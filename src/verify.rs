@@ -6,11 +6,12 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use chrono::Utc;
 use ed25519_dalek::SigningKey;
+use subtle::ConstantTimeEq;
 use tracing::{debug, info, warn};
 
 use crate::integrity::{IntegrityPolicy, IntegrityReport, IntegrityVerifier};
 use crate::trust::{
-    hash_data, key_id_from_verifying_key, sign_data, verify_signature, PublisherKeyring,
+    PublisherKeyring, hash_data, key_id_from_verifying_key, sign_data, verify_signature,
 };
 
 use super::policy::{RevocationEntry, RevocationList};
@@ -367,7 +368,12 @@ impl SigilVerifier {
         let mut result = self.verify_artifact(path, ArtifactType::Package)?;
 
         if let Some(expected) = expected_hash {
-            let matches = result.artifact.content_hash == expected;
+            let matches: bool = result
+                .artifact
+                .content_hash
+                .as_bytes()
+                .ct_eq(expected.as_bytes())
+                .into();
             result.checks.push(TrustCheck {
                 name: "expected_hash".to_string(),
                 passed: matches,
@@ -484,19 +490,21 @@ impl SigilVerifier {
     /// Check whether a key or artifact hash has been revoked.
     ///
     /// Returns `true` if revoked.
+    #[must_use]
     pub fn check_revocation(&self, key_id: Option<&str>, content_hash: &str) -> bool {
         if self.revocations.is_artifact_revoked(content_hash) {
             return true;
         }
-        if let Some(kid) = key_id {
-            if self.revocations.is_key_revoked(kid) {
-                return true;
-            }
+        if let Some(kid) = key_id
+            && self.revocations.is_key_revoked(kid)
+        {
+            return true;
         }
         false
     }
 
     /// Return the number of entries in the revocation list.
+    #[must_use]
     pub fn revocation_count(&self) -> usize {
         self.revocations.len()
     }
@@ -514,6 +522,7 @@ impl SigilVerifier {
 
     /// Look up the trust level for a content hash. Returns `Unverified` if
     /// the hash is not in the trust store.
+    #[must_use]
     pub fn trust_level_for(&self, content_hash: &str) -> TrustLevel {
         self.trust_store
             .get(content_hash)
@@ -522,6 +531,7 @@ impl SigilVerifier {
     }
 
     /// Return a reference to the active trust policy.
+    #[must_use]
     pub fn policy(&self) -> &TrustPolicy {
         &self.policy
     }
@@ -595,6 +605,7 @@ impl SigilVerifier {
     }
 
     /// Compute summary statistics for the trust store.
+    #[must_use]
     pub fn stats(&self) -> SigilStats {
         let total_artifacts = self.trust_store.len();
         let verified_count = self

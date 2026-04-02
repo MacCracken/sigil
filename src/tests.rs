@@ -10,8 +10,8 @@ mod tests {
 
     use chrono::Utc;
 
-    use crate::trust::hash_data;
     use crate::trust::PublisherKeyring;
+    use crate::trust::hash_data;
     use crate::{
         ArtifactType, RevocationEntry, RevocationList, SigilVerifier, TrustEnforcement, TrustLevel,
         TrustPolicy, TrustedArtifact,
@@ -43,7 +43,7 @@ mod tests {
         ed25519_dalek::VerifyingKey,
         String,
     ) {
-        use crate::trust::{generate_keypair, KeyVersion};
+        use crate::trust::{KeyVersion, generate_keypair};
 
         let (sk, vk, kid) = generate_keypair();
         let mut kr = PublisherKeyring::new(dir);
@@ -150,10 +150,12 @@ mod tests {
             .verify_artifact(&path, ArtifactType::AgentBinary)
             .unwrap();
         assert!(result.passed);
-        assert!(result
-            .checks
-            .iter()
-            .any(|c| c.name == "signature" && c.passed));
+        assert!(
+            result
+                .checks
+                .iter()
+                .any(|c| c.name == "signature" && c.passed)
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -226,10 +228,12 @@ mod tests {
             .verify_artifact(&path, ArtifactType::AgentBinary)
             .unwrap();
         // Signature check should fail
-        assert!(result
-            .checks
-            .iter()
-            .any(|c| c.name == "signature" && !c.passed));
+        assert!(
+            result
+                .checks
+                .iter()
+                .any(|c| c.name == "signature" && !c.passed)
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -440,10 +444,12 @@ mod tests {
         let result = verifier.verify_agent_binary(&path).unwrap();
         assert!(result.passed);
         #[cfg(unix)]
-        assert!(result
-            .checks
-            .iter()
-            .any(|c| c.name == "execute_permission" && c.passed));
+        assert!(
+            result
+                .checks
+                .iter()
+                .any(|c| c.name == "execute_permission" && c.passed)
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -468,10 +474,12 @@ mod tests {
             .verify_package(&path, Some(&expected_hash))
             .unwrap();
         assert!(result.passed);
-        assert!(result
-            .checks
-            .iter()
-            .any(|c| c.name == "expected_hash" && c.passed));
+        assert!(
+            result
+                .checks
+                .iter()
+                .any(|c| c.name == "expected_hash" && c.passed)
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -494,10 +502,12 @@ mod tests {
             .verify_package(&path, Some("wrong_hash_value"))
             .unwrap();
         assert!(!result.passed);
-        assert!(result
-            .checks
-            .iter()
-            .any(|c| c.name == "expected_hash" && !c.passed));
+        assert!(
+            result
+                .checks
+                .iter()
+                .any(|c| c.name == "expected_hash" && !c.passed)
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -644,10 +654,12 @@ mod tests {
             .unwrap();
         assert!(result.passed);
         // Policy check itself reports not-met
-        assert!(result
-            .checks
-            .iter()
-            .any(|c| c.name == "policy" && !c.passed));
+        assert!(
+            result
+                .checks
+                .iter()
+                .any(|c| c.name == "policy" && !c.passed)
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -889,10 +901,12 @@ mod tests {
 
         let result = verifier.verify_agent_binary(&path).unwrap();
         assert!(!result.passed);
-        assert!(result
-            .checks
-            .iter()
-            .any(|c| c.name == "execute_permission" && !c.passed));
+        assert!(
+            result
+                .checks
+                .iter()
+                .any(|c| c.name == "execute_permission" && !c.passed)
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -946,10 +960,12 @@ mod tests {
 
         let result = verifier.verify_agent_binary(&path).unwrap();
         assert!(result.passed);
-        assert!(result
-            .checks
-            .iter()
-            .any(|c| c.name == "skipped" && c.passed));
+        assert!(
+            result
+                .checks
+                .iter()
+                .any(|c| c.name == "skipped" && c.passed)
+        );
     }
 
     // CRITICAL 2: verify_on_install=false skips verification
@@ -966,10 +982,12 @@ mod tests {
         let result = verifier.verify_package(&path, Some("wrong_hash")).unwrap();
         // Should pass even with wrong expected hash because verification is skipped
         assert!(result.passed);
-        assert!(result
-            .checks
-            .iter()
-            .any(|c| c.name == "skipped" && c.passed));
+        assert!(
+            result
+                .checks
+                .iter()
+                .any(|c| c.name == "skipped" && c.passed)
+        );
     }
 
     // CRITICAL 2: verify_on_boot=false skips verification
@@ -1153,9 +1171,190 @@ mod tests {
 
         let result = verifier.verify_agent_binary(&path).unwrap();
         assert!(!result.passed);
-        assert!(result
-            .checks
-            .iter()
-            .any(|c| c.name == "unsigned_agent" && !c.passed));
+        assert!(
+            result
+                .checks
+                .iter()
+                .any(|c| c.name == "unsigned_agent" && !c.passed)
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Serde roundtrip tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn serde_roundtrip_trust_level() {
+        for level in [
+            TrustLevel::SystemCore,
+            TrustLevel::Verified,
+            TrustLevel::Community,
+            TrustLevel::Unverified,
+            TrustLevel::Revoked,
+        ] {
+            let json = serde_json::to_string(&level).unwrap();
+            let recovered: TrustLevel = serde_json::from_str(&json).unwrap();
+            assert_eq!(recovered, level);
+        }
+    }
+
+    #[test]
+    fn serde_roundtrip_trust_enforcement() {
+        for e in [
+            TrustEnforcement::Strict,
+            TrustEnforcement::Permissive,
+            TrustEnforcement::AuditOnly,
+        ] {
+            let json = serde_json::to_string(&e).unwrap();
+            let recovered: TrustEnforcement = serde_json::from_str(&json).unwrap();
+            assert_eq!(recovered, e);
+        }
+    }
+
+    #[test]
+    fn serde_roundtrip_artifact_type() {
+        for at in [
+            ArtifactType::AgentBinary,
+            ArtifactType::SystemBinary,
+            ArtifactType::Config,
+            ArtifactType::Package,
+            ArtifactType::BootComponent,
+        ] {
+            let json = serde_json::to_string(&at).unwrap();
+            let recovered: ArtifactType = serde_json::from_str(&json).unwrap();
+            assert_eq!(recovered, at);
+        }
+    }
+
+    #[test]
+    fn serde_roundtrip_trust_policy() {
+        let policy = TrustPolicy::default();
+        let json = serde_json::to_string(&policy).unwrap();
+        let recovered: TrustPolicy = serde_json::from_str(&json).unwrap();
+        assert_eq!(recovered.enforcement, policy.enforcement);
+        assert_eq!(recovered.minimum_trust_level, policy.minimum_trust_level);
+        assert_eq!(
+            recovered.allow_unsigned_agents,
+            policy.allow_unsigned_agents
+        );
+        assert_eq!(recovered.verify_on_boot, policy.verify_on_boot);
+        assert_eq!(recovered.verify_on_install, policy.verify_on_install);
+        assert_eq!(recovered.verify_on_execute, policy.verify_on_execute);
+        assert_eq!(recovered.revocation_check, policy.revocation_check);
+    }
+
+    #[test]
+    fn serde_roundtrip_revocation_entry() {
+        let entry = RevocationEntry {
+            key_id: Some("key1".to_string()),
+            content_hash: Some("hash1".to_string()),
+            reason: "compromised".to_string(),
+            revoked_at: Utc::now(),
+            revoked_by: "admin".to_string(),
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        let recovered: RevocationEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(recovered.key_id, entry.key_id);
+        assert_eq!(recovered.content_hash, entry.content_hash);
+        assert_eq!(recovered.reason, entry.reason);
+        assert_eq!(recovered.revoked_by, entry.revoked_by);
+    }
+
+    #[test]
+    fn serde_roundtrip_verification_result() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = temp_file(dir.path(), "serde_vr.bin", b"data");
+
+        let (kr, sk, _vk, _kid) = keyring_with_key(dir.path());
+        let mut verifier = SigilVerifier::new(kr, TrustPolicy::default());
+        verifier
+            .sign_artifact(&path, &sk, ArtifactType::Config)
+            .unwrap();
+
+        let result = verifier
+            .verify_artifact(&path, ArtifactType::Config)
+            .unwrap();
+        let json = serde_json::to_string(&result).unwrap();
+        let recovered: crate::types::VerificationResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(recovered.passed, result.passed);
+        assert_eq!(
+            recovered.artifact.content_hash,
+            result.artifact.content_hash
+        );
+        assert_eq!(recovered.checks.len(), result.checks.len());
+    }
+
+    #[test]
+    fn serde_roundtrip_sigil_stats() {
+        let dir = tempfile::tempdir().unwrap();
+        let kr = PublisherKeyring::new(dir.path());
+        let verifier = SigilVerifier::new(kr, TrustPolicy::default());
+        let stats = verifier.stats();
+        let json = serde_json::to_string(&stats).unwrap();
+        let recovered: crate::types::SigilStats = serde_json::from_str(&json).unwrap();
+        assert_eq!(recovered.total_artifacts, stats.total_artifacts);
+    }
+
+    #[test]
+    fn serde_roundtrip_key_version() {
+        use crate::trust::KeyVersion;
+        let kv = KeyVersion {
+            key_id: "test_key".to_string(),
+            valid_from: Utc::now(),
+            valid_until: Some(Utc::now() + chrono::Duration::days(365)),
+            public_key_hex: "00".repeat(32),
+        };
+        let json = serde_json::to_string(&kv).unwrap();
+        let recovered: KeyVersion = serde_json::from_str(&json).unwrap();
+        assert_eq!(recovered.key_id, kv.key_id);
+        assert_eq!(recovered.public_key_hex, kv.public_key_hex);
+    }
+
+    #[test]
+    fn serde_roundtrip_measurement_status() {
+        use crate::integrity::MeasurementStatus;
+        for status in [
+            MeasurementStatus::Pending,
+            MeasurementStatus::Verified,
+            MeasurementStatus::Mismatch,
+            MeasurementStatus::FileNotFound,
+            MeasurementStatus::Error("test error".to_string()),
+        ] {
+            let json = serde_json::to_string(&status).unwrap();
+            let recovered: MeasurementStatus = serde_json::from_str(&json).unwrap();
+            assert_eq!(recovered, status);
+        }
+    }
+
+    #[test]
+    fn serde_roundtrip_integrity_policy() {
+        use crate::integrity::IntegrityPolicy;
+        let mut policy = IntegrityPolicy::default();
+        policy.check_interval_seconds = 300;
+        policy.enforce = true;
+        let json = serde_json::to_string(&policy).unwrap();
+        let recovered: IntegrityPolicy = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            recovered.check_interval_seconds,
+            policy.check_interval_seconds
+        );
+        assert_eq!(recovered.enforce, policy.enforce);
+    }
+
+    #[test]
+    fn serde_roundtrip_integrity_report() {
+        use crate::integrity::IntegrityReport;
+        let report = IntegrityReport {
+            total: 5,
+            verified: 3,
+            mismatches: vec![],
+            errors: vec![],
+            checked_at: Utc::now(),
+        };
+        let json = serde_json::to_string(&report).unwrap();
+        let recovered: IntegrityReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(recovered.total, report.total);
+        assert_eq!(recovered.verified, report.verified);
+        assert!(recovered.is_clean());
     }
 }

@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// Ordered from highest trust to lowest. `SystemCore` is the most trusted,
 /// `Revoked` the least.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum TrustLevel {
     /// Core OS component — signed by the AGNOS project key, measured at boot.
@@ -33,6 +34,7 @@ pub enum TrustLevel {
 
 impl TrustLevel {
     /// Numeric rank for ordering (higher = more trusted).
+    #[must_use]
     pub(super) fn rank(self) -> u8 {
         match self {
             Self::SystemCore => 4,
@@ -73,6 +75,7 @@ impl Ord for TrustLevel {
 // ---------------------------------------------------------------------------
 
 /// How strictly the trust policy is enforced.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TrustEnforcement {
     /// Block any artifact that does not meet the minimum trust level.
@@ -98,6 +101,7 @@ impl fmt::Display for TrustEnforcement {
 // ---------------------------------------------------------------------------
 
 /// Classification of a trusted artifact.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ArtifactType {
     /// An agent binary (executed by the runtime).
@@ -191,7 +195,7 @@ pub struct TrustedArtifact {
 // ---------------------------------------------------------------------------
 
 /// Outcome of verifying a single artifact.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VerificationResult {
     /// The artifact that was verified.
     pub artifact: TrustedArtifact,
@@ -219,7 +223,7 @@ pub struct TrustCheck {
 // ---------------------------------------------------------------------------
 
 /// Summary statistics from the trust store.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SigilStats {
     /// Total artifacts in the trust store.
     pub total_artifacts: usize,

@@ -1,0 +1,11 @@
+timestamp,label,benchmark,estimate,unit
+2026-04-02T01:11:31Z,p-1-baseline,hash_data_4kb,2.0050,µs
+2026-04-02T01:11:31Z,p-1-baseline,hash_data_1mb,496.34,µs
+2026-04-02T01:11:31Z,p-1-baseline,sign_4kb,27.366,µs
+2026-04-02T01:11:31Z,p-1-baseline,verify_4kb,39.491,µs
+2026-04-02T01:11:31Z,p-1-baseline,generate_keypair,15.140,µs
+2026-04-02T01:11:31Z,p-1-baseline,compute_hash_file_4kb,5.6559,µs
+2026-04-02T01:11:31Z,p-1-baseline,compute_hash_file_1mb,611.11,µs
+2026-04-02T01:11:31Z,p-1-baseline,revocation_key_lookup_1k,16.776,ns
+2026-04-02T01:11:31Z,p-1-baseline,revocation_hash_lookup_1k,17.092,ns
+2026-04-02T01:11:31Z,p-1-baseline,verify_artifact_signed_4kb,45.298,µs

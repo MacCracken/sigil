@@ -9,9 +9,11 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 
 /// Status of a single integrity measurement.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MeasurementStatus {
     /// Not yet verified — awaiting first measurement pass.
     Pending,
@@ -25,21 +27,6 @@ pub enum MeasurementStatus {
     Error(String),
 }
 
-impl PartialEq for MeasurementStatus {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Self::Pending, Self::Pending) => true,
-            (Self::Verified, Self::Verified) => true,
-            (Self::Mismatch, Self::Mismatch) => true,
-            (Self::FileNotFound, Self::FileNotFound) => true,
-            (Self::Error(a), Self::Error(b)) => a == b,
-            _ => false,
-        }
-    }
-}
-
-impl Eq for MeasurementStatus {}
-
 /// A single file integrity measurement.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IntegrityMeasurement {
@@ -51,7 +38,7 @@ pub struct IntegrityMeasurement {
 }
 
 /// Policy defining which files to monitor.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct IntegrityPolicy {
     pub measurements: Vec<IntegrityMeasurement>,
     pub check_interval_seconds: u64,
@@ -79,7 +66,7 @@ impl IntegrityPolicy {
 }
 
 /// Report summarising an integrity verification pass.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IntegrityReport {
     pub total: usize,
     pub verified: usize,
@@ -90,11 +77,13 @@ pub struct IntegrityReport {
 
 impl IntegrityReport {
     /// Returns true if no mismatches or errors were found.
+    #[must_use]
     pub fn is_clean(&self) -> bool {
         self.mismatches.is_empty() && self.errors.is_empty()
     }
 
     /// Human-readable summary string.
+    #[must_use]
     pub fn summary(&self) -> String {
         format!(
             "Integrity check at {}: {}/{} verified, {} mismatches, {} errors",
@@ -128,17 +117,27 @@ impl IntegrityVerifier {
         self.last_report = None;
     }
 
-    /// Compute the SHA-256 hash of a file's contents.
+    /// Compute the SHA-256 hash of a file's contents using streaming I/O.
     pub fn compute_hash(path: &Path) -> anyhow::Result<String> {
-        let data = std::fs::read(path)
+        use std::io::Read;
+        let mut file = std::fs::File::open(path)
             .map_err(|e| anyhow::anyhow!("Failed to read {}: {}", path.display(), e))?;
         let mut hasher = Sha256::new();
-        hasher.update(&data);
-        let result = hasher.finalize();
-        Ok(format!("{:x}", result))
+        let mut buf = [0u8; 8192];
+        loop {
+            let n = file
+                .read(&mut buf)
+                .map_err(|e| anyhow::anyhow!("Failed to read {}: {}", path.display(), e))?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+        }
+        Ok(format!("{:x}", hasher.finalize()))
     }
 
     /// Verify a single file against an expected hash.
+    #[must_use]
     pub fn verify_file(&self, path: &Path) -> MeasurementStatus {
         let measurement = self.policy.measurements.iter().find(|m| m.path == path);
         let expected = match measurement {
@@ -148,7 +147,7 @@ impl IntegrityVerifier {
 
         match Self::compute_hash(path) {
             Ok(hash) => {
-                if hash == *expected {
+                if hash.as_bytes().ct_eq(expected.as_bytes()).into() {
                     MeasurementStatus::Verified
                 } else {
                     MeasurementStatus::Mismatch
@@ -177,7 +176,11 @@ impl IntegrityVerifier {
             } else {
                 match Self::compute_hash(&measurement.path) {
                     Ok(hash) => {
-                        if hash == measurement.expected_hash {
+                        if hash
+                            .as_bytes()
+                            .ct_eq(measurement.expected_hash.as_bytes())
+                            .into()
+                        {
                             (MeasurementStatus::Verified, Some(hash))
                         } else {
                             (MeasurementStatus::Mismatch, Some(hash))
@@ -233,6 +236,7 @@ impl IntegrityVerifier {
     }
 
     /// Return all files with a Mismatch status from the last report.
+    #[must_use]
     pub fn tampered_files(&self) -> Vec<&IntegrityMeasurement> {
         match &self.last_report {
             Some(report) => report.mismatches.iter().collect(),

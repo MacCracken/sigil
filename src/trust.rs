@@ -31,14 +31,15 @@ pub struct KeyVersion {
 
 impl KeyVersion {
     /// Check if the key is valid at the given time.
+    #[must_use]
     pub fn is_valid_at(&self, when: DateTime<Utc>) -> bool {
         if when < self.valid_from {
             return false;
         }
-        if let Some(until) = self.valid_until {
-            if when > until {
-                return false;
-            }
+        if let Some(until) = self.valid_until
+            && when > until
+        {
+            return false;
         }
         true
     }
@@ -119,12 +120,14 @@ impl PublisherKeyring {
     }
 
     /// Look up the current valid key for a given key_id.
+    #[must_use]
     pub fn get_current_key(&self, key_id: &str) -> Option<&KeyVersion> {
         let now = Utc::now();
         self.keys.get(key_id)?.iter().find(|k| k.is_valid_at(now))
     }
 
     /// Get all key versions for a key_id (including expired).
+    #[must_use]
     pub fn get_all_versions(&self, key_id: &str) -> Vec<&KeyVersion> {
         self.keys
             .get(key_id)
@@ -133,10 +136,12 @@ impl PublisherKeyring {
     }
 
     /// Number of distinct key IDs.
+    #[must_use]
     pub fn len(&self) -> usize {
         self.keys.len()
     }
 
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.keys.is_empty()
     }
@@ -147,6 +152,7 @@ impl PublisherKeyring {
 // ---------------------------------------------------------------------------
 
 /// Compute SHA-256 hash of arbitrary data.
+#[must_use]
 pub fn hash_data(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(data);
@@ -154,6 +160,7 @@ pub fn hash_data(data: &[u8]) -> String {
 }
 
 /// Sign data with an Ed25519 signing key. Returns the signature bytes.
+#[must_use]
 pub fn sign_data(data: &[u8], signing_key: &SigningKey) -> Vec<u8> {
     let signature = signing_key.sign(data);
     signature.to_bytes().to_vec()
@@ -175,6 +182,7 @@ pub fn verify_signature(
 }
 
 /// Generate a new Ed25519 keypair. Returns (signing_key, verifying_key, key_id).
+#[must_use]
 pub fn generate_keypair() -> (SigningKey, VerifyingKey, String) {
     let signing_key = SigningKey::generate(&mut rand::thread_rng());
     let verifying_key = signing_key.verifying_key();
@@ -183,6 +191,7 @@ pub fn generate_keypair() -> (SigningKey, VerifyingKey, String) {
 }
 
 /// Derive key_id from a verifying key (hex of first 8 bytes).
+#[must_use]
 pub fn key_id_from_verifying_key(vk: &VerifyingKey) -> String {
     hex::encode(&vk.to_bytes()[..8])
 }
