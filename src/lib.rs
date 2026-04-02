@@ -20,11 +20,13 @@ pub mod verify;
 mod tests;
 
 // Re-export the full public API surface.
+pub use audit::{AuditEvent, AuditLog};
 pub use error::{Result, SigilError};
 #[cfg(feature = "integrity")]
 pub use integrity::{BaselineEntry, IntegritySnapshot};
 #[cfg(feature = "policy")]
 pub use policy::{RevocationEntry, RevocationList};
+pub use trust::{KeyMetadata, KeyRole};
 pub use types::{
     ArtifactType, HashAlgorithm, SigilStats, TrustCheck, TrustEnforcement, TrustLevel, TrustPolicy,
     TrustPolicyBuilder, TrustedArtifact, VerificationResult,

@@ -45,25 +45,44 @@
 
 ## Backlog
 
-### v0.5.0 — Advanced Trust
+### v0.5.0 — Advanced Trust (done)
 
-**Trust chain**
-- [ ] Hierarchical trust delegation: root key -> intermediate -> publisher
-- [ ] Certificate-style key metadata (publisher name, contact, scope constraints)
+- [x] Hierarchical trust delegation: root key -> intermediate -> publisher
+- [x] Certificate-style key metadata (publisher name, contact, scope constraints)
+- [x] Structured verification audit log (JSON event stream)
+- [x] Trust store diff: compare two trust store snapshots
+- Remaining items moved to v0.6.0
+
+### v0.6.0 — Cross-signing & CRL
+
 - [ ] Cross-signing: multiple publishers co-sign an artifact
-
-**Revocation**
 - [ ] CRL distribution: fetch/merge remote revocation lists
-- [ ] OCSP-style online revocation checking
-
-**Audit & reporting**
-- [ ] Structured verification audit log (JSON event stream)
-- [ ] Trust store diff: compare two trust store snapshots
 - [ ] Policy compliance report: full-system trust posture summary
 
-## Future
+### v0.7.0 — Online Verification
 
-### v1.0.0 Criteria
+- [ ] OCSP-style online revocation checking
+- [ ] Certificate transparency log integration
+- [ ] Revocation stapling: cache OCSP responses locally
+
+### v0.8.0 — PQC Foundation
+
+- [ ] `pqc` feature gate (no separate crate — sigil owns all AGNOS crypto)
+- [ ] ML-DSA (FIPS 204) signatures alongside Ed25519
+- [ ] ML-KEM (FIPS 203) for key encapsulation (if needed for key exchange)
+- [ ] Hybrid mode: Ed25519 + ML-DSA dual signatures during transition
+- [ ] Re-sign utility: migrate existing trust store to PQC keys
+
+### v0.9.0 — Production Hardening
+
+- [ ] API freeze — no breaking changes after this
+- [ ] Full doc coverage on every public item (`#[warn(missing_docs)]`)
+- [ ] No `unsafe` code audit
+- [ ] Benchmark regression thresholds in CI
+- [ ] Fuzzing targets for all deserialization paths
+- [ ] TPM integration (`register_system_core` backed by TPM PCR measurements, sealed key storage, remote attestation) — depends on agnosys TPM exports
+
+## v1.0.0 Criteria
 
 - All public API is stable and documented
 - Error types are comprehensive and non-exhaustive
@@ -72,17 +91,5 @@
 - Security audit by third party
 - No `unsafe` code
 - All CLAUDE.md key principles enforced
-
-### Post-Quantum Cryptography
-
-- [ ] `pqc` feature gate on sigil (no separate crate)
-- [ ] ML-DSA (FIPS 204) for signatures alongside Ed25519
-- [ ] ML-KEM (FIPS 203) for key encapsulation (if needed for key exchange)
-- [ ] Hybrid mode: Ed25519 + ML-DSA dual signatures during transition
-- [ ] Migration path: re-sign existing trust store with PQC keys
-
-### TPM Integration
-
-- [ ] `register_system_core` backed by TPM PCR measurements
-- [ ] Sealed key storage via TPM
-- [ ] Remote attestation support
+- PQC hybrid mode operational
+- TPM integration tested on real hardware
