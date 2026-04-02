@@ -108,6 +108,44 @@ fn bench_verify_artifact(c: &mut Criterion) {
     });
 }
 
+fn bench_verify_batch(c: &mut Criterion) {
+    use sigil::trust::{KeyVersion, PublisherKeyring};
+    use sigil::verify::SigilVerifier;
+    use sigil::{ArtifactType, TrustPolicy};
+
+    let dir = tempfile::tempdir().unwrap();
+    let (sk, vk, kid) = generate_keypair();
+    let mut kr = PublisherKeyring::new(dir.path());
+    kr.add_key(KeyVersion {
+        key_id: kid.clone(),
+        valid_from: chrono::Utc::now() - chrono::Duration::hours(1),
+        valid_until: None,
+        public_key_hex: vk.to_bytes().iter().map(|b| format!("{:02x}", b)).collect(),
+    });
+
+    let mut verifier = SigilVerifier::new(kr, TrustPolicy::default());
+
+    // Create 10 files and sign them
+    let mut paths = Vec::new();
+    for i in 0..10 {
+        let path = dir.path().join(format!("batch_{i}.bin"));
+        std::fs::write(&path, vec![0u8; 4096]).unwrap();
+        verifier
+            .sign_artifact(&path, &sk, ArtifactType::AgentBinary)
+            .unwrap();
+        paths.push(path);
+    }
+
+    let batch: Vec<(&std::path::Path, ArtifactType)> = paths
+        .iter()
+        .map(|p| (p.as_path(), ArtifactType::AgentBinary))
+        .collect();
+
+    c.bench_function("verify_batch_10x4kb", |b| {
+        b.iter(|| verifier.verify_batch(black_box(&batch)));
+    });
+}
+
 criterion_group!(
     benches,
     bench_hash_data,
@@ -116,5 +154,6 @@ criterion_group!(
     bench_integrity_compute_hash,
     bench_revocation_lookup,
     bench_verify_artifact,
+    bench_verify_batch,
 );
 criterion_main!(benches);

@@ -149,6 +149,61 @@ impl PublisherKeyring {
         self.keys.is_empty()
     }
 
+    /// Rotate a key: expire the current version and add a new one.
+    ///
+    /// The old key's `valid_until` is set to `overlap_until`, and the new key's
+    /// `valid_from` is set to `now`. This creates an overlap window where both
+    /// keys are valid, allowing a graceful transition.
+    ///
+    /// Returns the new `KeyVersion` that was added.
+    pub fn rotate_key(
+        &mut self,
+        key_id: &str,
+        new_public_key_hex: String,
+        overlap_until: DateTime<Utc>,
+    ) -> error::Result<KeyVersion> {
+        let now = Utc::now();
+
+        // Expire the current active version
+        let versions = self
+            .keys
+            .get_mut(key_id)
+            .ok_or_else(|| SigilError::KeyNotFound {
+                key_id: key_id.to_string(),
+            })?;
+
+        for v in versions.iter_mut() {
+            if v.is_valid_at(now) && v.valid_until.is_none() {
+                v.valid_until = Some(overlap_until);
+            }
+        }
+
+        let new_version = KeyVersion {
+            key_id: key_id.to_string(),
+            valid_from: now,
+            valid_until: None,
+            public_key_hex: new_public_key_hex,
+        };
+
+        versions.push(new_version.clone());
+        Ok(new_version)
+    }
+
+    /// Check whether any version of a key was valid at the given time.
+    ///
+    /// Useful for historical verification — e.g., verifying an artifact that
+    /// was signed before a key was rotated.
+    #[must_use]
+    pub fn get_key_valid_at(&self, key_id: &str, when: DateTime<Utc>) -> Option<&KeyVersion> {
+        self.keys.get(key_id)?.iter().find(|k| k.is_valid_at(when))
+    }
+
+    /// Return all distinct key IDs in the keyring.
+    #[must_use]
+    pub fn key_ids(&self) -> Vec<&str> {
+        self.keys.keys().map(|s| s.as_str()).collect()
+    }
+
     /// Save all keys to the keys directory as JSON files.
     ///
     /// Each key ID gets its own file: `<key_id>.json`.
@@ -499,5 +554,112 @@ mod tests {
         let kv = keyring.get_current_key(&key_id).unwrap();
         let recovered_vk = kv.verifying_key().unwrap();
         assert!(verify_signature(data, &sig, &recovered_vk).is_ok());
+    }
+
+    #[test]
+    fn test_rotate_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, vk1, key_id) = generate_keypair();
+        let (_, vk2, _) = generate_keypair();
+
+        let mut keyring = PublisherKeyring::new(dir.path());
+        keyring.add_key(KeyVersion {
+            key_id: key_id.clone(),
+            valid_from: Utc::now() - chrono::Duration::hours(2),
+            valid_until: None,
+            public_key_hex: hex::encode(&vk1.to_bytes()),
+        });
+
+        let overlap_until = Utc::now() + chrono::Duration::hours(1);
+        let new_version = keyring
+            .rotate_key(&key_id, hex::encode(&vk2.to_bytes()), overlap_until)
+            .unwrap();
+
+        // New version should be valid now
+        assert!(new_version.is_valid_at(Utc::now()));
+
+        // Both versions should be valid during overlap
+        let versions = keyring.get_all_versions(&key_id);
+        assert_eq!(versions.len(), 2);
+        let valid_now: Vec<_> = versions
+            .iter()
+            .filter(|v| v.is_valid_at(Utc::now()))
+            .collect();
+        assert_eq!(valid_now.len(), 2);
+
+        // After overlap, only new version should be valid
+        let after_overlap = overlap_until + chrono::Duration::hours(1);
+        let valid_after: Vec<_> = versions
+            .iter()
+            .filter(|v| v.is_valid_at(after_overlap))
+            .collect();
+        assert_eq!(valid_after.len(), 1);
+    }
+
+    #[test]
+    fn test_rotate_key_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut keyring = PublisherKeyring::new(dir.path());
+        let result = keyring.rotate_key(
+            "nonexistent",
+            "aa".repeat(32),
+            Utc::now() + chrono::Duration::hours(1),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_get_key_valid_at_historical() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = Utc::now();
+        let mut keyring = PublisherKeyring::new(dir.path());
+
+        // Old key: valid from 10h ago to 2h ago
+        keyring.add_key(KeyVersion {
+            key_id: "rotated".to_string(),
+            valid_from: now - chrono::Duration::hours(10),
+            valid_until: Some(now - chrono::Duration::hours(2)),
+            public_key_hex: "00".repeat(32),
+        });
+
+        // New key: valid from 3h ago (overlap window was 3h ago to 2h ago)
+        keyring.add_key(KeyVersion {
+            key_id: "rotated".to_string(),
+            valid_from: now - chrono::Duration::hours(3),
+            valid_until: None,
+            public_key_hex: "11".repeat(32),
+        });
+
+        // Historical lookup at 5h ago should find the old key
+        let old = keyring
+            .get_key_valid_at("rotated", now - chrono::Duration::hours(5))
+            .unwrap();
+        assert_eq!(old.public_key_hex, "00".repeat(32));
+
+        // Current lookup should find the new key
+        let current = keyring.get_current_key("rotated").unwrap();
+        assert_eq!(current.public_key_hex, "11".repeat(32));
+    }
+
+    #[test]
+    fn test_key_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut keyring = PublisherKeyring::new(dir.path());
+        keyring.add_key(KeyVersion {
+            key_id: "key_a".to_string(),
+            valid_from: Utc::now(),
+            valid_until: None,
+            public_key_hex: "00".repeat(32),
+        });
+        keyring.add_key(KeyVersion {
+            key_id: "key_b".to_string(),
+            valid_from: Utc::now(),
+            valid_until: None,
+            public_key_hex: "11".repeat(32),
+        });
+
+        let mut ids = keyring.key_ids();
+        ids.sort();
+        assert_eq!(ids, vec!["key_a", "key_b"]);
     }
 }

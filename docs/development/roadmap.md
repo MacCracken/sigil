@@ -47,19 +47,21 @@
 ### v0.3.0 — Operational Capabilities
 
 **Key management**
-- [ ] Key rotation: transition between key versions with overlap windows
+- [x] Key rotation: transition between key versions with overlap windows
+- [x] Historical key lookup: `get_key_valid_at()` for post-rotation verification
+- [x] `key_ids()` to list all key IDs
 - [ ] Key pinning: bind specific keys to specific artifact paths
 - [ ] Keyring export: serialize full keyring state for backup/replication
 
 **Verification**
-- [ ] Batch verification: verify multiple artifacts in a single pass (parallel hash + sig verify)
+- [x] Batch verification: `verify_batch()` with optional rayon parallelism (`parallel` feature)
 - [ ] Verification caching: skip re-verification if file mtime + size unchanged since last pass
 - [ ] Configurable hash algorithm (prepare for PQC transition)
 
 **Integrity monitoring**
+- [x] Baseline snapshot: `export_baseline()` / `import_baseline()` with `IntegritySnapshot`
 - [ ] Periodic re-verification scheduler (driven by `check_interval_seconds`)
 - [ ] Integrity event callbacks: notify consumers on mismatch/error
-- [ ] Baseline snapshot: export/import full integrity state
 
 ### v0.4.0 — Advanced Trust
 

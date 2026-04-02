@@ -633,4 +633,33 @@ impl SigilVerifier {
             trust_level_counts,
         }
     }
+
+    /// Verify multiple artifacts in a single call.
+    ///
+    /// Returns a `Vec` of results in the same order as the input. Each entry
+    /// is `Ok(VerificationResult)` or `Err(SigilError)` if the file could not
+    /// be read.
+    ///
+    /// With the `parallel` feature enabled, file I/O and hash computation
+    /// are parallelized via rayon.
+    pub fn verify_batch(
+        &self,
+        artifacts: &[(&Path, ArtifactType)],
+    ) -> Vec<error::Result<VerificationResult>> {
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+            artifacts
+                .par_iter()
+                .map(|(path, artifact_type)| self.verify_artifact(path, *artifact_type))
+                .collect()
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            artifacts
+                .iter()
+                .map(|(path, artifact_type)| self.verify_artifact(path, *artifact_type))
+                .collect()
+        }
+    }
 }

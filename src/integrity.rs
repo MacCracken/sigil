@@ -263,6 +263,59 @@ impl IntegrityVerifier {
             None => Vec::new(),
         }
     }
+
+    /// Export the current integrity baseline as a serializable snapshot.
+    #[must_use]
+    pub fn export_baseline(&self) -> IntegritySnapshot {
+        IntegritySnapshot {
+            measurements: self
+                .policy
+                .measurements
+                .iter()
+                .map(|m| BaselineEntry {
+                    path: m.path.clone(),
+                    expected_hash: m.expected_hash.clone(),
+                })
+                .collect(),
+            exported_at: Utc::now(),
+        }
+    }
+
+    /// Import a baseline snapshot, replacing the current policy measurements.
+    ///
+    /// Returns the number of entries imported. Clears any cached report.
+    pub fn import_baseline(&mut self, snapshot: IntegritySnapshot) -> usize {
+        let count = snapshot.measurements.len();
+        let mut policy = IntegrityPolicy {
+            check_interval_seconds: self.policy.check_interval_seconds,
+            enforce: self.policy.enforce,
+            ..IntegrityPolicy::default()
+        };
+        for entry in snapshot.measurements {
+            policy.add_measurement(entry.path, entry.expected_hash);
+        }
+        self.policy = policy;
+        self.last_report = None;
+        count
+    }
+}
+
+/// A serializable snapshot of an integrity baseline.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IntegritySnapshot {
+    /// The baseline measurements (path + expected hash).
+    pub measurements: Vec<BaselineEntry>,
+    /// When this snapshot was taken.
+    pub exported_at: DateTime<Utc>,
+}
+
+/// A single entry in a baseline snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BaselineEntry {
+    /// File path.
+    pub path: PathBuf,
+    /// Expected SHA-256 hash.
+    pub expected_hash: String,
 }
 
 #[cfg(test)]

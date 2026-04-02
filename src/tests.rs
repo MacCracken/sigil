@@ -1471,4 +1471,112 @@ mod tests {
         let sigil_err: SigilError = io_err.into();
         assert!(sigil_err.to_string().contains("file missing"));
     }
+
+    // -----------------------------------------------------------------------
+    // v0.3.0: Integrity baseline snapshots
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn integrity_snapshot_export_import() {
+        use crate::integrity::{IntegrityPolicy, IntegrityVerifier};
+
+        let dir = tempfile::tempdir().unwrap();
+        let p1 = temp_file(dir.path(), "snap1.txt", b"data1");
+        let p2 = temp_file(dir.path(), "snap2.txt", b"data2");
+
+        let mut verifier = IntegrityVerifier::new(IntegrityPolicy::default());
+        verifier.add_baseline(&p1).unwrap();
+        verifier.add_baseline(&p2).unwrap();
+
+        // Export
+        let snapshot = verifier.export_baseline();
+        assert_eq!(snapshot.measurements.len(), 2);
+
+        // Serialize and deserialize
+        let json = serde_json::to_string(&snapshot).unwrap();
+        let recovered: crate::integrity::IntegritySnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(recovered.measurements.len(), 2);
+
+        // Import into a fresh verifier
+        let mut verifier2 = IntegrityVerifier::new(IntegrityPolicy::default());
+        let count = verifier2.import_baseline(recovered);
+        assert_eq!(count, 2);
+
+        // Verify should pass with the imported baseline
+        let report = verifier2.verify_all();
+        assert!(report.is_clean());
+        assert_eq!(report.total, 2);
+    }
+
+    #[test]
+    fn integrity_snapshot_empty() {
+        use crate::integrity::{IntegrityPolicy, IntegrityVerifier};
+
+        let verifier = IntegrityVerifier::new(IntegrityPolicy::default());
+        let snapshot = verifier.export_baseline();
+        assert!(snapshot.measurements.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // v0.3.0: Batch verification
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn verify_batch_basic() {
+        let dir = tempfile::tempdir().unwrap();
+        let p1 = temp_file(dir.path(), "batch1.bin", b"data1");
+        let p2 = temp_file(dir.path(), "batch2.bin", b"data2");
+
+        let (kr, sk, _vk, _kid) = keyring_with_key(dir.path());
+        let mut verifier = SigilVerifier::new(kr, TrustPolicy::default());
+
+        verifier
+            .sign_artifact(&p1, &sk, ArtifactType::AgentBinary)
+            .unwrap();
+        verifier
+            .sign_artifact(&p2, &sk, ArtifactType::Config)
+            .unwrap();
+
+        let results = verifier.verify_batch(&[
+            (p1.as_path(), ArtifactType::AgentBinary),
+            (p2.as_path(), ArtifactType::Config),
+        ]);
+
+        assert_eq!(results.len(), 2);
+        assert!(results[0].as_ref().unwrap().passed);
+        assert!(results[1].as_ref().unwrap().passed);
+    }
+
+    #[test]
+    fn verify_batch_mixed_results() {
+        let dir = tempfile::tempdir().unwrap();
+        let signed = temp_file(dir.path(), "signed.bin", b"signed");
+        let unsigned = temp_file(dir.path(), "unsigned.bin", b"unsigned");
+
+        let (kr, sk, _vk, _kid) = keyring_with_key(dir.path());
+        let mut verifier = SigilVerifier::new(kr, TrustPolicy::default());
+
+        verifier
+            .sign_artifact(&signed, &sk, ArtifactType::Config)
+            .unwrap();
+
+        let results = verifier.verify_batch(&[
+            (signed.as_path(), ArtifactType::Config),
+            (unsigned.as_path(), ArtifactType::Config),
+        ]);
+
+        assert_eq!(results.len(), 2);
+        assert!(results[0].as_ref().unwrap().passed);
+        assert!(!results[1].as_ref().unwrap().passed); // strict, unsigned
+    }
+
+    #[test]
+    fn verify_batch_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let kr = PublisherKeyring::new(dir.path());
+        let verifier = SigilVerifier::new(kr, TrustPolicy::default());
+
+        let results = verifier.verify_batch(&[]);
+        assert!(results.is_empty());
+    }
 }

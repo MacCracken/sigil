@@ -1,6 +1,6 @@
 [package]
 name = "sigil"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.89"
 license = "GPL-3.0-only"
@@ -17,6 +17,7 @@ default = ["integrity", "chain", "policy"]
 integrity = []
 chain = ["integrity"]
 policy = []
+parallel = ["rayon"]
 
 [dependencies]
 chrono = { version = "0.4", features = ["serde"] }
@@ -27,6 +28,7 @@ sha2 = "0.10"
 rand = "0.8"
 tracing = "0.1"
 subtle = "2.6.1"
+rayon = { version = "1", optional = true }
 
 [dev-dependencies]
 chrono = "0.4"

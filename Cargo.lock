@@ -853,6 +853,7 @@ dependencies = [
  "criterion",
  "ed25519-dalek",
  "rand",
+ "rayon",
  "serde",
  "serde_json",
  "sha2",

@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] — 2026-04-02
+
+### Added
+- **Key rotation**: `PublisherKeyring::rotate_key()` expires the current key version and adds a new one with a configurable overlap window for graceful transitions
+- **Historical key lookup**: `PublisherKeyring::get_key_valid_at()` for verifying artifacts signed before a key rotation
+- `PublisherKeyring::key_ids()` to list all key IDs in the keyring
+- **Integrity baseline snapshots**: `IntegrityVerifier::export_baseline()` / `import_baseline()` with `IntegritySnapshot` type for backup/restore of integrity state
+- **Batch verification**: `SigilVerifier::verify_batch()` verifies multiple artifacts in one call
+- `parallel` feature flag: enables rayon-based parallel batch verification
+- 9 new tests (key rotation, baseline snapshots, batch verification) — 115 total
+
+### Performance
+
+| Benchmark | v0.2.0 | v0.3.0 |
+|---|---|---|
+| verify_batch (10x4KB) | N/A | 745 us |
+| revocation_key_lookup (1k) | 17 ns | 17 ns |
+
 ## [0.2.0] — 2026-04-02
 
 ### Added
