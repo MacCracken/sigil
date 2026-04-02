@@ -2,9 +2,10 @@
 
 use std::collections::HashSet;
 
-use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+
+use crate::error::{self, SigilError};
 
 // ---------------------------------------------------------------------------
 // Revocation
@@ -51,9 +52,12 @@ impl RevocationList {
     ///
     /// At least one of `key_id` or `content_hash` must be `Some`,
     /// otherwise an error is returned.
-    pub fn add(&mut self, entry: RevocationEntry) -> Result<()> {
+    pub fn add(&mut self, entry: RevocationEntry) -> error::Result<()> {
         if entry.key_id.is_none() && entry.content_hash.is_none() {
-            anyhow::bail!("RevocationEntry must have at least one of key_id or content_hash set");
+            return Err(SigilError::InvalidInput {
+                detail: "RevocationEntry must have at least one of key_id or content_hash set"
+                    .to_string(),
+            });
         }
         if let Some(ref kid) = entry.key_id {
             self.revoked_keys.insert(kid.clone());
@@ -90,16 +94,13 @@ impl RevocationList {
     }
 
     /// Serialize to JSON.
-    pub fn to_json(&self) -> Result<String> {
-        use anyhow::Context;
-        serde_json::to_string_pretty(&self.entries).context("Failed to serialize revocation list")
+    pub fn to_json(&self) -> error::Result<String> {
+        Ok(serde_json::to_string_pretty(&self.entries)?)
     }
 
     /// Deserialize from JSON.
-    pub fn from_json(json: &str) -> Result<Self> {
-        use anyhow::Context;
-        let entries: Vec<RevocationEntry> =
-            serde_json::from_str(json).context("Failed to deserialize revocation list")?;
+    pub fn from_json(json: &str) -> error::Result<Self> {
+        let entries: Vec<RevocationEntry> = serde_json::from_str(json)?;
         let mut list = Self::new();
         for entry in entries {
             // Entries from JSON are assumed valid (already validated on creation).

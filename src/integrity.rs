@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
+use crate::error;
+
 /// Status of a single integrity measurement.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -25,6 +27,18 @@ pub enum MeasurementStatus {
     FileNotFound,
     /// An error occurred while measuring.
     Error(String),
+}
+
+impl std::fmt::Display for MeasurementStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Pending => write!(f, "Pending"),
+            Self::Verified => write!(f, "Verified"),
+            Self::Mismatch => write!(f, "Mismatch"),
+            Self::FileNotFound => write!(f, "FileNotFound"),
+            Self::Error(msg) => write!(f, "Error: {msg}"),
+        }
+    }
 }
 
 /// A single file integrity measurement.
@@ -118,16 +132,13 @@ impl IntegrityVerifier {
     }
 
     /// Compute the SHA-256 hash of a file's contents using streaming I/O.
-    pub fn compute_hash(path: &Path) -> anyhow::Result<String> {
+    pub fn compute_hash(path: &Path) -> error::Result<String> {
         use std::io::Read;
-        let mut file = std::fs::File::open(path)
-            .map_err(|e| anyhow::anyhow!("Failed to read {}: {}", path.display(), e))?;
+        let mut file = std::fs::File::open(path).map_err(|e| error::io_err(e, path))?;
         let mut hasher = Sha256::new();
         let mut buf = [0u8; 8192];
         loop {
-            let n = file
-                .read(&mut buf)
-                .map_err(|e| anyhow::anyhow!("Failed to read {}: {}", path.display(), e))?;
+            let n = file.read(&mut buf).map_err(|e| error::io_err(e, path))?;
             if n == 0 {
                 break;
             }
@@ -221,7 +232,7 @@ impl IntegrityVerifier {
     }
 
     /// Hash a file and add it to the policy as a new baseline measurement.
-    pub fn add_baseline(&mut self, path: &Path) -> anyhow::Result<IntegrityMeasurement> {
+    pub fn add_baseline(&mut self, path: &Path) -> error::Result<IntegrityMeasurement> {
         let hash = Self::compute_hash(path)?;
         let measurement = IntegrityMeasurement {
             path: path.to_path_buf(),
@@ -233,6 +244,15 @@ impl IntegrityVerifier {
         self.policy
             .add_measurement(path.to_path_buf(), measurement.expected_hash.clone());
         Ok(measurement)
+    }
+
+    /// Remove a file from the integrity baseline. Returns `true` if it was present.
+    pub fn remove_baseline(&mut self, path: &Path) -> bool {
+        let removed = self.policy.remove_measurement(path);
+        if removed {
+            self.last_report = None;
+        }
+        removed
     }
 
     /// Return all files with a Mismatch status from the last report.

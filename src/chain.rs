@@ -3,10 +3,10 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
 use chrono::Utc;
 use tracing::{info, warn};
 
+use crate::error;
 use crate::integrity::{IntegrityPolicy, IntegrityReport, IntegrityVerifier};
 use crate::trust::hash_data;
 
@@ -25,7 +25,7 @@ pub(super) fn verify_boot_chain_impl(
     integrity: &mut IntegrityVerifier,
     trust_store: &HashMap<String, TrustedArtifact>,
     components: &[PathBuf],
-) -> Result<IntegrityReport> {
+) -> error::Result<IntegrityReport> {
     // Early-return if policy says not to verify on boot
     if !policy.verify_on_boot {
         tracing::debug!("Skipping boot chain verification (verify_on_boot=false)");
@@ -56,9 +56,7 @@ pub(super) fn verify_boot_chain_impl(
             artifact.content_hash.clone()
         } else {
             // No baseline — compute fresh hash (first-time measurement).
-            let data = std::fs::read(component).with_context(|| {
-                format!("Failed to read boot component: {}", component.display())
-            })?;
+            let data = std::fs::read(component).map_err(|e| error::io_err(e, component))?;
             hash_data(&data)
         };
 

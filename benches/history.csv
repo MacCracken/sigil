@@ -9,3 +9,13 @@ timestamp,label,benchmark,estimate,unit
 2026-04-02T01:11:31Z,p-1-baseline,revocation_key_lookup_1k,16.776,ns
 2026-04-02T01:11:31Z,p-1-baseline,revocation_hash_lookup_1k,17.092,ns
 2026-04-02T01:11:31Z,p-1-baseline,verify_artifact_signed_4kb,45.298,µs
+2026-04-02T01:34:10Z,v0.2.0,hash_data_4kb,2.0100,µs
+2026-04-02T01:34:10Z,v0.2.0,hash_data_1mb,495.45,µs
+2026-04-02T01:34:10Z,v0.2.0,sign_4kb,27.568,µs
+2026-04-02T01:34:10Z,v0.2.0,verify_4kb,34.556,µs
+2026-04-02T01:34:10Z,v0.2.0,generate_keypair,15.026,µs
+2026-04-02T01:34:10Z,v0.2.0,compute_hash_file_4kb,5.7188,µs
+2026-04-02T01:34:10Z,v0.2.0,compute_hash_file_1mb,613.92,µs
+2026-04-02T01:34:10Z,v0.2.0,revocation_key_lookup_1k,17.703,ns
+2026-04-02T01:34:10Z,v0.2.0,revocation_hash_lookup_1k,18.684,ns
+2026-04-02T01:34:10Z,v0.2.0,verify_artifact_signed_4kb,52.412,µs

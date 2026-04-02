@@ -1,23 +1,26 @@
 //! Verification logic — SigilVerifier implementation.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(feature = "chain")]
+use std::path::PathBuf;
 
-use anyhow::{Context, Result};
 use chrono::Utc;
 use ed25519_dalek::SigningKey;
 use subtle::ConstantTimeEq;
 use tracing::{debug, info, warn};
 
-use crate::integrity::{IntegrityPolicy, IntegrityReport, IntegrityVerifier};
-use crate::trust::{
-    PublisherKeyring, hash_data, key_id_from_verifying_key, sign_data, verify_signature,
-};
-
-use super::policy::{RevocationEntry, RevocationList};
 use super::types::{
     ArtifactType, SigilStats, TrustCheck, TrustEnforcement, TrustLevel, TrustPolicy,
     TrustedArtifact, VerificationResult,
+};
+use crate::error;
+#[cfg(feature = "integrity")]
+use crate::integrity::{IntegrityPolicy, IntegrityReport, IntegrityVerifier};
+#[cfg(feature = "policy")]
+use crate::policy::{RevocationEntry, RevocationList};
+use crate::trust::{
+    PublisherKeyring, hash_data, key_id_from_verifying_key, sign_data, verify_signature,
 };
 
 // ---------------------------------------------------------------------------
@@ -35,9 +38,11 @@ pub struct SigilVerifier {
     /// Active trust policy.
     policy: TrustPolicy,
     /// Revocation list.
+    #[cfg(feature = "policy")]
     revocations: RevocationList,
     /// File integrity verifier (used by boot chain verification and future
     /// periodic integrity sweeps).
+    #[cfg(feature = "integrity")]
     integrity: IntegrityVerifier,
     /// Trust store keyed by content hash.
     trust_store: HashMap<String, TrustedArtifact>,
@@ -46,7 +51,6 @@ pub struct SigilVerifier {
 impl SigilVerifier {
     /// Create a new verifier with the given keyring and policy.
     pub fn new(keyring: PublisherKeyring, policy: TrustPolicy) -> Self {
-        let integrity = IntegrityVerifier::new(IntegrityPolicy::default());
         info!(
             enforcement = %policy.enforcement,
             minimum_trust = %policy.minimum_trust_level,
@@ -55,8 +59,10 @@ impl SigilVerifier {
         Self {
             keyring,
             policy,
+            #[cfg(feature = "policy")]
             revocations: RevocationList::new(),
-            integrity,
+            #[cfg(feature = "integrity")]
+            integrity: IntegrityVerifier::new(IntegrityPolicy::default()),
             trust_store: HashMap::new(),
         }
     }
@@ -70,9 +76,8 @@ impl SigilVerifier {
         &self,
         path: &Path,
         artifact_type: ArtifactType,
-    ) -> Result<VerificationResult> {
-        let data = std::fs::read(path)
-            .with_context(|| format!("Failed to read artifact: {}", path.display()))?;
+    ) -> error::Result<VerificationResult> {
+        let data = std::fs::read(path).map_err(|e| error::io_err(e, path))?;
 
         let content_hash = hash_data(&data);
         let mut checks: Vec<TrustCheck> = Vec::new();
@@ -160,6 +165,7 @@ impl SigilVerifier {
         checks.push(sig_check);
 
         // --- Check: revocation ---
+        #[cfg(feature = "policy")]
         if self.policy.revocation_check {
             let key_id = stored.and_then(|a| a.signer_key_id.as_deref());
             let revoked = self.check_revocation(key_id, &content_hash);
@@ -253,15 +259,14 @@ impl SigilVerifier {
     ///
     /// In addition to standard artifact verification, checks that the file
     /// has execute permission and that unsigned agents are allowed by policy.
-    pub fn verify_agent_binary(&self, path: &Path) -> Result<VerificationResult> {
+    pub fn verify_agent_binary(&self, path: &Path) -> error::Result<VerificationResult> {
         // Early-return if policy says not to verify on execute
         if !self.policy.verify_on_execute {
             debug!(
                 path = %path.display(),
                 "Skipping agent binary verification (verify_on_execute=false)"
             );
-            let data = std::fs::read(path)
-                .with_context(|| format!("Failed to read artifact: {}", path.display()))?;
+            let data = std::fs::read(path).map_err(|e| error::io_err(e, path))?;
             let content_hash = hash_data(&data);
             let now = Utc::now();
             return Ok(VerificationResult {
@@ -291,8 +296,7 @@ impl SigilVerifier {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let meta = std::fs::metadata(path)
-                .with_context(|| format!("Failed to stat {}", path.display()))?;
+            let meta = std::fs::metadata(path).map_err(|e| error::io_err(e, path))?;
             let executable = meta.permissions().mode() & 0o111 != 0;
             result.checks.push(TrustCheck {
                 name: "execute_permission".to_string(),
@@ -333,15 +337,14 @@ impl SigilVerifier {
         &self,
         path: &Path,
         expected_hash: Option<&str>,
-    ) -> Result<VerificationResult> {
+    ) -> error::Result<VerificationResult> {
         // Early-return if policy says not to verify on install
         if !self.policy.verify_on_install {
             debug!(
                 path = %path.display(),
                 "Skipping package verification (verify_on_install=false)"
             );
-            let data = std::fs::read(path)
-                .with_context(|| format!("Failed to read artifact: {}", path.display()))?;
+            let data = std::fs::read(path).map_err(|e| error::io_err(e, path))?;
             let content_hash = hash_data(&data);
             let now = Utc::now();
             return Ok(VerificationResult {
@@ -403,9 +406,8 @@ impl SigilVerifier {
         path: &Path,
         signing_key: &SigningKey,
         artifact_type: ArtifactType,
-    ) -> Result<TrustedArtifact> {
-        let data = std::fs::read(path)
-            .with_context(|| format!("Failed to read artifact for signing: {}", path.display()))?;
+    ) -> error::Result<TrustedArtifact> {
+        let data = std::fs::read(path).map_err(|e| error::io_err(e, path))?;
 
         let content_hash = hash_data(&data);
         let signature = sign_data(&data, signing_key);
@@ -490,6 +492,7 @@ impl SigilVerifier {
     /// Check whether a key or artifact hash has been revoked.
     ///
     /// Returns `true` if revoked.
+    #[cfg(feature = "policy")]
     #[must_use]
     pub fn check_revocation(&self, key_id: Option<&str>, content_hash: &str) -> bool {
         if self.revocations.is_artifact_revoked(content_hash) {
@@ -504,13 +507,15 @@ impl SigilVerifier {
     }
 
     /// Return the number of entries in the revocation list.
+    #[cfg(feature = "policy")]
     #[must_use]
     pub fn revocation_count(&self) -> usize {
         self.revocations.len()
     }
 
     /// Add a revocation entry.
-    pub fn add_revocation(&mut self, entry: RevocationEntry) -> Result<()> {
+    #[cfg(feature = "policy")]
+    pub fn add_revocation(&mut self, entry: RevocationEntry) -> error::Result<()> {
         info!(
             key_id = ?entry.key_id,
             content_hash = ?entry.content_hash,
@@ -540,7 +545,8 @@ impl SigilVerifier {
     ///
     /// Builds an `IntegrityPolicy` from the trust store entries for the
     /// given paths and runs a full integrity check.
-    pub fn verify_boot_chain(&mut self, components: &[PathBuf]) -> Result<IntegrityReport> {
+    #[cfg(feature = "chain")]
+    pub fn verify_boot_chain(&mut self, components: &[PathBuf]) -> error::Result<IntegrityReport> {
         use super::chain::verify_boot_chain_impl;
         verify_boot_chain_impl(
             &self.policy,
@@ -551,12 +557,10 @@ impl SigilVerifier {
     }
 
     /// Save the trust store to a JSON file on disk.
-    pub fn save_trust_store(&self, path: &Path) -> Result<()> {
+    pub fn save_trust_store(&self, path: &Path) -> error::Result<()> {
         let artifacts: Vec<&TrustedArtifact> = self.trust_store.values().collect();
-        let json =
-            serde_json::to_string_pretty(&artifacts).context("Failed to serialize trust store")?;
-        std::fs::write(path, json)
-            .with_context(|| format!("Failed to write trust store to {}", path.display()))?;
+        let json = serde_json::to_string_pretty(&artifacts)?;
+        std::fs::write(path, json).map_err(|e| error::io_err(e, path))?;
         info!(path = %path.display(), count = artifacts.len(), "Trust store saved");
         Ok(())
     }
@@ -565,11 +569,9 @@ impl SigilVerifier {
     ///
     /// Returns the number of entries loaded. Existing entries with the same
     /// content hash are overwritten.
-    pub fn load_trust_store(&mut self, path: &Path) -> Result<usize> {
-        let json = std::fs::read_to_string(path)
-            .with_context(|| format!("Failed to read trust store from {}", path.display()))?;
-        let artifacts: Vec<TrustedArtifact> =
-            serde_json::from_str(&json).context("Failed to deserialize trust store")?;
+    pub fn load_trust_store(&mut self, path: &Path) -> error::Result<usize> {
+        let json = std::fs::read_to_string(path).map_err(|e| error::io_err(e, path))?;
+        let artifacts: Vec<TrustedArtifact> = serde_json::from_str(&json)?;
         let count = artifacts.len();
         for artifact in artifacts {
             self.trust_store
@@ -580,10 +582,10 @@ impl SigilVerifier {
     }
 
     /// Save the revocation list to a JSON file on disk.
-    pub fn save_revocations(&self, path: &Path) -> Result<()> {
+    #[cfg(feature = "policy")]
+    pub fn save_revocations(&self, path: &Path) -> error::Result<()> {
         let json = self.revocations.to_json()?;
-        std::fs::write(path, json)
-            .with_context(|| format!("Failed to write revocations to {}", path.display()))?;
+        std::fs::write(path, json).map_err(|e| error::io_err(e, path))?;
         info!(path = %path.display(), count = self.revocations.len(), "Revocations saved");
         Ok(())
     }
@@ -592,9 +594,9 @@ impl SigilVerifier {
     ///
     /// Returns the number of entries loaded. Entries are appended to the
     /// existing revocation list.
-    pub fn load_revocations(&mut self, path: &Path) -> Result<usize> {
-        let json = std::fs::read_to_string(path)
-            .with_context(|| format!("Failed to read revocations from {}", path.display()))?;
+    #[cfg(feature = "policy")]
+    pub fn load_revocations(&mut self, path: &Path) -> error::Result<usize> {
+        let json = std::fs::read_to_string(path).map_err(|e| error::io_err(e, path))?;
         let loaded = RevocationList::from_json(&json)?;
         let count = loaded.len();
         for entry in loaded.entries {

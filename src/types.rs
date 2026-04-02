@@ -165,6 +165,75 @@ impl Default for TrustPolicy {
     }
 }
 
+impl TrustPolicy {
+    /// Start building a new `TrustPolicy` from the strict defaults.
+    #[must_use]
+    pub fn builder() -> TrustPolicyBuilder {
+        TrustPolicyBuilder(TrustPolicy::default())
+    }
+}
+
+/// Builder for [`TrustPolicy`].
+#[derive(Debug, Clone)]
+pub struct TrustPolicyBuilder(TrustPolicy);
+
+impl TrustPolicyBuilder {
+    /// Set the enforcement mode.
+    #[must_use]
+    pub fn enforcement(mut self, mode: TrustEnforcement) -> Self {
+        self.0.enforcement = mode;
+        self
+    }
+
+    /// Set the minimum trust level.
+    #[must_use]
+    pub fn minimum_trust_level(mut self, level: TrustLevel) -> Self {
+        self.0.minimum_trust_level = level;
+        self
+    }
+
+    /// Allow or disallow unsigned agent binaries.
+    #[must_use]
+    pub fn allow_unsigned_agents(mut self, allow: bool) -> Self {
+        self.0.allow_unsigned_agents = allow;
+        self
+    }
+
+    /// Enable or disable boot-time verification.
+    #[must_use]
+    pub fn verify_on_boot(mut self, enabled: bool) -> Self {
+        self.0.verify_on_boot = enabled;
+        self
+    }
+
+    /// Enable or disable install-time verification.
+    #[must_use]
+    pub fn verify_on_install(mut self, enabled: bool) -> Self {
+        self.0.verify_on_install = enabled;
+        self
+    }
+
+    /// Enable or disable execute-time verification.
+    #[must_use]
+    pub fn verify_on_execute(mut self, enabled: bool) -> Self {
+        self.0.verify_on_execute = enabled;
+        self
+    }
+
+    /// Enable or disable revocation checking.
+    #[must_use]
+    pub fn revocation_check(mut self, enabled: bool) -> Self {
+        self.0.revocation_check = enabled;
+        self
+    }
+
+    /// Consume the builder and produce the final [`TrustPolicy`].
+    #[must_use]
+    pub fn build(self) -> TrustPolicy {
+        self.0
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Trusted artifact
 // ---------------------------------------------------------------------------

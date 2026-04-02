@@ -4,8 +4,12 @@
 //! trust chain covering boot, agent binaries, configs, and packages.
 //! Named after the Latin word for "seal" — sigil seals trust into AGNOS.
 
+#[cfg(feature = "chain")]
 pub mod chain;
+pub mod error;
+#[cfg(feature = "integrity")]
 pub mod integrity;
+#[cfg(feature = "policy")]
 pub mod policy;
 pub mod trust;
 pub mod types;
@@ -14,10 +18,12 @@ pub mod verify;
 #[cfg(test)]
 mod tests;
 
-// Re-export the full public API surface (identical to old sigil.rs).
+// Re-export the full public API surface.
+pub use error::{Result, SigilError};
+#[cfg(feature = "policy")]
 pub use policy::{RevocationEntry, RevocationList};
 pub use types::{
     ArtifactType, SigilStats, TrustCheck, TrustEnforcement, TrustLevel, TrustPolicy,
-    TrustedArtifact, VerificationResult,
+    TrustPolicyBuilder, TrustedArtifact, VerificationResult,
 };
 pub use verify::SigilVerifier;

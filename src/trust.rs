@@ -6,11 +6,12 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+
+use crate::error::{self, SigilError};
 
 // ---------------------------------------------------------------------------
 // Key management
@@ -45,13 +46,16 @@ impl KeyVersion {
     }
 
     /// Decode the public key from hex.
-    pub fn verifying_key(&self) -> Result<VerifyingKey> {
-        let bytes = hex::decode(&self.public_key_hex).context("Invalid hex in public key")?;
-        let key_bytes: [u8; 32] = bytes
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("Public key must be 32 bytes"))?;
-        VerifyingKey::from_bytes(&key_bytes)
-            .map_err(|e| anyhow::anyhow!("Invalid Ed25519 public key: {}", e))
+    pub fn verifying_key(&self) -> error::Result<VerifyingKey> {
+        let bytes = hex::decode(&self.public_key_hex).map_err(|e| SigilError::InvalidInput {
+            detail: format!("invalid hex in public key: {e}"),
+        })?;
+        let key_bytes: [u8; 32] = bytes.try_into().map_err(|_| SigilError::InvalidInput {
+            detail: "public key must be 32 bytes".to_string(),
+        })?;
+        VerifyingKey::from_bytes(&key_bytes).map_err(|e| SigilError::Crypto {
+            detail: format!("invalid Ed25519 public key: {e}"),
+        })
     }
 }
 
@@ -73,7 +77,7 @@ impl PublisherKeyring {
     }
 
     /// Load all key files from the keys directory.
-    pub fn load(&mut self) -> Result<usize> {
+    pub fn load(&mut self) -> error::Result<usize> {
         self.keys.clear();
         let mut count = 0;
 
@@ -81,9 +85,8 @@ impl PublisherKeyring {
             return Ok(0);
         }
 
-        let entries = std::fs::read_dir(&self.keys_dir).with_context(|| {
-            format!("Failed to read keys directory: {}", self.keys_dir.display())
-        })?;
+        let entries =
+            std::fs::read_dir(&self.keys_dir).map_err(|e| error::io_err(e, &self.keys_dir))?;
 
         for entry in entries {
             let entry = entry?;
@@ -145,6 +148,21 @@ impl PublisherKeyring {
     pub fn is_empty(&self) -> bool {
         self.keys.is_empty()
     }
+
+    /// Save all keys to the keys directory as JSON files.
+    ///
+    /// Each key ID gets its own file: `<key_id>.json`.
+    pub fn save(&self) -> error::Result<usize> {
+        std::fs::create_dir_all(&self.keys_dir).map_err(|e| error::io_err(e, &self.keys_dir))?;
+        let mut count = 0;
+        for (key_id, versions) in &self.keys {
+            let path = self.keys_dir.join(format!("{key_id}.json"));
+            let json = serde_json::to_string_pretty(versions)?;
+            std::fs::write(&path, json).map_err(|e| error::io_err(e, &path))?;
+            count += versions.len();
+        }
+        Ok(count)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -171,14 +189,19 @@ pub fn verify_signature(
     data: &[u8],
     signature_bytes: &[u8],
     verifying_key: &VerifyingKey,
-) -> Result<()> {
-    let sig_bytes: [u8; 64] = signature_bytes
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("Signature must be 64 bytes"))?;
+) -> error::Result<()> {
+    let sig_bytes: [u8; 64] =
+        signature_bytes
+            .try_into()
+            .map_err(|_| SigilError::SignatureInvalid {
+                detail: "signature must be 64 bytes".to_string(),
+            })?;
     let signature = Signature::from_bytes(&sig_bytes);
     verifying_key
         .verify(data, &signature)
-        .map_err(|e| anyhow::anyhow!("Signature verification failed: {}", e))
+        .map_err(|e| SigilError::SignatureInvalid {
+            detail: format!("verification failed: {e}"),
+        })
 }
 
 /// Generate a new Ed25519 keypair. Returns (signing_key, verifying_key, key_id).
@@ -203,16 +226,13 @@ mod hex {
         data.iter().map(|b| format!("{:02x}", b)).collect()
     }
 
-    pub fn decode(s: &str) -> Result<Vec<u8>, anyhow::Error> {
+    pub fn decode(s: &str) -> std::result::Result<Vec<u8>, String> {
         if !s.len().is_multiple_of(2) {
-            return Err(anyhow::anyhow!("Hex string has odd length"));
+            return Err("hex string has odd length".to_string());
         }
         (0..s.len())
             .step_by(2)
-            .map(|i| {
-                u8::from_str_radix(&s[i..i + 2], 16)
-                    .map_err(|e| anyhow::anyhow!("Invalid hex: {}", e))
-            })
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).map_err(|e| format!("invalid hex: {e}")))
             .collect()
     }
 }

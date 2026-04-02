@@ -126,6 +126,8 @@ Follow [Keep a Changelog](https://keepachangelog.com/). Performance claims MUST 
 ## Current Status
 
 - **Extracted from**: agnosticos/userland/agent-runtime/src/sigil/ + integrity.rs + marketplace/trust.rs
-- **Tests**: 88 passing
-- **Phase**: Needs P(-1) scaffold hardening
-- **Next**: Cleanliness check, benchmark baseline, deep security review, then v0.2.0
+- **Version**: 0.2.0
+- **Tests**: 106 passing
+- **Benchmarks**: 10 benchmarks, baseline in benches/history.csv
+- **Phase**: P(-1) complete, v0.2.0 released. Ready for Work Loop.
+- **Next**: v0.3.0 roadmap items (see docs/development/roadmap.md)

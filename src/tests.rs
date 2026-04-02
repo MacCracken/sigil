@@ -1357,4 +1357,118 @@ mod tests {
         assert_eq!(recovered.verified, report.verified);
         assert!(recovered.is_clean());
     }
+
+    // -----------------------------------------------------------------------
+    // v0.2.0 API additions
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn measurement_status_display() {
+        use crate::integrity::MeasurementStatus;
+        assert_eq!(MeasurementStatus::Pending.to_string(), "Pending");
+        assert_eq!(MeasurementStatus::Verified.to_string(), "Verified");
+        assert_eq!(MeasurementStatus::Mismatch.to_string(), "Mismatch");
+        assert_eq!(MeasurementStatus::FileNotFound.to_string(), "FileNotFound");
+        assert_eq!(
+            MeasurementStatus::Error("oops".to_string()).to_string(),
+            "Error: oops"
+        );
+    }
+
+    #[test]
+    fn trust_policy_builder() {
+        let policy = TrustPolicy::builder()
+            .enforcement(TrustEnforcement::Permissive)
+            .minimum_trust_level(TrustLevel::Community)
+            .allow_unsigned_agents(true)
+            .verify_on_boot(false)
+            .verify_on_install(false)
+            .verify_on_execute(false)
+            .revocation_check(false)
+            .build();
+
+        assert_eq!(policy.enforcement, TrustEnforcement::Permissive);
+        assert_eq!(policy.minimum_trust_level, TrustLevel::Community);
+        assert!(policy.allow_unsigned_agents);
+        assert!(!policy.verify_on_boot);
+        assert!(!policy.verify_on_install);
+        assert!(!policy.verify_on_execute);
+        assert!(!policy.revocation_check);
+    }
+
+    #[test]
+    fn trust_policy_builder_defaults() {
+        let policy = TrustPolicy::builder().build();
+        let default = TrustPolicy::default();
+        assert_eq!(policy.enforcement, default.enforcement);
+        assert_eq!(policy.minimum_trust_level, default.minimum_trust_level);
+    }
+
+    #[test]
+    fn keyring_save_and_reload() {
+        use crate::trust::{KeyVersion, generate_keypair};
+
+        let dir = tempfile::tempdir().unwrap();
+        let (_, vk, kid) = generate_keypair();
+
+        let mut kr = PublisherKeyring::new(dir.path());
+        kr.add_key(KeyVersion {
+            key_id: kid.clone(),
+            valid_from: Utc::now() - chrono::Duration::hours(1),
+            valid_until: None,
+            public_key_hex: vk.to_bytes().iter().map(|b| format!("{:02x}", b)).collect(),
+        });
+
+        let saved = kr.save().unwrap();
+        assert_eq!(saved, 1);
+
+        // Reload into fresh keyring
+        let mut kr2 = PublisherKeyring::new(dir.path());
+        let loaded = kr2.load().unwrap();
+        assert_eq!(loaded, 1);
+        assert!(kr2.get_current_key(&kid).is_some());
+    }
+
+    #[test]
+    fn integrity_remove_baseline() {
+        use crate::integrity::{IntegrityPolicy, IntegrityVerifier};
+
+        let dir = tempfile::tempdir().unwrap();
+        let p1 = temp_file(dir.path(), "keep.txt", b"keep");
+        let p2 = temp_file(dir.path(), "remove.txt", b"remove");
+
+        let policy = IntegrityPolicy::default();
+        let mut verifier = IntegrityVerifier::new(policy);
+        verifier.add_baseline(&p1).unwrap();
+        verifier.add_baseline(&p2).unwrap();
+
+        assert!(verifier.remove_baseline(&p2));
+        assert!(!verifier.remove_baseline(&p2)); // already removed
+
+        let report = verifier.verify_all();
+        assert_eq!(report.total, 1);
+        assert!(report.is_clean());
+    }
+
+    #[test]
+    fn sigil_error_display() {
+        use crate::error::SigilError;
+        let err = SigilError::KeyNotFound {
+            key_id: "abc123".to_string(),
+        };
+        assert_eq!(err.to_string(), "key not found: abc123");
+
+        let err = SigilError::InvalidInput {
+            detail: "bad data".to_string(),
+        };
+        assert_eq!(err.to_string(), "invalid input: bad data");
+    }
+
+    #[test]
+    fn sigil_error_from_io() {
+        use crate::error::SigilError;
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "file missing");
+        let sigil_err: SigilError = io_err.into();
+        assert!(sigil_err.to_string().contains("file missing"));
+    }
 }
