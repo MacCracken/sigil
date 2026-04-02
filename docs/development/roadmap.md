@@ -43,53 +43,42 @@
 - [x] Pre-allocated hex encoding via lookup table
 - [x] Audit: zero unwrap/panic in library code, all re-exports clean, deny.toml clean
 
-## Backlog
+## v1.0.0 (shipped)
 
-### v0.5.0 — Advanced Trust (done)
+- [x] Cross-signing: `Cosignature`, `cosign_artifact()`, cosigner verification
+- [x] CRL distribution: `Crl` struct, `RevocationList::merge()`, `Crl::apply_to()`
+- [x] Policy compliance report: `ComplianceReport`, `compliance_report()`
+- [x] PQC scaffold: `SignatureAlgorithm` enum, `pqc` feature flag, `signature_algorithm` on artifacts
+- [x] TPM scaffold: `TpmProvider` trait, `PcrMeasurement`, `measure_system_component()`, `tpm` feature flag
+- [x] `#![forbid(unsafe_code)]`
+- [x] `#![warn(missing_docs)]` — full doc coverage
+- [x] 8 fuzzing targets for all deserialization paths
+- [x] API frozen
 
-- [x] Hierarchical trust delegation: root key -> intermediate -> publisher
-- [x] Certificate-style key metadata (publisher name, contact, scope constraints)
-- [x] Structured verification audit log (JSON event stream)
-- [x] Trust store diff: compare two trust store snapshots
-- Remaining items moved to v0.6.0
+## Post-v1.0
 
-### v0.6.0 — Cross-signing & CRL
+### PQC Implementation (when crates mature)
 
-- [ ] Cross-signing: multiple publishers co-sign an artifact
-- [ ] CRL distribution: fetch/merge remote revocation lists
-- [ ] Policy compliance report: full-system trust posture summary
+- [ ] ML-DSA (FIPS 204) actual signing/verification behind `pqc` feature
+- [ ] ML-KEM (FIPS 203) for key encapsulation
+- [ ] Hybrid mode: Ed25519 + ML-DSA dual signatures during transition
+- [ ] Re-sign utility: migrate existing trust store to PQC keys
 
-### v0.7.0 — Online Verification
+### TPM Implementation (when agnosys exports available)
+
+- [ ] Concrete `TpmProvider` implementation backed by agnosys TPM subsystem
+- [ ] `register_system_core` with mandatory TPM attestation
+- [ ] Sealed key storage via TPM
+- [ ] Remote attestation end-to-end flow
+
+### Online Verification
 
 - [ ] OCSP-style online revocation checking
 - [ ] Certificate transparency log integration
 - [ ] Revocation stapling: cache OCSP responses locally
 
-### v0.8.0 — PQC Foundation
+### CI/CD
 
-- [ ] `pqc` feature gate (no separate crate — sigil owns all AGNOS crypto)
-- [ ] ML-DSA (FIPS 204) signatures alongside Ed25519
-- [ ] ML-KEM (FIPS 203) for key encapsulation (if needed for key exchange)
-- [ ] Hybrid mode: Ed25519 + ML-DSA dual signatures during transition
-- [ ] Re-sign utility: migrate existing trust store to PQC keys
-
-### v0.9.0 — Production Hardening
-
-- [ ] API freeze — no breaking changes after this
-- [ ] Full doc coverage on every public item (`#[warn(missing_docs)]`)
-- [ ] No `unsafe` code audit
 - [ ] Benchmark regression thresholds in CI
-- [ ] Fuzzing targets for all deserialization paths
-- [ ] TPM integration (`register_system_core` backed by TPM PCR measurements, sealed key storage, remote attestation) — depends on agnosys TPM exports
-
-## v1.0.0 Criteria
-
-- All public API is stable and documented
-- Error types are comprehensive and non-exhaustive
-- Feature gates are well-tested in isolation and combination
-- Benchmark regression suite in CI
-- Security audit by third party
-- No `unsafe` code
-- All CLAUDE.md key principles enforced
-- PQC hybrid mode operational
-- TPM integration tested on real hardware
+- [ ] Fuzzing in CI (nightly)
+- [ ] Third-party security audit

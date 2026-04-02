@@ -16,39 +16,61 @@ use crate::types::{ArtifactType, TrustLevel};
 pub enum AuditEvent {
     /// An artifact was verified.
     ArtifactVerified {
+        /// Path to the artifact.
         path: PathBuf,
+        /// Type of the artifact.
         artifact_type: ArtifactType,
+        /// Trust level required for verification.
         trust_level: TrustLevel,
+        /// Whether verification passed.
         passed: bool,
+        /// SHA-256 hash of the artifact contents.
         content_hash: String,
+        /// When the verification occurred.
         timestamp: DateTime<Utc>,
     },
     /// An artifact was signed and registered.
     ArtifactSigned {
+        /// Path to the artifact.
         path: PathBuf,
+        /// Type of the artifact.
         artifact_type: ArtifactType,
+        /// Key ID of the signer.
         signer_key_id: String,
+        /// SHA-256 hash of the artifact contents.
         content_hash: String,
+        /// When the signing occurred.
         timestamp: DateTime<Utc>,
     },
     /// A revocation entry was added.
     RevocationAdded {
+        /// Key ID that was revoked, if applicable.
         key_id: Option<String>,
+        /// Content hash that was revoked, if applicable.
         content_hash: Option<String>,
+        /// Human-readable reason for revocation.
         reason: String,
+        /// When the revocation was recorded.
         timestamp: DateTime<Utc>,
     },
     /// A key was rotated.
     KeyRotated {
+        /// Key ID of the outgoing key.
         key_id: String,
+        /// Key ID of the replacement key.
         new_key_id: String,
+        /// When the rotation occurred.
         timestamp: DateTime<Utc>,
     },
     /// A key chain was validated.
     ChainValidated {
+        /// Key ID at the tip of the chain.
         key_id: String,
+        /// Number of keys in the chain.
         chain_length: usize,
+        /// Whether the chain was valid.
         valid: bool,
+        /// When the validation occurred.
         timestamp: DateTime<Utc>,
     },
 }

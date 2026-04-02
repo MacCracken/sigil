@@ -291,6 +291,34 @@ impl SigilVerifier {
         };
         checks.push(sig_check);
 
+        // --- Check: cosigner verification ---
+        if let Some(artifact) = stored
+            && !artifact.cosigners.is_empty()
+        {
+            let mut valid_cosigs = 0usize;
+            for cosig in &artifact.cosigners {
+                let ok = self
+                    .keyring
+                    .get_current_key(&cosig.key_id)
+                    .and_then(|kv| kv.verifying_key().ok())
+                    .is_some_and(|vk| {
+                        verify_signature(content_hash.as_bytes(), &cosig.signature, &vk).is_ok()
+                    });
+                if ok {
+                    valid_cosigs += 1;
+                }
+            }
+            checks.push(TrustCheck {
+                name: "cosigners".to_string(),
+                passed: valid_cosigs > 0,
+                detail: format!(
+                    "{}/{} co-signatures verified",
+                    valid_cosigs,
+                    artifact.cosigners.len()
+                ),
+            });
+        }
+
         // --- Check: trust chain (if signer has an issuer) ---
         if let Some(artifact) = stored
             && let Some(key_id) = &artifact.signer_key_id
@@ -403,10 +431,12 @@ impl SigilVerifier {
             artifact_type,
             content_hash,
             signature: stored.and_then(|a| a.signature.clone()),
+            signature_algorithm: stored.map(|a| a.signature_algorithm).unwrap_or_default(),
             signer_key_id: stored.and_then(|a| a.signer_key_id.clone()),
             trust_level,
             verified_at: Some(now),
             metadata: stored.map(|a| a.metadata.clone()).unwrap_or_default(),
+            cosigners: stored.map(|a| a.cosigners.clone()).unwrap_or_default(),
         };
 
         debug!(
@@ -473,10 +503,12 @@ impl SigilVerifier {
                     artifact_type: ArtifactType::AgentBinary,
                     content_hash: String::new(),
                     signature: None,
+                    signature_algorithm: Default::default(),
                     signer_key_id: None,
                     trust_level: TrustLevel::Unverified,
                     verified_at: Some(now),
                     metadata: HashMap::new(),
+                    cosigners: Vec::new(),
                 },
                 passed: true,
                 checks: vec![TrustCheck {
@@ -549,10 +581,12 @@ impl SigilVerifier {
                     artifact_type: ArtifactType::Package,
                     content_hash: String::new(),
                     signature: None,
+                    signature_algorithm: Default::default(),
                     signer_key_id: None,
                     trust_level: TrustLevel::Unverified,
                     verified_at: Some(now),
                     metadata: HashMap::new(),
+                    cosigners: Vec::new(),
                 },
                 passed: true,
                 checks: vec![TrustCheck {
@@ -629,10 +663,12 @@ impl SigilVerifier {
             artifact_type,
             content_hash: content_hash.clone(),
             signature: Some(signature),
+            signature_algorithm: Default::default(),
             signer_key_id: Some(key_id.clone()),
             trust_level,
             verified_at: Some(now),
             metadata: HashMap::new(),
+            cosigners: Vec::new(),
         };
 
         info!(
@@ -654,6 +690,33 @@ impl SigilVerifier {
 
         self.trust_store.insert(content_hash, artifact.clone());
         Ok(artifact)
+    }
+
+    /// Add a co-signature to an existing artifact in the trust store.
+    ///
+    /// The co-signer signs the artifact's content hash. Returns an error if
+    /// the artifact is not found in the trust store.
+    pub fn cosign_artifact(
+        &mut self,
+        content_hash: &str,
+        signing_key: &SigningKey,
+    ) -> error::Result<()> {
+        let artifact = self.trust_store.get_mut(content_hash).ok_or_else(|| {
+            error::SigilError::InvalidInput {
+                detail: format!("artifact {content_hash} not in trust store"),
+            }
+        })?;
+
+        let vk = signing_key.verifying_key();
+        let kid = key_id_from_verifying_key(&vk);
+        let sig = sign_data(content_hash.as_bytes(), signing_key);
+
+        artifact.cosigners.push(super::types::Cosignature {
+            key_id: kid,
+            signature: sig,
+        });
+
+        Ok(())
     }
 
     /// Register a pre-built `TrustedArtifact` in the trust store.
@@ -857,6 +920,56 @@ impl SigilVerifier {
         }
     }
 
+    /// Generate a policy compliance report for the entire trust store.
+    ///
+    /// Scans all registered artifacts and reports which ones meet the current
+    /// policy and which violate it, without re-reading files from disk.
+    #[must_use]
+    pub fn compliance_report(&self) -> ComplianceReport {
+        let mut compliant = Vec::new();
+        let mut below_minimum = Vec::new();
+        let mut unsigned = Vec::new();
+        let mut revoked = Vec::new();
+        let mut pin_violations = Vec::new();
+
+        for artifact in self.trust_store.values() {
+            if artifact.trust_level == TrustLevel::Revoked {
+                revoked.push(artifact.content_hash.clone());
+                continue;
+            }
+
+            if artifact.signature.is_none() {
+                unsigned.push(artifact.content_hash.clone());
+            }
+
+            if artifact.trust_level < self.policy.minimum_trust_level {
+                below_minimum.push(artifact.content_hash.clone());
+                continue;
+            }
+
+            // Check key pinning
+            if !self.key_pins.is_empty() {
+                let signer = artifact.signer_key_id.as_deref();
+                if !self.is_key_authorized_for_path(&artifact.path, signer) {
+                    pin_violations.push(artifact.content_hash.clone());
+                    continue;
+                }
+            }
+
+            compliant.push(artifact.content_hash.clone());
+        }
+
+        ComplianceReport {
+            total: self.trust_store.len(),
+            compliant_count: compliant.len(),
+            compliant,
+            below_minimum,
+            unsigned,
+            revoked,
+            pin_violations,
+        }
+    }
+
     /// Verify multiple artifacts in a single call.
     ///
     /// Returns a `Vec` of results in the same order as the input. Each entry
@@ -989,5 +1102,42 @@ impl TrustStoreDiff {
     #[must_use]
     pub fn len(&self) -> usize {
         self.added.len() + self.removed.len() + self.changed.len()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Policy compliance report
+// ---------------------------------------------------------------------------
+
+/// Full-system trust posture summary.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ComplianceReport {
+    /// Total artifacts in the trust store.
+    pub total: usize,
+    /// Number of artifacts that meet policy.
+    pub compliant_count: usize,
+    /// Content hashes of compliant artifacts.
+    pub compliant: Vec<String>,
+    /// Content hashes of artifacts below minimum trust level.
+    pub below_minimum: Vec<String>,
+    /// Content hashes of unsigned artifacts.
+    pub unsigned: Vec<String>,
+    /// Content hashes of revoked artifacts.
+    pub revoked: Vec<String>,
+    /// Content hashes of artifacts violating key pinning.
+    pub pin_violations: Vec<String>,
+}
+
+impl ComplianceReport {
+    /// Returns true if all artifacts are compliant.
+    #[must_use]
+    pub fn is_compliant(&self) -> bool {
+        self.below_minimum.is_empty() && self.revoked.is_empty() && self.pin_violations.is_empty()
+    }
+
+    /// Total number of violations.
+    #[must_use]
+    pub fn violation_count(&self) -> usize {
+        self.below_minimum.len() + self.revoked.len() + self.pin_violations.len()
     }
 }

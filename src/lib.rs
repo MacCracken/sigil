@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+#![warn(missing_docs)]
 //! Sigil — System-Wide Trust Verification for AGNOS
 //!
 //! Unified trust module that extends marketplace signing into a complete
@@ -12,6 +14,8 @@ pub mod error;
 pub mod integrity;
 #[cfg(feature = "policy")]
 pub mod policy;
+#[cfg(feature = "tpm")]
+pub mod tpm;
 pub mod trust;
 pub mod types;
 pub mod verify;
@@ -25,10 +29,11 @@ pub use error::{Result, SigilError};
 #[cfg(feature = "integrity")]
 pub use integrity::{BaselineEntry, IntegritySnapshot};
 #[cfg(feature = "policy")]
-pub use policy::{RevocationEntry, RevocationList};
+pub use policy::{Crl, RevocationEntry, RevocationList};
 pub use trust::{KeyMetadata, KeyRole};
 pub use types::{
-    ArtifactType, HashAlgorithm, SigilStats, TrustCheck, TrustEnforcement, TrustLevel, TrustPolicy,
-    TrustPolicyBuilder, TrustedArtifact, VerificationResult,
+    ArtifactType, Cosignature, HashAlgorithm, SigilStats, SignatureAlgorithm, TrustCheck,
+    TrustEnforcement, TrustLevel, TrustPolicy, TrustPolicyBuilder, TrustedArtifact,
+    VerificationResult,
 };
-pub use verify::{ArtifactChange, KeyPin, SigilVerifier, TrustStoreDiff};
+pub use verify::{ArtifactChange, ComplianceReport, KeyPin, SigilVerifier, TrustStoreDiff};

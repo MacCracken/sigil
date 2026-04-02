@@ -150,4 +150,82 @@ impl RevocationList {
         }
         Ok(list)
     }
+
+    /// Merge another revocation list into this one, deduplicating entries.
+    ///
+    /// Deduplication is based on (key_id, content_hash) pairs. If both lists
+    /// contain an entry for the same target, the existing entry is kept.
+    /// Returns the number of new entries added.
+    pub fn merge(&mut self, other: &RevocationList) -> error::Result<usize> {
+        let mut added = 0;
+        for entry in &other.entries {
+            let already_has = self
+                .entries
+                .iter()
+                .any(|e| e.key_id == entry.key_id && e.content_hash == entry.content_hash);
+            if !already_has {
+                self.add(entry.clone())?;
+                added += 1;
+            }
+        }
+        Ok(added)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CRL (Certificate Revocation List)
+// ---------------------------------------------------------------------------
+
+/// A distributable Certificate Revocation List with versioning.
+///
+/// Wraps a `RevocationList` with metadata for distribution and freshness
+/// checking. Consumers fetch CRLs from a distribution point and merge them
+/// into the local revocation list.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Crl {
+    /// Monotonically increasing version number.
+    pub version: u64,
+    /// Key ID of the CRL issuer (typically the root key).
+    pub issuer: String,
+    /// When this CRL was issued.
+    pub issued_at: DateTime<Utc>,
+    /// When the next CRL is expected (for freshness checking).
+    pub next_update: Option<DateTime<Utc>>,
+    /// The revocation entries.
+    pub entries: Vec<RevocationEntry>,
+}
+
+impl Crl {
+    /// Serialize the CRL to JSON.
+    pub fn to_json(&self) -> error::Result<String> {
+        Ok(serde_json::to_string_pretty(self)?)
+    }
+
+    /// Deserialize a CRL from JSON.
+    pub fn from_json(json: &str) -> error::Result<Self> {
+        Ok(serde_json::from_str(json)?)
+    }
+
+    /// Check whether this CRL is stale (past its next_update time).
+    #[must_use]
+    pub fn is_stale(&self) -> bool {
+        self.next_update.is_some_and(|next| Utc::now() > next)
+    }
+
+    /// Apply this CRL to a RevocationList, merging in all entries.
+    /// Returns the number of new entries added.
+    pub fn apply_to(&self, list: &mut RevocationList) -> error::Result<usize> {
+        let mut added = 0;
+        for entry in &self.entries {
+            let already_has = list
+                .entries
+                .iter()
+                .any(|e| e.key_id == entry.key_id && e.content_hash == entry.content_hash);
+            if !already_has {
+                list.add(entry.clone())?;
+                added += 1;
+            }
+        }
+        Ok(added)
+    }
 }

@@ -200,6 +200,7 @@ impl PublisherKeyring {
         self.keys.len()
     }
 
+    /// Whether the keyring contains no keys.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.keys.is_empty()

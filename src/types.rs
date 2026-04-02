@@ -8,6 +8,36 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
+// Signature algorithm
+// ---------------------------------------------------------------------------
+
+/// Cryptographic signature algorithm.
+///
+/// Currently only Ed25519 is implemented. The `MlDsa65` and `Hybrid` variants
+/// are scaffolded for post-quantum migration behind the `pqc` feature flag.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum SignatureAlgorithm {
+    /// Ed25519 (default, current).
+    #[default]
+    Ed25519,
+    /// ML-DSA-65 (FIPS 204) — post-quantum. Requires `pqc` feature.
+    MlDsa65,
+    /// Hybrid Ed25519 + ML-DSA-65 dual signature for transition period.
+    Hybrid,
+}
+
+impl fmt::Display for SignatureAlgorithm {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Ed25519 => write!(f, "Ed25519"),
+            Self::MlDsa65 => write!(f, "ML-DSA-65"),
+            Self::Hybrid => write!(f, "Hybrid(Ed25519+ML-DSA-65)"),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Hash algorithm
 // ---------------------------------------------------------------------------
 
@@ -281,8 +311,11 @@ pub struct TrustedArtifact {
     pub artifact_type: ArtifactType,
     /// SHA-256 hash of the artifact's contents.
     pub content_hash: String,
-    /// Ed25519 signature bytes (if signed).
+    /// Signature bytes (if signed).
     pub signature: Option<Vec<u8>>,
+    /// Algorithm used for the signature.
+    #[serde(default)]
+    pub signature_algorithm: SignatureAlgorithm,
     /// Key ID of the signer (if signed).
     pub signer_key_id: Option<String>,
     /// Determined trust level.
@@ -291,6 +324,19 @@ pub struct TrustedArtifact {
     pub verified_at: Option<DateTime<Utc>>,
     /// Arbitrary metadata (e.g. version, publisher name).
     pub metadata: HashMap<String, String>,
+    /// Additional co-signatures from other publishers.
+    /// Each entry is (key_id, signature_bytes).
+    #[serde(default)]
+    pub cosigners: Vec<Cosignature>,
+}
+
+/// A co-signature from an additional publisher.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Cosignature {
+    /// Key ID of the co-signer.
+    pub key_id: String,
+    /// Ed25519 signature bytes over the content hash.
+    pub signature: Vec<u8>,
 }
 
 // ---------------------------------------------------------------------------

@@ -45,18 +45,26 @@ impl std::fmt::Display for MeasurementStatus {
 /// A single file integrity measurement.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IntegrityMeasurement {
+    /// Path to the monitored file.
     pub path: PathBuf,
+    /// Known-good hash the file must match.
     pub expected_hash: String,
+    /// Hash computed during the last measurement pass.
     pub actual_hash: Option<String>,
+    /// When this measurement was last taken.
     pub measured_at: DateTime<Utc>,
+    /// Result of the most recent verification.
     pub status: MeasurementStatus,
 }
 
 /// Policy defining which files to monitor.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct IntegrityPolicy {
+    /// Files registered for integrity monitoring.
     pub measurements: Vec<IntegrityMeasurement>,
+    /// How frequently (in seconds) to run verification passes.
     pub check_interval_seconds: u64,
+    /// Whether a mismatch should be treated as a hard failure.
     pub enforce: bool,
 }
 
@@ -83,10 +91,15 @@ impl IntegrityPolicy {
 /// Report summarising an integrity verification pass.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IntegrityReport {
+    /// Total number of files checked.
     pub total: usize,
+    /// Number of files whose hashes matched the baseline.
     pub verified: usize,
+    /// Files whose hashes did not match the baseline.
     pub mismatches: Vec<IntegrityMeasurement>,
+    /// Files that could not be read or were missing.
     pub errors: Vec<IntegrityMeasurement>,
+    /// When this report was produced.
     pub checked_at: DateTime<Utc>,
 }
 

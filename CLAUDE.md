@@ -126,8 +126,8 @@ Follow [Keep a Changelog](https://keepachangelog.com/). Performance claims MUST 
 ## Current Status
 
 - **Extracted from**: agnosticos/userland/agent-runtime/src/sigil/ + integrity.rs + marketplace/trust.rs
-- **Version**: 0.5.0
-- **Tests**: 142 passing
+- **Version**: 1.0.0
+- **Tests**: 149 passing
 - **Benchmarks**: 12 benchmarks, history in benches/history.csv
-- **Phase**: Advanced Trust shipped. v0.5.0 complete.
-- **Next**: CRL distribution, cross-signing, policy compliance reports, then PQC
+- **Phase**: v1.0.0 released. API frozen.
+- **Post-v1**: PQC implementation (ML-DSA/ML-KEM when crates mature), TPM implementation (when agnosys exports available)

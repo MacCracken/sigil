@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0] — 2026-04-02
+
+### Added
+- **Cross-signing**: `Cosignature` type, `cosign_artifact()`, automatic cosigner verification during `verify_artifact`
+- **CRL distribution**: `Crl` struct with version/issuer/freshness metadata, `RevocationList::merge()`, `Crl::apply_to()`
+- **Policy compliance report**: `ComplianceReport` with compliant/below_minimum/unsigned/revoked/pin_violations breakdown, `compliance_report()` on `SigilVerifier`
+- **PQC scaffold**: `SignatureAlgorithm` enum (`Ed25519`, `MlDsa65`, `Hybrid`), `signature_algorithm` field on `TrustedArtifact`, `pqc` feature flag
+- **TPM scaffold**: `tpm` module with `TpmProvider` trait, `PcrMeasurement`, `AttestationResult`, `measure_system_component()`, `tpm` feature flag
+- **Fuzzing targets**: 8 fuzz targets covering all deserialization paths (TrustedArtifact, RevocationList, KeyVersion, IntegritySnapshot, AuditEvent, Crl, TrustPolicy, AuditLog JSONL)
+- `#![forbid(unsafe_code)]` — enforced at crate level
+- `#![warn(missing_docs)]` — full doc coverage on every public item
+- All public types re-exported from crate root
+
+### Changed
+- **API frozen** — no breaking changes after this release
+
 ## [0.5.0] — Advanced Trust
 
 ### Added

@@ -226,6 +226,8 @@ mod tests {
             trust_level: TrustLevel::Verified,
             verified_at: Some(Utc::now()),
             metadata: HashMap::new(),
+            cosigners: Vec::new(),
+            signature_algorithm: Default::default(),
         });
 
         let result = verifier
@@ -426,6 +428,8 @@ mod tests {
             trust_level: TrustLevel::Community,
             verified_at: Some(Utc::now()),
             metadata: HashMap::new(),
+            cosigners: Vec::new(),
+            signature_algorithm: Default::default(),
         });
 
         assert_eq!(verifier.trust_level_for(&hash), TrustLevel::Community);
@@ -561,6 +565,8 @@ mod tests {
             trust_level: TrustLevel::SystemCore,
             verified_at: Some(Utc::now()),
             metadata: HashMap::new(),
+            cosigners: Vec::new(),
+            signature_algorithm: Default::default(),
         });
 
         // Tamper
@@ -590,6 +596,8 @@ mod tests {
             trust_level: TrustLevel::Verified,
             verified_at: Some(Utc::now()),
             metadata: HashMap::new(),
+            cosigners: Vec::new(),
+            signature_algorithm: Default::default(),
         });
         verifier.register_trusted(TrustedArtifact {
             path: PathBuf::from("/b"),
@@ -600,6 +608,8 @@ mod tests {
             trust_level: TrustLevel::Revoked,
             verified_at: Some(Utc::now()),
             metadata: HashMap::new(),
+            cosigners: Vec::new(),
+            signature_algorithm: Default::default(),
         });
         verifier.register_trusted(TrustedArtifact {
             path: PathBuf::from("/c"),
@@ -610,6 +620,8 @@ mod tests {
             trust_level: TrustLevel::Verified,
             verified_at: None,
             metadata: HashMap::new(),
+            cosigners: Vec::new(),
+            signature_algorithm: Default::default(),
         });
 
         let stats = verifier.stats();
@@ -711,6 +723,8 @@ mod tests {
                 m.insert("version".to_string(), "1.0".to_string());
                 m
             },
+            cosigners: Vec::new(),
+            signature_algorithm: Default::default(),
         };
 
         let json = serde_json::to_string(&artifact).unwrap();
@@ -764,6 +778,8 @@ mod tests {
                 trust_level: TrustLevel::Verified,
                 verified_at: Some(Utc::now()),
                 metadata: HashMap::new(),
+                cosigners: Vec::new(),
+                signature_algorithm: Default::default(),
             });
         }
 
@@ -1051,6 +1067,8 @@ mod tests {
             trust_level: TrustLevel::SystemCore,
             verified_at: Some(Utc::now()),
             metadata: HashMap::new(),
+            cosigners: Vec::new(),
+            signature_algorithm: Default::default(),
         });
 
         // Should have been downgraded to Verified
@@ -1074,6 +1092,8 @@ mod tests {
             trust_level: TrustLevel::Verified, // even if lower is passed
             verified_at: Some(Utc::now()),
             metadata: HashMap::new(),
+            cosigners: Vec::new(),
+            signature_algorithm: Default::default(),
         });
 
         // Should be forced to SystemCore
@@ -1098,6 +1118,8 @@ mod tests {
             trust_level: TrustLevel::Verified,
             verified_at: Some(Utc::now()),
             metadata: HashMap::new(),
+            cosigners: Vec::new(),
+            signature_algorithm: Default::default(),
         });
         verifier.register_trusted(TrustedArtifact {
             path: PathBuf::from("/opt/agent2"),
@@ -1108,6 +1130,8 @@ mod tests {
             trust_level: TrustLevel::Community,
             verified_at: Some(Utc::now()),
             metadata: HashMap::new(),
+            cosigners: Vec::new(),
+            signature_algorithm: Default::default(),
         });
 
         verifier.save_trust_store(&store_path).unwrap();
@@ -2262,5 +2286,216 @@ mod tests {
 
         let diff = verifier.diff_trust_store(&snapshot);
         assert!(diff.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Cross-signing
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn cosign_and_verify() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = temp_file(dir.path(), "cosigned.bin", b"cosigned data");
+
+        let (kr, sk1, _vk1, _kid1) = keyring_with_key(dir.path());
+        let mut verifier = SigilVerifier::new(kr, TrustPolicy::default());
+
+        let artifact = verifier
+            .sign_artifact(&path, &sk1, ArtifactType::Config)
+            .unwrap();
+        let content_hash = artifact.content_hash.clone();
+
+        let (_sk2, _vk2, kid2) = crate::trust::generate_keypair();
+        verifier.cosign_artifact(&content_hash, &_sk2).unwrap();
+
+        let store = verifier.snapshot_trust_store();
+        let art = store.get(&content_hash).unwrap();
+        assert_eq!(art.cosigners.len(), 1);
+        assert_eq!(art.cosigners[0].key_id, kid2);
+    }
+
+    #[test]
+    fn cosign_nonexistent_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let kr = PublisherKeyring::new(dir.path());
+        let mut verifier = SigilVerifier::new(kr, TrustPolicy::default());
+
+        let sk = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+        assert!(verifier.cosign_artifact("nonexistent", &sk).is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // CRL distribution
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn crl_merge_and_apply() {
+        use crate::policy::Crl;
+
+        let mut rl = RevocationList::new();
+        rl.add(RevocationEntry {
+            key_id: Some("existing".to_string()),
+            content_hash: None,
+            reason: "old".to_string(),
+            revoked_at: Utc::now(),
+            revoked_by: "admin".to_string(),
+            revoked_after: None,
+        })
+        .unwrap();
+
+        let crl = Crl {
+            version: 1,
+            issuer: "root".to_string(),
+            issued_at: Utc::now(),
+            next_update: Some(Utc::now() + chrono::Duration::hours(24)),
+            entries: vec![
+                RevocationEntry {
+                    key_id: Some("new_key".to_string()),
+                    content_hash: None,
+                    reason: "compromised".to_string(),
+                    revoked_at: Utc::now(),
+                    revoked_by: "root".to_string(),
+                    revoked_after: None,
+                },
+                // Duplicate of existing — should be skipped
+                RevocationEntry {
+                    key_id: Some("existing".to_string()),
+                    content_hash: None,
+                    reason: "old".to_string(),
+                    revoked_at: Utc::now(),
+                    revoked_by: "admin".to_string(),
+                    revoked_after: None,
+                },
+            ],
+        };
+
+        let added = crl.apply_to(&mut rl).unwrap();
+        assert_eq!(added, 1); // Only new_key added, existing skipped
+        assert_eq!(rl.len(), 2);
+        assert!(rl.is_key_revoked("new_key"));
+        assert!(rl.is_key_revoked("existing"));
+    }
+
+    #[test]
+    fn crl_json_roundtrip() {
+        use crate::policy::Crl;
+
+        let crl = Crl {
+            version: 42,
+            issuer: "root_key".to_string(),
+            issued_at: Utc::now(),
+            next_update: None,
+            entries: vec![RevocationEntry {
+                key_id: Some("k1".to_string()),
+                content_hash: None,
+                reason: "test".to_string(),
+                revoked_at: Utc::now(),
+                revoked_by: "test".to_string(),
+                revoked_after: None,
+            }],
+        };
+
+        let json = crl.to_json().unwrap();
+        let recovered = Crl::from_json(&json).unwrap();
+        assert_eq!(recovered.version, 42);
+        assert_eq!(recovered.entries.len(), 1);
+    }
+
+    #[test]
+    fn revocation_list_merge() {
+        let mut rl1 = RevocationList::new();
+        rl1.add(RevocationEntry {
+            key_id: Some("a".to_string()),
+            content_hash: None,
+            reason: "r".to_string(),
+            revoked_at: Utc::now(),
+            revoked_by: "t".to_string(),
+            revoked_after: None,
+        })
+        .unwrap();
+
+        let mut rl2 = RevocationList::new();
+        rl2.add(RevocationEntry {
+            key_id: Some("b".to_string()),
+            content_hash: None,
+            reason: "r".to_string(),
+            revoked_at: Utc::now(),
+            revoked_by: "t".to_string(),
+            revoked_after: None,
+        })
+        .unwrap();
+
+        let added = rl1.merge(&rl2).unwrap();
+        assert_eq!(added, 1);
+        assert_eq!(rl1.len(), 2);
+        assert!(rl1.is_key_revoked("a"));
+        assert!(rl1.is_key_revoked("b"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Policy compliance report
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn compliance_report_all_compliant() {
+        let dir = tempfile::tempdir().unwrap();
+        let p1 = temp_file(dir.path(), "comp1.bin", b"data1");
+        let p2 = temp_file(dir.path(), "comp2.bin", b"data2");
+
+        let (kr, sk, _vk, _kid) = keyring_with_key(dir.path());
+        let mut verifier = SigilVerifier::new(kr, TrustPolicy::default());
+
+        verifier
+            .sign_artifact(&p1, &sk, ArtifactType::Config)
+            .unwrap();
+        verifier
+            .sign_artifact(&p2, &sk, ArtifactType::AgentBinary)
+            .unwrap();
+
+        let report = verifier.compliance_report();
+        assert_eq!(report.total, 2);
+        assert!(report.is_compliant());
+        assert_eq!(report.compliant_count, 2);
+        assert_eq!(report.violation_count(), 0);
+    }
+
+    #[test]
+    fn compliance_report_mixed() {
+        let dir = tempfile::tempdir().unwrap();
+        let kr = PublisherKeyring::new(dir.path());
+        let mut verifier = SigilVerifier::new(kr, TrustPolicy::default());
+
+        // Register one Verified and one Unverified
+        verifier.register_trusted(TrustedArtifact {
+            path: PathBuf::from("/good"),
+            artifact_type: ArtifactType::Config,
+            content_hash: "good_hash".to_string(),
+            signature: Some(vec![1; 64]),
+            signer_key_id: Some("k1".to_string()),
+            trust_level: TrustLevel::Verified,
+            verified_at: Some(Utc::now()),
+            metadata: HashMap::new(),
+            cosigners: Vec::new(),
+            signature_algorithm: Default::default(),
+        });
+        verifier.register_trusted(TrustedArtifact {
+            path: PathBuf::from("/bad"),
+            artifact_type: ArtifactType::Config,
+            content_hash: "bad_hash".to_string(),
+            signature: None,
+            signer_key_id: None,
+            trust_level: TrustLevel::Unverified,
+            verified_at: None,
+            metadata: HashMap::new(),
+            cosigners: Vec::new(),
+            signature_algorithm: Default::default(),
+        });
+
+        let report = verifier.compliance_report();
+        assert_eq!(report.total, 2);
+        assert!(!report.is_compliant());
+        assert_eq!(report.compliant_count, 1);
+        assert_eq!(report.below_minimum.len(), 1);
+        assert_eq!(report.unsigned.len(), 1);
     }
 }
