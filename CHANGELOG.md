@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] — 2026-04-02
+
+### Added
+- **Verification caching**: `set_cache_enabled()`, `clear_cache()`, `cache_len()`. When enabled, skips re-reading and re-hashing files whose mtime and size haven't changed. Thread-safe via `RwLock`.
+- **Key pinning**: `KeyPin` struct, `add_key_pin()`, `remove_key_pins()`, `key_pins()`. Binds key IDs to path prefixes — only the pinned key may sign artifacts under that prefix. Prevents unauthorized publishers from signing critical paths.
+- **Revocation timestamps**: `RevocationEntry.revoked_after` field. When set, artifacts verified before the compromise time remain valid. Supports graceful handling of key compromises with known timeline.
+- `check_revocation_at()` for time-aware revocation checks
+- `RevocationList::is_key_revoked_at()` / `is_artifact_revoked_at()` for time-aware queries
+- 10 new tests (caching, key pinning, revocation timestamps) — 126 total
+
+### Changed
+- Verification cache uses `RwLock` (thread-safe, compatible with rayon parallel verification)
+- Internal revocation check in `verify_artifact` now passes current timestamp, enabling `revoked_after` semantics
+
 ## [0.3.0] — 2026-04-02
 
 ### Added

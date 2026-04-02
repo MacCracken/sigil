@@ -24,6 +24,12 @@ pub struct RevocationEntry {
     pub revoked_at: DateTime<Utc>,
     /// Identity of the revoker.
     pub revoked_by: String,
+    /// If set, only artifacts verified *after* this timestamp are considered
+    /// revoked. Artifacts signed/verified before this point remain valid.
+    /// This supports "revoked after" semantics for key compromises that
+    /// occurred at a known point in time.
+    #[serde(default)]
+    pub revoked_after: Option<DateTime<Utc>>,
 }
 
 /// A list of revoked keys and artifact hashes.
@@ -70,15 +76,52 @@ impl RevocationList {
     }
 
     /// Check whether a key ID has been revoked.
+    ///
+    /// If `at` is `Some`, only revocations that apply at that timestamp are
+    /// considered (honoring `revoked_after` semantics).
     #[must_use]
     pub fn is_key_revoked(&self, key_id: &str) -> bool {
-        self.revoked_keys.contains(key_id)
+        self.is_key_revoked_at(key_id, None)
+    }
+
+    /// Check whether a key ID has been revoked at a specific time.
+    #[must_use]
+    pub fn is_key_revoked_at(&self, key_id: &str, at: Option<DateTime<Utc>>) -> bool {
+        if !self.revoked_keys.contains(key_id) {
+            return false;
+        }
+        // If no timestamp given, treat as unconditionally revoked
+        let Some(when) = at else { return true };
+        // Check if any matching entry applies at this timestamp
+        self.entries
+            .iter()
+            .filter(|e| e.key_id.as_deref() == Some(key_id))
+            .any(|e| match e.revoked_after {
+                Some(after) => when >= after,
+                None => true, // No revoked_after means unconditional
+            })
     }
 
     /// Check whether an artifact content hash has been revoked.
     #[must_use]
     pub fn is_artifact_revoked(&self, content_hash: &str) -> bool {
-        self.revoked_hashes.contains(content_hash)
+        self.is_artifact_revoked_at(content_hash, None)
+    }
+
+    /// Check whether an artifact content hash has been revoked at a specific time.
+    #[must_use]
+    pub fn is_artifact_revoked_at(&self, content_hash: &str, at: Option<DateTime<Utc>>) -> bool {
+        if !self.revoked_hashes.contains(content_hash) {
+            return false;
+        }
+        let Some(when) = at else { return true };
+        self.entries
+            .iter()
+            .filter(|e| e.content_hash.as_deref() == Some(content_hash))
+            .any(|e| match e.revoked_after {
+                Some(after) => when >= after,
+                None => true,
+            })
     }
 
     /// Number of entries in the revocation list.

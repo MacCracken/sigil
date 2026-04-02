@@ -30,3 +30,14 @@ timestamp,label,benchmark,estimate,unit
 2026-04-02T01:40:44Z,v0.3.0,revocation_hash_lookup_1k,17.283,ns
 2026-04-02T01:40:44Z,v0.3.0,verify_artifact_signed_4kb,64.004,µs
 2026-04-02T01:40:44Z,v0.3.0,verify_batch_10x4kb,744.70,µs
+2026-04-02T01:57:41Z,v0.4.0,hash_data_4kb,2.0121,µs
+2026-04-02T01:57:41Z,v0.4.0,hash_data_1mb,494.57,µs
+2026-04-02T01:57:41Z,v0.4.0,sign_4kb,27.484,µs
+2026-04-02T01:57:41Z,v0.4.0,verify_4kb,35.042,µs
+2026-04-02T01:57:41Z,v0.4.0,generate_keypair,15.230,µs
+2026-04-02T01:57:41Z,v0.4.0,compute_hash_file_4kb,5.6673,µs
+2026-04-02T01:57:41Z,v0.4.0,compute_hash_file_1mb,608.11,µs
+2026-04-02T01:57:41Z,v0.4.0,revocation_key_lookup_1k,16.775,ns
+2026-04-02T01:57:41Z,v0.4.0,revocation_hash_lookup_1k,16.853,ns
+2026-04-02T01:57:41Z,v0.4.0,verify_artifact_signed_4kb,46.886,µs
+2026-04-02T01:57:41Z,v0.4.0,verify_batch_10x4kb,491.22,µs

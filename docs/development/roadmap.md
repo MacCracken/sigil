@@ -55,7 +55,8 @@
 
 **Verification**
 - [x] Batch verification: `verify_batch()` with optional rayon parallelism (`parallel` feature)
-- [ ] Verification caching: skip re-verification if file mtime + size unchanged since last pass
+- [x] Verification caching: `set_cache_enabled()` skips re-hash if mtime+size unchanged (thread-safe via `RwLock`)
+- [x] Key pinning: `KeyPin` binds key IDs to path prefixes for supply-chain protection
 - [ ] Configurable hash algorithm (prepare for PQC transition)
 
 **Integrity monitoring**
@@ -71,7 +72,7 @@
 - [ ] Cross-signing: multiple publishers co-sign an artifact
 
 **Revocation**
-- [ ] Revocation timestamps: honor "revoked after" semantics (artifacts signed before revocation remain valid)
+- [x] Revocation timestamps: `revoked_after` field with time-aware `check_revocation_at()`
 - [ ] CRL distribution: fetch/merge remote revocation lists
 - [ ] OCSP-style online revocation checking
 

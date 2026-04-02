@@ -260,6 +260,7 @@ mod tests {
                 reason: "Compromised".to_string(),
                 revoked_at: Utc::now(),
                 revoked_by: "admin".to_string(),
+                revoked_after: None,
             })
             .unwrap();
 
@@ -294,6 +295,7 @@ mod tests {
                 reason: "Malicious config".to_string(),
                 revoked_at: Utc::now(),
                 revoked_by: "audit-bot".to_string(),
+                revoked_after: None,
             })
             .unwrap();
 
@@ -319,6 +321,7 @@ mod tests {
             reason: "test".to_string(),
             revoked_at: Utc::now(),
             revoked_by: "tester".to_string(),
+            revoked_after: None,
         })
         .unwrap();
         assert_eq!(rl.len(), 1);
@@ -336,6 +339,7 @@ mod tests {
             reason: "bad".to_string(),
             revoked_at: Utc::now(),
             revoked_by: "admin".to_string(),
+            revoked_after: None,
         })
         .unwrap();
         assert!(rl.is_artifact_revoked("abc123"));
@@ -351,6 +355,7 @@ mod tests {
             reason: "compromised".to_string(),
             revoked_at: Utc::now(),
             revoked_by: "root".to_string(),
+            revoked_after: None,
         })
         .unwrap();
 
@@ -798,6 +803,7 @@ mod tests {
                 reason: "Supply chain compromise".to_string(),
                 revoked_at: Utc::now(),
                 revoked_by: "security-team".to_string(),
+                revoked_after: None,
             })
             .unwrap();
 
@@ -856,6 +862,7 @@ mod tests {
                 reason: "test".to_string(),
                 revoked_at: Utc::now(),
                 revoked_by: "test".to_string(),
+                revoked_after: None,
             })
             .unwrap();
 
@@ -936,6 +943,7 @@ mod tests {
                 reason: "Key compromised".to_string(),
                 revoked_at: Utc::now(),
                 revoked_by: "admin".to_string(),
+                revoked_after: None,
             })
             .unwrap();
 
@@ -1126,6 +1134,7 @@ mod tests {
                 reason: "test revocation".to_string(),
                 revoked_at: Utc::now(),
                 revoked_by: "admin".to_string(),
+                revoked_after: None,
             })
             .unwrap();
 
@@ -1150,6 +1159,7 @@ mod tests {
             reason: "invalid entry".to_string(),
             revoked_at: Utc::now(),
             revoked_by: "test".to_string(),
+            revoked_after: None,
         });
         assert!(result.is_err());
         assert!(rl.is_empty());
@@ -1251,6 +1261,7 @@ mod tests {
             reason: "compromised".to_string(),
             revoked_at: Utc::now(),
             revoked_by: "admin".to_string(),
+            revoked_after: None,
         };
         let json = serde_json::to_string(&entry).unwrap();
         let recovered: RevocationEntry = serde_json::from_str(&json).unwrap();
@@ -1578,5 +1589,314 @@ mod tests {
 
         let results = verifier.verify_batch(&[]);
         assert!(results.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Verification caching
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn verify_cache_hit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = temp_file(dir.path(), "cached.bin", b"cached data");
+
+        let (kr, sk, _vk, _kid) = keyring_with_key(dir.path());
+        let mut verifier = SigilVerifier::new(kr, TrustPolicy::default());
+        verifier.set_cache_enabled(true);
+
+        verifier
+            .sign_artifact(&path, &sk, ArtifactType::Config)
+            .unwrap();
+
+        // First verify — cache miss
+        let r1 = verifier
+            .verify_artifact(&path, ArtifactType::Config)
+            .unwrap();
+        assert!(r1.passed);
+        assert_eq!(verifier.cache_len(), 1);
+
+        // Second verify — cache hit (same result)
+        let r2 = verifier
+            .verify_artifact(&path, ArtifactType::Config)
+            .unwrap();
+        assert!(r2.passed);
+        assert_eq!(r2.artifact.content_hash, r1.artifact.content_hash);
+    }
+
+    #[test]
+    fn verify_cache_invalidated_on_modification() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = temp_file(dir.path(), "mutable.bin", b"version 1");
+
+        let (kr, sk, _vk, _kid) = keyring_with_key(dir.path());
+        let mut verifier = SigilVerifier::new(kr, TrustPolicy::default());
+        verifier.set_cache_enabled(true);
+
+        verifier
+            .sign_artifact(&path, &sk, ArtifactType::Config)
+            .unwrap();
+
+        let r1 = verifier
+            .verify_artifact(&path, ArtifactType::Config)
+            .unwrap();
+        assert!(r1.passed);
+
+        // Modify the file — cache should be invalidated
+        std::fs::write(&path, b"version 2").unwrap();
+
+        let r2 = verifier
+            .verify_artifact(&path, ArtifactType::Config)
+            .unwrap();
+        // Different content, won't match trust store
+        assert_ne!(r2.artifact.content_hash, r1.artifact.content_hash);
+    }
+
+    #[test]
+    fn verify_cache_disabled_by_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = temp_file(dir.path(), "nocache.bin", b"data");
+
+        let kr = PublisherKeyring::new(dir.path());
+        let verifier = SigilVerifier::new(kr, TrustPolicy::default());
+
+        let _ = verifier
+            .verify_artifact(&path, ArtifactType::Config)
+            .unwrap();
+        assert_eq!(verifier.cache_len(), 0);
+    }
+
+    #[test]
+    fn verify_cache_clear() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = temp_file(dir.path(), "clear.bin", b"data");
+
+        let (kr, sk, _vk, _kid) = keyring_with_key(dir.path());
+        let mut verifier = SigilVerifier::new(kr, TrustPolicy::default());
+        verifier.set_cache_enabled(true);
+
+        verifier
+            .sign_artifact(&path, &sk, ArtifactType::Config)
+            .unwrap();
+        let _ = verifier.verify_artifact(&path, ArtifactType::Config);
+        assert_eq!(verifier.cache_len(), 1);
+
+        verifier.clear_cache();
+        assert_eq!(verifier.cache_len(), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Key pinning
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn key_pin_authorized_signer() {
+        use crate::verify::KeyPin;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = temp_file(dir.path(), "pinned.bin", b"pinned data");
+
+        let (kr, sk, _vk, kid) = keyring_with_key(dir.path());
+        let mut verifier = SigilVerifier::new(kr, TrustPolicy::default());
+
+        // Pin this directory to the signing key
+        verifier.add_key_pin(KeyPin {
+            key_id: kid,
+            path_prefix: dir.path().to_path_buf(),
+        });
+
+        verifier
+            .sign_artifact(&path, &sk, ArtifactType::Config)
+            .unwrap();
+
+        let result = verifier
+            .verify_artifact(&path, ArtifactType::Config)
+            .unwrap();
+        assert!(result.passed);
+        assert!(
+            result
+                .checks
+                .iter()
+                .any(|c| c.name == "key_pin" && c.passed)
+        );
+    }
+
+    #[test]
+    fn key_pin_unauthorized_signer() {
+        use crate::verify::KeyPin;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = temp_file(dir.path(), "wrong_signer.bin", b"data");
+
+        let (kr, sk, _vk, _kid) = keyring_with_key(dir.path());
+        let mut verifier = SigilVerifier::new(kr, TrustPolicy::default());
+
+        // Pin to a DIFFERENT key
+        verifier.add_key_pin(KeyPin {
+            key_id: "some_other_key_id".to_string(),
+            path_prefix: dir.path().to_path_buf(),
+        });
+
+        verifier
+            .sign_artifact(&path, &sk, ArtifactType::Config)
+            .unwrap();
+
+        let result = verifier
+            .verify_artifact(&path, ArtifactType::Config)
+            .unwrap();
+        // Should fail because signer doesn't match pin
+        assert!(!result.passed);
+        assert!(
+            result
+                .checks
+                .iter()
+                .any(|c| c.name == "key_pin" && !c.passed)
+        );
+    }
+
+    #[test]
+    fn key_pin_unpinned_path_allows_any() {
+        use crate::verify::KeyPin;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = temp_file(dir.path(), "unpinned.bin", b"data");
+
+        let (kr, sk, _vk, _kid) = keyring_with_key(dir.path());
+        let mut verifier = SigilVerifier::new(kr, TrustPolicy::default());
+
+        // Pin a DIFFERENT prefix — our file should be unaffected
+        verifier.add_key_pin(KeyPin {
+            key_id: "irrelevant".to_string(),
+            path_prefix: PathBuf::from("/some/other/path"),
+        });
+
+        verifier
+            .sign_artifact(&path, &sk, ArtifactType::Config)
+            .unwrap();
+
+        let result = verifier
+            .verify_artifact(&path, ArtifactType::Config)
+            .unwrap();
+        assert!(result.passed);
+    }
+
+    #[test]
+    fn key_pin_remove() {
+        use crate::verify::KeyPin;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut verifier =
+            SigilVerifier::new(PublisherKeyring::new(dir.path()), TrustPolicy::default());
+
+        verifier.add_key_pin(KeyPin {
+            key_id: "k1".to_string(),
+            path_prefix: PathBuf::from("/boot"),
+        });
+        verifier.add_key_pin(KeyPin {
+            key_id: "k2".to_string(),
+            path_prefix: PathBuf::from("/usr"),
+        });
+        assert_eq!(verifier.key_pins().len(), 2);
+
+        let removed = verifier.remove_key_pins(Path::new("/boot"));
+        assert_eq!(removed, 1);
+        assert_eq!(verifier.key_pins().len(), 1);
+        assert_eq!(verifier.key_pins()[0].key_id, "k2");
+    }
+
+    // -----------------------------------------------------------------------
+    // Revocation timestamps (revoked-after semantics)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn revocation_after_respects_timestamp() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = temp_file(dir.path(), "revafter.bin", b"data");
+
+        let (kr, sk, _vk, kid) = keyring_with_key(dir.path());
+        let mut verifier = SigilVerifier::new(kr, TrustPolicy::default());
+
+        verifier
+            .sign_artifact(&path, &sk, ArtifactType::Config)
+            .unwrap();
+
+        let compromise_time = Utc::now() + chrono::Duration::hours(1);
+
+        // Revoke the key, but only after compromise_time
+        verifier
+            .add_revocation(RevocationEntry {
+                key_id: Some(kid.clone()),
+                content_hash: None,
+                reason: "Key compromised at known time".to_string(),
+                revoked_at: Utc::now(),
+                revoked_by: "admin".to_string(),
+                revoked_after: Some(compromise_time),
+            })
+            .unwrap();
+
+        // Verify NOW — before the revoked_after time → should PASS
+        let result = verifier
+            .verify_artifact(&path, ArtifactType::Config)
+            .unwrap();
+        assert!(
+            result.passed,
+            "Artifact signed before compromise should pass"
+        );
+    }
+
+    #[test]
+    fn revocation_after_none_is_unconditional() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = temp_file(dir.path(), "unconditional.bin", b"data");
+
+        let (kr, sk, _vk, kid) = keyring_with_key(dir.path());
+        let mut verifier = SigilVerifier::new(kr, TrustPolicy::default());
+
+        verifier
+            .sign_artifact(&path, &sk, ArtifactType::Config)
+            .unwrap();
+
+        // Revoke unconditionally (revoked_after = None)
+        verifier
+            .add_revocation(RevocationEntry {
+                key_id: Some(kid),
+                content_hash: None,
+                reason: "Unconditional revocation".to_string(),
+                revoked_at: Utc::now(),
+                revoked_by: "admin".to_string(),
+                revoked_after: None,
+            })
+            .unwrap();
+
+        let result = verifier
+            .verify_artifact(&path, ArtifactType::Config)
+            .unwrap();
+        assert!(
+            !result.passed,
+            "Unconditional revocation should always block"
+        );
+    }
+
+    #[test]
+    fn revocation_at_api_direct() {
+        let mut rl = RevocationList::new();
+        let past = Utc::now() - chrono::Duration::hours(2);
+        let future = Utc::now() + chrono::Duration::hours(2);
+
+        rl.add(RevocationEntry {
+            key_id: Some("timed_key".to_string()),
+            content_hash: None,
+            reason: "timed".to_string(),
+            revoked_at: Utc::now(),
+            revoked_by: "test".to_string(),
+            revoked_after: Some(Utc::now()),
+        })
+        .unwrap();
+
+        // Before revoked_after → not revoked
+        assert!(!rl.is_key_revoked_at("timed_key", Some(past)));
+        // After revoked_after → revoked
+        assert!(rl.is_key_revoked_at("timed_key", Some(future)));
+        // No timestamp → unconditionally revoked
+        assert!(rl.is_key_revoked_at("timed_key", None));
     }
 }

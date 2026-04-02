@@ -1,12 +1,13 @@
 //! Verification logic — SigilVerifier implementation.
 
 use std::collections::HashMap;
-use std::path::Path;
-#[cfg(feature = "chain")]
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::RwLock;
+use std::time::SystemTime;
 
 use chrono::Utc;
 use ed25519_dalek::SigningKey;
+use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 use tracing::{debug, info, warn};
 
@@ -22,6 +23,35 @@ use crate::policy::{RevocationEntry, RevocationList};
 use crate::trust::{
     PublisherKeyring, hash_data, key_id_from_verifying_key, sign_data, verify_signature,
 };
+
+// ---------------------------------------------------------------------------
+// Verification cache
+// ---------------------------------------------------------------------------
+
+/// Cached file metadata used to skip re-verification when a file hasn't changed.
+#[derive(Debug, Clone)]
+struct CacheEntry {
+    mtime: SystemTime,
+    size: u64,
+    result: VerificationResult,
+}
+
+// ---------------------------------------------------------------------------
+// Key pinning
+// ---------------------------------------------------------------------------
+
+/// A key pin binding a key ID to a path prefix.
+///
+/// When a pin exists for a path, only the pinned key may sign artifacts
+/// under that prefix. This prevents supply-chain attacks where a valid
+/// but unauthorized publisher signs a critical system path.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KeyPin {
+    /// The key ID that is authorized for this path prefix.
+    pub key_id: String,
+    /// Path prefix that this pin applies to (e.g. "/boot/", "/usr/lib/agents/").
+    pub path_prefix: PathBuf,
+}
 
 // ---------------------------------------------------------------------------
 // SigilVerifier — the main trust engine
@@ -46,6 +76,13 @@ pub struct SigilVerifier {
     integrity: IntegrityVerifier,
     /// Trust store keyed by content hash.
     trust_store: HashMap<String, TrustedArtifact>,
+    /// Key pins: path prefix -> authorized key ID.
+    key_pins: Vec<KeyPin>,
+    /// Verification cache keyed by canonical path.
+    /// Uses `RwLock` so caching works through `&self` methods and is thread-safe.
+    cache: RwLock<HashMap<PathBuf, CacheEntry>>,
+    /// Whether the verification cache is enabled.
+    cache_enabled: bool,
 }
 
 impl SigilVerifier {
@@ -64,6 +101,73 @@ impl SigilVerifier {
             #[cfg(feature = "integrity")]
             integrity: IntegrityVerifier::new(IntegrityPolicy::default()),
             trust_store: HashMap::new(),
+            key_pins: Vec::new(),
+            cache: RwLock::new(HashMap::new()),
+            cache_enabled: false,
+        }
+    }
+
+    /// Enable or disable the verification cache.
+    ///
+    /// When enabled, `verify_artifact` skips re-reading and re-hashing a file
+    /// if its mtime and size have not changed since the last verification.
+    /// This can significantly speed up repeated verification of the same files.
+    pub fn set_cache_enabled(&mut self, enabled: bool) {
+        self.cache_enabled = enabled;
+        if !enabled && let Ok(mut c) = self.cache.write() {
+            c.clear();
+        }
+    }
+
+    /// Clear the verification cache.
+    pub fn clear_cache(&self) {
+        if let Ok(mut c) = self.cache.write() {
+            c.clear();
+        }
+    }
+
+    /// Number of entries currently in the verification cache.
+    #[must_use]
+    pub fn cache_len(&self) -> usize {
+        self.cache.read().map(|c| c.len()).unwrap_or(0)
+    }
+
+    /// Add a key pin: only `key_id` may sign artifacts under `path_prefix`.
+    pub fn add_key_pin(&mut self, pin: KeyPin) {
+        self.key_pins.push(pin);
+    }
+
+    /// Remove all pins for a given path prefix. Returns the number removed.
+    pub fn remove_key_pins(&mut self, path_prefix: &Path) -> usize {
+        let before = self.key_pins.len();
+        self.key_pins.retain(|p| p.path_prefix != path_prefix);
+        before - self.key_pins.len()
+    }
+
+    /// Return all active key pins.
+    #[must_use]
+    pub fn key_pins(&self) -> &[KeyPin] {
+        &self.key_pins
+    }
+
+    /// Check whether a key is authorized for a given path.
+    ///
+    /// Returns `true` if no pin matches the path (unpinned paths allow any key),
+    /// or if the signer matches the pin.
+    fn is_key_authorized_for_path(&self, path: &Path, signer_key_id: Option<&str>) -> bool {
+        let matching_pins: Vec<&KeyPin> = self
+            .key_pins
+            .iter()
+            .filter(|p| path.starts_with(&p.path_prefix))
+            .collect();
+
+        if matching_pins.is_empty() {
+            return true; // No pin for this path — any key is fine
+        }
+
+        match signer_key_id {
+            Some(kid) => matching_pins.iter().any(|p| p.key_id == kid),
+            None => false, // Pinned path requires a signature
         }
     }
 
@@ -77,6 +181,19 @@ impl SigilVerifier {
         path: &Path,
         artifact_type: ArtifactType,
     ) -> error::Result<VerificationResult> {
+        // Check cache before doing any I/O
+        if self.cache_enabled
+            && let Ok(meta) = std::fs::metadata(path)
+            && let Ok(mtime) = meta.modified()
+            && let Ok(cache) = self.cache.read()
+            && let Some(entry) = cache.get(path)
+            && entry.mtime == mtime
+            && entry.size == meta.len()
+        {
+            debug!(path = %path.display(), "Verification cache hit");
+            return Ok(entry.result.clone());
+        }
+
         let data = std::fs::read(path).map_err(|e| error::io_err(e, path))?;
 
         let content_hash = hash_data(&data);
@@ -168,7 +285,7 @@ impl SigilVerifier {
         #[cfg(feature = "policy")]
         if self.policy.revocation_check {
             let key_id = stored.and_then(|a| a.signer_key_id.as_deref());
-            let revoked = self.check_revocation(key_id, &content_hash);
+            let revoked = self.check_revocation_at(key_id, &content_hash, Some(now));
             if revoked {
                 trust_level = TrustLevel::Revoked;
                 warn!(
@@ -186,6 +303,28 @@ impl SigilVerifier {
                     "Not revoked".to_string()
                 },
             });
+        }
+
+        // --- Check: key pinning ---
+        if !self.key_pins.is_empty() {
+            let signer = stored.and_then(|a| a.signer_key_id.as_deref());
+            let authorized = self.is_key_authorized_for_path(path, signer);
+            checks.push(TrustCheck {
+                name: "key_pin".to_string(),
+                passed: authorized,
+                detail: if authorized {
+                    "Key authorized for path (or path not pinned)".to_string()
+                } else {
+                    format!(
+                        "Key {} not authorized for pinned path {}",
+                        signer.unwrap_or("<unsigned>"),
+                        path.display()
+                    )
+                },
+            });
+            if !authorized {
+                trust_level = TrustLevel::Unverified;
+            }
         }
 
         // --- Check: trust level meets policy ---
@@ -247,12 +386,30 @@ impl SigilVerifier {
             "Artifact verification complete"
         );
 
-        Ok(VerificationResult {
+        let result = VerificationResult {
             artifact,
             passed,
             checks,
             verified_at: now,
-        })
+        };
+
+        // Store in cache
+        if self.cache_enabled
+            && let Ok(meta) = std::fs::metadata(path)
+            && let Ok(mtime) = meta.modified()
+            && let Ok(mut c) = self.cache.write()
+        {
+            c.insert(
+                path.to_path_buf(),
+                CacheEntry {
+                    mtime,
+                    size: meta.len(),
+                    result: result.clone(),
+                },
+            );
+        }
+
+        Ok(result)
     }
 
     /// Convenience method: verify an agent binary.
@@ -491,15 +648,32 @@ impl SigilVerifier {
 
     /// Check whether a key or artifact hash has been revoked.
     ///
-    /// Returns `true` if revoked.
+    /// Returns `true` if revoked. Does not consider `revoked_after` timestamps
+    /// (treats all revocations as unconditional).
     #[cfg(feature = "policy")]
     #[must_use]
     pub fn check_revocation(&self, key_id: Option<&str>, content_hash: &str) -> bool {
-        if self.revocations.is_artifact_revoked(content_hash) {
+        self.check_revocation_at(key_id, content_hash, None)
+    }
+
+    /// Check whether a key or artifact hash has been revoked at a specific time.
+    ///
+    /// When `at` is `Some`, revocation entries with `revoked_after` are only
+    /// considered if `at >= revoked_after`. This allows artifacts verified
+    /// before a key compromise to remain valid.
+    #[cfg(feature = "policy")]
+    #[must_use]
+    pub fn check_revocation_at(
+        &self,
+        key_id: Option<&str>,
+        content_hash: &str,
+        at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> bool {
+        if self.revocations.is_artifact_revoked_at(content_hash, at) {
             return true;
         }
         if let Some(kid) = key_id
-            && self.revocations.is_key_revoked(kid)
+            && self.revocations.is_key_revoked_at(kid, at)
         {
             return true;
         }

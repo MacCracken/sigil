@@ -63,6 +63,7 @@ fn bench_revocation_lookup(c: &mut Criterion) {
             reason: "bench".to_string(),
             revoked_at: chrono::Utc::now(),
             revoked_by: "bench".to_string(),
+            revoked_after: None,
         })
         .unwrap();
     }
