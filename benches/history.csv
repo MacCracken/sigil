@@ -64,3 +64,15 @@ timestamp,label,benchmark,estimate,unit
 2026-04-02T02:10:52Z,v0.4.0-final,verify_artifact_signed_4kb,42.512,µs
 2026-04-02T02:10:52Z,v0.4.0-final,verify_artifact_signed_1mb,620.73,µs
 2026-04-02T02:10:52Z,v0.4.0-final,verify_batch_10x4kb,429.11,µs
+2026-04-02T02:20:16Z,near-term-complete,hash_data_4kb,2.3939,µs
+2026-04-02T02:20:16Z,near-term-complete,hash_data_1mb,559.20,µs
+2026-04-02T02:20:16Z,near-term-complete,sign_4kb,38.978,µs
+2026-04-02T02:20:16Z,near-term-complete,verify_4kb,40.451,µs
+2026-04-02T02:20:16Z,near-term-complete,generate_keypair,18.570,µs
+2026-04-02T02:20:16Z,near-term-complete,compute_hash_file_4kb,7.5172,µs
+2026-04-02T02:20:16Z,near-term-complete,compute_hash_file_1mb,769.39,µs
+2026-04-02T02:20:16Z,near-term-complete,revocation_key_lookup_1k,28.382,ns
+2026-04-02T02:20:16Z,near-term-complete,revocation_hash_lookup_1k,30.073,ns
+2026-04-02T02:20:16Z,near-term-complete,verify_artifact_signed_4kb,54.594,µs
+2026-04-02T02:20:16Z,near-term-complete,verify_artifact_signed_1mb,723.81,µs
+2026-04-02T02:20:16Z,near-term-complete,verify_batch_10x4kb,496.41,µs

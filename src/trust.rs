@@ -9,7 +9,9 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha2::{Digest, Sha256, Sha512};
+
+use crate::types::HashAlgorithm;
 
 use crate::error::{self, SigilError};
 
@@ -227,9 +229,24 @@ impl PublisherKeyring {
 /// Compute SHA-256 hash of arbitrary data.
 #[must_use]
 pub fn hash_data(data: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(data);
-    hex::encode(hasher.finalize().as_slice())
+    hash_data_with(data, HashAlgorithm::Sha256)
+}
+
+/// Compute hash of arbitrary data using the specified algorithm.
+#[must_use]
+pub fn hash_data_with(data: &[u8], algorithm: HashAlgorithm) -> String {
+    match algorithm {
+        HashAlgorithm::Sha256 => {
+            let mut hasher = Sha256::new();
+            hasher.update(data);
+            hex::encode(hasher.finalize().as_slice())
+        }
+        HashAlgorithm::Sha512 => {
+            let mut hasher = Sha512::new();
+            hasher.update(data);
+            hex::encode(hasher.finalize().as_slice())
+        }
+    }
 }
 
 /// Sign data with an Ed25519 signing key. Returns the signature bytes.

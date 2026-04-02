@@ -8,6 +8,30 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
+// Hash algorithm
+// ---------------------------------------------------------------------------
+
+/// Cryptographic hash algorithm used for content hashing.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum HashAlgorithm {
+    /// SHA-256 (default).
+    #[default]
+    Sha256,
+    /// SHA-512.
+    Sha512,
+}
+
+impl fmt::Display for HashAlgorithm {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Sha256 => write!(f, "SHA-256"),
+            Self::Sha512 => write!(f, "SHA-512"),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Trust levels
 // ---------------------------------------------------------------------------
 
@@ -149,6 +173,8 @@ pub struct TrustPolicy {
     pub verify_on_execute: bool,
     /// Check the revocation list during verification.
     pub revocation_check: bool,
+    /// Hash algorithm used for content hashing.
+    pub hash_algorithm: HashAlgorithm,
 }
 
 impl Default for TrustPolicy {
@@ -161,6 +187,7 @@ impl Default for TrustPolicy {
             verify_on_install: true,
             verify_on_execute: true,
             revocation_check: true,
+            hash_algorithm: HashAlgorithm::default(),
         }
     }
 }
@@ -224,6 +251,13 @@ impl TrustPolicyBuilder {
     #[must_use]
     pub fn revocation_check(mut self, enabled: bool) -> Self {
         self.0.revocation_check = enabled;
+        self
+    }
+
+    /// Set the hash algorithm.
+    #[must_use]
+    pub fn hash_algorithm(mut self, algo: HashAlgorithm) -> Self {
+        self.0.hash_algorithm = algo;
         self
     }
 

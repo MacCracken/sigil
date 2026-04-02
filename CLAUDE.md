@@ -127,7 +127,7 @@ Follow [Keep a Changelog](https://keepachangelog.com/). Performance claims MUST 
 
 - **Extracted from**: agnosticos/userland/agent-runtime/src/sigil/ + integrity.rs + marketplace/trust.rs
 - **Version**: 0.4.0
-- **Tests**: 126 passing
-- **Benchmarks**: 11 benchmarks, history in benches/history.csv
-- **Phase**: Work Loop active. v0.2.0 through v0.4.0 shipped.
-- **Next**: See docs/development/roadmap.md for remaining items
+- **Tests**: 130 passing
+- **Benchmarks**: 12 benchmarks, history in benches/history.csv
+- **Phase**: Near-term roadmap complete. Ready for Advanced Trust (v0.5.0).
+- **Next**: Hierarchical trust delegation, audit logging, CRL distribution

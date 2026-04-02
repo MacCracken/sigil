@@ -1899,4 +1899,103 @@ mod tests {
         // No timestamp → unconditionally revoked
         assert!(rl.is_key_revoked_at("timed_key", None));
     }
+
+    // -----------------------------------------------------------------------
+    // Configurable hash algorithm
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn hash_algorithm_sha512_sign_verify() {
+        use crate::types::HashAlgorithm;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = temp_file(dir.path(), "sha512.bin", b"sha512 data");
+
+        let (kr, sk, _vk, _kid) = keyring_with_key(dir.path());
+        let policy = TrustPolicy::builder()
+            .hash_algorithm(HashAlgorithm::Sha512)
+            .build();
+        let mut verifier = SigilVerifier::new(kr, policy);
+
+        let artifact = verifier
+            .sign_artifact(&path, &sk, ArtifactType::Config)
+            .unwrap();
+        // SHA-512 produces 128 hex chars
+        assert_eq!(artifact.content_hash.len(), 128);
+
+        let result = verifier
+            .verify_artifact(&path, ArtifactType::Config)
+            .unwrap();
+        assert!(result.passed);
+    }
+
+    #[test]
+    fn hash_algorithm_default_is_sha256() {
+        use crate::types::HashAlgorithm;
+        let policy = TrustPolicy::default();
+        assert_eq!(policy.hash_algorithm, HashAlgorithm::Sha256);
+    }
+
+    #[test]
+    fn integrity_callback_fires_on_mismatch() {
+        use crate::integrity::{
+            IntegrityCallback, IntegrityMeasurement, IntegrityPolicy, IntegrityVerifier,
+        };
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct Counter {
+            mismatches: AtomicUsize,
+            errors: AtomicUsize,
+        }
+        impl IntegrityCallback for Counter {
+            fn on_mismatch(&self, _m: &IntegrityMeasurement) {
+                self.mismatches.fetch_add(1, Ordering::Relaxed);
+            }
+            fn on_error(&self, _m: &IntegrityMeasurement) {
+                self.errors.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let p1 = temp_file(dir.path(), "good.txt", b"good");
+        let p2 = temp_file(dir.path(), "bad.txt", b"bad");
+
+        let h1 = crate::integrity::IntegrityVerifier::compute_hash(&p1).unwrap();
+
+        let mut policy = IntegrityPolicy::default();
+        policy.add_measurement(p1, h1);
+        policy.add_measurement(p2, "wrong_hash".to_string());
+        policy.add_measurement(
+            std::path::PathBuf::from("/nonexistent_callback_test"),
+            "hash".to_string(),
+        );
+
+        let counter = Arc::new(Counter {
+            mismatches: AtomicUsize::new(0),
+            errors: AtomicUsize::new(0),
+        });
+
+        let mut verifier = IntegrityVerifier::new(policy);
+        verifier.set_callback(counter.clone());
+
+        let report = verifier.verify_all();
+        assert_eq!(report.verified, 1);
+        assert_eq!(counter.mismatches.load(Ordering::Relaxed), 1);
+        assert_eq!(counter.errors.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn hash_data_with_sha512() {
+        use crate::trust::{hash_data, hash_data_with};
+        use crate::types::HashAlgorithm;
+
+        let data = b"test";
+        let sha256 = hash_data(data);
+        let sha512 = hash_data_with(data, HashAlgorithm::Sha512);
+
+        assert_eq!(sha256.len(), 64); // 32 bytes = 64 hex
+        assert_eq!(sha512.len(), 128); // 64 bytes = 128 hex
+        assert_ne!(sha256, sha512);
+    }
 }

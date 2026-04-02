@@ -2,69 +2,50 @@
 
 ## Completed
 
-### P(-1): Scaffold Hardening (v0.1.0 -> v0.1.1)
+### P(-1): Scaffold Hardening
 
 - [x] Cleanliness check: fmt, clippy, audit, deny, rustdoc — all clean
-- [x] `#[non_exhaustive]` on all public enums (`TrustLevel`, `TrustEnforcement`, `ArtifactType`, `MeasurementStatus`)
-- [x] `#[must_use]` on all pure functions across all modules
-- [x] Serde on all public types (`VerificationResult`, `SigilStats`, `IntegrityPolicy`, `IntegrityReport`)
-- [x] Constant-time hash comparison via `subtle::ConstantTimeEq` (timing side-channel fix)
-- [x] Streaming file hash in `IntegrityVerifier::compute_hash` (8KB buffer I/O)
+- [x] `#[non_exhaustive]` on all public enums
+- [x] `#[must_use]` on all pure functions
+- [x] Serde on all public types
+- [x] Constant-time hash comparison via `subtle::ConstantTimeEq`
+- [x] Streaming file hash in `IntegrityVerifier::compute_hash`
 - [x] `RevocationList` O(1) lookups via `HashSet` indexes
-- [x] Derived `PartialEq`/`Eq` on `MeasurementStatus` (replaced redundant manual impl)
-- [x] Serde roundtrip tests for all public types (11 new tests, 88 -> 99 total)
-- [x] Benchmark suite: 10 benchmarks covering hash, sign, verify, keypair gen, integrity, revocation lookup
-- [x] `scripts/bench-history.sh` with CSV baseline
-
-## Backlog
+- [x] Serde roundtrip tests for all public types
+- [x] Benchmark suite with `scripts/bench-history.sh`
 
 ### v0.2.0 — Hardening & API Cleanup
 
-**Error handling**
-- [ ] `SigilError` enum replacing `anyhow::Result` in all public API surfaces
-- [ ] Typed error variants: `KeyNotFound`, `SignatureInvalid`, `RevocationViolation`, `IntegrityMismatch`, `IoError`, etc.
-- [ ] Keep `anyhow` as internal convenience; public API returns `Result<T, SigilError>`
-
-**API completeness**
-- [ ] `Display` impl for `MeasurementStatus`
-- [ ] Builder pattern for `TrustPolicy` (currently relies on struct literal + `Default`)
-- [ ] `PublisherKeyring::save()` — persist keyring to disk (currently load-only)
-- [ ] `IntegrityVerifier::remove_baseline()` — remove a file from monitoring
-
-**Feature gates**
-- [ ] `integrity` feature — `IntegrityVerifier`, `IntegrityPolicy`, `IntegrityReport`
-- [ ] `chain` feature — boot chain verification (depends on `integrity`)
-- [ ] `policy` feature — `RevocationList`, `RevocationEntry`
-- [ ] Default: all features enabled; consumers can opt out
-
-**Documentation**
-- [ ] `docs/architecture/overview.md` — module map, data flow, consumer integration
-- [ ] `CHANGELOG.md`
-- [ ] `CONTRIBUTING.md`
-- [ ] `SECURITY.md`
-- [ ] `CODE_OF_CONDUCT.md`
+- [x] `SigilError` enum replacing `anyhow::Result` in all public API
+- [x] `anyhow` dependency removed entirely
+- [x] `Display` impl for `MeasurementStatus`
+- [x] `TrustPolicy::builder()` with `TrustPolicyBuilder`
+- [x] `PublisherKeyring::save()` — persist keyring to disk
+- [x] `IntegrityVerifier::remove_baseline()`
+- [x] Feature gates: `integrity`, `chain`, `policy` (all default on)
+- [x] Documentation: architecture overview, CHANGELOG, CONTRIBUTING, SECURITY, CODE_OF_CONDUCT
 
 ### v0.3.0 — Operational Capabilities
 
-**Key management**
-- [x] Key rotation: transition between key versions with overlap windows
-- [x] Historical key lookup: `get_key_valid_at()` for post-rotation verification
-- [x] `key_ids()` to list all key IDs
-- [ ] Key pinning: bind specific keys to specific artifact paths
-- [ ] Keyring export: serialize full keyring state for backup/replication
+- [x] Key rotation with overlap windows, `get_key_valid_at()`, `key_ids()`
+- [x] Batch verification: `verify_batch()` with optional rayon (`parallel` feature)
+- [x] Verification caching: `set_cache_enabled()` (thread-safe via `RwLock`)
+- [x] Key pinning: `KeyPin` binds key IDs to path prefixes
+- [x] Baseline snapshots: `export_baseline()` / `import_baseline()` with `IntegritySnapshot`
+- [x] Revocation timestamps: `revoked_after` with time-aware `check_revocation_at()`
+- [x] Configurable hash algorithm: `HashAlgorithm` enum (SHA-256, SHA-512), `hash_data_with()`
+- [x] Integrity event callbacks: `IntegrityCallback` trait with `on_mismatch`/`on_error`
 
-**Verification**
-- [x] Batch verification: `verify_batch()` with optional rayon parallelism (`parallel` feature)
-- [x] Verification caching: `set_cache_enabled()` skips re-hash if mtime+size unchanged (thread-safe via `RwLock`)
-- [x] Key pinning: `KeyPin` binds key IDs to path prefixes for supply-chain protection
-- [ ] Configurable hash algorithm (prepare for PQC transition)
+### Optimizations
 
-**Integrity monitoring**
-- [x] Baseline snapshot: `export_baseline()` / `import_baseline()` with `IntegritySnapshot`
-- [ ] Periodic re-verification scheduler (driven by `check_interval_seconds`)
-- [ ] Integrity event callbacks: notify consumers on mismatch/error
+- [x] Sign/verify hash instead of raw data (Ed25519 over 64-byte hash, not full file)
+- [x] Skip file I/O on disabled verification paths
+- [x] Pre-allocated hex encoding via lookup table
+- [x] Audit: zero unwrap/panic in library code, all re-exports clean, deny.toml clean
 
-### v0.4.0 — Advanced Trust
+## Backlog
+
+### v0.5.0 — Advanced Trust
 
 **Trust chain**
 - [ ] Hierarchical trust delegation: root key -> intermediate -> publisher
@@ -72,7 +53,6 @@
 - [ ] Cross-signing: multiple publishers co-sign an artifact
 
 **Revocation**
-- [x] Revocation timestamps: `revoked_after` field with time-aware `check_revocation_at()`
 - [ ] CRL distribution: fetch/merge remote revocation lists
 - [ ] OCSP-style online revocation checking
 

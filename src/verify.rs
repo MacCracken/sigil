@@ -21,7 +21,7 @@ use crate::integrity::{IntegrityPolicy, IntegrityReport, IntegrityVerifier};
 #[cfg(feature = "policy")]
 use crate::policy::{RevocationEntry, RevocationList};
 use crate::trust::{
-    PublisherKeyring, hash_data, key_id_from_verifying_key, sign_data, verify_signature,
+    PublisherKeyring, hash_data_with, key_id_from_verifying_key, sign_data, verify_signature,
 };
 
 // ---------------------------------------------------------------------------
@@ -196,7 +196,7 @@ impl SigilVerifier {
 
         let data = std::fs::read(path).map_err(|e| error::io_err(e, path))?;
 
-        let content_hash = hash_data(&data);
+        let content_hash = hash_data_with(&data, self.policy.hash_algorithm);
         let mut checks: Vec<TrustCheck> = Vec::new();
         let mut trust_level = TrustLevel::Unverified;
         let now = Utc::now();
@@ -562,7 +562,7 @@ impl SigilVerifier {
     ) -> error::Result<TrustedArtifact> {
         let data = std::fs::read(path).map_err(|e| error::io_err(e, path))?;
 
-        let content_hash = hash_data(&data);
+        let content_hash = hash_data_with(&data, self.policy.hash_algorithm);
         let signature = sign_data(content_hash.as_bytes(), signing_key);
         let vk = signing_key.verifying_key();
         let key_id = key_id_from_verifying_key(&vk);

@@ -25,7 +25,7 @@ pub use integrity::{BaselineEntry, IntegritySnapshot};
 #[cfg(feature = "policy")]
 pub use policy::{RevocationEntry, RevocationList};
 pub use types::{
-    ArtifactType, SigilStats, TrustCheck, TrustEnforcement, TrustLevel, TrustPolicy,
+    ArtifactType, HashAlgorithm, SigilStats, TrustCheck, TrustEnforcement, TrustLevel, TrustPolicy,
     TrustPolicyBuilder, TrustedArtifact, VerificationResult,
 };
 pub use verify::{KeyPin, SigilVerifier};

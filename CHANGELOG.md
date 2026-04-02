@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] — Near-term completion
+
+### Added
+- **Configurable hash algorithm**: `HashAlgorithm` enum (`Sha256`, `Sha512`) with `#[non_exhaustive]` for future PQC. `hash_data_with()` and `IntegrityVerifier::compute_hash_with()`. `TrustPolicy.hash_algorithm` field + builder method.
+- **Integrity event callbacks**: `IntegrityCallback` trait with `on_mismatch()`/`on_error()`. `IntegrityVerifier::set_callback()`. Blanket impl for `Arc<T>`.
+- `KeyPin` and `IntegritySnapshot`/`BaselineEntry` re-exported from crate root
+- `#[must_use]` on `verify_batch()`
+- 4 new tests (SHA-512 sign/verify, hash algorithm default, hash_data_with, callback) — 130 total
+
+### Changed
+- **Sign/verify hash instead of raw data**: Ed25519 now operates on the 64-byte SHA-256/512 hash, not the full file. Signature verification cost is constant regardless of file size. ~54% reduction for 1MB files.
+- **Skip file I/O on disabled verification paths**: `verify_agent_binary` and `verify_package` no longer read files when their policy flags are disabled.
+- **Pre-allocated hex encoding**: Lookup-table encoder replaces per-byte `format!("{:02x}")`.
+- `RevocationList::from_json()` now validates entries through `add()` (previously skipped validation)
+- Cleaned `deny.toml` — removed 4 unused license allowances
+
+### Performance
+
+| Benchmark | Before | After | Delta |
+|---|---|---|---|
+| verify_artifact (4KB) | 46.9 us | 42.5 us | -9.4% |
+| verify_artifact (1MB) | ~1350 us* | 621 us | -54% |
+| verify_batch (10x4KB) | 491 us | 429 us | -12.6% |
+
+*estimated (raw-data signing was never benchmarked at 1MB before the change)
+
 ## [0.4.0] — 2026-04-02
 
 ### Added

@@ -8,10 +8,11 @@ use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha2::{Digest, Sha256, Sha512};
 use subtle::ConstantTimeEq;
 
 use crate::error;
+use crate::types::HashAlgorithm;
 
 /// Status of a single integrity measurement.
 #[non_exhaustive]
@@ -110,10 +111,31 @@ impl IntegrityReport {
     }
 }
 
+/// Callback for real-time integrity events.
+///
+/// Implement this trait to receive notifications during `verify_all()`
+/// as each file is checked, rather than waiting for the full report.
+pub trait IntegrityCallback {
+    /// Called when a file's hash does not match the expected baseline.
+    fn on_mismatch(&self, measurement: &IntegrityMeasurement);
+    /// Called when a file cannot be read or is missing.
+    fn on_error(&self, measurement: &IntegrityMeasurement);
+}
+
+impl<T: IntegrityCallback> IntegrityCallback for std::sync::Arc<T> {
+    fn on_mismatch(&self, measurement: &IntegrityMeasurement) {
+        (**self).on_mismatch(measurement);
+    }
+    fn on_error(&self, measurement: &IntegrityMeasurement) {
+        (**self).on_error(measurement);
+    }
+}
+
 /// Verifies file integrity against known-good hashes.
 pub struct IntegrityVerifier {
     policy: IntegrityPolicy,
     last_report: Option<IntegrityReport>,
+    callback: Option<Box<dyn IntegrityCallback + Send + Sync>>,
 }
 
 impl IntegrityVerifier {
@@ -122,7 +144,18 @@ impl IntegrityVerifier {
         Self {
             policy,
             last_report: None,
+            callback: None,
         }
+    }
+
+    /// Set a callback for real-time integrity events.
+    pub fn set_callback(&mut self, callback: impl IntegrityCallback + Send + Sync + 'static) {
+        self.callback = Some(Box::new(callback));
+    }
+
+    /// Remove the current callback.
+    pub fn clear_callback(&mut self) {
+        self.callback = None;
     }
 
     /// Replace the current policy, clearing any cached report.
@@ -131,20 +164,41 @@ impl IntegrityVerifier {
         self.last_report = None;
     }
 
-    /// Compute the SHA-256 hash of a file's contents using streaming I/O.
+    /// Compute hash of a file's contents using streaming I/O with SHA-256.
     pub fn compute_hash(path: &Path) -> error::Result<String> {
+        Self::compute_hash_with(path, HashAlgorithm::Sha256)
+    }
+
+    /// Compute hash of a file's contents using the specified algorithm.
+    pub fn compute_hash_with(path: &Path, algorithm: HashAlgorithm) -> error::Result<String> {
         use std::io::Read;
         let mut file = std::fs::File::open(path).map_err(|e| error::io_err(e, path))?;
-        let mut hasher = Sha256::new();
         let mut buf = [0u8; 8192];
-        loop {
-            let n = file.read(&mut buf).map_err(|e| error::io_err(e, path))?;
-            if n == 0 {
-                break;
+
+        match algorithm {
+            HashAlgorithm::Sha256 => {
+                let mut hasher = Sha256::new();
+                loop {
+                    let n = file.read(&mut buf).map_err(|e| error::io_err(e, path))?;
+                    if n == 0 {
+                        break;
+                    }
+                    hasher.update(&buf[..n]);
+                }
+                Ok(crate::trust::hash_hex(hasher.finalize().as_slice()))
             }
-            hasher.update(&buf[..n]);
+            HashAlgorithm::Sha512 => {
+                let mut hasher = Sha512::new();
+                loop {
+                    let n = file.read(&mut buf).map_err(|e| error::io_err(e, path))?;
+                    if n == 0 {
+                        break;
+                    }
+                    hasher.update(&buf[..n]);
+                }
+                Ok(crate::trust::hash_hex(hasher.finalize().as_slice()))
+            }
         }
-        Ok(crate::trust::hash_hex(hasher.finalize().as_slice()))
     }
 
     /// Verify a single file against an expected hash.
@@ -211,9 +265,17 @@ impl IntegrityVerifier {
 
             match &result.status {
                 MeasurementStatus::Verified => verified_count += 1,
-                MeasurementStatus::Mismatch => mismatches.push(result.clone()),
+                MeasurementStatus::Mismatch => {
+                    if let Some(ref cb) = self.callback {
+                        cb.on_mismatch(&result);
+                    }
+                    mismatches.push(result.clone());
+                }
                 MeasurementStatus::Pending => { /* not yet measured, skip */ }
                 MeasurementStatus::FileNotFound | MeasurementStatus::Error(_) => {
+                    if let Some(ref cb) = self.callback {
+                        cb.on_error(&result);
+                    }
                     errors.push(result.clone());
                 }
             }

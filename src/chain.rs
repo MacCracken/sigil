@@ -8,7 +8,7 @@ use tracing::{info, warn};
 
 use crate::error;
 use crate::integrity::{IntegrityPolicy, IntegrityReport, IntegrityVerifier};
-use crate::trust::hash_data;
+use crate::trust::hash_data_with;
 
 use super::types::{TrustPolicy, TrustedArtifact};
 
@@ -57,7 +57,7 @@ pub(super) fn verify_boot_chain_impl(
         } else {
             // No baseline — compute fresh hash (first-time measurement).
             let data = std::fs::read(component).map_err(|e| error::io_err(e, component))?;
-            hash_data(&data)
+            hash_data_with(&data, policy.hash_algorithm)
         };
 
         ip.add_measurement(component.clone(), expected);
