@@ -78,7 +78,7 @@ fn bench_revocation_lookup(c: &mut Criterion) {
 }
 
 fn bench_verify_artifact(c: &mut Criterion) {
-    use sigil::trust::{KeyVersion, PublisherKeyring};
+    use sigil::trust::{KeyMetadata, KeyRole, KeyVersion, PublisherKeyring};
     use sigil::verify::SigilVerifier;
     use sigil::{ArtifactType, TrustPolicy};
 
@@ -93,6 +93,10 @@ fn bench_verify_artifact(c: &mut Criterion) {
         valid_from: chrono::Utc::now() - chrono::Duration::hours(1),
         valid_until: None,
         public_key_hex: vk.to_bytes().iter().map(|b| format!("{:02x}", b)).collect(),
+        role: KeyRole::default(),
+        issued_by: None,
+        issuer_signature: None,
+        metadata: KeyMetadata::default(),
     });
 
     let mut verifier = SigilVerifier::new(kr, TrustPolicy::default());
@@ -125,7 +129,7 @@ fn bench_verify_artifact(c: &mut Criterion) {
 }
 
 fn bench_verify_batch(c: &mut Criterion) {
-    use sigil::trust::{KeyVersion, PublisherKeyring};
+    use sigil::trust::{KeyMetadata, KeyRole, KeyVersion, PublisherKeyring};
     use sigil::verify::SigilVerifier;
     use sigil::{ArtifactType, TrustPolicy};
 
@@ -137,6 +141,10 @@ fn bench_verify_batch(c: &mut Criterion) {
         valid_from: chrono::Utc::now() - chrono::Duration::hours(1),
         valid_until: None,
         public_key_hex: vk.to_bytes().iter().map(|b| format!("{:02x}", b)).collect(),
+        role: KeyRole::default(),
+        issued_by: None,
+        issuer_signature: None,
+        metadata: KeyMetadata::default(),
     });
 
     let mut verifier = SigilVerifier::new(kr, TrustPolicy::default());

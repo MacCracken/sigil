@@ -15,6 +15,7 @@ use super::types::{
     ArtifactType, SigilStats, TrustCheck, TrustEnforcement, TrustLevel, TrustPolicy,
     TrustedArtifact, VerificationResult,
 };
+use crate::audit::{AuditEvent, AuditLog};
 use crate::error;
 #[cfg(feature = "integrity")]
 use crate::integrity::{IntegrityPolicy, IntegrityReport, IntegrityVerifier};
@@ -83,6 +84,8 @@ pub struct SigilVerifier {
     cache: RwLock<HashMap<PathBuf, CacheEntry>>,
     /// Whether the verification cache is enabled.
     cache_enabled: bool,
+    /// Structured audit log.
+    audit_log: RwLock<AuditLog>,
 }
 
 impl SigilVerifier {
@@ -104,6 +107,7 @@ impl SigilVerifier {
             key_pins: Vec::new(),
             cache: RwLock::new(HashMap::new()),
             cache_enabled: false,
+            audit_log: RwLock::new(AuditLog::new()),
         }
     }
 
@@ -130,6 +134,12 @@ impl SigilVerifier {
     #[must_use]
     pub fn cache_len(&self) -> usize {
         self.cache.read().map(|c| c.len()).unwrap_or(0)
+    }
+
+    /// Return a reference to the audit log for reading events.
+    #[must_use]
+    pub fn audit_log(&self) -> &RwLock<AuditLog> {
+        &self.audit_log
     }
 
     /// Add a key pin: only `key_id` may sign artifacts under `path_prefix`.
@@ -281,6 +291,27 @@ impl SigilVerifier {
         };
         checks.push(sig_check);
 
+        // --- Check: trust chain (if signer has an issuer) ---
+        if let Some(artifact) = stored
+            && let Some(key_id) = &artifact.signer_key_id
+            && let Some(kv) = self.keyring.get_current_key(key_id)
+            && kv.issued_by.is_some()
+        {
+            let chain_valid = self.keyring.validate_chain(key_id).unwrap_or(false);
+            checks.push(TrustCheck {
+                name: "trust_chain".to_string(),
+                passed: chain_valid,
+                detail: if chain_valid {
+                    format!("Key {} has valid chain to root", key_id)
+                } else {
+                    format!("Key {} has broken or incomplete trust chain", key_id)
+                },
+            });
+            if !chain_valid {
+                trust_level = TrustLevel::Community;
+            }
+        }
+
         // --- Check: revocation ---
         #[cfg(feature = "policy")]
         if self.policy.revocation_check {
@@ -392,6 +423,18 @@ impl SigilVerifier {
             checks,
             verified_at: now,
         };
+
+        // Record audit event
+        if let Ok(mut log) = self.audit_log.write() {
+            log.record(AuditEvent::ArtifactVerified {
+                path: result.artifact.path.clone(),
+                artifact_type: result.artifact.artifact_type,
+                trust_level: result.artifact.trust_level,
+                passed: result.passed,
+                content_hash: result.artifact.content_hash.clone(),
+                timestamp: now,
+            });
+        }
 
         // Store in cache
         if self.cache_enabled
@@ -598,6 +641,16 @@ impl SigilVerifier {
             hash = %content_hash,
             "Artifact signed and registered"
         );
+
+        if let Ok(mut log) = self.audit_log.write() {
+            log.record(AuditEvent::ArtifactSigned {
+                path: artifact.path.clone(),
+                artifact_type: artifact.artifact_type,
+                signer_key_id: key_id,
+                content_hash: content_hash.clone(),
+                timestamp: now,
+            });
+        }
 
         self.trust_store.insert(content_hash, artifact.clone());
         Ok(artifact)
@@ -832,5 +885,109 @@ impl SigilVerifier {
                 .map(|(path, artifact_type)| self.verify_artifact(path, *artifact_type))
                 .collect()
         }
+    }
+
+    /// Snapshot the trust store for later diffing.
+    #[must_use]
+    pub fn snapshot_trust_store(&self) -> HashMap<String, TrustedArtifact> {
+        self.trust_store.clone()
+    }
+
+    /// Compute the diff between the current trust store and a previous snapshot.
+    #[must_use]
+    pub fn diff_trust_store(&self, old: &HashMap<String, TrustedArtifact>) -> TrustStoreDiff {
+        TrustStoreDiff::compute(old, &self.trust_store)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Trust store diff
+// ---------------------------------------------------------------------------
+
+/// A changed artifact in the trust store.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArtifactChange {
+    /// Content hash of the artifact.
+    pub content_hash: String,
+    /// Trust level before the change (None if added).
+    pub old_trust_level: Option<TrustLevel>,
+    /// Trust level after the change (None if removed).
+    pub new_trust_level: Option<TrustLevel>,
+    /// Path of the artifact.
+    pub path: PathBuf,
+}
+
+/// Diff between two trust store snapshots.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrustStoreDiff {
+    /// Artifacts added since the old snapshot.
+    pub added: Vec<ArtifactChange>,
+    /// Artifacts removed since the old snapshot.
+    pub removed: Vec<ArtifactChange>,
+    /// Artifacts whose trust level changed.
+    pub changed: Vec<ArtifactChange>,
+}
+
+impl TrustStoreDiff {
+    /// Compute the diff between an old and new trust store.
+    #[must_use]
+    pub fn compute(
+        old: &HashMap<String, TrustedArtifact>,
+        new: &HashMap<String, TrustedArtifact>,
+    ) -> Self {
+        let mut added = Vec::new();
+        let mut removed = Vec::new();
+        let mut changed = Vec::new();
+
+        // Find added and changed
+        for (hash, new_art) in new {
+            match old.get(hash) {
+                None => added.push(ArtifactChange {
+                    content_hash: hash.clone(),
+                    old_trust_level: None,
+                    new_trust_level: Some(new_art.trust_level),
+                    path: new_art.path.clone(),
+                }),
+                Some(old_art) if old_art.trust_level != new_art.trust_level => {
+                    changed.push(ArtifactChange {
+                        content_hash: hash.clone(),
+                        old_trust_level: Some(old_art.trust_level),
+                        new_trust_level: Some(new_art.trust_level),
+                        path: new_art.path.clone(),
+                    });
+                }
+                _ => {}
+            }
+        }
+
+        // Find removed
+        for (hash, old_art) in old {
+            if !new.contains_key(hash) {
+                removed.push(ArtifactChange {
+                    content_hash: hash.clone(),
+                    old_trust_level: Some(old_art.trust_level),
+                    new_trust_level: None,
+                    path: old_art.path.clone(),
+                });
+            }
+        }
+
+        Self {
+            added,
+            removed,
+            changed,
+        }
+    }
+
+    /// Returns true if there are no changes.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.added.is_empty() && self.removed.is_empty() && self.changed.is_empty()
+    }
+
+    /// Total number of changes.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.added.len() + self.removed.len() + self.changed.len()
     }
 }

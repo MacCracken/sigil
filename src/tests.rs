@@ -43,7 +43,7 @@ mod tests {
         ed25519_dalek::VerifyingKey,
         String,
     ) {
-        use crate::trust::{KeyVersion, generate_keypair};
+        use crate::trust::{KeyMetadata, KeyRole, KeyVersion, generate_keypair};
 
         let (sk, vk, kid) = generate_keypair();
         let mut kr = PublisherKeyring::new(dir);
@@ -55,6 +55,10 @@ mod tests {
                 // Inline hex encode (same logic as trust.rs)
                 vk.to_bytes().iter().map(|b| format!("{:02x}", b)).collect()
             },
+            role: KeyRole::default(),
+            issued_by: None,
+            issuer_signature: None,
+            metadata: KeyMetadata::default(),
         });
         (kr, sk, vk, kid)
     }
@@ -1308,12 +1312,16 @@ mod tests {
 
     #[test]
     fn serde_roundtrip_key_version() {
-        use crate::trust::KeyVersion;
+        use crate::trust::{KeyMetadata, KeyRole, KeyVersion};
         let kv = KeyVersion {
             key_id: "test_key".to_string(),
             valid_from: Utc::now(),
             valid_until: Some(Utc::now() + chrono::Duration::days(365)),
             public_key_hex: "00".repeat(32),
+            role: KeyRole::default(),
+            issued_by: None,
+            issuer_signature: None,
+            metadata: KeyMetadata::default(),
         };
         let json = serde_json::to_string(&kv).unwrap();
         let recovered: KeyVersion = serde_json::from_str(&json).unwrap();
@@ -1417,7 +1425,7 @@ mod tests {
 
     #[test]
     fn keyring_save_and_reload() {
-        use crate::trust::{KeyVersion, generate_keypair};
+        use crate::trust::{KeyMetadata, KeyRole, KeyVersion, generate_keypair};
 
         let dir = tempfile::tempdir().unwrap();
         let (_, vk, kid) = generate_keypair();
@@ -1428,6 +1436,10 @@ mod tests {
             valid_from: Utc::now() - chrono::Duration::hours(1),
             valid_until: None,
             public_key_hex: vk.to_bytes().iter().map(|b| format!("{:02x}", b)).collect(),
+            role: KeyRole::default(),
+            issued_by: None,
+            issuer_signature: None,
+            metadata: KeyMetadata::default(),
         });
 
         let saved = kr.save().unwrap();
@@ -1997,5 +2009,258 @@ mod tests {
         assert_eq!(sha256.len(), 64); // 32 bytes = 64 hex
         assert_eq!(sha512.len(), 128); // 64 bytes = 128 hex
         assert_ne!(sha256, sha512);
+    }
+
+    // -----------------------------------------------------------------------
+    // Hierarchical trust delegation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn verify_artifact_with_valid_chain() {
+        use crate::trust::{KeyMetadata, KeyRole, KeyVersion, generate_keypair, sign_data};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = temp_file(dir.path(), "chained.bin", b"chained artifact");
+
+        // Create root and publisher keys
+        let (root_sk, root_vk, root_kid) = generate_keypair();
+        let (pub_sk, pub_vk, pub_kid) = generate_keypair();
+
+        // Root signs publisher's public key
+        let pub_sig = sign_data(&pub_vk.to_bytes(), &root_sk);
+
+        let mut kr = PublisherKeyring::new(dir.path());
+        kr.add_key(KeyVersion {
+            key_id: root_kid.clone(),
+            valid_from: Utc::now() - chrono::Duration::hours(1),
+            valid_until: None,
+            public_key_hex: root_vk
+                .to_bytes()
+                .iter()
+                .map(|b| format!("{:02x}", b))
+                .collect(),
+            role: KeyRole::Root,
+            issued_by: None,
+            issuer_signature: None,
+            metadata: KeyMetadata::default(),
+        });
+        kr.add_key(KeyVersion {
+            key_id: pub_kid.clone(),
+            valid_from: Utc::now() - chrono::Duration::hours(1),
+            valid_until: None,
+            public_key_hex: pub_vk
+                .to_bytes()
+                .iter()
+                .map(|b| format!("{:02x}", b))
+                .collect(),
+            role: KeyRole::Publisher,
+            issued_by: Some(root_kid),
+            issuer_signature: Some(pub_sig),
+            metadata: KeyMetadata::default(),
+        });
+
+        let mut verifier = SigilVerifier::new(kr, TrustPolicy::default());
+        verifier
+            .sign_artifact(&path, &pub_sk, ArtifactType::Config)
+            .unwrap();
+
+        let result = verifier
+            .verify_artifact(&path, ArtifactType::Config)
+            .unwrap();
+        assert!(result.passed);
+        // Should have a trust_chain check that passed
+        assert!(
+            result
+                .checks
+                .iter()
+                .any(|c| c.name == "trust_chain" && c.passed)
+        );
+    }
+
+    #[test]
+    fn verify_artifact_with_broken_chain() {
+        use crate::trust::{KeyMetadata, KeyRole, KeyVersion, generate_keypair};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = temp_file(dir.path(), "broken_chain.bin", b"broken chain");
+
+        let (_, root_vk, root_kid) = generate_keypair();
+        let (pub_sk, pub_vk, pub_kid) = generate_keypair();
+
+        let mut kr = PublisherKeyring::new(dir.path());
+        kr.add_key(KeyVersion {
+            key_id: root_kid.clone(),
+            valid_from: Utc::now() - chrono::Duration::hours(1),
+            valid_until: None,
+            public_key_hex: root_vk
+                .to_bytes()
+                .iter()
+                .map(|b| format!("{:02x}", b))
+                .collect(),
+            role: KeyRole::Root,
+            issued_by: None,
+            issuer_signature: None,
+            metadata: KeyMetadata::default(),
+        });
+        // Publisher with BOGUS issuer signature
+        kr.add_key(KeyVersion {
+            key_id: pub_kid.clone(),
+            valid_from: Utc::now() - chrono::Duration::hours(1),
+            valid_until: None,
+            public_key_hex: pub_vk
+                .to_bytes()
+                .iter()
+                .map(|b| format!("{:02x}", b))
+                .collect(),
+            role: KeyRole::Publisher,
+            issued_by: Some(root_kid),
+            issuer_signature: Some(vec![0u8; 64]),
+            metadata: KeyMetadata::default(),
+        });
+
+        let mut verifier = SigilVerifier::new(kr, TrustPolicy::default());
+        verifier
+            .sign_artifact(&path, &pub_sk, ArtifactType::Config)
+            .unwrap();
+
+        let result = verifier
+            .verify_artifact(&path, ArtifactType::Config)
+            .unwrap();
+        // trust_chain check should fail
+        assert!(
+            result
+                .checks
+                .iter()
+                .any(|c| c.name == "trust_chain" && !c.passed)
+        );
+        // Trust level should be downgraded to Community
+        assert_eq!(result.artifact.trust_level, TrustLevel::Community);
+    }
+
+    // -----------------------------------------------------------------------
+    // Audit log
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn audit_log_records_verify_and_sign() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = temp_file(dir.path(), "audited.bin", b"audit me");
+
+        let (kr, sk, _vk, _kid) = keyring_with_key(dir.path());
+        let mut verifier = SigilVerifier::new(kr, TrustPolicy::default());
+
+        verifier
+            .sign_artifact(&path, &sk, ArtifactType::Config)
+            .unwrap();
+
+        let _ = verifier
+            .verify_artifact(&path, ArtifactType::Config)
+            .unwrap();
+
+        let log = verifier.audit_log().read().unwrap();
+        assert_eq!(log.len(), 2);
+
+        // First event should be ArtifactSigned
+        match &log.events()[0] {
+            crate::audit::AuditEvent::ArtifactSigned { artifact_type, .. } => {
+                assert_eq!(*artifact_type, ArtifactType::Config);
+            }
+            other => panic!("Expected ArtifactSigned, got {:?}", other),
+        }
+
+        // Second event should be ArtifactVerified
+        match &log.events()[1] {
+            crate::audit::AuditEvent::ArtifactVerified { passed, .. } => {
+                assert!(*passed);
+            }
+            other => panic!("Expected ArtifactVerified, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn audit_log_json_roundtrip() {
+        use crate::audit::{AuditEvent, AuditLog};
+
+        let mut log = AuditLog::new();
+        log.record(AuditEvent::ArtifactVerified {
+            path: PathBuf::from("/test"),
+            artifact_type: ArtifactType::Config,
+            trust_level: TrustLevel::Verified,
+            passed: true,
+            content_hash: "abc".to_string(),
+            timestamp: Utc::now(),
+        });
+
+        let json = log.to_json_lines().unwrap();
+        let recovered = AuditLog::from_json_lines(&json).unwrap();
+        assert_eq!(recovered.len(), 1);
+    }
+
+    #[test]
+    fn audit_log_file_persistence() {
+        use crate::audit::{AuditEvent, AuditLog};
+
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("audit.jsonl");
+
+        let mut log = AuditLog::new();
+        log.record(AuditEvent::RevocationAdded {
+            key_id: Some("k1".to_string()),
+            content_hash: None,
+            reason: "test".to_string(),
+            timestamp: Utc::now(),
+        });
+        log.append_to_file(&log_path).unwrap();
+
+        let loaded = AuditLog::load_from_file(&log_path).unwrap();
+        assert_eq!(loaded.len(), 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // Trust store diff
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn trust_store_diff_detects_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let p1 = temp_file(dir.path(), "diff1.bin", b"data1");
+        let p2 = temp_file(dir.path(), "diff2.bin", b"data2");
+
+        let (kr, sk, _vk, _kid) = keyring_with_key(dir.path());
+        let mut verifier = SigilVerifier::new(kr, TrustPolicy::default());
+
+        // Sign first artifact, snapshot
+        verifier
+            .sign_artifact(&p1, &sk, ArtifactType::Config)
+            .unwrap();
+        let snapshot = verifier.snapshot_trust_store();
+
+        // Sign second artifact
+        verifier
+            .sign_artifact(&p2, &sk, ArtifactType::AgentBinary)
+            .unwrap();
+
+        let diff = verifier.diff_trust_store(&snapshot);
+        assert_eq!(diff.added.len(), 1);
+        assert!(diff.removed.is_empty());
+        assert!(diff.changed.is_empty());
+        assert_eq!(diff.len(), 1);
+    }
+
+    #[test]
+    fn trust_store_diff_empty_when_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = temp_file(dir.path(), "nodiff.bin", b"stable");
+
+        let (kr, sk, _vk, _kid) = keyring_with_key(dir.path());
+        let mut verifier = SigilVerifier::new(kr, TrustPolicy::default());
+
+        verifier
+            .sign_artifact(&path, &sk, ArtifactType::Config)
+            .unwrap();
+        let snapshot = verifier.snapshot_trust_store();
+
+        let diff = verifier.diff_trust_store(&snapshot);
+        assert!(diff.is_empty());
     }
 }

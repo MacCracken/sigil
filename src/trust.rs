@@ -19,6 +19,48 @@ use crate::error::{self, SigilError};
 // Key management
 // ---------------------------------------------------------------------------
 
+/// Metadata describing a key's publisher and authorized scope.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct KeyMetadata {
+    /// Human-readable publisher name (e.g. "AGNOS Core Team").
+    #[serde(default)]
+    pub publisher_name: Option<String>,
+    /// Publisher contact (e.g. email or URL).
+    #[serde(default)]
+    pub publisher_contact: Option<String>,
+    /// Artifact types this key is authorized to sign.
+    /// Empty means all types are allowed.
+    #[serde(default)]
+    pub allowed_artifact_types: Vec<crate::types::ArtifactType>,
+    /// Path prefixes this key is authorized to sign.
+    /// Empty means all paths are allowed.
+    #[serde(default)]
+    pub allowed_paths: Vec<PathBuf>,
+}
+
+/// The role of a key in the trust hierarchy.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum KeyRole {
+    /// Root of trust — self-signed, highest authority.
+    Root,
+    /// Intermediate CA — signed by root or another intermediate.
+    Intermediate,
+    /// End-entity publisher key — signs artifacts.
+    #[default]
+    Publisher,
+}
+
+impl std::fmt::Display for KeyRole {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Root => write!(f, "Root"),
+            Self::Intermediate => write!(f, "Intermediate"),
+            Self::Publisher => write!(f, "Publisher"),
+        }
+    }
+}
+
 /// A versioned publisher key with validity window.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KeyVersion {
@@ -30,6 +72,18 @@ pub struct KeyVersion {
     pub valid_until: Option<DateTime<Utc>>,
     /// Ed25519 public key bytes (32 bytes, hex-encoded for serialization).
     pub public_key_hex: String,
+    /// Role in the trust hierarchy.
+    #[serde(default)]
+    pub role: KeyRole,
+    /// Key ID of the issuer that signed this key (None = self-signed / root).
+    #[serde(default)]
+    pub issued_by: Option<String>,
+    /// Signature from the issuer over this key's public key bytes.
+    #[serde(default)]
+    pub issuer_signature: Option<Vec<u8>>,
+    /// Publisher and scope metadata.
+    #[serde(default)]
+    pub metadata: KeyMetadata,
 }
 
 impl KeyVersion {
@@ -185,6 +239,10 @@ impl PublisherKeyring {
             valid_from: now,
             valid_until: None,
             public_key_hex: new_public_key_hex,
+            role: KeyRole::default(),
+            issued_by: None,
+            issuer_signature: None,
+            metadata: KeyMetadata::default(),
         };
 
         versions.push(new_version.clone());
@@ -204,6 +262,106 @@ impl PublisherKeyring {
     #[must_use]
     pub fn key_ids(&self) -> Vec<&str> {
         self.keys.keys().map(|s| s.as_str()).collect()
+    }
+
+    /// Find all keys by publisher name (case-insensitive substring match).
+    #[must_use]
+    pub fn find_by_publisher(&self, name: &str) -> Vec<&KeyVersion> {
+        let lower = name.to_lowercase();
+        self.keys
+            .values()
+            .flatten()
+            .filter(|kv| {
+                kv.metadata
+                    .publisher_name
+                    .as_ref()
+                    .is_some_and(|n| n.to_lowercase().contains(&lower))
+            })
+            .collect()
+    }
+
+    /// Find all keys with a given role.
+    #[must_use]
+    pub fn find_by_role(&self, role: KeyRole) -> Vec<&KeyVersion> {
+        self.keys
+            .values()
+            .flatten()
+            .filter(|kv| kv.role == role)
+            .collect()
+    }
+
+    /// Get the trust chain for a key: walks `issued_by` links back to a root.
+    ///
+    /// Returns the chain from the given key up to the root (inclusive).
+    /// Returns `None` if any link in the chain is missing from the keyring.
+    #[must_use]
+    pub fn get_chain(&self, key_id: &str) -> Option<Vec<&KeyVersion>> {
+        let mut chain = Vec::new();
+        let mut current_id = key_id;
+        let now = Utc::now();
+
+        loop {
+            let kv = self
+                .keys
+                .get(current_id)?
+                .iter()
+                .find(|k| k.is_valid_at(now))?;
+            chain.push(kv);
+
+            match &kv.issued_by {
+                Some(issuer_id) if issuer_id != current_id => {
+                    current_id = issuer_id;
+                }
+                _ => break, // Self-signed or no issuer = root
+            }
+        }
+
+        Some(chain)
+    }
+
+    /// Validate a key's chain of trust back to a root key.
+    ///
+    /// Verifies that each key in the chain was signed by its issuer.
+    /// Returns `true` if the chain is valid and terminates at a `Root` key.
+    pub fn validate_chain(&self, key_id: &str) -> error::Result<bool> {
+        let chain = self
+            .get_chain(key_id)
+            .ok_or_else(|| SigilError::KeyNotFound {
+                key_id: key_id.to_string(),
+            })?;
+
+        if chain.is_empty() {
+            return Ok(false);
+        }
+
+        // Last element should be a root
+        let root = &chain[chain.len() - 1];
+        if root.role != KeyRole::Root {
+            return Ok(false);
+        }
+
+        // Validate each link: chain[i] should be signed by chain[i+1]
+        for window in chain.windows(2) {
+            let child = &window[0];
+            let parent = &window[1];
+
+            let sig = match &child.issuer_signature {
+                Some(s) => s,
+                None => return Ok(false),
+            };
+
+            let parent_vk = parent.verifying_key()?;
+            let child_pub_bytes =
+                hex::decode(&child.public_key_hex).map_err(|e| SigilError::InvalidInput {
+                    detail: format!("invalid hex in child key: {e}"),
+                })?;
+
+            if verify_signature(&child_pub_bytes, sig, &parent_vk).is_err() {
+                return Ok(false);
+            }
+        }
+
+        Ok(true)
     }
 
     /// Save all keys to the keys directory as JSON files.
@@ -394,6 +552,10 @@ mod tests {
             valid_from: now - chrono::Duration::hours(1),
             valid_until: Some(now + chrono::Duration::hours(1)),
             public_key_hex: "00".repeat(32),
+            role: KeyRole::default(),
+            issued_by: None,
+            issuer_signature: None,
+            metadata: KeyMetadata::default(),
         };
         assert!(kv.is_valid_at(now));
         assert!(!kv.is_valid_at(now - chrono::Duration::hours(2)));
@@ -408,6 +570,10 @@ mod tests {
             valid_from: now - chrono::Duration::hours(1),
             valid_until: None,
             public_key_hex: "00".repeat(32),
+            role: KeyRole::default(),
+            issued_by: None,
+            issuer_signature: None,
+            metadata: KeyMetadata::default(),
         };
         assert!(kv.is_valid_at(now));
         assert!(kv.is_valid_at(now + chrono::Duration::days(365)));
@@ -421,6 +587,10 @@ mod tests {
             valid_from: now + chrono::Duration::hours(1),
             valid_until: None,
             public_key_hex: "00".repeat(32),
+            role: KeyRole::default(),
+            issued_by: None,
+            issuer_signature: None,
+            metadata: KeyMetadata::default(),
         };
         assert!(!kv.is_valid_at(now));
     }
@@ -433,6 +603,10 @@ mod tests {
             valid_from: Utc::now(),
             valid_until: None,
             public_key_hex: hex::encode(&vk.to_bytes()),
+            role: KeyRole::default(),
+            issued_by: None,
+            issuer_signature: None,
+            metadata: KeyMetadata::default(),
         };
         let recovered = kv.verifying_key().unwrap();
         assert_eq!(recovered, vk);
@@ -445,6 +619,10 @@ mod tests {
             valid_from: Utc::now(),
             valid_until: None,
             public_key_hex: "not-hex".to_string(),
+            role: KeyRole::default(),
+            issued_by: None,
+            issuer_signature: None,
+            metadata: KeyMetadata::default(),
         };
         assert!(kv.verifying_key().is_err());
     }
@@ -456,6 +634,10 @@ mod tests {
             valid_from: Utc::now(),
             valid_until: None,
             public_key_hex: "aabb".to_string(),
+            role: KeyRole::default(),
+            issued_by: None,
+            issuer_signature: None,
+            metadata: KeyMetadata::default(),
         };
         assert!(kv.verifying_key().is_err());
     }
@@ -479,6 +661,10 @@ mod tests {
             valid_from: Utc::now() - chrono::Duration::hours(1),
             valid_until: None,
             public_key_hex: hex::encode(&vk.to_bytes()),
+            role: KeyRole::default(),
+            issued_by: None,
+            issuer_signature: None,
+            metadata: KeyMetadata::default(),
         });
 
         assert_eq!(keyring.len(), 1);
@@ -498,6 +684,10 @@ mod tests {
             valid_from: now - chrono::Duration::hours(2),
             valid_until: Some(now - chrono::Duration::hours(1)),
             public_key_hex: "00".repeat(32),
+            role: KeyRole::default(),
+            issued_by: None,
+            issuer_signature: None,
+            metadata: KeyMetadata::default(),
         });
 
         assert!(keyring.get_current_key("expired").is_none());
@@ -514,6 +704,10 @@ mod tests {
             valid_from: Utc::now() - chrono::Duration::hours(1),
             valid_until: None,
             public_key_hex: hex::encode(&vk.to_bytes()),
+            role: KeyRole::default(),
+            issued_by: None,
+            issuer_signature: None,
+            metadata: KeyMetadata::default(),
         }];
 
         let key_file = dir.path().join("publisher.json");
@@ -575,6 +769,10 @@ mod tests {
             valid_from: Utc::now() - chrono::Duration::hours(1),
             valid_until: None,
             public_key_hex: hex::encode(&vk.to_bytes()),
+            role: KeyRole::default(),
+            issued_by: None,
+            issuer_signature: None,
+            metadata: KeyMetadata::default(),
         });
 
         let data = b"package content hash";
@@ -597,6 +795,10 @@ mod tests {
             valid_from: Utc::now() - chrono::Duration::hours(2),
             valid_until: None,
             public_key_hex: hex::encode(&vk1.to_bytes()),
+            role: KeyRole::default(),
+            issued_by: None,
+            issuer_signature: None,
+            metadata: KeyMetadata::default(),
         });
 
         let overlap_until = Utc::now() + chrono::Duration::hours(1);
@@ -649,6 +851,10 @@ mod tests {
             valid_from: now - chrono::Duration::hours(10),
             valid_until: Some(now - chrono::Duration::hours(2)),
             public_key_hex: "00".repeat(32),
+            role: KeyRole::default(),
+            issued_by: None,
+            issuer_signature: None,
+            metadata: KeyMetadata::default(),
         });
 
         // New key: valid from 3h ago (overlap window was 3h ago to 2h ago)
@@ -657,6 +863,10 @@ mod tests {
             valid_from: now - chrono::Duration::hours(3),
             valid_until: None,
             public_key_hex: "11".repeat(32),
+            role: KeyRole::default(),
+            issued_by: None,
+            issuer_signature: None,
+            metadata: KeyMetadata::default(),
         });
 
         // Historical lookup at 5h ago should find the old key
@@ -679,16 +889,221 @@ mod tests {
             valid_from: Utc::now(),
             valid_until: None,
             public_key_hex: "00".repeat(32),
+            role: KeyRole::default(),
+            issued_by: None,
+            issuer_signature: None,
+            metadata: KeyMetadata::default(),
         });
         keyring.add_key(KeyVersion {
             key_id: "key_b".to_string(),
             valid_from: Utc::now(),
             valid_until: None,
             public_key_hex: "11".repeat(32),
+            role: KeyRole::default(),
+            issued_by: None,
+            issuer_signature: None,
+            metadata: KeyMetadata::default(),
         });
 
         let mut ids = keyring.key_ids();
         ids.sort();
         assert_eq!(ids, vec!["key_a", "key_b"]);
+    }
+
+    #[test]
+    fn test_find_by_publisher() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut keyring = PublisherKeyring::new(dir.path());
+
+        keyring.add_key(KeyVersion {
+            key_id: "pub1".to_string(),
+            valid_from: Utc::now(),
+            valid_until: None,
+            public_key_hex: "00".repeat(32),
+            role: KeyRole::Publisher,
+            issued_by: None,
+            issuer_signature: None,
+            metadata: KeyMetadata {
+                publisher_name: Some("AGNOS Core Team".to_string()),
+                ..KeyMetadata::default()
+            },
+        });
+
+        let found = keyring.find_by_publisher("agnos");
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].key_id, "pub1");
+
+        assert!(keyring.find_by_publisher("unknown").is_empty());
+    }
+
+    #[test]
+    fn test_find_by_role() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut keyring = PublisherKeyring::new(dir.path());
+
+        keyring.add_key(KeyVersion {
+            key_id: "root1".to_string(),
+            valid_from: Utc::now(),
+            valid_until: None,
+            public_key_hex: "00".repeat(32),
+            role: KeyRole::Root,
+            issued_by: None,
+            issuer_signature: None,
+            metadata: KeyMetadata::default(),
+        });
+        keyring.add_key(KeyVersion {
+            key_id: "pub1".to_string(),
+            valid_from: Utc::now(),
+            valid_until: None,
+            public_key_hex: "11".repeat(32),
+            role: KeyRole::Publisher,
+            issued_by: None,
+            issuer_signature: None,
+            metadata: KeyMetadata::default(),
+        });
+
+        assert_eq!(keyring.find_by_role(KeyRole::Root).len(), 1);
+        assert_eq!(keyring.find_by_role(KeyRole::Publisher).len(), 1);
+        assert!(keyring.find_by_role(KeyRole::Intermediate).is_empty());
+    }
+
+    #[test]
+    fn test_chain_validation() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut keyring = PublisherKeyring::new(dir.path());
+
+        // Generate root key
+        let (root_sk, root_vk, root_kid) = generate_keypair();
+
+        // Generate publisher key
+        let (_pub_sk, pub_vk, pub_kid) = generate_keypair();
+
+        // Root signs the publisher's public key
+        let pub_sig = sign_data(&pub_vk.to_bytes(), &root_sk);
+
+        // Add root key (self-signed)
+        keyring.add_key(KeyVersion {
+            key_id: root_kid.clone(),
+            valid_from: Utc::now() - chrono::Duration::hours(1),
+            valid_until: None,
+            public_key_hex: hex::encode(&root_vk.to_bytes()),
+            role: KeyRole::Root,
+            issued_by: None,
+            issuer_signature: None,
+            metadata: KeyMetadata {
+                publisher_name: Some("AGNOS Root".to_string()),
+                ..KeyMetadata::default()
+            },
+        });
+
+        // Add publisher key (issued by root)
+        keyring.add_key(KeyVersion {
+            key_id: pub_kid.clone(),
+            valid_from: Utc::now() - chrono::Duration::hours(1),
+            valid_until: None,
+            public_key_hex: hex::encode(&pub_vk.to_bytes()),
+            role: KeyRole::Publisher,
+            issued_by: Some(root_kid.clone()),
+            issuer_signature: Some(pub_sig),
+            metadata: KeyMetadata {
+                publisher_name: Some("Third-Party Publisher".to_string()),
+                ..KeyMetadata::default()
+            },
+        });
+
+        // Chain should be valid
+        assert!(keyring.validate_chain(&pub_kid).unwrap());
+
+        // Chain for root itself should be valid (single-element chain)
+        assert!(keyring.validate_chain(&root_kid).unwrap());
+
+        // Chain for unknown key should error
+        assert!(keyring.validate_chain("nonexistent").is_err());
+    }
+
+    #[test]
+    fn test_chain_invalid_signature() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut keyring = PublisherKeyring::new(dir.path());
+
+        let (_, root_vk, root_kid) = generate_keypair();
+        let (_, pub_vk, pub_kid) = generate_keypair();
+
+        keyring.add_key(KeyVersion {
+            key_id: root_kid.clone(),
+            valid_from: Utc::now(),
+            valid_until: None,
+            public_key_hex: hex::encode(&root_vk.to_bytes()),
+            role: KeyRole::Root,
+            issued_by: None,
+            issuer_signature: None,
+            metadata: KeyMetadata::default(),
+        });
+
+        // Publisher with bogus signature
+        keyring.add_key(KeyVersion {
+            key_id: pub_kid.clone(),
+            valid_from: Utc::now(),
+            valid_until: None,
+            public_key_hex: hex::encode(&pub_vk.to_bytes()),
+            role: KeyRole::Publisher,
+            issued_by: Some(root_kid),
+            issuer_signature: Some(vec![0u8; 64]),
+            metadata: KeyMetadata::default(),
+        });
+
+        assert!(!keyring.validate_chain(&pub_kid).unwrap());
+    }
+
+    #[test]
+    fn test_get_chain_three_levels() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut keyring = PublisherKeyring::new(dir.path());
+
+        let (root_sk, root_vk, root_kid) = generate_keypair();
+        let (int_sk, int_vk, int_kid) = generate_keypair();
+        let (_pub_sk, pub_vk, pub_kid) = generate_keypair();
+
+        let int_sig = sign_data(&int_vk.to_bytes(), &root_sk);
+        let pub_sig = sign_data(&pub_vk.to_bytes(), &int_sk);
+
+        keyring.add_key(KeyVersion {
+            key_id: root_kid.clone(),
+            valid_from: Utc::now() - chrono::Duration::hours(1),
+            valid_until: None,
+            public_key_hex: hex::encode(&root_vk.to_bytes()),
+            role: KeyRole::Root,
+            issued_by: None,
+            issuer_signature: None,
+            metadata: KeyMetadata::default(),
+        });
+        keyring.add_key(KeyVersion {
+            key_id: int_kid.clone(),
+            valid_from: Utc::now() - chrono::Duration::hours(1),
+            valid_until: None,
+            public_key_hex: hex::encode(&int_vk.to_bytes()),
+            role: KeyRole::Intermediate,
+            issued_by: Some(root_kid),
+            issuer_signature: Some(int_sig),
+            metadata: KeyMetadata::default(),
+        });
+        keyring.add_key(KeyVersion {
+            key_id: pub_kid.clone(),
+            valid_from: Utc::now() - chrono::Duration::hours(1),
+            valid_until: None,
+            public_key_hex: hex::encode(&pub_vk.to_bytes()),
+            role: KeyRole::Publisher,
+            issued_by: Some(int_kid),
+            issuer_signature: Some(pub_sig),
+            metadata: KeyMetadata::default(),
+        });
+
+        let chain = keyring.get_chain(&pub_kid).unwrap();
+        assert_eq!(chain.len(), 3);
+        assert_eq!(chain[0].role, KeyRole::Publisher);
+        assert_eq!(chain[1].role, KeyRole::Intermediate);
+        assert_eq!(chain[2].role, KeyRole::Root);
+
+        assert!(keyring.validate_chain(&pub_kid).unwrap());
     }
 }

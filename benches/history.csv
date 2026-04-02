@@ -76,3 +76,15 @@ timestamp,label,benchmark,estimate,unit
 2026-04-02T02:20:16Z,near-term-complete,verify_artifact_signed_4kb,54.594,µs
 2026-04-02T02:20:16Z,near-term-complete,verify_artifact_signed_1mb,723.81,µs
 2026-04-02T02:20:16Z,near-term-complete,verify_batch_10x4kb,496.41,µs
+2026-04-02T02:38:38Z,v0.5.0,hash_data_4kb,2.3070,µs
+2026-04-02T02:38:38Z,v0.5.0,hash_data_1mb,546.32,µs
+2026-04-02T02:38:38Z,v0.5.0,sign_4kb,30.948,µs
+2026-04-02T02:38:38Z,v0.5.0,verify_4kb,39.205,µs
+2026-04-02T02:38:38Z,v0.5.0,generate_keypair,19.638,µs
+2026-04-02T02:38:38Z,v0.5.0,compute_hash_file_4kb,7.5543,µs
+2026-04-02T02:38:38Z,v0.5.0,compute_hash_file_1mb,769.26,µs
+2026-04-02T02:38:38Z,v0.5.0,revocation_key_lookup_1k,22.583,ns
+2026-04-02T02:38:38Z,v0.5.0,revocation_hash_lookup_1k,23.099,ns
+2026-04-02T02:38:38Z,v0.5.0,verify_artifact_signed_4kb,53.119,µs
+2026-04-02T02:38:38Z,v0.5.0,verify_artifact_signed_1mb,704.59,µs
+2026-04-02T02:38:38Z,v0.5.0,verify_batch_10x4kb,510.09,µs

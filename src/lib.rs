@@ -4,6 +4,7 @@
 //! trust chain covering boot, agent binaries, configs, and packages.
 //! Named after the Latin word for "seal" — sigil seals trust into AGNOS.
 
+pub mod audit;
 #[cfg(feature = "chain")]
 pub mod chain;
 pub mod error;
@@ -28,4 +29,4 @@ pub use types::{
     ArtifactType, HashAlgorithm, SigilStats, TrustCheck, TrustEnforcement, TrustLevel, TrustPolicy,
     TrustPolicyBuilder, TrustedArtifact, VerificationResult,
 };
-pub use verify::{KeyPin, SigilVerifier};
+pub use verify::{ArtifactChange, KeyPin, SigilVerifier, TrustStoreDiff};

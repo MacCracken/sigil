@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] — Advanced Trust
+
+### Added
+- **Certificate-style key metadata**: `KeyMetadata` struct with `publisher_name`, `publisher_contact`, `allowed_artifact_types`, `allowed_paths`. `KeyRole` enum (`Root`, `Intermediate`, `Publisher`).
+- **Hierarchical trust delegation**: `issued_by` and `issuer_signature` fields on `KeyVersion`. `PublisherKeyring::get_chain()` walks the issuer chain back to root. `validate_chain()` verifies each link's signature. `SigilVerifier` integrates chain validation into artifact verification — broken chains downgrade to `Community` trust.
+- **Structured verification audit log**: `AuditEvent` enum, `AuditLog` struct. Events emitted for `ArtifactVerified` and `ArtifactSigned`. JSON lines serialization. File-backed persistence via `append_to_file()`/`load_from_file()`.
+- **Trust store diff**: `TrustStoreDiff` with `added`/`removed`/`changed` sets. `snapshot_trust_store()` and `diff_trust_store()` on `SigilVerifier`.
+- `find_by_publisher()` and `find_by_role()` on `PublisherKeyring`
+- Re-exports: `KeyPin`, `ArtifactChange`, `TrustStoreDiff`, `IntegritySnapshot`, `BaselineEntry`
+- 12 new tests (chain validation 3-level, broken chain, metadata queries, audit log, trust store diff) — 142 total
+
 ## [Unreleased] — Near-term completion
 
 ### Added
