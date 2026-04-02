@@ -19,7 +19,7 @@ chain = ["integrity"]
 policy = []
 parallel = ["rayon"]
 pqc = []
-tpm = []
+tpm = ["integrity"]
 
 [dependencies]
 chrono = { version = "0.4", features = ["serde"] }

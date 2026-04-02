@@ -294,14 +294,19 @@ impl PublisherKeyring {
     /// Get the trust chain for a key: walks `issued_by` links back to a root.
     ///
     /// Returns the chain from the given key up to the root (inclusive).
-    /// Returns `None` if any link in the chain is missing from the keyring.
+    /// Returns `None` if any link in the chain is missing from the keyring
+    /// or if a cycle is detected.
     #[must_use]
     pub fn get_chain(&self, key_id: &str) -> Option<Vec<&KeyVersion>> {
         let mut chain = Vec::new();
         let mut current_id = key_id;
         let now = Utc::now();
+        let mut visited = std::collections::HashSet::new();
 
         loop {
+            if !visited.insert(current_id) {
+                return None; // Cycle detected
+            }
             let kv = self
                 .keys
                 .get(current_id)?
