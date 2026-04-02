@@ -144,7 +144,7 @@ impl IntegrityVerifier {
             }
             hasher.update(&buf[..n]);
         }
-        Ok(format!("{:x}", hasher.finalize()))
+        Ok(crate::trust::hash_hex(hasher.finalize().as_slice()))
     }
 
     /// Verify a single file against an expected hash.

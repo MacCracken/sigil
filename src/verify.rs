@@ -233,7 +233,7 @@ impl SigilVerifier {
             if let (Some(sig), Some(key_id)) = (&artifact.signature, &artifact.signer_key_id) {
                 match self.keyring.get_current_key(key_id) {
                     Some(kv) => match kv.verifying_key() {
-                        Ok(vk) => match verify_signature(&data, sig, &vk) {
+                        Ok(vk) => match verify_signature(content_hash.as_bytes(), sig, &vk) {
                             Ok(()) => {
                                 if trust_level < TrustLevel::Verified {
                                     trust_level = TrustLevel::Verified;
@@ -423,14 +423,12 @@ impl SigilVerifier {
                 path = %path.display(),
                 "Skipping agent binary verification (verify_on_execute=false)"
             );
-            let data = std::fs::read(path).map_err(|e| error::io_err(e, path))?;
-            let content_hash = hash_data(&data);
             let now = Utc::now();
             return Ok(VerificationResult {
                 artifact: TrustedArtifact {
                     path: path.to_path_buf(),
                     artifact_type: ArtifactType::AgentBinary,
-                    content_hash,
+                    content_hash: String::new(),
                     signature: None,
                     signer_key_id: None,
                     trust_level: TrustLevel::Unverified,
@@ -501,14 +499,12 @@ impl SigilVerifier {
                 path = %path.display(),
                 "Skipping package verification (verify_on_install=false)"
             );
-            let data = std::fs::read(path).map_err(|e| error::io_err(e, path))?;
-            let content_hash = hash_data(&data);
             let now = Utc::now();
             return Ok(VerificationResult {
                 artifact: TrustedArtifact {
                     path: path.to_path_buf(),
                     artifact_type: ArtifactType::Package,
-                    content_hash,
+                    content_hash: String::new(),
                     signature: None,
                     signer_key_id: None,
                     trust_level: TrustLevel::Unverified,
@@ -567,7 +563,7 @@ impl SigilVerifier {
         let data = std::fs::read(path).map_err(|e| error::io_err(e, path))?;
 
         let content_hash = hash_data(&data);
-        let signature = sign_data(&data, signing_key);
+        let signature = sign_data(content_hash.as_bytes(), signing_key);
         let vk = signing_key.verifying_key();
         let key_id = key_id_from_verifying_key(&vk);
         let now = Utc::now();
@@ -816,6 +812,7 @@ impl SigilVerifier {
     ///
     /// With the `parallel` feature enabled, file I/O and hash computation
     /// are parallelized via rayon.
+    #[must_use]
     pub fn verify_batch(
         &self,
         artifacts: &[(&Path, ArtifactType)],

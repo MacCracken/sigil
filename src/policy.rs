@@ -146,14 +146,7 @@ impl RevocationList {
         let entries: Vec<RevocationEntry> = serde_json::from_str(json)?;
         let mut list = Self::new();
         for entry in entries {
-            // Entries from JSON are assumed valid (already validated on creation).
-            if let Some(ref kid) = entry.key_id {
-                list.revoked_keys.insert(kid.clone());
-            }
-            if let Some(ref hash) = entry.content_hash {
-                list.revoked_hashes.insert(hash.clone());
-            }
-            list.entries.push(entry);
+            list.add(entry)?;
         }
         Ok(list)
     }

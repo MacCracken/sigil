@@ -229,7 +229,7 @@ impl PublisherKeyring {
 pub fn hash_data(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(data);
-    format!("{:x}", hasher.finalize())
+    hex::encode(hasher.finalize().as_slice())
 }
 
 /// Sign data with an Ed25519 signing key. Returns the signature bytes.
@@ -274,11 +274,23 @@ pub fn key_id_from_verifying_key(vk: &VerifyingKey) -> String {
     hex::encode(&vk.to_bytes()[..8])
 }
 
-// We need hex encoding — use a minimal inline implementation to avoid adding
-// the `hex` crate. (sha2 already gives us hex via format!, but we need decode too.)
+/// Hex-encode raw bytes. Exposed for crate-internal use (e.g. integrity hash output).
+#[must_use]
+pub(crate) fn hash_hex(data: &[u8]) -> String {
+    hex::encode(data)
+}
+
+// Minimal inline hex implementation — avoids adding the `hex` crate.
 mod hex {
+    const HEX_CHARS: &[u8; 16] = b"0123456789abcdef";
+
     pub fn encode(data: &[u8]) -> String {
-        data.iter().map(|b| format!("{:02x}", b)).collect()
+        let mut s = String::with_capacity(data.len() * 2);
+        for &b in data {
+            s.push(HEX_CHARS[(b >> 4) as usize] as char);
+            s.push(HEX_CHARS[(b & 0x0f) as usize] as char);
+        }
+        s
     }
 
     pub fn decode(s: &str) -> std::result::Result<Vec<u8>, String> {

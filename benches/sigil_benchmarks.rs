@@ -107,6 +107,21 @@ fn bench_verify_artifact(c: &mut Criterion) {
                 .unwrap()
         });
     });
+
+    // 1MB artifact — shows the win from signing hash instead of raw data
+    let path_1m = dir.path().join("bench_artifact_1m.bin");
+    std::fs::write(&path_1m, vec![0u8; 1024 * 1024]).unwrap();
+    verifier
+        .sign_artifact(&path_1m, &sk, ArtifactType::AgentBinary)
+        .unwrap();
+
+    c.bench_function("verify_artifact_signed_1mb", |b| {
+        b.iter(|| {
+            verifier
+                .verify_artifact(black_box(&path_1m), ArtifactType::AgentBinary)
+                .unwrap()
+        });
+    });
 }
 
 fn bench_verify_batch(c: &mut Criterion) {
