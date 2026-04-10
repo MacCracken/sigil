@@ -22,6 +22,9 @@ include "src/hex.cyr"
 include "src/ct.cyr"
 include "src/hmac.cyr"
 include "src/sha512.cyr"
+include "lib/bigint.cyr"
+include "src/bigint_ext.cyr"
+include "src/ed25519.cyr"
 include "src/trust.cyr"
 include "src/integrity.cyr"
 include "src/policy.cyr"
@@ -29,16 +32,18 @@ include "src/audit.cyr"
 
 fn main() {
     alloc_init();
+    ed25519_init();
 
     # ============================================================
     # Trust: key generation and signing
     # ============================================================
     test_group("key generation");
-    var sk[32];
-    var pk_hex[65];
-    var kid = generate_keypair(&sk, &pk_hex);
+    var sk[64];
+    var pk[32];
+    var kid = generate_keypair(&sk, &pk);
     assert(strlen(kid) == 16, "key_id is 16 chars");
-    assert(strlen(&pk_hex) == 64, "pk_hex is 64 chars");
+    var pk_hex = hex_encode(&pk, 32);
+    assert(strlen(pk_hex) == 64, "pk_hex is 64 chars");
 
     test_group("hash_data");
     var h = hash_data("hello world", 11);
@@ -47,18 +52,18 @@ fn main() {
     test_group("sign and verify");
     var sig = sign_data("test message", 12, &sk);
     assert(sig != 0, "signature not null");
-    var valid = verify_signature("test message", 12, sig, &sk);
+    var valid = verify_data("test message", 12, sig, &pk);
     assert_eq(valid, 1, "valid signature");
 
     test_group("verify wrong message");
-    var invalid = verify_signature("wrong message", 13, sig, &sk);
+    var invalid = verify_data("wrong message", 13, sig, &pk);
     assert_eq(invalid, 0, "wrong message rejected");
 
     test_group("verify wrong key");
-    var sk2[32];
-    var pk2[65];
+    var sk2[64];
+    var pk2[32];
     generate_keypair(&sk2, &pk2);
-    var invalid2 = verify_signature("test message", 12, sig, &sk2);
+    var invalid2 = verify_data("test message", 12, sig, &pk2);
     assert_eq(invalid2, 0, "wrong key rejected");
 
     # ============================================================
@@ -66,7 +71,7 @@ fn main() {
     # ============================================================
     test_group("keyring");
     var kr = keyring_new("/tmp/sigil_test_keys");
-    var kv = key_version_new(kid, &pk_hex);
+    var kv = key_version_new(kid, pk_hex);
     kv_set_pub_name(kv, "Test Publisher");
     keyring_add_key(kr, kv);
     assert_eq(keyring_len(kr), 1, "keyring has 1 key");

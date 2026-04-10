@@ -1,0 +1,111 @@
+# fuzz_integrity.fcyr — fuzz integrity verifier operations
+
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fmt.cyr"
+include "lib/json.cyr"
+include "lib/sakshi.cyr"
+include "lib/chrono.cyr"
+
+include "src/types.cyr"
+include "src/error.cyr"
+include "src/sha256.cyr"
+include "src/hex.cyr"
+include "src/ct.cyr"
+include "src/hmac.cyr"
+include "src/sha512.cyr"
+include "lib/bigint.cyr"
+include "src/bigint_ext.cyr"
+include "src/ed25519.cyr"
+include "src/trust.cyr"
+include "src/integrity.cyr"
+
+fn main() {
+    alloc_init();
+    ed25519_init();
+
+    # Create temp files with known content
+    var i = 0;
+    while (i < 20) {
+        var path = alloc(64);
+        memcpy(path, "/tmp/sigil_fuzz_", 16);
+        var ns = fmt_int(i);
+        memcpy(path + 16, ns, strlen(ns));
+        memcpy(path + 16 + strlen(ns), ".bin", 4);
+        store8(path + 20 + strlen(ns), 0);
+
+        var fd = file_open(path, 577, 420);
+        # Write varying content
+        var content = alloc(256);
+        memset(content, 0x41 + (i % 26), 256);
+        file_write(fd, content, 256);
+        file_close(fd);
+        i = i + 1;
+    }
+
+    # Build integrity policy with correct hashes
+    var policy = integrity_policy_new();
+    i = 0;
+    while (i < 20) {
+        var path = alloc(64);
+        memcpy(path, "/tmp/sigil_fuzz_", 16);
+        var ns = fmt_int(i);
+        memcpy(path + 16, ns, strlen(ns));
+        memcpy(path + 16 + strlen(ns), ".bin", 4);
+        store8(path + 20 + strlen(ns), 0);
+
+        var h = hash_file(path);
+        if (h != 0) {
+            ipolicy_add(policy, path, h);
+        }
+        i = i + 1;
+    }
+
+    # Verify all — should be clean
+    var iv = integrity_verifier_new(policy);
+    var report = iv_verify_all(iv);
+    assert_eq(ireport_is_clean(report), 1, "all clean");
+    assert_eq(ireport_total(report), 20, "20 files");
+
+    # Export and import baseline
+    var snap = iv_export_baseline(iv);
+    var count = iv_import_baseline(iv, snap);
+    assert_eq(count, 20, "imported 20");
+
+    # Verify again after import
+    var report2 = iv_verify_all(iv);
+    assert_eq(ireport_is_clean(report2), 1, "clean after import");
+
+    # Tamper with one file and re-verify
+    var tamper_fd = file_open("/tmp/sigil_fuzz_5.bin", 577, 420);
+    file_write(tamper_fd, "TAMPERED", 8);
+    file_close(tamper_fd);
+
+    var report3 = iv_verify_all(iv);
+    assert_eq(ireport_is_clean(report3), 0, "tamper detected");
+    assert_eq(vec_len(ireport_mismatches(report3)), 1, "1 mismatch");
+
+    # Cleanup
+    i = 0;
+    while (i < 20) {
+        var path = alloc(64);
+        memcpy(path, "/tmp/sigil_fuzz_", 16);
+        var ns = fmt_int(i);
+        memcpy(path + 16, ns, strlen(ns));
+        memcpy(path + 16 + strlen(ns), ".bin", 4);
+        store8(path + 20 + strlen(ns), 0);
+        syscall(87, path);
+        i = i + 1;
+    }
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

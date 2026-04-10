@@ -1,0 +1,92 @@
+# fuzz_revocation.fcyr — fuzz revocation list operations
+
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fmt.cyr"
+include "lib/json.cyr"
+include "lib/sakshi.cyr"
+include "lib/chrono.cyr"
+
+include "src/types.cyr"
+include "src/error.cyr"
+include "src/sha256.cyr"
+include "src/hex.cyr"
+include "src/ct.cyr"
+include "src/hmac.cyr"
+include "src/sha512.cyr"
+include "lib/bigint.cyr"
+include "src/bigint_ext.cyr"
+include "src/ed25519.cyr"
+include "src/trust.cyr"
+include "src/integrity.cyr"
+include "src/policy.cyr"
+include "src/audit.cyr"
+
+fn main() {
+    alloc_init();
+    ed25519_init();
+
+    var rl = revocation_list_new();
+
+    # Fuzz: add many entries with various key_id/hash combinations
+    var i = 0;
+    while (i < 200) {
+        var kid = alloc(20);
+        memcpy(kid, "fuzz_key_", 9);
+        var ns = fmt_int(i);
+        memcpy(kid + 9, ns, strlen(ns));
+        store8(kid + 9 + strlen(ns), 0);
+
+        var chash = alloc(20);
+        memcpy(chash, "fuzz_hash_", 10);
+        memcpy(chash + 10, ns, strlen(ns));
+        store8(chash + 10 + strlen(ns), 0);
+
+        # Alternate between key-only, hash-only, and both
+        if (i % 3 == 0) {
+            rl_add(rl, revocation_entry_new(kid, 0, "fuzz", "admin"));
+        } elif (i % 3 == 1) {
+            rl_add(rl, revocation_entry_new(0, chash, "fuzz", "admin"));
+        } else {
+            rl_add(rl, revocation_entry_new(kid, chash, "fuzz", "admin"));
+        }
+        i = i + 1;
+    }
+
+    # Verify lookups
+    assert_eq(rl_is_key_revoked(rl, "fuzz_key_0"), 1, "key 0 revoked");
+    assert_eq(rl_is_key_revoked(rl, "fuzz_key_99"), 1, "key 99 revoked");
+    assert_eq(rl_is_key_revoked(rl, "fuzz_key_999"), 0, "key 999 not revoked");
+    assert_eq(rl_is_artifact_revoked(rl, "fuzz_hash_1"), 1, "hash 1 revoked");
+    assert_eq(rl_is_artifact_revoked(rl, "fuzz_hash_999"), 0, "hash 999 not revoked");
+
+    # Fuzz: merge two lists
+    var rl2 = revocation_list_new();
+    i = 0;
+    while (i < 50) {
+        var kid = alloc(20);
+        memcpy(kid, "merge_key_", 10);
+        var ns = fmt_int(i);
+        memcpy(kid + 10, ns, strlen(ns));
+        store8(kid + 10 + strlen(ns), 0);
+        rl_add(rl2, revocation_entry_new(kid, 0, "merge", "admin"));
+        i = i + 1;
+    }
+    var merged = rl_merge(rl, rl2);
+    assert_eq(merged, 50, "merged 50");
+
+    # Invalid entry (no key_id or hash)
+    var bad = revocation_entry_new(0, 0, "bad", "admin");
+    assert_eq(rl_add(rl, bad), ERR_INVALID_INPUT, "reject invalid");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

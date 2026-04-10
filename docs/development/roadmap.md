@@ -2,83 +2,57 @@
 
 ## Completed
 
-### P(-1): Scaffold Hardening
+### Cyrius Port (v0.1.0)
 
-- [x] Cleanliness check: fmt, clippy, audit, deny, rustdoc — all clean
-- [x] `#[non_exhaustive]` on all public enums
-- [x] `#[must_use]` on all pure functions
-- [x] Serde on all public types
-- [x] Constant-time hash comparison via `subtle::ConstantTimeEq`
-- [x] Streaming file hash in `IntegrityVerifier::compute_hash`
-- [x] `RevocationList` O(1) lookups via `HashSet` indexes
-- [x] Serde roundtrip tests for all public types
-- [x] Benchmark suite with `scripts/bench-history.sh`
+- [x] Full port from Rust v1.0.0 to Cyrius
+- [x] Ed25519 (RFC 8032) — keypair, sign, verify, RFC test vectors pass
+- [x] SHA-256 (FIPS 180-4), SHA-512, HMAC-SHA256 (RFC 2104)
+- [x] Constant-time comparison (bitwise OR accumulation)
+- [x] All type system: TrustLevel, TrustPolicy, TrustedArtifact, VerificationResult, SigilStats
+- [x] SigilError codes and error constructors
+- [x] PublisherKeyring with rotation, chain validation, persistence
+- [x] IntegrityVerifier with snapshot export/import
+- [x] RevocationList with temporal semantics, CRL, merge
+- [x] AuditLog with JSON lines output
+- [x] SigilVerifier trust engine (verify, sign, batch, compliance, diff, boot chain)
+- [x] TPM module with runtime detection, PCR measurement
+- [x] 206 tests, 0 failures
+- [x] Rust debris cleaned (target/, Cargo files, CI, fuzz targets)
 
-### v0.2.0 — Hardening & API Cleanup
+## Backlog
 
-- [x] `SigilError` enum replacing `anyhow::Result` in all public API
-- [x] `anyhow` dependency removed entirely
-- [x] `Display` impl for `MeasurementStatus`
-- [x] `TrustPolicy::builder()` with `TrustPolicyBuilder`
-- [x] `PublisherKeyring::save()` — persist keyring to disk
-- [x] `IntegrityVerifier::remove_baseline()`
-- [x] Feature gates: `integrity`, `chain`, `policy` (all default on)
-- [x] Documentation: architecture overview, CHANGELOG, CONTRIBUTING, SECURITY, CODE_OF_CONDUCT
+### P(-1): Scaffold Hardening (current)
 
-### v0.3.0 — Operational Capabilities
+- [x] Rust debris removal
+- [x] .gitignore updated for Cyrius
+- [x] CHANGELOG, README, roadmap updated
+- [ ] Benchmark suite (Cyrius .bcyr files)
+- [ ] Fuzz harnesses (Cyrius .fcyr files)
+- [ ] Cyrius CI workflow (.github/workflows/)
+- [ ] `cyrius fmt --check` pass
+- [ ] `cyrius lint` pass
+- [ ] VERSION / cyrius.toml sync verified
 
-- [x] Key rotation with overlap windows, `get_key_valid_at()`, `key_ids()`
-- [x] Batch verification: `verify_batch()` with optional rayon (`parallel` feature)
-- [x] Verification caching: `set_cache_enabled()` (thread-safe via `RwLock`)
-- [x] Key pinning: `KeyPin` binds key IDs to path prefixes
-- [x] Baseline snapshots: `export_baseline()` / `import_baseline()` with `IntegritySnapshot`
-- [x] Revocation timestamps: `revoked_after` with time-aware `check_revocation_at()`
-- [x] Configurable hash algorithm: `HashAlgorithm` enum (SHA-256, SHA-512), `hash_data_with()`
-- [x] Integrity event callbacks: `IntegrityCallback` trait with `on_mismatch`/`on_error`
+### v0.2.0 — Hardening
 
-### Optimizations
+- [ ] Constant-time scalar multiplication for Ed25519 signing (Montgomery ladder)
+- [ ] Ed25519 RFC 8032 test vectors 2-5
+- [ ] Benchmark baseline: all crypto ops, keyring, verification
+- [ ] Fuzz targets: JSON deserialization paths, key generation, signature verification
+- [ ] Key zeroization audit — ensure all secret key paths zeroed
+- [ ] `#derive(Serialize)` on all public types
 
-- [x] Sign/verify hash instead of raw data (Ed25519 over 64-byte hash, not full file)
-- [x] Skip file I/O on disabled verification paths
-- [x] Pre-allocated hex encoding via lookup table
-- [x] Audit: zero unwrap/panic in library code, all re-exports clean, deny.toml clean
+### v0.3.0 — Integration
 
-## v1.0.0 (shipped)
+- [ ] agnosys TPM integration: replace seal/unseal stubs with real tpm2-tools calls
+- [ ] IMA measurement integration via agnosys
+- [ ] Secure boot state detection
+- [ ] Trust store JSON load (currently save-only)
+- [ ] Audit log JSON lines load
 
-- [x] Cross-signing: `Cosignature`, `cosign_artifact()`, cosigner verification
-- [x] CRL distribution: `Crl` struct, `RevocationList::merge()`, `Crl::apply_to()`
-- [x] Policy compliance report: `ComplianceReport`, `compliance_report()`
-- [x] PQC scaffold: `SignatureAlgorithm` enum, `pqc` feature flag, `signature_algorithm` on artifacts
-- [x] TPM scaffold: `TpmProvider` trait, `PcrMeasurement`, `measure_system_component()`, `tpm` feature flag
-- [x] `#![forbid(unsafe_code)]`
-- [x] `#![warn(missing_docs)]` — full doc coverage
-- [x] 8 fuzzing targets for all deserialization paths
-- [x] API frozen
+## Future
 
-## Post-v1.0
-
-### PQC Implementation (when crates mature)
-
-- [ ] ML-DSA (FIPS 204) actual signing/verification behind `pqc` feature
-- [ ] ML-KEM (FIPS 203) for key encapsulation
-- [ ] Hybrid mode: Ed25519 + ML-DSA dual signatures during transition
-- [ ] Re-sign utility: migrate existing trust store to PQC keys
-
-### TPM Implementation (when agnosys exports available)
-
-- [ ] Concrete `TpmProvider` implementation backed by agnosys TPM subsystem
-- [ ] `register_system_core` with mandatory TPM attestation
-- [ ] Sealed key storage via TPM
-- [ ] Remote attestation end-to-end flow
-
-### Online Verification
-
-- [ ] OCSP-style online revocation checking
-- [ ] Certificate transparency log integration
-- [ ] Revocation stapling: cache OCSP responses locally
-
-### CI/CD
-
-- [ ] Benchmark regression thresholds in CI
-- [ ] Fuzzing in CI (nightly)
-- [ ] Third-party security audit
+- PQC: ML-DSA-65 signing when Cyrius implementations mature
+- Hybrid Ed25519 + ML-DSA-65 dual signatures
+- Certificate pinning integration via agnosys certpin
+- Parallel batch verification (when Cyrius threading matures)

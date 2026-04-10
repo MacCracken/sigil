@@ -1,29 +1,14 @@
-# ed25519_bug.tcyr — isolated test for Ed25519 verify failure
+# ed25519_bug.tcyr — Ed25519 RFC 8032 test vector verification
 #
-# STATUS:
-# - Keypair generation: PASSES (RFC 8032 test vector 1 pk matches)
-# - Sign: PASSES (produces byte-exact RFC 8032 expected signature)
-# - Verify: FAILS (ed25519_verify returns 0 for known-good signatures)
+# STATUS: ALL PASS
+# - Keypair: correct pk from seed
+# - Sign: byte-exact RFC 8032 test vector 1 signature
+# - Verify: sign+verify roundtrip passes
 #
-# WHAT WORKS:
-# - Field arithmetic (fp_add, fp_sub, fp_mul, fp_sq, fp_inv)
-# - Point operations (ge_add, ge_double, ge_scalarmult) for all tested scalars
-# - ge_to_bytes / ge_from_bytes (point compression/decompression roundtrips)
-# - sc_reduce (scalar reduction mod L — fixed: constant was off-by-one, now iterative)
-# - sc_muladd (scalar multiply-add mod L)
-# - Keypair generation (public key derivation from seed)
-# - Signing (produces exact RFC 8032 test vector 1 signature)
-#
-# WHAT FAILS:
-# - ed25519_verify rejects valid signatures (returns 0)
-# - The bug is in the verify equation: R_check = [S]B - [h]A
-# - Possible causes:
-#   1. ge_from_bytes(A, pk) decompression is wrong (but roundtrip test passes)
-#   2. Point negation (fp_neg on X,T) before ge_add is incorrect
-#   3. The two ge_scalarmult calls ([S]B and [h]A) share globals that get clobbered
-#   4. ct_eq comparison fails due to encoding mismatch
-# - The sign path is proven correct, so all field/point/scalar ops work.
-#   The bug is isolated to the verify-specific code path.
+# Bugs fixed during development:
+# - u256_sub borrow propagation (bigint.cyr): limbs 1,2 of p = 0xFF..FF lost borrow
+# - sc_reduce constant off-by-one: r256modL ended in 951c, should be 951d
+# - sc_reduce truncated: only 2 levels of reduction, needed iterative (~64 iters)
 
 include "lib/assert.cyr"
 include "lib/alloc.cyr"

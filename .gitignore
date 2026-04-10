@@ -1,22 +1,22 @@
-/target/
-**/*.rs.bk
-Cargo.lock
-!Cargo.lock
+# Build output
+/build/
+
+# Editor
 .idea/
 .vscode/
 *.swp
 *.swo
 *~
+
+# OS
 .DS_Store
 Thumbs.db
-/coverage/
-*.profraw
-*.profdata
-lcov.info
-tarpaulin-report.*
-.claude/
-/target/criterion/
+
+# Secrets
 .env
 .env.*
 *.pem
 *.key
+
+# Claude
+.claude/

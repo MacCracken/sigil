@@ -178,7 +178,7 @@ fn sv_sign_artifact(sv, path, secret_key, key_id, artifact_type) {
 
     var sig = sign_data(chash, strlen(chash), secret_key);
     var artifact = trusted_artifact_new(path, artifact_type, chash);
-    artifact_set_signature(artifact, sig, 32);
+    artifact_set_signature(artifact, sig, 64);
     artifact_set_signer(artifact, key_id);
     artifact_set_trust_level(artifact, TRUST_VERIFIED);
     artifact_set_verified_at(artifact, clock_epoch_secs());
@@ -234,9 +234,10 @@ fn sv_verify_artifact(sv, path, artifact_type) {
                 var kr = load64(sv);
                 var kv = keyring_get_current(kr, signer);
                 if (kv != 0) {
-                    var sk = kv_secret_key(kv);
-                    if (sk != 0) {
-                        var valid = verify_signature(chash, strlen(chash), sig, sk);
+                    var pk = kv_public_key_hex(kv);
+                    if (pk != 0) {
+                        var pk_bytes = hex_decode(pk, 64);
+                        var valid = verify_data(chash, strlen(chash), sig, pk_bytes);
                         if (valid == 1) {
                             if (trust_level_rank(trust_level) < trust_level_rank(TRUST_VERIFIED)) {
                                 trust_level = TRUST_VERIFIED;
@@ -247,7 +248,7 @@ fn sv_verify_artifact(sv, path, artifact_type) {
                             vresult_add_check(vr, trust_check_new("signature", 0, "Signature invalid"));
                         }
                     } else {
-                        vresult_add_check(vr, trust_check_new("signature", 0, "No secret key for verification"));
+                        vresult_add_check(vr, trust_check_new("signature", 0, "No public key for verification"));
                     }
                 } else {
                     vresult_add_check(vr, trust_check_new("signature", 0, "Signer key not in keyring"));

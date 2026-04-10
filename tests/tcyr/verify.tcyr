@@ -20,6 +20,9 @@ include "src/hex.cyr"
 include "src/ct.cyr"
 include "src/hmac.cyr"
 include "src/sha512.cyr"
+include "lib/bigint.cyr"
+include "src/bigint_ext.cyr"
+include "src/ed25519.cyr"
 include "src/trust.cyr"
 include "src/integrity.cyr"
 include "src/policy.cyr"
@@ -28,6 +31,7 @@ include "src/verify.cyr"
 
 fn main() {
     alloc_init();
+    ed25519_init();
 
     # Setup: create a temp file to verify
     var tmppath = "/tmp/sigil_verify_test.txt";
@@ -36,13 +40,14 @@ fn main() {
     file_close(tfd);
 
     # Generate a keypair
-    var sk[32];
-    var pk_hex[65];
-    var kid = generate_keypair(&sk, &pk_hex);
+    var sk[64];
+    var pk[32];
+    var kid = generate_keypair(&sk, &pk);
+    var pk_hex = hex_encode(&pk, 32);
 
     # Create keyring and add key
     var kr = keyring_new("/tmp/sigil_test_keys");
-    var kv = key_version_new(kid, &pk_hex);
+    var kv = key_version_new(kid, pk_hex);
     kv_set_secret_key(kv, &sk);
     keyring_add_key(kr, kv);
 

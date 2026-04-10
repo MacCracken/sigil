@@ -342,40 +342,39 @@ fn hash_file(path) {
 }
 
 # ================================================================
-# Signing / verification (HMAC-SHA256 for now)
+# Signing / verification (Ed25519)
 # ================================================================
 
 fn sign_data(data, len, secret_key) {
-    return hmac_sign(secret_key, 32, data, len);
+    # secret_key is 64 bytes (seed || pk) from ed25519_keypair
+    var sig = alloc(64);
+    ed25519_sign(secret_key, data, len, sig);
+    return sig;
 }
 
-fn verify_signature(data, len, sig, secret_key) {
-    return hmac_verify(secret_key, 32, data, len, sig);
+fn verify_data(data, len, sig, public_key) {
+    # public_key is 32 bytes
+    return ed25519_verify(public_key, data, len, sig);
 }
 
 # ================================================================
-# Key generation
+# Key generation (Ed25519)
 # ================================================================
 
-fn generate_keypair(sk_out, pk_hex_out) {
-    # Generate 32 random bytes for secret key
+fn generate_keypair(sk_out, pk_out) {
+    # sk_out: 64 bytes (seed || pk), pk_out: 32 bytes
+    var seed[32];
     var fd = file_open("/dev/urandom", 0, 0);
-    file_read(fd, sk_out, 32);
+    file_read(fd, &seed, 32);
     file_close(fd);
+    ed25519_keypair(&seed, sk_out, pk_out);
+    memset(&seed, 0, 32);
 
-    # Derive "public key" = SHA-256(secret_key) for HMAC scheme
-    var pk[32];
-    sha256(sk_out, 32, &pk);
-    var hex = hex_encode(&pk, 32);
-
-    # Generate key_id = first 16 chars of public key hex
+    # key_id = first 16 hex chars of public key
+    var hex = hex_encode(pk_out, 32);
     var kid = alloc(17);
     memcpy(kid, hex, 16);
     store8(kid + 16, 0);
-
-    # Store hex in output
-    memcpy(pk_hex_out, hex, 65);
-
     return kid;
 }
 
