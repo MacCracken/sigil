@@ -417,6 +417,185 @@ fn sv_stats(sv) {
 # Boot chain verification
 # ================================================================
 
+# ================================================================
+# Compliance report
+# ================================================================
+
+fn sv_compliance_report(sv) {
+    var cr = compliance_report_new();
+    var store = load64(sv + 32);
+    var policy = load64(sv + 8);
+    var min_trust = policy_min_trust(policy);
+    var keys = map_keys(store);
+    var total = vec_len(keys);
+    store64(cr, total);
+
+    var compliant = 0;
+    var i = 0;
+    while (i < total) {
+        var chash = vec_get(keys, i);
+        var artifact = map_get(store, chash);
+        var tl = artifact_trust_level(artifact);
+        var path = artifact_path(artifact);
+
+        if (tl == TRUST_REVOKED) {
+            vec_push(load64(cr + 40), artifact);
+        } elif (trust_level_ge(tl, min_trust) == 0) {
+            vec_push(load64(cr + 24), artifact);
+        } else {
+            # Check key pin
+            var signer = artifact_signer_key_id(artifact);
+            if (_sv_key_authorized(sv, path, signer) == 0) {
+                vec_push(load64(cr + 48), artifact);
+            } else {
+                if (artifact_signature(artifact) == 0) {
+                    if (policy_allow_unsigned(policy) == 0) {
+                        vec_push(load64(cr + 32), artifact);
+                    } else {
+                        vec_push(load64(cr + 16), artifact);
+                        compliant = compliant + 1;
+                    }
+                } else {
+                    vec_push(load64(cr + 16), artifact);
+                    compliant = compliant + 1;
+                }
+            }
+        }
+        i = i + 1;
+    }
+    store64(cr + 8, compliant);
+    return cr;
+}
+
+# ================================================================
+# Trust store snapshot and diff
+# ================================================================
+
+fn sv_snapshot_trust_store(sv) {
+    var store = load64(sv + 32);
+    var keys = map_keys(store);
+    var snap = map_new();
+    var klen = vec_len(keys);
+    var i = 0;
+    while (i < klen) {
+        var chash = vec_get(keys, i);
+        var artifact = map_get(store, chash);
+        map_set(snap, chash, artifact);
+        i = i + 1;
+    }
+    return snap;
+}
+
+# TrustStoreDiff (24 bytes): added, removed, changed (all vecs)
+fn trust_store_diff_new() {
+    var d = fl_alloc(24);
+    store64(d, vec_new());     # added
+    store64(d + 8, vec_new()); # removed
+    store64(d + 16, vec_new()); # changed
+    return d;
+}
+
+fn tsdiff_added(d) { return load64(d); }
+fn tsdiff_removed(d) { return load64(d + 8); }
+fn tsdiff_changed(d) { return load64(d + 16); }
+fn tsdiff_is_empty(d) {
+    if (vec_len(load64(d)) == 0) {
+        if (vec_len(load64(d + 8)) == 0) {
+            if (vec_len(load64(d + 16)) == 0) { return 1; }
+        }
+    }
+    return 0;
+}
+
+fn sv_diff_trust_store(sv, old_snap) {
+    var diff = trust_store_diff_new();
+    var store = load64(sv + 32);
+    var current_keys = map_keys(store);
+    var old_keys = map_keys(old_snap);
+
+    # Find added and changed
+    var cklen = vec_len(current_keys);
+    var i = 0;
+    while (i < cklen) {
+        var chash = vec_get(current_keys, i);
+        var old_art = map_get(old_snap, chash);
+        if (old_art == 0) {
+            vec_push(load64(diff), map_get(store, chash));
+        } else {
+            var new_art = map_get(store, chash);
+            if (artifact_trust_level(new_art) != artifact_trust_level(old_art)) {
+                vec_push(load64(diff + 16), new_art);
+            }
+        }
+        i = i + 1;
+    }
+
+    # Find removed
+    var oklen = vec_len(old_keys);
+    i = 0;
+    while (i < oklen) {
+        var chash = vec_get(old_keys, i);
+        if (map_get(store, chash) == 0) {
+            vec_push(load64(diff + 8), map_get(old_snap, chash));
+        }
+        i = i + 1;
+    }
+    return diff;
+}
+
+# ================================================================
+# Trust store persistence
+# ================================================================
+
+fn sv_save_trust_store(sv, path) {
+    var store = load64(sv + 32);
+    var keys = map_keys(store);
+    var klen = vec_len(keys);
+    var fd = file_open(path, 577, 420);
+    if (fd < 0) { return ERR_IO; }
+    file_write(fd, "[", 1);
+    var i = 0;
+    while (i < klen) {
+        var chash = vec_get(keys, i);
+        var art = map_get(store, chash);
+        if (i > 0) { file_write(fd, ",", 1); }
+        file_write(fd, "{\"hash\":\"", 9);
+        file_write(fd, chash, strlen(chash));
+        file_write(fd, "\",\"path\":\"", 10);
+        file_write(fd, artifact_path(art), strlen(artifact_path(art)));
+        file_write(fd, "\",\"type\":", 9);
+        var ts = fmt_int(artifact_type(art));
+        file_write(fd, ts, strlen(ts));
+        file_write(fd, ",\"trust\":", 9);
+        ts = fmt_int(artifact_trust_level(art));
+        file_write(fd, ts, strlen(ts));
+        file_write(fd, "}", 1);
+        i = i + 1;
+    }
+    file_write(fd, "]", 1);
+    file_close(fd);
+    return ERR_NONE;
+}
+
+# Batch verification
+fn sv_verify_batch(sv, artifacts, count) {
+    var results = vec_new();
+    var i = 0;
+    while (i < count) {
+        # Each artifact entry: {path, type} packed as 16 bytes
+        var path = load64(artifacts + i * 16);
+        var atype = load64(artifacts + i * 16 + 8);
+        var vr = sv_verify_artifact(sv, path, atype);
+        vec_push(results, vr);
+        i = i + 1;
+    }
+    return results;
+}
+
+# ================================================================
+# Boot chain verification
+# ================================================================
+
 fn sv_verify_boot_chain(sv, components) {
     var policy = load64(sv + 8);
     if (policy_verify_on_boot(policy) == 0) {

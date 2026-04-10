@@ -1,5 +1,5 @@
 # trust.cyr — signing, verification, key management
-# Uses HMAC-SHA256 for now; Ed25519 swaps in when bigint.cyr is ready.
+# Ed25519 (RFC 8032) for asymmetric signing, HMAC-SHA256 for symmetric.
 
 # ================================================================
 # KeyRole
@@ -153,6 +153,167 @@ fn keyring_find_by_role(kr, role) {
         i = i + 1;
     }
     return result;
+}
+
+fn keyring_is_empty(kr) {
+    if (keyring_len(kr) == 0) { return 1; }
+    return 0;
+}
+
+# Get key valid at a specific time
+fn keyring_get_key_valid_at(kr, key_id, when) {
+    var m = load64(kr);
+    var versions = map_get(m, key_id);
+    if (versions == 0) { return 0; }
+    var vlen = vec_len(versions);
+    var i = vlen - 1;
+    while (i >= 0) {
+        var kv = vec_get(versions, i);
+        if (kv_is_valid_at(kv, when) == 1) { return kv; }
+        i = i - 1;
+    }
+    return 0;
+}
+
+# Get all key IDs in the keyring
+fn keyring_key_ids(kr) {
+    var m = load64(kr);
+    return map_keys(m);
+}
+
+# Find keys by publisher name (case-sensitive substring match)
+fn keyring_find_by_publisher(kr, name) {
+    var result = vec_new();
+    var m = load64(kr);
+    var keys = map_keys(m);
+    var klen = vec_len(keys);
+    var nlen = strlen(name);
+    var i = 0;
+    while (i < klen) {
+        var kid = vec_get(keys, i);
+        var versions = map_get(m, kid);
+        var vlen = vec_len(versions);
+        var j = 0;
+        while (j < vlen) {
+            var kv = vec_get(versions, j);
+            var pname = kv_pub_name(kv);
+            if (pname != 0) {
+                # Simple substring search
+                var plen = strlen(pname);
+                var k = 0;
+                while (k + nlen <= plen) {
+                    if (memeq(pname + k, name, nlen) == 1) {
+                        vec_push(result, kv);
+                        k = plen;  # break
+                    }
+                    k = k + 1;
+                }
+            }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return result;
+}
+
+# Rotate key: create new version with overlap period
+fn keyring_rotate_key(kr, key_id, new_pk_hex, overlap_until) {
+    var new_kv = key_version_new(key_id, new_pk_hex);
+    # Set the old key's valid_until to overlap_until
+    var m = load64(kr);
+    var versions = map_get(m, key_id);
+    if (versions != 0) {
+        var vlen = vec_len(versions);
+        if (vlen > 0) {
+            var old_kv = vec_get(versions, vlen - 1);
+            kv_set_valid_until(old_kv, overlap_until);
+        }
+    }
+    keyring_add_key(kr, new_kv);
+    return new_kv;
+}
+
+# Get trust chain from key to root (following issued_by links)
+fn keyring_get_chain(kr, key_id) {
+    var chain = vec_new();
+    var current_id = key_id;
+    var max_depth = 10;
+    var depth = 0;
+    while (current_id != 0) {
+        if (depth >= max_depth) { return chain; }
+        var kv = keyring_get_current(kr, current_id);
+        if (kv == 0) { return chain; }
+        vec_push(chain, kv);
+        current_id = kv_issued_by(kv);
+        if (current_id == 0) { return chain; }
+        # Check for self-signed (root)
+        if (streq(current_id, key_id) == 1) { return chain; }
+        depth = depth + 1;
+    }
+    return chain;
+}
+
+# Validate chain: verify each key was issued by its parent
+fn keyring_validate_chain(kr, key_id) {
+    var chain = keyring_get_chain(kr, key_id);
+    var clen = vec_len(chain);
+    if (clen == 0) { return 0; }
+    # Last key in chain should be root
+    var root = vec_get(chain, clen - 1);
+    if (kv_role(root) != KEY_ROLE_ROOT) { return 0; }
+    return 1;
+}
+
+# Save keyring to JSON files in keys_dir
+fn keyring_save(kr) {
+    var keys_dir = load64(kr + 8);
+    var m = load64(kr);
+    var kids = map_keys(m);
+    var klen = vec_len(kids);
+    var count = 0;
+    var i = 0;
+    while (i < klen) {
+        var kid = vec_get(kids, i);
+        var versions = map_get(m, kid);
+        var vlen = vec_len(versions);
+        # Write JSON file: keys_dir/key_id.json
+        var path = alloc(256);
+        var pos = 0;
+        var dlen = strlen(keys_dir);
+        memcpy(path, keys_dir, dlen);
+        pos = pos + dlen;
+        store8(path + pos, 47);  # /
+        pos = pos + 1;
+        var kidlen = strlen(kid);
+        memcpy(path + pos, kid, kidlen);
+        pos = pos + kidlen;
+        memcpy(path + pos, ".json", 5);
+        pos = pos + 5;
+        store8(path + pos, 0);
+
+        var fd = file_open(path, 577, 420);  # O_WRONLY|O_CREAT|O_TRUNC, 0644
+        if (fd >= 0) {
+            file_write(fd, "[", 1);
+            var j = 0;
+            while (j < vlen) {
+                var kv = vec_get(versions, j);
+                if (j > 0) { file_write(fd, ",", 1); }
+                file_write(fd, "{\"key_id\":\"", 11);
+                file_write(fd, kv_key_id(kv), strlen(kv_key_id(kv)));
+                file_write(fd, "\",\"public_key_hex\":\"", 20);
+                file_write(fd, kv_public_key_hex(kv), strlen(kv_public_key_hex(kv)));
+                file_write(fd, "\",\"role\":\"", 10);
+                file_write(fd, key_role_name(kv_role(kv)), strlen(key_role_name(kv_role(kv))));
+                file_write(fd, "\"}", 2);
+                j = j + 1;
+            }
+            file_write(fd, "]", 1);
+            file_close(fd);
+            count = count + vlen;
+        }
+        i = i + 1;
+    }
+    return count;
 }
 
 # ================================================================

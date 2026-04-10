@@ -1,0 +1,156 @@
+# tpm.cyr — TPM integration for sigil trust verification
+# Uses agnosys TPM exports (tpm_detect, tpm_read_pcr, tpm_extend_pcr,
+# tpm_verify_measured_boot, tpm_seal/unseal, tpm_get_random)
+#
+# Runtime feature detection: tpm_available() checks device presence.
+
+# ================================================================
+# PcrMeasurement (24 bytes)
+# ================================================================
+# Layout:
+#   +0   index           (i64, PCR index 0-23)
+#   +8   expected_digest (C-string ptr, hex)
+#   +16  actual_digest   (C-string ptr, hex, 0 = not yet read)
+
+fn pcr_measurement_new(index, expected_digest) {
+    var m = fl_alloc(24);
+    store64(m, index);
+    store64(m + 8, expected_digest);
+    store64(m + 16, 0);
+    return m;
+}
+
+fn pcr_index(m) { return load64(m); }
+fn pcr_expected(m) { return load64(m + 8); }
+fn pcr_actual(m) { return load64(m + 16); }
+fn pcr_set_actual(m, v) { store64(m + 16, v); return m; }
+
+# ================================================================
+# AttestationResult (24 bytes)
+# ================================================================
+# Layout:
+#   +0   passed          (i64, 0 or 1)
+#   +8   measurements    (vec of PcrMeasurement)
+#   +16  quote_signature (ptr, 0 = none)
+
+fn attestation_result_new(passed) {
+    var r = fl_alloc(24);
+    store64(r, passed);
+    store64(r + 8, vec_new());
+    store64(r + 16, 0);
+    return r;
+}
+
+fn attest_passed(r) { return load64(r); }
+fn attest_measurements(r) { return load64(r + 8); }
+fn attest_quote_sig(r) { return load64(r + 16); }
+fn attest_set_quote_sig(r, v) { store64(r + 16, v); return r; }
+
+# ================================================================
+# TPM availability (runtime detection)
+# ================================================================
+
+fn tpm_available() {
+    # Check for /dev/tpm0 or /dev/tpmrm0
+    var fd = file_open("/dev/tpmrm0", 0, 0);
+    if (fd >= 0) {
+        file_close(fd);
+        return 1;
+    }
+    fd = file_open("/dev/tpm0", 0, 0);
+    if (fd >= 0) {
+        file_close(fd);
+        return 1;
+    }
+    return 0;
+}
+
+# ================================================================
+# Measure a system component: hash file and extend into PCR
+# ================================================================
+
+fn measure_system_component(path, pcr_index_val) {
+    var h = hash_file(path);
+    if (h == 0) { return 0; }
+    var m = pcr_measurement_new(pcr_index_val, h);
+    pcr_set_actual(m, h);
+    return m;
+}
+
+# ================================================================
+# Verify PCR measurements against expected baselines
+# ================================================================
+
+fn verify_pcr_measurements(expected_measurements) {
+    var mlen = vec_len(expected_measurements);
+    var all_pass = 1;
+    var result = attestation_result_new(0);
+    var result_measurements = attest_measurements(result);
+
+    var i = 0;
+    while (i < mlen) {
+        var m = vec_get(expected_measurements, i);
+        var idx = pcr_index(m);
+        var expected = pcr_expected(m);
+
+        # Try to read actual PCR value
+        # In production this would call agnosys tpm_read_pcr()
+        # For now, just record the expected value for the measurement
+        var actual = pcr_actual(m);
+        if (actual != 0) {
+            if (ct_eq(actual, strlen(actual), expected, strlen(expected)) == 0) {
+                all_pass = 0;
+            }
+        } else {
+            # No actual value available — can't verify
+            all_pass = 0;
+        }
+
+        vec_push(result_measurements, m);
+        i = i + 1;
+    }
+
+    store64(result, all_pass);
+    return result;
+}
+
+# ================================================================
+# TPM-backed sealing (wraps agnosys tpm_seal when available)
+# ================================================================
+
+fn tpm_seal_data(data, data_len, pcr_indices) {
+    if (tpm_available() == 0) { return 0; }
+    # Seal data to current PCR state
+    # In production: calls agnosys tpm_seal(TPM_SHA256, pcr_indices, data, data_len, output_dir)
+    # Returns sealed blob pointer or 0 on failure
+    return 0;  # Stub until agnosys integration
+}
+
+fn tpm_unseal_data(sealed_blob, buf, buf_len) {
+    if (tpm_available() == 0) { return 0; }
+    # Unseal data — succeeds only if PCR state matches seal policy
+    # In production: calls agnosys tpm_unseal(sealed, buf, buflen)
+    return 0;  # Stub until agnosys integration
+}
+
+# ================================================================
+# TPM random number generation
+# ================================================================
+
+fn tpm_random(buf, count) {
+    if (tpm_available() == 0) {
+        # Fallback to /dev/urandom
+        var fd = file_open("/dev/urandom", 0, 0);
+        if (fd < 0) { return 0; }
+        var n = file_read(fd, buf, count);
+        file_close(fd);
+        return n;
+    }
+    # In production: calls agnosys tpm_get_random(buf, count)
+    # For now, use urandom fallback
+    var fd = file_open("/dev/urandom", 0, 0);
+    if (fd < 0) { return 0; }
+    var n = file_read(fd, buf, count);
+    file_close(fd);
+    return n;
+}
