@@ -1,0 +1,451 @@
+# verify.cyr — SigilVerifier: the main trust engine
+# Combines signing, keyring, integrity, revocation, key pinning, audit.
+
+# ================================================================
+# KeyPin (16 bytes)
+# ================================================================
+# Layout:
+#   +0   key_id       (C-string ptr)
+#   +8   path_prefix  (C-string ptr)
+
+fn key_pin_new(key_id, path_prefix) {
+    var kp = fl_alloc(16);
+    store64(kp, key_id);
+    store64(kp + 8, path_prefix);
+    return kp;
+}
+
+fn kpin_key_id(kp) { return load64(kp); }
+fn kpin_prefix(kp) { return load64(kp + 8); }
+
+# ================================================================
+# ComplianceReport (56 bytes)
+# ================================================================
+# Layout:
+#   +0   total            (i64)
+#   +8   compliant_count  (i64)
+#   +16  compliant        (vec)
+#   +24  below_minimum    (vec)
+#   +32  unsigned_list    (vec)
+#   +40  revoked_list     (vec)
+#   +48  pin_violations   (vec)
+
+fn compliance_report_new() {
+    var cr = fl_alloc(56);
+    store64(cr, 0);
+    store64(cr + 8, 0);
+    store64(cr + 16, vec_new());
+    store64(cr + 24, vec_new());
+    store64(cr + 32, vec_new());
+    store64(cr + 40, vec_new());
+    store64(cr + 48, vec_new());
+    return cr;
+}
+
+fn creport_total(cr) { return load64(cr); }
+fn creport_compliant_count(cr) { return load64(cr + 8); }
+fn creport_is_compliant(cr) {
+    if (load64(cr + 8) == load64(cr)) { return 1; }
+    return 0;
+}
+fn creport_violation_count(cr) {
+    return load64(cr) - load64(cr + 8);
+}
+
+# ================================================================
+# SigilVerifier (72 bytes)
+# ================================================================
+# Layout:
+#   +0   keyring       (PublisherKeyring ptr)
+#   +8   policy        (TrustPolicy ptr)
+#   +16  revocations   (RevocationList ptr)
+#   +24  integrity     (IntegrityVerifier ptr)
+#   +32  trust_store   (hashmap: content_hash -> TrustedArtifact)
+#   +40  key_pins      (vec of KeyPin)
+#   +48  cache_enabled (i64)
+#   +56  audit_log     (AuditLog ptr)
+#   +64  cache         (hashmap: path -> cached result hash, 0=disabled)
+
+fn sigil_verifier_new(keyring, policy) {
+    var sv = fl_alloc(72);
+    store64(sv, keyring);
+    store64(sv + 8, policy);
+    store64(sv + 16, revocation_list_new());
+    store64(sv + 24, integrity_verifier_new(integrity_policy_new()));
+    store64(sv + 32, map_new());
+    store64(sv + 40, vec_new());
+    store64(sv + 48, 0);
+    store64(sv + 56, audit_log_new());
+    store64(sv + 64, 0);
+    return sv;
+}
+
+fn sv_keyring(sv) { return load64(sv); }
+fn sv_policy(sv) { return load64(sv + 8); }
+fn sv_revocations(sv) { return load64(sv + 16); }
+fn sv_integrity(sv) { return load64(sv + 24); }
+fn sv_trust_store(sv) { return load64(sv + 32); }
+fn sv_key_pins(sv) { return load64(sv + 40); }
+fn sv_audit_log(sv) { return load64(sv + 56); }
+
+fn sv_set_cache_enabled(sv, enabled) {
+    store64(sv + 48, enabled);
+    return sv;
+}
+
+fn sv_clear_cache(sv) {
+    store64(sv + 64, 0);
+    return sv;
+}
+
+# ================================================================
+# Key pin management
+# ================================================================
+
+fn sv_add_key_pin(sv, pin) {
+    vec_push(load64(sv + 40), pin);
+    return sv;
+}
+
+fn sv_remove_key_pins(sv, path_prefix) {
+    var pins = load64(sv + 40);
+    var plen = vec_len(pins);
+    var removed = 0;
+    var i = plen - 1;
+    while (i >= 0) {
+        var pin = vec_get(pins, i);
+        if (streq(kpin_prefix(pin), path_prefix) == 1) {
+            vec_remove(pins, i);
+            removed = removed + 1;
+        }
+        i = i - 1;
+    }
+    return removed;
+}
+
+# Check if key is authorized for path (no pin = any key OK)
+fn _sv_key_authorized(sv, path, signer_key_id) {
+    var pins = load64(sv + 40);
+    var plen = vec_len(pins);
+    var has_matching_pin = 0;
+    var i = 0;
+    while (i < plen) {
+        var pin = vec_get(pins, i);
+        var prefix = kpin_prefix(pin);
+        var plen2 = strlen(prefix);
+        if (memeq(path, prefix, plen2) == 1) {
+            has_matching_pin = 1;
+            if (signer_key_id != 0) {
+                if (streq(kpin_key_id(pin), signer_key_id) == 1) {
+                    return 1;
+                }
+            }
+        }
+        i = i + 1;
+    }
+    if (has_matching_pin == 0) { return 1; }
+    return 0;
+}
+
+# ================================================================
+# Register artifacts in trust store
+# ================================================================
+
+fn sv_register_trusted(sv, artifact) {
+    # Downgrade SystemCore to Verified (only register_system_core allows SystemCore)
+    if (artifact_trust_level(artifact) == TRUST_SYSTEM_CORE) {
+        artifact_set_trust_level(artifact, TRUST_VERIFIED);
+    }
+    var chash = artifact_content_hash(artifact);
+    map_set(load64(sv + 32), chash, artifact);
+    return sv;
+}
+
+fn sv_register_system_core(sv, artifact) {
+    artifact_set_trust_level(artifact, TRUST_SYSTEM_CORE);
+    var chash = artifact_content_hash(artifact);
+    map_set(load64(sv + 32), chash, artifact);
+    return sv;
+}
+
+# ================================================================
+# Sign an artifact and register it
+# ================================================================
+
+fn sv_sign_artifact(sv, path, secret_key, key_id, artifact_type) {
+    var chash = hash_file(path);
+    if (chash == 0) { return 0; }
+
+    var sig = sign_data(chash, strlen(chash), secret_key);
+    var artifact = trusted_artifact_new(path, artifact_type, chash);
+    artifact_set_signature(artifact, sig, 32);
+    artifact_set_signer(artifact, key_id);
+    artifact_set_trust_level(artifact, TRUST_VERIFIED);
+    artifact_set_verified_at(artifact, clock_epoch_secs());
+
+    map_set(load64(sv + 32), chash, artifact);
+
+    # Audit
+    var ae = audit_artifact_signed(path, artifact_type, key_id, chash);
+    alog_record(load64(sv + 56), ae);
+
+    return artifact;
+}
+
+# ================================================================
+# Verify an artifact
+# ================================================================
+
+fn sv_verify_artifact(sv, path, artifact_type) {
+    var policy = load64(sv + 8);
+    var chash = hash_file(path);
+    if (chash == 0) {
+        return verification_result_new(
+            trusted_artifact_new(path, artifact_type, ""),
+            0, clock_epoch_secs()
+        );
+    }
+
+    var trust_level = TRUST_UNVERIFIED;
+    var vr = verification_result_new(
+        trusted_artifact_new(path, artifact_type, chash),
+        1, clock_epoch_secs()
+    );
+
+    # Check: file readable
+    vresult_add_check(vr, trust_check_new("file_readable", 1, "File read successfully"));
+
+    # Check: trust store lookup
+    var store = load64(sv + 32);
+    var stored = map_get(store, chash);
+    if (stored != 0) {
+        trust_level = artifact_trust_level(stored);
+        vresult_add_check(vr, trust_check_new("trust_store", 1, "Found in trust store"));
+    } else {
+        vresult_add_check(vr, trust_check_new("trust_store", 0, "Not in trust store"));
+    }
+
+    # Check: signature verification
+    if (stored != 0) {
+        var sig = artifact_signature(stored);
+        var signer = artifact_signer_key_id(stored);
+        if (sig != 0) {
+            if (signer != 0) {
+                var kr = load64(sv);
+                var kv = keyring_get_current(kr, signer);
+                if (kv != 0) {
+                    var sk = kv_secret_key(kv);
+                    if (sk != 0) {
+                        var valid = verify_signature(chash, strlen(chash), sig, sk);
+                        if (valid == 1) {
+                            if (trust_level_rank(trust_level) < trust_level_rank(TRUST_VERIFIED)) {
+                                trust_level = TRUST_VERIFIED;
+                            }
+                            vresult_add_check(vr, trust_check_new("signature", 1, "Signature valid"));
+                        } else {
+                            trust_level = TRUST_UNVERIFIED;
+                            vresult_add_check(vr, trust_check_new("signature", 0, "Signature invalid"));
+                        }
+                    } else {
+                        vresult_add_check(vr, trust_check_new("signature", 0, "No secret key for verification"));
+                    }
+                } else {
+                    vresult_add_check(vr, trust_check_new("signature", 0, "Signer key not in keyring"));
+                }
+            } else {
+                vresult_add_check(vr, trust_check_new("signature", 0, "No signer key ID"));
+            }
+        } else {
+            vresult_add_check(vr, trust_check_new("signature", 0, "No signature"));
+        }
+    } else {
+        vresult_add_check(vr, trust_check_new("signature", 0, "Not in trust store"));
+    }
+
+    # Check: revocation
+    var rl = load64(sv + 16);
+    var key_revoked = 0;
+    var hash_revoked = rl_is_artifact_revoked(rl, chash);
+    if (stored != 0) {
+        var signer = artifact_signer_key_id(stored);
+        if (signer != 0) {
+            key_revoked = rl_is_key_revoked(rl, signer);
+        }
+    }
+    if (key_revoked == 1) {
+        trust_level = TRUST_REVOKED;
+        vresult_add_check(vr, trust_check_new("revocation", 0, "Signer key revoked"));
+    } elif (hash_revoked == 1) {
+        trust_level = TRUST_REVOKED;
+        vresult_add_check(vr, trust_check_new("revocation", 0, "Content hash revoked"));
+    } else {
+        vresult_add_check(vr, trust_check_new("revocation", 1, "Not revoked"));
+    }
+
+    # Check: key pinning
+    if (stored != 0) {
+        var signer = artifact_signer_key_id(stored);
+        var authorized = _sv_key_authorized(sv, path, signer);
+        if (authorized == 1) {
+            vresult_add_check(vr, trust_check_new("key_pin", 1, "Key authorized"));
+        } else {
+            vresult_add_check(vr, trust_check_new("key_pin", 0, "Key not authorized for path"));
+            trust_level = TRUST_UNVERIFIED;
+        }
+    }
+
+    # Check: policy compliance
+    var min_trust = policy_min_trust(policy);
+    var enforcement = policy_enforcement(policy);
+    var meets_min = trust_level_ge(trust_level, min_trust);
+    if (meets_min == 1) {
+        vresult_add_check(vr, trust_check_new("policy", 1, "Meets minimum trust level"));
+    } else {
+        if (enforcement == ENFORCE_STRICT) {
+            vresult_add_check(vr, trust_check_new("policy", 0, "Below minimum trust level"));
+            vresult_set_passed(vr, 0);
+        } elif (enforcement == ENFORCE_PERMISSIVE) {
+            vresult_add_check(vr, trust_check_new("policy", 0, "Below minimum (permissive)"));
+        } else {
+            vresult_add_check(vr, trust_check_new("policy", 0, "Below minimum (audit only)"));
+        }
+    }
+
+    # Update artifact trust level
+    artifact_set_trust_level(vresult_artifact(vr), trust_level);
+
+    # Audit
+    var passed = vresult_passed(vr);
+    var ae = audit_artifact_verified(path, artifact_type, trust_level, passed, chash);
+    alog_record(load64(sv + 56), ae);
+
+    return vr;
+}
+
+# ================================================================
+# Convenience: verify agent binary
+# ================================================================
+
+fn sv_verify_agent(sv, path) {
+    var policy = load64(sv + 8);
+    var vr = sv_verify_artifact(sv, path, ARTIFACT_AGENT_BINARY);
+
+    # Additional check: unsigned agents
+    if (policy_allow_unsigned(policy) == 0) {
+        var checks = vresult_checks(vr);
+        var clen = vec_len(checks);
+        var has_sig = 0;
+        var i = 0;
+        while (i < clen) {
+            var tc = vec_get(checks, i);
+            if (streq(check_name(tc), "signature") == 1) {
+                if (check_passed(tc) == 1) { has_sig = 1; }
+            }
+            i = i + 1;
+        }
+        if (has_sig == 0) {
+            vresult_add_check(vr, trust_check_new("unsigned_agent", 0, "Unsigned agents not allowed"));
+            vresult_set_passed(vr, 0);
+        }
+    }
+    return vr;
+}
+
+# ================================================================
+# Revocation management
+# ================================================================
+
+fn sv_add_revocation(sv, entry) {
+    var rl = load64(sv + 16);
+    var result = rl_add(rl, entry);
+    if (result == ERR_NONE) {
+        var ae = audit_revocation_added(rev_key_id(entry), rev_content_hash(entry), rev_reason(entry));
+        alog_record(load64(sv + 56), ae);
+    }
+    return result;
+}
+
+fn sv_check_revocation(sv, key_id, content_hash) {
+    var rl = load64(sv + 16);
+    if (key_id != 0) {
+        if (rl_is_key_revoked(rl, key_id) == 1) { return 1; }
+    }
+    if (content_hash != 0) {
+        if (rl_is_artifact_revoked(rl, content_hash) == 1) { return 1; }
+    }
+    return 0;
+}
+
+fn sv_revocation_count(sv) {
+    return rl_len(load64(sv + 16));
+}
+
+# ================================================================
+# Trust store queries
+# ================================================================
+
+fn sv_trust_level_for(sv, content_hash) {
+    var store = load64(sv + 32);
+    var artifact = map_get(store, content_hash);
+    if (artifact == 0) { return TRUST_UNVERIFIED; }
+    return artifact_trust_level(artifact);
+}
+
+fn sv_stats(sv) {
+    var store = load64(sv + 32);
+    var s = sigil_stats_new();
+    var keys = map_keys(store);
+    var total = vec_len(keys);
+    store64(s, total);
+    var verified = 0;
+    var revoked = 0;
+    var i = 0;
+    while (i < total) {
+        var chash = vec_get(keys, i);
+        var artifact = map_get(store, chash);
+        var tl = artifact_trust_level(artifact);
+        if (trust_level_ge(tl, TRUST_VERIFIED) == 1) { verified = verified + 1; }
+        if (tl == TRUST_REVOKED) { revoked = revoked + 1; }
+        i = i + 1;
+    }
+    store64(s + 8, verified);
+    store64(s + 16, revoked);
+    return s;
+}
+
+# ================================================================
+# Boot chain verification
+# ================================================================
+
+fn sv_verify_boot_chain(sv, components) {
+    var policy = load64(sv + 8);
+    if (policy_verify_on_boot(policy) == 0) {
+        return integrity_report_new();
+    }
+
+    var iv = load64(sv + 24);
+    var ipol = integrity_policy_new();
+
+    var clen = vec_len(components);
+    var i = 0;
+    while (i < clen) {
+        var path = vec_get(components, i);
+        var store = load64(sv + 32);
+        # Look for artifact by path in trust store
+        var keys = map_keys(store);
+        var klen = vec_len(keys);
+        var j = 0;
+        while (j < klen) {
+            var chash = vec_get(keys, j);
+            var artifact = map_get(store, chash);
+            if (streq(artifact_path(artifact), path) == 1) {
+                ipolicy_add(ipol, path, chash);
+            }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+
+    iv_set_policy(iv, ipol);
+    return iv_verify_all(iv);
+}

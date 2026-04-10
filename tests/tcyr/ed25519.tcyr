@@ -12,6 +12,7 @@ include "lib/fmt.cyr"
 include "lib/json.cyr"
 include "lib/sakshi.cyr"
 include "lib/chrono.cyr"
+include "lib/bigint.cyr"
 
 include "src/types.cyr"
 include "src/error.cyr"
@@ -19,6 +20,7 @@ include "src/sha256.cyr"
 include "src/hex.cyr"
 include "src/ct.cyr"
 include "src/sha512.cyr"
+include "src/bigint_ext.cyr"
 include "src/ed25519.cyr"
 
 fn main() {

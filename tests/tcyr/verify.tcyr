@@ -1,0 +1,176 @@
+# verify.tcyr — SigilVerifier integration tests
+
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fmt.cyr"
+include "lib/json.cyr"
+include "lib/sakshi.cyr"
+include "lib/chrono.cyr"
+
+include "src/types.cyr"
+include "src/error.cyr"
+include "src/sha256.cyr"
+include "src/hex.cyr"
+include "src/ct.cyr"
+include "src/hmac.cyr"
+include "src/sha512.cyr"
+include "src/trust.cyr"
+include "src/integrity.cyr"
+include "src/policy.cyr"
+include "src/audit.cyr"
+include "src/verify.cyr"
+
+fn main() {
+    alloc_init();
+
+    # Setup: create a temp file to verify
+    var tmppath = "/tmp/sigil_verify_test.txt";
+    var tfd = file_open(tmppath, 577, 420);
+    file_write(tfd, "test artifact content", 21);
+    file_close(tfd);
+
+    # Generate a keypair
+    var sk[32];
+    var pk_hex[65];
+    var kid = generate_keypair(&sk, &pk_hex);
+
+    # Create keyring and add key
+    var kr = keyring_new("/tmp/sigil_test_keys");
+    var kv = key_version_new(kid, &pk_hex);
+    kv_set_secret_key(kv, &sk);
+    keyring_add_key(kr, kv);
+
+    # Create verifier with default policy
+    var policy = trust_policy_new();
+    var sv = sigil_verifier_new(kr, policy);
+
+    # ============================================================
+    # Verify unknown artifact (not in trust store)
+    # ============================================================
+    test_group("verify unknown");
+    var vr = sv_verify_artifact(sv, tmppath, ARTIFACT_SYSTEM_BINARY);
+    assert(vr != 0, "result not null");
+    # Should have checks but no trust store match
+    var checks = vresult_checks(vr);
+    assert(vec_len(checks) > 0, "has checks");
+
+    # ============================================================
+    # Sign and verify
+    # ============================================================
+    test_group("sign and verify");
+    var artifact = sv_sign_artifact(sv, tmppath, &sk, kid, ARTIFACT_SYSTEM_BINARY);
+    assert(artifact != 0, "signed artifact");
+    assert_eq(artifact_trust_level(artifact), TRUST_VERIFIED, "trust = verified");
+
+    var vr2 = sv_verify_artifact(sv, tmppath, ARTIFACT_SYSTEM_BINARY);
+    assert_eq(vresult_passed(vr2), 1, "passed");
+
+    # ============================================================
+    # Trust level query
+    # ============================================================
+    test_group("trust level query");
+    var chash = artifact_content_hash(artifact);
+    var tl = sv_trust_level_for(sv, chash);
+    assert_eq(tl, TRUST_VERIFIED, "verified level");
+
+    var tl2 = sv_trust_level_for(sv, "nonexistent_hash");
+    assert_eq(tl2, TRUST_UNVERIFIED, "unknown = unverified");
+
+    # ============================================================
+    # Stats
+    # ============================================================
+    test_group("stats");
+    var stats = sv_stats(sv);
+    assert_eq(stats_total(stats), 1, "1 artifact");
+    assert_eq(stats_verified(stats), 1, "1 verified");
+    assert_eq(stats_revoked(stats), 0, "0 revoked");
+
+    # ============================================================
+    # Revocation
+    # ============================================================
+    test_group("revocation");
+    assert_eq(sv_revocation_count(sv), 0, "no revocations");
+    var re = revocation_entry_new(0, chash, "test revocation", "admin");
+    sv_add_revocation(sv, re);
+    assert_eq(sv_revocation_count(sv), 1, "1 revocation");
+    assert_eq(sv_check_revocation(sv, 0, chash), 1, "hash revoked");
+
+    # Verify again — should show revoked
+    var vr3 = sv_verify_artifact(sv, tmppath, ARTIFACT_SYSTEM_BINARY);
+    var a3 = vresult_artifact(vr3);
+    assert_eq(artifact_trust_level(a3), TRUST_REVOKED, "artifact now revoked");
+
+    # ============================================================
+    # Key pinning
+    # ============================================================
+    test_group("key pinning");
+    var pin = key_pin_new(kid, "/tmp/");
+    sv_add_key_pin(sv, pin);
+
+    # Should still pass (correct key for path)
+    var vr4 = sv_verify_artifact(sv, tmppath, ARTIFACT_SYSTEM_BINARY);
+    # Will fail on revocation, but key_pin check should pass
+    var checks4 = vresult_checks(vr4);
+    var pin_found = 0;
+    var ci = 0;
+    while (ci < vec_len(checks4)) {
+        var tc = vec_get(checks4, ci);
+        if (streq(check_name(tc), "key_pin") == 1) {
+            pin_found = 1;
+            assert_eq(check_passed(tc), 1, "pin check passed");
+        }
+        ci = ci + 1;
+    }
+    assert_eq(pin_found, 1, "pin check exists");
+
+    # ============================================================
+    # Register system core
+    # ============================================================
+    test_group("system core");
+    var core_artifact = trusted_artifact_new("/boot/kernel", ARTIFACT_BOOT_COMPONENT, "kernelhash123");
+    sv_register_system_core(sv, core_artifact);
+    var core_tl = sv_trust_level_for(sv, "kernelhash123");
+    assert_eq(core_tl, TRUST_SYSTEM_CORE, "system core level");
+
+    # Register trusted (downgrades SystemCore)
+    test_group("register trusted");
+    var reg_artifact = trusted_artifact_new("/usr/bin/app", ARTIFACT_AGENT_BINARY, "apphash456");
+    artifact_set_trust_level(reg_artifact, TRUST_SYSTEM_CORE);
+    sv_register_trusted(sv, reg_artifact);
+    var reg_tl = sv_trust_level_for(sv, "apphash456");
+    assert_eq(reg_tl, TRUST_VERIFIED, "downgraded to verified");
+
+    # ============================================================
+    # Audit log
+    # ============================================================
+    test_group("audit log");
+    var alog = sv_audit_log(sv);
+    assert(alog_len(alog) > 0, "audit has events");
+
+    # ============================================================
+    # Verify agent binary (unsigned check)
+    # ============================================================
+    test_group("verify agent unsigned");
+    var tmppath2 = "/tmp/sigil_verify_agent.txt";
+    var tfd2 = file_open(tmppath2, 577, 420);
+    file_write(tfd2, "unsigned agent", 14);
+    file_close(tfd2);
+
+    var vr5 = sv_verify_agent(sv, tmppath2);
+    assert_eq(vresult_passed(vr5), 0, "unsigned agent rejected");
+
+    # Cleanup
+    syscall(87, tmppath);
+    syscall(87, tmppath2);
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

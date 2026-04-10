@@ -1,0 +1,248 @@
+# bigint_ext.cyr — extended 256-bit arithmetic for Ed25519
+# Adds: full 512-bit multiply, modular reduction for p=2^255-19,
+# modular inversion, modular exponentiation.
+# Builds on lib/bigint.cyr
+
+# ================================================================
+# 64×64 → 128-bit multiply (result in globals)
+# ================================================================
+
+var _m64_lo = 0;
+var _m64_hi = 0;
+
+fn _mul64_full(a, b) {
+    var mask32 = 0xFFFFFFFF;
+    var aL = a & mask32;
+    var aH = (a >> 32) & mask32;
+    var bL = b & mask32;
+    var bH = (b >> 32) & mask32;
+    var ll = aL * bL;
+    var lh = aL * bH;
+    var hl = aH * bL;
+    var hh = aH * bH;
+    var mid = lh + hl;
+    var mid_carry = 0;
+    if ((mid ^ (1 << 63)) < (lh ^ (1 << 63))) { mid_carry = 1; }
+    var lo = ll + (mid << 32);
+    var lo_carry = 0;
+    if ((lo ^ (1 << 63)) < (ll ^ (1 << 63))) { lo_carry = 1; }
+    _m64_lo = lo;
+    _m64_hi = hh + (mid >> 32) + (mid_carry << 32) + lo_carry;
+    return 0;
+}
+
+# ================================================================
+# Full 256×256 → 512-bit multiply
+# out: 64 bytes (8 limbs)
+# ================================================================
+
+# Unsigned add with carry detection: returns 1 if a+b overflows 64 bits
+fn _uadd_overflow(a, b) {
+    var sum = a + b;
+    # Unsigned overflow: sum < a (when compared as unsigned)
+    var sa = a ^ (1 << 63);
+    var ss = sum ^ (1 << 63);
+    if (ss < sa) { return 1; }
+    return 0;
+}
+
+fn u256_mul_full(out, a, b) {
+    memset(out, 0, 64);
+    var i = 0;
+    while (i < 4) {
+        var carry = 0;
+        var j = 0;
+        while (j < 4) {
+            _mul64_full(load64(a + i * 8), load64(b + j * 8));
+            var k = i + j;
+            var prev = load64(out + k * 8);
+
+            # Add three values: prev + _m64_lo + carry, tracking overflow
+            var s1 = prev + _m64_lo;
+            var c1 = _uadd_overflow(prev, _m64_lo);
+            var s2 = s1 + carry;
+            var c2 = _uadd_overflow(s1, carry);
+
+            store64(out + k * 8, s2);
+            carry = _m64_hi + c1 + c2;
+            j = j + 1;
+        }
+        if (i + 4 < 8) {
+            store64(out + (i + 4) * 8, load64(out + (i + 4) * 8) + carry);
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ================================================================
+# Reduction mod p = 2^255 - 19
+# Uses: 2^256 ≡ 38 (mod p), so for 512-bit val = aH*2^256 + aL:
+#   val mod p ≡ aL + 38*aH (mod p)
+# May need 1-2 further subtractions.
+# ================================================================
+
+# Global p = 2^255 - 19
+var _ed_p = 0;
+var _ed_p_inited = 0;
+var _mod_prod = 0;
+var _mod_aH = 0;
+var _mod_aL = 0;
+var _mod_38 = 0;
+var _mod_lowp = 0;
+var _mod_r = 0;
+var _mod_extra = 0;
+
+fn _init_ed_p() {
+    if (_ed_p_inited == 1) { return 0; }
+    _ed_p = u256_from_hex("7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffed");
+    _mod_prod = alloc(64);
+    _mod_aH = alloc(32);
+    _mod_aL = alloc(32);
+    _mod_38 = u256_from(38);
+    _mod_lowp = alloc(32);
+    _mod_r = alloc(32);
+    _mod_extra = alloc(32);
+    _ed_p_inited = 1;
+    return 0;
+}
+
+fn u512_mod_p(out, val) {
+    _init_ed_p();
+
+    store64(_mod_aH, load64(val + 32));
+    store64(_mod_aH + 8, load64(val + 40));
+    store64(_mod_aH + 16, load64(val + 48));
+    store64(_mod_aH + 24, load64(val + 56));
+
+    store64(_mod_aL, load64(val));
+    store64(_mod_aL + 8, load64(val + 8));
+    store64(_mod_aL + 16, load64(val + 16));
+    store64(_mod_aL + 24, load64(val + 24));
+
+    u256_mul_full(_mod_prod, _mod_aH, _mod_38);
+
+    store64(_mod_lowp, load64(_mod_prod));
+    store64(_mod_lowp + 8, load64(_mod_prod + 8));
+    store64(_mod_lowp + 16, load64(_mod_prod + 16));
+    store64(_mod_lowp + 24, load64(_mod_prod + 24));
+
+    var carry = u256_add(_mod_r, _mod_aL, _mod_lowp);
+    var overflow = carry + load64(_mod_prod + 32);
+
+    while (overflow > 0) {
+        store64(_mod_extra, overflow * 38);
+        store64(_mod_extra + 8, 0);
+        store64(_mod_extra + 16, 0);
+        store64(_mod_extra + 24, 0);
+        overflow = u256_add(_mod_r, _mod_r, _mod_extra);
+    }
+
+    while (u256_cmp(_mod_r, _ed_p) >= 0) {
+        u256_sub(_mod_r, _mod_r, _ed_p);
+    }
+
+    u256_copy(out, _mod_r);
+    return 0;
+}
+
+# ================================================================
+# Field arithmetic mod p
+# ================================================================
+
+fn fp_add(r, a, b) {
+    _init_ed_p();
+    u256_add(r, a, b);
+    if (u256_cmp(r, _ed_p) >= 0) { u256_sub(r, r, _ed_p); }
+    return 0;
+}
+
+fn fp_sub(r, a, b) {
+    _init_ed_p();
+    var borrow = u256_sub(r, a, b);
+    if (borrow > 0) { u256_add(r, r, _ed_p); }
+    return 0;
+}
+
+fn fp_neg(r, a) {
+    _init_ed_p();
+    if (u256_is_zero(a) == 1) {
+        u256_copy(r, a);
+        return 0;
+    }
+    u256_sub(r, _ed_p, a);
+    return 0;
+}
+
+var _fp_mul_product = 0;
+
+fn fp_mul(r, a, b) {
+    if (_fp_mul_product == 0) { _fp_mul_product = alloc(64); }
+    u256_mul_full(_fp_mul_product, a, b);
+    u512_mod_p(r, _fp_mul_product);
+    return 0;
+}
+
+fn fp_sq(r, a) {
+    return fp_mul(r, a, a);
+}
+
+# ================================================================
+# Modular exponentiation: r = base^exp mod p
+# ================================================================
+
+# Globals for fp_pow to survive nested calls (compiler clobber workaround)
+var _fp_pow_tmp = 0;
+var _fp_pow_result = 0;
+var _fp_pow_base = 0;
+var _fp_pow_exp = 0;
+var _fp_pow_i = 0;
+var _fp_pow_inited = 0;
+
+fn fp_pow(r, base, exp) {
+    _init_ed_p();
+    if (_fp_pow_inited == 0) {
+        _fp_pow_tmp = alloc(32);
+        _fp_pow_result = alloc(32);
+        _fp_pow_base = alloc(32);
+        _fp_pow_inited = 1;
+    }
+    store64(_fp_pow_result, 1);
+    store64(_fp_pow_result + 8, 0);
+    store64(_fp_pow_result + 16, 0);
+    store64(_fp_pow_result + 24, 0);
+    u256_copy(_fp_pow_base, base);
+    _fp_pow_exp = exp;
+    _fp_pow_i = 0;
+    while (_fp_pow_i < 256) {
+        var limb_idx = _fp_pow_i / 64;
+        var bit_idx = _fp_pow_i % 64;
+        var bit = (load64(_fp_pow_exp + limb_idx * 8) >> bit_idx) & 1;
+        if (bit == 1) {
+            fp_mul(_fp_pow_tmp, _fp_pow_result, _fp_pow_base);
+            u256_copy(_fp_pow_result, _fp_pow_tmp);
+        }
+        fp_mul(_fp_pow_tmp, _fp_pow_base, _fp_pow_base);
+        u256_copy(_fp_pow_base, _fp_pow_tmp);
+        _fp_pow_i = _fp_pow_i + 1;
+    }
+    u256_copy(r, _fp_pow_result);
+    return 0;
+}
+
+# ================================================================
+# Modular inversion: r = a^(p-2) mod p (Fermat's little theorem)
+# ================================================================
+
+var _fp_inv_pm2 = 0;
+
+fn fp_inv(r, a) {
+    _init_ed_p();
+    if (_fp_inv_pm2 == 0) {
+        _fp_inv_pm2 = alloc(32);
+        u256_copy(_fp_inv_pm2, _ed_p);
+        store64(_fp_inv_pm2, load64(_fp_inv_pm2) - 2);
+    }
+    fp_pow(r, a, _fp_inv_pm2);
+    return 0;
+}

@@ -1,0 +1,88 @@
+# field.tcyr — tests for Ed25519 field arithmetic (mod p = 2^255-19)
+
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fmt.cyr"
+include "lib/json.cyr"
+include "lib/sakshi.cyr"
+include "lib/chrono.cyr"
+include "lib/bigint.cyr"
+
+include "src/types.cyr"
+include "src/error.cyr"
+include "src/sha256.cyr"
+include "src/hex.cyr"
+include "src/ct.cyr"
+include "src/sha512.cyr"
+include "src/bigint_ext.cyr"
+
+fn main() {
+    alloc_init();
+
+    # p = 2^255 - 19
+    _init_ed_p();
+    var p_hex = u256_to_hex(_ed_p);
+    test_group("field prime");
+    assert_streq(p_hex, "7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffed", "p correct");
+
+    # fp_add: (p-1) + 1 = 0 mod p
+    test_group("fp_add wrap");
+    var p_minus_1 = u256_clone(_ed_p);
+    var one = u256_from(1);
+    u256_sub(p_minus_1, p_minus_1, one);
+    var r = u256_zero();
+    fp_add(r, p_minus_1, one);
+    assert_eq(u256_is_zero(r), 1, "(p-1)+1 = 0");
+
+    # fp_sub: 0 - 1 = p - 1
+    test_group("fp_sub underflow");
+    var z = u256_zero();
+    fp_sub(r, z, one);
+    assert_eq(u256_eq(r, p_minus_1), 1, "0-1 = p-1");
+
+    # fp_mul: 2 * 3 = 6
+    test_group("fp_mul small");
+    var two = u256_from(2);
+    var three = u256_from(3);
+    fp_mul(r, two, three);
+    assert_eq(u256_limb(r, 0), 6, "2*3=6");
+
+    # fp_mul: large values near p
+    test_group("fp_mul large");
+    fp_mul(r, p_minus_1, p_minus_1);
+    # (p-1)^2 mod p = 1 mod p (since (-1)^2 = 1)
+    assert_eq(u256_limb(r, 0), 1, "(p-1)^2 = 1");
+    assert_eq(u256_limb(r, 1), 0, "(p-1)^2 high = 0");
+
+    # fp_sq
+    test_group("fp_sq");
+    fp_sq(r, two);
+    assert_eq(u256_limb(r, 0), 4, "2^2=4");
+
+    # fp_inv: a * a^(-1) = 1
+    test_group("fp_inv");
+    var five = u256_from(5);
+    var inv5 = u256_zero();
+    fp_inv(inv5, five);
+    fp_mul(r, five, inv5);
+    assert_eq(u256_limb(r, 0), 1, "5 * 5^(-1) = 1");
+    assert_eq(u256_limb(r, 1), 0, "inv high = 0");
+
+    # fp_neg: neg(a) + a = 0
+    test_group("fp_neg");
+    var neg5 = u256_zero();
+    fp_neg(neg5, five);
+    fp_add(r, five, neg5);
+    assert_eq(u256_is_zero(r), 1, "5 + (-5) = 0");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

@@ -1,0 +1,77 @@
+# bigint.tcyr — tests for 256-bit arithmetic
+
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/str.cyr"
+include "lib/vec.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fmt.cyr"
+include "lib/bigint.cyr"
+
+fn main() {
+    alloc_init();
+
+    test_group("u256 from/zero");
+    var z = u256_zero();
+    assert_eq(u256_is_zero(z), 1, "zero is zero");
+    var one = u256_from(1);
+    assert_eq(u256_is_zero(one), 0, "one not zero");
+
+    test_group("u256 cmp");
+    var a = u256_from(100);
+    var b = u256_from(200);
+    assert_eq(u256_cmp(a, b), 0 - 1, "100 < 200");
+    assert_eq(u256_cmp(b, a), 1, "200 > 100");
+    assert_eq(u256_cmp(a, a), 0, "100 == 100");
+
+    test_group("u256 add");
+    var r = u256_zero();
+    u256_add(r, a, b);
+    assert_eq(u256_limb(r, 0), 300, "100+200=300");
+
+    test_group("u256 sub");
+    u256_sub(r, b, a);
+    assert_eq(u256_limb(r, 0), 100, "200-100=100");
+
+    test_group("u256 mul");
+    var x = u256_from(1000);
+    var y = u256_from(2000);
+    u256_mul(r, x, y);
+    assert_eq(u256_limb(r, 0), 2000000, "1000*2000=2000000");
+
+    test_group("u256 hex roundtrip");
+    var big = u256_from_hex("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+    var h = u256_to_hex(big);
+    assert_streq(h, "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", "max u256 hex");
+
+    test_group("u256 hex small");
+    var small = u256_from(255);
+    var hs = u256_to_hex(small);
+    assert_streq(hs, "00000000000000000000000000000000000000000000000000000000000000ff", "255 hex");
+
+    test_group("u256 addmod");
+    # p = 7, a = 5, b = 4 => (5+4) mod 7 = 2
+    var pa = u256_from(5);
+    var pb = u256_from(4);
+    var pp = u256_from(7);
+    u256_addmod(r, pa, pb, pp);
+    assert_eq(u256_limb(r, 0), 2, "(5+4) mod 7 = 2");
+
+    test_group("u256 submod");
+    # p = 7, a = 2, b = 5 => (2-5) mod 7 = 4
+    var sa = u256_from(2);
+    var sb = u256_from(5);
+    u256_submod(r, sa, sb, pp);
+    assert_eq(u256_limb(r, 0), 4, "(2-5) mod 7 = 4");
+
+    test_group("u256 clone");
+    var orig = u256_from(42);
+    var cl = u256_clone(orig);
+    assert_eq(u256_eq(orig, cl), 1, "clone equals original");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);
