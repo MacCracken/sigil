@@ -20,7 +20,8 @@ jobs:
 
       - name: Install Cyrius
         run: |
-          curl -sSL "https://github.com/MacCracken/cyrius/releases/download/${CYRIUS_VERSION}/cc3" -o /usr/local/bin/cc3
+          git clone --depth 1 --branch "${CYRIUS_VERSION}" https://github.com/MacCracken/cyrius.git /tmp/cyrius
+          cp /tmp/cyrius/build/cc3 /usr/local/bin/cc3
           chmod +x /usr/local/bin/cc3
           cc3 --version
 
