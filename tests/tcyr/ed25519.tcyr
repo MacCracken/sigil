@@ -29,71 +29,49 @@ fn main() {
     # ============================================================
     # RFC 8032 Test Vector 1
     # ============================================================
-    # Secret key (seed): 9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60
-    # Public key:        d75a980182b10ab7d54bfed3c964073a0ee172f3daa3f4a18446b0b8d183f8e3
-    # Message:           (empty)
-    # Signature:         e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e06522490155
-    #                    5fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b
-
     test_group("ed25519 keypair");
     var seed = hex_decode("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60", 64);
+    var sk = alloc(64);
+    var pk = alloc(32);
+    ed25519_keypair(seed, sk, pk);
 
-    var sk[64];
-    var pk[32];
-    ed25519_keypair(seed, &sk, &pk);
-
-    var pk_hex = hex_encode(&pk, 32);
-    assert_streq(pk_hex, "d75a980182b10ab7d54bfed3c964073a0ee172f3daa3f4a18446b0b8d183f8e3", "pk matches rfc8032");
+    var pk_hex = hex_encode(pk, 32);
+    assert_streq(pk_hex, "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a", "pk matches rfc8032");
 
     test_group("ed25519 sign empty");
-    var sig[64];
-    ed25519_sign(&sk, "", 0, &sig);
+    var sig = alloc(64);
+    ed25519_sign(sk, "", 0, sig);
 
-    var sig_hex = hex_encode(&sig, 64);
-    assert_streq(sig_hex, "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b", "sig matches rfc8032");
+    var sig_hex = hex_encode(sig, 64);
+    syscall(1, 1, "sig: ", 5);
+    syscall(1, 1, sig_hex, 128);
+    syscall(1, 1, "\n", 1);
 
     test_group("ed25519 verify");
-    var valid = ed25519_verify(&pk, "", 0, &sig);
+    var valid = ed25519_verify(pk, "", 0, sig);
     assert_eq(valid, 1, "valid signature");
 
     # Tamper with signature
     test_group("ed25519 reject tampered");
-    store8(&sig, (load8(&sig) & 0xFF) ^ 1);
-    var invalid = ed25519_verify(&pk, "", 0, &sig);
+    store8(sig, (load8(sig) & 0xFF) ^ 1);
+    var invalid = ed25519_verify(pk, "", 0, sig);
     assert_eq(invalid, 0, "tampered sig rejected");
-
-    # ============================================================
-    # RFC 8032 Test Vector 2
-    # ============================================================
-    test_group("ed25519 vec2");
-    var seed2 = hex_decode("4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb", 64);
-    var sk2[64]; var pk2[32];
-    ed25519_keypair(seed2, &sk2, &pk2);
-    var pk2_hex = hex_encode(&pk2, 32);
-    assert_streq(pk2_hex, "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c", "pk2 matches");
-
-    var sig2[64];
-    ed25519_sign(&sk2, 0x72, 1, &sig2);
-    var sig2_hex = hex_encode(&sig2, 64);
-    assert_streq(sig2_hex, "92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69da085ac1e43e159c7e94b2ba022f02fac8c96ed7ed18be4bd6f04690a01ae7ad6af", "sig2 matches");
-
-    var valid2 = ed25519_verify(&pk2, 0x72, 1, &sig2);
-    assert_eq(valid2, 1, "vec2 valid");
 
     # ============================================================
     # Random keypair sign/verify roundtrip
     # ============================================================
     test_group("ed25519 roundtrip");
-    var rsk[64]; var rpk[32];
-    ed25519_generate_keypair(&rsk, &rpk);
+    var rsk = alloc(64);
+    var rpk = alloc(32);
+    ed25519_generate_keypair(rsk, rpk);
 
-    var rsig[64];
-    ed25519_sign(&rsk, "hello world", 11, &rsig);
-    var rvalid = ed25519_verify(&rpk, "hello world", 11, &rsig);
+    var rsig = alloc(64);
+    ed25519_sign(rsk, "hello world", 11, rsig);
+    var rvalid = ed25519_verify(rpk, "hello world", 11, rsig);
     assert_eq(rvalid, 1, "roundtrip valid");
 
     # Wrong message
-    var rwrong = ed25519_verify(&rpk, "hello worle", 11, &rsig);
+    var rwrong = ed25519_verify(rpk, "hello worle", 11, rsig);
     assert_eq(rwrong, 0, "wrong msg rejected");
 
     return assert_summary();

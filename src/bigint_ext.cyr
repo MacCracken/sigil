@@ -46,29 +46,38 @@ fn _uadd_overflow(a, b) {
     return 0;
 }
 
+# Globals for mul_full inner loop (avoid local clobber across fn calls)
+var _mf_s1 = 0;
+var _mf_c1 = 0;
+var _mf_carry = 0;
+var _mf_hi = 0;
+
 fn u256_mul_full(out, a, b) {
     memset(out, 0, 64);
     var i = 0;
     while (i < 4) {
-        var carry = 0;
+        _mf_carry = 0;
         var j = 0;
         while (j < 4) {
             _mul64_full(load64(a + i * 8), load64(b + j * 8));
             var k = i + j;
             var prev = load64(out + k * 8);
+            _mf_hi = _m64_hi;
 
-            # Add three values: prev + _m64_lo + carry, tracking overflow
-            var s1 = prev + _m64_lo;
-            var c1 = _uadd_overflow(prev, _m64_lo);
-            var s2 = s1 + carry;
-            var c2 = _uadd_overflow(s1, carry);
+            # s1 = prev + _m64_lo (save to global before fn call)
+            _mf_s1 = prev + _m64_lo;
+            _mf_c1 = _uadd_overflow(prev, _m64_lo);
+
+            # s2 = s1 + carry
+            var s2 = _mf_s1 + _mf_carry;
+            var c2 = _uadd_overflow(_mf_s1, _mf_carry);
 
             store64(out + k * 8, s2);
-            carry = _m64_hi + c1 + c2;
+            _mf_carry = _mf_hi + _mf_c1 + c2;
             j = j + 1;
         }
         if (i + 4 < 8) {
-            store64(out + (i + 4) * 8, load64(out + (i + 4) * 8) + carry);
+            store64(out + (i + 4) * 8, load64(out + (i + 4) * 8) + _mf_carry);
         }
         i = i + 1;
     }

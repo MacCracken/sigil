@@ -173,20 +173,24 @@ fn ge_double(r, p) {
 var _gsm_q = 0;
 var _gsm_tmp = 0;
 var _gsm_i = 0;
+var _gsm_r = 0;
+var _gsm_s = 0;
 
 fn ge_scalarmult(r, s, p) {
     if (_gsm_q == 0) { _gsm_q = alloc(128); _gsm_tmp = alloc(128); }
-    ge_identity(r);
+    _gsm_r = r;
+    _gsm_s = s;
+    ge_identity(_gsm_r);
     ge_copy(_gsm_q, p);
 
     _gsm_i = 0;
     while (_gsm_i < 256) {
         var byte_idx = _gsm_i / 8;
         var bit_idx = _gsm_i % 8;
-        var bit = (load8(s + byte_idx) >> bit_idx) & 1;
+        var bit = (load8(_gsm_s + byte_idx) >> bit_idx) & 1;
         if (bit == 1) {
-            ge_add(_gsm_tmp, r, _gsm_q);
-            ge_copy(r, _gsm_tmp);
+            ge_add(_gsm_tmp, _gsm_r, _gsm_q);
+            ge_copy(_gsm_r, _gsm_tmp);
         }
         ge_double(_gsm_tmp, _gsm_q);
         ge_copy(_gsm_q, _gsm_tmp);
@@ -252,6 +256,11 @@ var _gdc_pow = 0;
 var _gdc_x = 0;
 var _gdc_check = 0;
 var _gdc_vx2 = 0;
+var _gdc_y = 0;
+var _gdc_s_copy = 0;
+var _gdc_x_sign = 0;
+var _gdc_p_out = 0;
+var _gdc_exp = 0;
 var _gdc_inited = 0;
 
 fn ge_from_bytes(p, s) {
@@ -261,40 +270,40 @@ fn ge_from_bytes(p, s) {
         _gdc_one = u256_from(1); _gdc_v3 = alloc(32); _gdc_v7 = alloc(32);
         _gdc_uv3 = alloc(32); _gdc_uv7 = alloc(32); _gdc_pow = alloc(32);
         _gdc_x = alloc(32); _gdc_check = alloc(32); _gdc_vx2 = alloc(32);
+        _gdc_y = alloc(32); _gdc_s_copy = alloc(32);
+        _gdc_exp = u256_from_hex("0ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffd");
         _gdc_inited = 1;
     }
+    _gdc_p_out = p;
 
     # Decode y from bytes, clear sign bit
-    var x_sign = (load8(s + 31) >> 7) & 1;
-    var s_copy[32];
-    memcpy(&s_copy, s, 32);
-    store8(&s_copy + 31, load8(&s_copy + 31) & 0x7F);
+    _gdc_x_sign = (load8(s + 31) >> 7) & 1;
+    memcpy(_gdc_s_copy, s, 32);
+    store8(_gdc_s_copy + 31, load8(_gdc_s_copy + 31) & 0x7F);
 
     # Load y as u256 from little-endian bytes
-    var y = alloc(32);
     var li = 0;
     while (li < 4) {
-        var v = (load8(&s_copy + li*8) & 0xFF)
-        | ((load8(&s_copy + li*8+1) & 0xFF) << 8)
-        | ((load8(&s_copy + li*8+2) & 0xFF) << 16)
-        | ((load8(&s_copy + li*8+3) & 0xFF) << 24)
-        | ((load8(&s_copy + li*8+4) & 0xFF) << 32)
-        | ((load8(&s_copy + li*8+5) & 0xFF) << 40)
-        | ((load8(&s_copy + li*8+6) & 0xFF) << 48)
-        | ((load8(&s_copy + li*8+7) & 0xFF) << 56);
-        u256_set_limb(y, li, v);
+        var v = (load8(_gdc_s_copy + li*8) & 0xFF)
+        | ((load8(_gdc_s_copy + li*8+1) & 0xFF) << 8)
+        | ((load8(_gdc_s_copy + li*8+2) & 0xFF) << 16)
+        | ((load8(_gdc_s_copy + li*8+3) & 0xFF) << 24)
+        | ((load8(_gdc_s_copy + li*8+4) & 0xFF) << 32)
+        | ((load8(_gdc_s_copy + li*8+5) & 0xFF) << 40)
+        | ((load8(_gdc_s_copy + li*8+6) & 0xFF) << 48)
+        | ((load8(_gdc_s_copy + li*8+7) & 0xFF) << 56);
+        u256_set_limb(_gdc_y, li, v);
         li = li + 1;
     }
 
     # u = y^2 - 1
-    fp_sq(_gdc_y2, y);
+    fp_sq(_gdc_y2, _gdc_y);
     fp_sub(_gdc_u, _gdc_y2, _gdc_one);
 
     # v = d*y^2 + 1
     fp_mul(_gdc_v, _ed_d, _gdc_y2);
     fp_add(_gdc_v, _gdc_v, _gdc_one);
 
-    # x = (u/v)^((p+3)/8) * u (Tonelli-Shanks for p ≡ 5 mod 8)
     # candidate = u * v^3 * (u*v^7)^((p-5)/8)
     fp_sq(_gdc_v3, _gdc_v);
     fp_mul(_gdc_v3, _gdc_v3, _gdc_v);        # v^3
@@ -303,9 +312,7 @@ fn ge_from_bytes(p, s) {
     fp_mul(_gdc_uv7, _gdc_u, _gdc_v7);       # u*v^7
     fp_mul(_gdc_uv3, _gdc_u, _gdc_v3);       # u*v^3
 
-    # (p-5)/8 = (2^255 - 24)/8 = 2^252 - 3
-    var exp_252_3 = u256_from_hex("0ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffb");
-    fp_pow(_gdc_pow, _gdc_uv7, exp_252_3);
+    fp_pow(_gdc_pow, _gdc_uv7, _gdc_exp);
 
     # x = u*v^3 * pow
     fp_mul(_gdc_x, _gdc_uv3, _gdc_pow);
@@ -320,16 +327,16 @@ fn ge_from_bytes(p, s) {
     }
 
     # Adjust sign
-    if ((u256_limb(_gdc_x, 0) & 1) != x_sign) {
+    if ((u256_limb(_gdc_x, 0) & 1) != _gdc_x_sign) {
         fp_neg(_gdc_x, _gdc_x);
     }
 
     # Set point: X=x, Y=y, Z=1, T=x*y
-    u256_copy(ge_x(p), _gdc_x);
-    u256_copy(ge_y(p), y);
+    u256_copy(ge_x(_gdc_p_out), _gdc_x);
+    u256_copy(ge_y(_gdc_p_out), _gdc_y);
     var one_z = u256_from(1);
-    u256_copy(ge_z(p), one_z);
-    fp_mul(ge_t(p), _gdc_x, y);
+    u256_copy(ge_z(_gdc_p_out), one_z);
+    fp_mul(ge_t(_gdc_p_out), _gdc_x, _gdc_y);
     return 0;
 }
 
@@ -383,17 +390,24 @@ fn ed25519_init() {
 # Scalar reduce: 64-byte hash -> 32-byte scalar mod L
 # ================================================================
 
-fn sc_reduce(out, s64) {
-    # Load 64-byte value as u256 pair (low + high)
-    # Simple approach: treat as big number, reduce mod L
-    # For 512-bit reduction, we use: val = high*2^256 + low
-    # val mod L ≈ low + high*(2^256 mod L)
-    # 2^256 mod L = 2^256 - L = 0x0ffffffffffffffffffffffffffffffec6ef5bf4737dcf70d6ec31748d98951c (approximately)
-    # But this is complex. Let's use repeated subtraction on the full 512-bit value.
+var _scr_lo = 0;
+var _scr_hi = 0;
+var _scr_prod = 0;
+var _scr_r256 = 0;
+var _scr_inited = 0;
 
-    # Load as two u256
-    var lo = alloc(32);
-    var hi = alloc(32);
+fn sc_reduce(out, s64) {
+    # Reduce 512-bit value mod L using: val = hi*2^256 + lo ≡ hi*R + lo (mod L)
+    # where R = 2^256 mod L. Iterate until hi == 0.
+    if (_scr_inited == 0) {
+        _scr_lo = alloc(32);
+        _scr_hi = alloc(32);
+        _scr_prod = alloc(64);
+        _scr_r256 = u256_from_hex("0ffffffffffffffffffffffffffffffec6ef5bf4737dcf70d6ec31748d98951d");
+        _scr_inited = 1;
+    }
+
+    # Load 64-byte input as two u256 (little-endian)
     var li = 0;
     while (li < 4) {
         var v = (load8(s64 + li*8) & 0xFF)
@@ -404,7 +418,7 @@ fn sc_reduce(out, s64) {
         | ((load8(s64 + li*8+5) & 0xFF) << 40)
         | ((load8(s64 + li*8+6) & 0xFF) << 48)
         | ((load8(s64 + li*8+7) & 0xFF) << 56);
-        u256_set_limb(lo, li, v);
+        u256_set_limb(_scr_lo, li, v);
         li = li + 1;
     }
     li = 0;
@@ -417,52 +431,44 @@ fn sc_reduce(out, s64) {
         | ((load8(s64 + 32 + li*8+5) & 0xFF) << 40)
         | ((load8(s64 + 32 + li*8+6) & 0xFF) << 48)
         | ((load8(s64 + 32 + li*8+7) & 0xFF) << 56);
-        u256_set_limb(hi, li, v);
+        u256_set_limb(_scr_hi, li, v);
         li = li + 1;
     }
 
-    # Compute: result = lo + hi * (2^256 mod L), then reduce mod L
-    # 2^256 mod L:
-    var r256modL = u256_from_hex("0ffffffffffffffffffffffffffffffec6ef5bf4737dcf70d6ec31748d98951c");
-
-    # hi * r256modL (use full multiply to avoid truncation)
-    var product[64];
-    u256_mul_full(&product, hi, r256modL);
-
-    # Reduce product mod L (it's < L^2 so a few subtractions suffice after taking low 256 bits)
-    # Actually the product can be up to ~2^508. Use the same trick recursively.
-    var prod_lo = alloc(32);
-    var prod_hi = alloc(32);
-    store64(prod_lo, load64(&product));
-    store64(prod_lo + 8, load64(&product + 8));
-    store64(prod_lo + 16, load64(&product + 16));
-    store64(prod_lo + 24, load64(&product + 24));
-    store64(prod_hi, load64(&product + 32));
-    store64(prod_hi + 8, load64(&product + 40));
-    store64(prod_hi + 16, load64(&product + 48));
-    store64(prod_hi + 24, load64(&product + 56));
-
-    # Second-level: prod_hi * r256modL
-    var product2[64];
-    u256_mul_full(&product2, prod_hi, r256modL);
-    # Third level is small enough to ignore high bits (< 256 bits)
-
-    # result = lo + prod_lo + product2_lo
-    var tmp = alloc(32);
-    u256_add(tmp, lo, prod_lo);
-    var p2lo = alloc(32);
-    store64(p2lo, load64(&product2));
-    store64(p2lo + 8, load64(&product2 + 8));
-    store64(p2lo + 16, load64(&product2 + 16));
-    store64(p2lo + 24, load64(&product2 + 24));
-    u256_add(tmp, tmp, p2lo);
-
-    # Reduce mod L by repeated subtraction
-    while (u256_cmp(tmp, _ed_L) >= 0) {
-        u256_sub(tmp, tmp, _ed_L);
+    # Iteratively reduce: lo = lo + hi*R, split result, repeat until hi == 0
+    while (u256_is_zero(_scr_hi) == 0) {
+        u256_mul_full(_scr_prod, _scr_hi, _scr_r256);
+        # new_hi = product high 256 bits
+        store64(_scr_hi, load64(_scr_prod + 32));
+        store64(_scr_hi + 8, load64(_scr_prod + 40));
+        store64(_scr_hi + 16, load64(_scr_prod + 48));
+        store64(_scr_hi + 24, load64(_scr_prod + 56));
+        # new_lo = old_lo + product_lo (carry propagates to hi)
+        var carry = u256_add(_scr_lo, _scr_lo, _scr_prod);
+        if (carry > 0) {
+            # Add carry to hi limb 0, propagate manually
+            var h0 = load64(_scr_hi) + 1;
+            store64(_scr_hi, h0);
+            if (h0 == 0) {
+                var h1 = load64(_scr_hi + 8) + 1;
+                store64(_scr_hi + 8, h1);
+                if (h1 == 0) {
+                    var h2 = load64(_scr_hi + 16) + 1;
+                    store64(_scr_hi + 16, h2);
+                    if (h2 == 0) {
+                        store64(_scr_hi + 24, load64(_scr_hi + 24) + 1);
+                    }
+                }
+            }
+        }
     }
 
-    u256_copy(out, tmp);
+    # Final reduction mod L
+    while (u256_cmp(_scr_lo, _ed_L) >= 0) {
+        u256_sub(_scr_lo, _scr_lo, _ed_L);
+    }
+
+    u256_copy(out, _scr_lo);
     return 0;
 }
 
@@ -470,29 +476,19 @@ fn sc_reduce(out, s64) {
 # sc_muladd: out = (a * b + c) mod L
 # ================================================================
 
+var _scma_prod = 0;
+
 fn sc_muladd(out, a, b, c) {
-    var product[64];
-    u256_mul_full(&product, a, b);
+    if (_scma_prod == 0) { _scma_prod = alloc(64); }
+    u256_mul_full(_scma_prod, a, b);
 
-    # Add c to the 512-bit product
-    var lo = alloc(32);
-    store64(lo, load64(&product));
-    store64(lo + 8, load64(&product + 8));
-    store64(lo + 16, load64(&product + 16));
-    store64(lo + 24, load64(&product + 24));
-
-    var carry = u256_add(lo, lo, c);
-    store64(&product, load64(lo));
-    store64(&product + 8, load64(lo + 8));
-    store64(&product + 16, load64(lo + 16));
-    store64(&product + 24, load64(lo + 24));
+    # Add c to the 512-bit product (low 256 bits, propagate carry to high)
+    var carry = u256_add(_scma_prod, _scma_prod, c);
     if (carry > 0) {
-        var hi0 = load64(&product + 32);
-        store64(&product + 32, hi0 + carry);
+        store64(_scma_prod + 32, load64(_scma_prod + 32) + carry);
     }
 
-    # Reduce 512-bit result mod L using sc_reduce
-    sc_reduce(out, &product);
+    sc_reduce(out, _scma_prod);
     return 0;
 }
 
@@ -500,16 +496,24 @@ fn sc_muladd(out, a, b, c) {
 # Ed25519 keypair: seed (32 bytes) -> sk (64 bytes), pk (32 bytes)
 # ================================================================
 
+var _kp_hash = 0;
+var _kp_scalar = 0;
+
 fn ed25519_keypair(seed, sk_out, pk_out) {
     ed25519_init();
-    var h[64];
-    sha512(seed, 32, &h);
-    store8(&h, load8(&h) & 0xF8);
-    store8(&h + 31, (load8(&h + 31) & 0x7F) | 0x40);
+    if (_kp_hash == 0) { _kp_hash = alloc(64); _kp_scalar = alloc(32); }
+    sha512(seed, 32, _kp_hash);
+
+    # Clamp scalar (first 32 bytes)
+    store8(_kp_hash, load8(_kp_hash) & 0xF8);
+    store8(_kp_hash + 31, (load8(_kp_hash + 31) & 0x7F) | 0x40);
+
+    # Copy scalar to dedicated heap buffer (survives nested calls)
+    memcpy(_kp_scalar, _kp_hash, 32);
 
     # A = [a]B
     var A = ge_alloc();
-    ge_scalarmult(A, &h, _ed_B);
+    ge_scalarmult(A, _kp_scalar, _ed_B);
     ge_to_bytes(pk_out, A);
 
     memcpy(sk_out, seed, 32);
@@ -521,75 +525,95 @@ fn ed25519_keypair(seed, sk_out, pk_out) {
 # Ed25519 sign: sk (64b), msg, msg_len -> sig (64b)
 # ================================================================
 
+var _sign_az = 0;
+var _sign_nhash = 0;
+var _sign_hram = 0;
+var _sign_sk = 0;
+var _sign_msg = 0;
+var _sign_msg_len = 0;
+var _sign_sig_out = 0;
+var _sign_r_scalar = 0;
+var _sign_h_scalar = 0;
+var _sign_a_scalar = 0;
+
 fn ed25519_sign(sk, msg, msg_len, sig_out) {
     ed25519_init();
-    var az[64];
-    sha512(sk, 32, &az);
-    store8(&az, load8(&az) & 0xF8);
-    store8(&az + 31, (load8(&az + 31) & 0x7F) | 0x40);
+    if (_sign_az == 0) {
+        _sign_az = alloc(64);
+        _sign_nhash = alloc(64);
+        _sign_hram = alloc(64);
+        _sign_r_scalar = alloc(32);
+        _sign_h_scalar = alloc(32);
+        _sign_a_scalar = alloc(32);
+    }
+    _sign_sk = sk;
+    _sign_msg = msg;
+    _sign_msg_len = msg_len;
+    _sign_sig_out = sig_out;
+
+    sha512(_sign_sk, 32, _sign_az);
+    store8(_sign_az, load8(_sign_az) & 0xF8);
+    store8(_sign_az + 31, (load8(_sign_az + 31) & 0x7F) | 0x40);
 
     # r = SHA-512(az[32..64] || msg) mod L
     var nctx = sha512_init();
-    sha512_update(nctx, &az + 32, 32);
-    sha512_update(nctx, msg, msg_len);
-    var nhash[64];
-    sha512_finalize(nctx, &nhash);
+    sha512_update(nctx, _sign_az + 32, 32);
+    sha512_update(nctx, _sign_msg, _sign_msg_len);
+    sha512_finalize(nctx, _sign_nhash);
     fl_free(nctx);
 
-    var r_scalar = alloc(32);
-    sc_reduce(r_scalar, &nhash);
+    sc_reduce(_sign_r_scalar, _sign_nhash);
 
     # R = [r]B
     var R_point = ge_alloc();
-    ge_scalarmult(R_point, r_scalar, _ed_B);
-    ge_to_bytes(sig_out, R_point);
+    ge_scalarmult(R_point, _sign_r_scalar, _ed_B);
+    ge_to_bytes(_sign_sig_out, R_point);
 
     # h = SHA-512(R || pk || msg) mod L
     var hctx = sha512_init();
-    sha512_update(hctx, sig_out, 32);
-    sha512_update(hctx, sk + 32, 32);
-    sha512_update(hctx, msg, msg_len);
-    var hram[64];
-    sha512_finalize(hctx, &hram);
+    sha512_update(hctx, _sign_sig_out, 32);
+    sha512_update(hctx, _sign_sk + 32, 32);
+    sha512_update(hctx, _sign_msg, _sign_msg_len);
+    sha512_finalize(hctx, _sign_hram);
     fl_free(hctx);
 
-    var h_scalar = alloc(32);
-    sc_reduce(h_scalar, &hram);
+    sc_reduce(_sign_h_scalar, _sign_hram);
 
-    # S = (r + h*a) mod L — load a from az[0..32]
-    var a_scalar = alloc(32);
+    # Load a from az[0..32] as u256
     var li = 0;
     while (li < 4) {
-        var v = (load8(&az + li*8) & 0xFF)
-        | ((load8(&az + li*8+1) & 0xFF) << 8)
-        | ((load8(&az + li*8+2) & 0xFF) << 16)
-        | ((load8(&az + li*8+3) & 0xFF) << 24)
-        | ((load8(&az + li*8+4) & 0xFF) << 32)
-        | ((load8(&az + li*8+5) & 0xFF) << 40)
-        | ((load8(&az + li*8+6) & 0xFF) << 48)
-        | ((load8(&az + li*8+7) & 0xFF) << 56);
-        u256_set_limb(a_scalar, li, v);
+        var v = (load8(_sign_az + li*8) & 0xFF)
+        | ((load8(_sign_az + li*8+1) & 0xFF) << 8)
+        | ((load8(_sign_az + li*8+2) & 0xFF) << 16)
+        | ((load8(_sign_az + li*8+3) & 0xFF) << 24)
+        | ((load8(_sign_az + li*8+4) & 0xFF) << 32)
+        | ((load8(_sign_az + li*8+5) & 0xFF) << 40)
+        | ((load8(_sign_az + li*8+6) & 0xFF) << 48)
+        | ((load8(_sign_az + li*8+7) & 0xFF) << 56);
+        u256_set_limb(_sign_a_scalar, li, v);
         li = li + 1;
     }
 
-    sc_muladd(sig_out + 32, h_scalar, a_scalar, r_scalar);
+    # S = (r + h*a) mod L
+    var S_result = alloc(32);
+    sc_muladd(S_result, _sign_h_scalar, _sign_a_scalar, _sign_r_scalar);
 
-    # Write S as little-endian bytes
+    # Write S as little-endian bytes to sig_out+32
     li = 0;
     while (li < 4) {
-        var v = u256_limb(sig_out + 32, li);
-        store8(sig_out + 32 + li*8, v & 0xFF);
-        store8(sig_out + 32 + li*8 + 1, (v >> 8) & 0xFF);
-        store8(sig_out + 32 + li*8 + 2, (v >> 16) & 0xFF);
-        store8(sig_out + 32 + li*8 + 3, (v >> 24) & 0xFF);
-        store8(sig_out + 32 + li*8 + 4, (v >> 32) & 0xFF);
-        store8(sig_out + 32 + li*8 + 5, (v >> 40) & 0xFF);
-        store8(sig_out + 32 + li*8 + 6, (v >> 48) & 0xFF);
-        store8(sig_out + 32 + li*8 + 7, (v >> 56) & 0xFF);
+        var v = u256_limb(S_result, li);
+        store8(_sign_sig_out + 32 + li*8, v & 0xFF);
+        store8(_sign_sig_out + 32 + li*8 + 1, (v >> 8) & 0xFF);
+        store8(_sign_sig_out + 32 + li*8 + 2, (v >> 16) & 0xFF);
+        store8(_sign_sig_out + 32 + li*8 + 3, (v >> 24) & 0xFF);
+        store8(_sign_sig_out + 32 + li*8 + 4, (v >> 32) & 0xFF);
+        store8(_sign_sig_out + 32 + li*8 + 5, (v >> 40) & 0xFF);
+        store8(_sign_sig_out + 32 + li*8 + 6, (v >> 48) & 0xFF);
+        store8(_sign_sig_out + 32 + li*8 + 7, (v >> 56) & 0xFF);
         li = li + 1;
     }
 
-    memset(&az, 0, 64);
+    memset(_sign_az, 0, 64);
     return 0;
 }
 
@@ -597,60 +621,74 @@ fn ed25519_sign(sk, msg, msg_len, sig_out) {
 # Ed25519 verify: pk (32b), msg, msg_len, sig (64b) -> 0/1
 # ================================================================
 
+var _ver_pk = 0;
+var _ver_msg = 0;
+var _ver_msg_len = 0;
+var _ver_sig = 0;
+var _ver_hram = 0;
+var _ver_h_scalar = 0;
+var _ver_S_scalar = 0;
+var _ver_R_bytes = 0;
+
 fn ed25519_verify(pk, msg, msg_len, sig) {
     ed25519_init();
+    if (_ver_hram == 0) {
+        _ver_hram = alloc(64);
+        _ver_h_scalar = alloc(32);
+        _ver_S_scalar = alloc(32);
+        _ver_R_bytes = alloc(32);
+    }
+    _ver_pk = pk;
+    _ver_msg = msg;
+    _ver_msg_len = msg_len;
+    _ver_sig = sig;
 
     var A = ge_alloc();
-    ge_from_bytes(A, pk);
+    ge_from_bytes(A, _ver_pk);
 
     # h = SHA-512(R || pk || msg) mod L
     var hctx = sha512_init();
-    sha512_update(hctx, sig, 32);
-    sha512_update(hctx, pk, 32);
-    sha512_update(hctx, msg, msg_len);
-    var hram[64];
-    sha512_finalize(hctx, &hram);
+    sha512_update(hctx, _ver_sig, 32);
+    sha512_update(hctx, _ver_pk, 32);
+    sha512_update(hctx, _ver_msg, _ver_msg_len);
+    sha512_finalize(hctx, _ver_hram);
     fl_free(hctx);
 
-    var h_scalar = alloc(32);
-    sc_reduce(h_scalar, &hram);
+    sc_reduce(_ver_h_scalar, _ver_hram);
 
     # Load S from sig[32..64] as scalar
-    var S_scalar = alloc(32);
     var li = 0;
     while (li < 4) {
-        var v = (load8(sig + 32 + li*8) & 0xFF)
-        | ((load8(sig + 32 + li*8+1) & 0xFF) << 8)
-        | ((load8(sig + 32 + li*8+2) & 0xFF) << 16)
-        | ((load8(sig + 32 + li*8+3) & 0xFF) << 24)
-        | ((load8(sig + 32 + li*8+4) & 0xFF) << 32)
-        | ((load8(sig + 32 + li*8+5) & 0xFF) << 40)
-        | ((load8(sig + 32 + li*8+6) & 0xFF) << 48)
-        | ((load8(sig + 32 + li*8+7) & 0xFF) << 56);
-        u256_set_limb(S_scalar, li, v);
+        var v = (load8(_ver_sig + 32 + li*8) & 0xFF)
+        | ((load8(_ver_sig + 32 + li*8+1) & 0xFF) << 8)
+        | ((load8(_ver_sig + 32 + li*8+2) & 0xFF) << 16)
+        | ((load8(_ver_sig + 32 + li*8+3) & 0xFF) << 24)
+        | ((load8(_ver_sig + 32 + li*8+4) & 0xFF) << 32)
+        | ((load8(_ver_sig + 32 + li*8+5) & 0xFF) << 40)
+        | ((load8(_ver_sig + 32 + li*8+6) & 0xFF) << 48)
+        | ((load8(_ver_sig + 32 + li*8+7) & 0xFF) << 56);
+        u256_set_limb(_ver_S_scalar, li, v);
         li = li + 1;
     }
 
     # [S]B
     var SB = ge_alloc();
-    ge_scalarmult(SB, S_scalar, _ed_B);
+    ge_scalarmult(SB, _ver_S_scalar, _ed_B);
 
     # [h]A
     var hA = ge_alloc();
-    ge_scalarmult(hA, h_scalar, A);
+    ge_scalarmult(hA, _ver_h_scalar, A);
 
-    # R_check = [S]B - [h]A
-    # Negate hA: negate X and T
+    # R_check = [S]B - [h]A (negate hA: negate X and T)
     fp_neg(ge_x(hA), ge_x(hA));
     fp_neg(ge_t(hA), ge_t(hA));
 
     var R_check = ge_alloc();
     ge_add(R_check, SB, hA);
 
-    var R_bytes[32];
-    ge_to_bytes(&R_bytes, R_check);
+    ge_to_bytes(_ver_R_bytes, R_check);
 
-    return ct_eq(&R_bytes, 32, sig, 32);
+    return ct_eq(_ver_R_bytes, 32, _ver_sig, 32);
 }
 
 # ================================================================

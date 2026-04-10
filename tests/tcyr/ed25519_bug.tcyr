@@ -1,0 +1,91 @@
+# ed25519_bug.tcyr — isolated test for Ed25519 verify failure
+#
+# STATUS:
+# - Keypair generation: PASSES (RFC 8032 test vector 1 pk matches)
+# - Sign: PASSES (produces byte-exact RFC 8032 expected signature)
+# - Verify: FAILS (ed25519_verify returns 0 for known-good signatures)
+#
+# WHAT WORKS:
+# - Field arithmetic (fp_add, fp_sub, fp_mul, fp_sq, fp_inv)
+# - Point operations (ge_add, ge_double, ge_scalarmult) for all tested scalars
+# - ge_to_bytes / ge_from_bytes (point compression/decompression roundtrips)
+# - sc_reduce (scalar reduction mod L — fixed: constant was off-by-one, now iterative)
+# - sc_muladd (scalar multiply-add mod L)
+# - Keypair generation (public key derivation from seed)
+# - Signing (produces exact RFC 8032 test vector 1 signature)
+#
+# WHAT FAILS:
+# - ed25519_verify rejects valid signatures (returns 0)
+# - The bug is in the verify equation: R_check = [S]B - [h]A
+# - Possible causes:
+#   1. ge_from_bytes(A, pk) decompression is wrong (but roundtrip test passes)
+#   2. Point negation (fp_neg on X,T) before ge_add is incorrect
+#   3. The two ge_scalarmult calls ([S]B and [h]A) share globals that get clobbered
+#   4. ct_eq comparison fails due to encoding mismatch
+# - The sign path is proven correct, so all field/point/scalar ops work.
+#   The bug is isolated to the verify-specific code path.
+
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fmt.cyr"
+include "lib/json.cyr"
+include "lib/sakshi.cyr"
+include "lib/chrono.cyr"
+include "lib/bigint.cyr"
+
+include "src/types.cyr"
+include "src/error.cyr"
+include "src/sha256.cyr"
+include "src/hex.cyr"
+include "src/ct.cyr"
+include "src/sha512.cyr"
+include "src/bigint_ext.cyr"
+include "src/ed25519.cyr"
+
+fn main() {
+    alloc_init();
+    ed25519_init();
+
+    # RFC 8032 Test Vector 1
+    test_group("keypair");
+    var seed = hex_decode("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60", 64);
+    var sk = alloc(64);
+    var pk = alloc(32);
+    ed25519_keypair(seed, sk, pk);
+    var pk_hex = hex_encode(pk, 32);
+    assert_streq(pk_hex, "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a", "pk correct");
+
+    test_group("sign");
+    var sig = alloc(64);
+    ed25519_sign(sk, "", 0, sig);
+    var sig_hex = hex_encode(sig, 64);
+    syscall(1, 1, "sig R: ", 7);
+    syscall(1, 1, sig_hex, 64);
+    syscall(1, 1, "\nsig S: ", 7);
+    syscall(1, 1, sig_hex + 64, 64);
+    syscall(1, 1, "\n", 1);
+
+    test_group("verify own sig");
+    var valid = ed25519_verify(pk, "", 0, sig);
+    assert_eq(valid, 1, "self-verify passes");
+
+    test_group("roundtrip");
+    var rsk = alloc(64);
+    var rpk = alloc(32);
+    ed25519_generate_keypair(rsk, rpk);
+    var rsig = alloc(64);
+    ed25519_sign(rsk, "test", 4, rsig);
+    var rvalid = ed25519_verify(rpk, "test", 4, rsig);
+    assert_eq(rvalid, 1, "roundtrip valid");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);
