@@ -1,0 +1,132 @@
+# crypto.tcyr — tests for SHA-256, hex, constant-time eq, HMAC-SHA256
+# Ed25519 tests in separate file (ed25519.tcyr)
+
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fmt.cyr"
+include "lib/json.cyr"
+include "lib/sakshi.cyr"
+include "lib/chrono.cyr"
+
+include "src/types.cyr"
+include "src/error.cyr"
+include "src/sha256.cyr"
+include "src/hex.cyr"
+include "src/ct.cyr"
+include "src/hmac.cyr"
+
+fn main() {
+    alloc_init();
+
+    # ============================================================
+    # SHA-256 — NIST test vectors
+    # ============================================================
+    test_group("SHA-256 empty");
+    var digest[32];
+    sha256("", 0, &digest);
+    var hex = hex_encode(&digest, 32);
+    assert_streq(hex, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "sha256 empty");
+
+    test_group("SHA-256 abc");
+    sha256("abc", 3, &digest);
+    var hex2 = hex_encode(&digest, 32);
+    assert_streq(hex2, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", "sha256 abc");
+
+    test_group("SHA-256 longer");
+    sha256("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq", 56, &digest);
+    var hex3 = hex_encode(&digest, 32);
+    assert_streq(hex3, "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1", "sha256 448bit");
+
+    test_group("SHA-256 streaming");
+    var ctx = sha256_init();
+    sha256_update(ctx, "abc", 3);
+    sha256_update(ctx, "def", 3);
+    var d2[32];
+    sha256_finalize(ctx, &d2);
+    var hex4 = hex_encode(&d2, 32);
+    # sha256("abcdef")
+    var d3[32];
+    sha256("abcdef", 6, &d3);
+    var hex5 = hex_encode(&d3, 32);
+    assert_streq(hex4, hex5, "streaming == oneshot");
+
+    # ============================================================
+    # Hex encode/decode
+    # ============================================================
+    test_group("hex encode");
+    var buf[4];
+    store8(&buf, 0xDE);
+    store8(&buf + 1, 0xAD);
+    store8(&buf + 2, 0xBE);
+    store8(&buf + 3, 0xEF);
+    var h = hex_encode(&buf, 4);
+    assert_streq(h, "deadbeef", "hex encode deadbeef");
+
+    test_group("hex decode");
+    var decoded = hex_decode("deadbeef", 8);
+    assert_eq(load8(decoded) & 0xFF, 0xDE, "decode byte 0");
+    assert_eq(load8(decoded + 1) & 0xFF, 0xAD, "decode byte 1");
+    assert_eq(load8(decoded + 2) & 0xFF, 0xBE, "decode byte 2");
+    assert_eq(load8(decoded + 3) & 0xFF, 0xEF, "decode byte 3");
+
+    test_group("hex roundtrip");
+    var rt_in[8];
+    store8(&rt_in, 0x01);
+    store8(&rt_in + 1, 0x23);
+    store8(&rt_in + 2, 0x45);
+    store8(&rt_in + 3, 0x67);
+    store8(&rt_in + 4, 0x89);
+    store8(&rt_in + 5, 0xAB);
+    store8(&rt_in + 6, 0xCD);
+    store8(&rt_in + 7, 0xEF);
+    var rt_hex = hex_encode(&rt_in, 8);
+    assert_streq(rt_hex, "0123456789abcdef", "roundtrip hex");
+    var rt_out = hex_decode("0123456789abcdef", 16);
+    var i = 0;
+    while (i < 8) {
+        assert_eq(load8(rt_out + i) & 0xFF, load8(&rt_in + i) & 0xFF, "roundtrip byte");
+        i = i + 1;
+    }
+
+    # ============================================================
+    # Constant-time comparison
+    # ============================================================
+    test_group("constant_time_eq");
+    assert_eq(ct_eq("abcd", 4, "abcd", 4), 1, "equal");
+    assert_eq(ct_eq("abcd", 4, "abce", 4), 0, "differ last");
+    assert_eq(ct_eq("abcd", 4, "xbcd", 4), 0, "differ first");
+    assert_eq(ct_eq("abc", 3, "abcd", 4), 0, "diff length");
+    assert_eq(ct_eq("", 0, "", 0), 1, "both empty");
+
+    # ============================================================
+    # HMAC-SHA256 — RFC 4231 test vector 1
+    # ============================================================
+    test_group("HMAC-SHA256");
+    # Key = 0x0b repeated 20 times, data = "Hi There"
+    var hmac_key[64];
+    memset(&hmac_key, 0, 64);
+    memset(&hmac_key, 0x0b, 20);
+
+    var hmac_out[32];
+    hmac_sha256(&hmac_key, 20, "Hi There", 8, &hmac_out);
+    var hmac_hex = hex_encode(&hmac_out, 32);
+    assert_streq(hmac_hex, "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7", "rfc4231 vec1");
+
+    # RFC 4231 test vector 2: key = "Jefe", data = "what do ya want for nothing?"
+    test_group("HMAC-SHA256 vec2");
+    var hmac_out2[32];
+    hmac_sha256("Jefe", 4, "what do ya want for nothing?", 28, &hmac_out2);
+    var hmac_hex2 = hex_encode(&hmac_out2, 32);
+    assert_streq(hmac_hex2, "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843", "rfc4231 vec2");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

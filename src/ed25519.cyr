@@ -1,0 +1,1271 @@
+# ed25519.cyr — Ed25519 signing and verification (RFC 8032)
+# Implements the Ed25519 signature scheme using the twisted Edwards curve:
+#   -x^2 + y^2 = 1 + d*x^2*y^2  (mod p)
+# where p = 2^255 - 19, d = -121665/121666 mod p
+#
+# Field elements: 5 limbs of 51 bits each (radix 2^51)
+# Points: extended coordinates (X, Y, Z, T) where x=X/Z, y=Y/Z, T=X*Y/Z
+#
+# Key operations:
+#   ed25519_keypair(seed, sk_out, pk_out)
+#   ed25519_sign(sk, pk, msg, msg_len, sig_out)
+#   ed25519_verify(pk, msg, msg_len, sig)
+
+# ================================================================
+# Constants
+# ================================================================
+
+var FE_LIMB_BITS = 51;
+var FE_LIMB_MASK = 0x7FFFFFFFFFFFF;  # 2^51 - 1
+
+# Field element: 5 x i64 = 40 bytes
+# Point (extended): 4 field elements = 160 bytes
+
+# p = 2^255 - 19 in 5 limbs:
+# limb0 = 2^51 - 19 = 0x7FFFFFFFFFFED
+# limb1..4 = 2^51 - 1 = 0x7FFFFFFFFFFFF
+var _fe_p0 = 0x7FFFFFFFFFFED;
+var _fe_p1 = 0x7FFFFFFFFFFFF;
+
+# d = -121665/121666 mod p
+# = 37095705934669439343138083508754565189542113879843219016388785533085940283555
+var _ed_d = 0;
+
+# 2*d
+var _ed_2d = 0;
+
+# Base point B
+var _ed_B = 0;
+
+# Precomputed L (group order) for scalar reduction
+# L = 2^252 + 27742317777372353535851937790883648493
+# In 4 x 64-bit limbs (little-endian):
+var _ed_L = 0;
+
+var _ed25519_inited = 0;
+
+# ================================================================
+# Multi-precision helpers (128-bit product from 64x64)
+# ================================================================
+# We need to multiply 51-bit limbs without overflow.
+# 51 + 51 = 102 bits — fits in i64 if we're careful.
+# Actually: 51-bit * 51-bit = max 102 bits, but Cyrius i64 is 64-bit SIGNED.
+# We need to handle this differently.
+#
+# Strategy: split each limb into lo26/hi25 halves, use schoolbook.
+# Or: use the fact that 51-bit limbs fit in unsigned 64-bit, and Cyrius
+# treats them as signed. We need to ensure all intermediate values stay
+# in the positive signed range.
+#
+# For multiplication: a*b where a,b < 2^51.
+# Max product = (2^51-1)^2 < 2^102. This overflows i64 (max 2^63-1).
+#
+# Solution: reduce limbs to 25.5-bit radix (alternating 26/25 bit limbs,
+# 10 limbs) like ref10. This gives max product 2^52 which fits i64.
+
+# ================================================================
+# Field element: 10 limbs, alternating 26/25 bits (ref10 representation)
+# ================================================================
+# fe[0]: 26 bits, fe[1]: 25 bits, fe[2]: 26 bits, ...
+# Total: 5*26 + 5*25 = 255 bits
+# Each limb: 80 bytes (10 x i64)
+
+fn fe_zero(f) {
+    memset(f, 0, 80);
+    return 0;
+}
+
+fn fe_one(f) {
+    memset(f, 0, 80);
+    store64(f, 1);
+    return 0;
+}
+
+fn fe_copy(dst, src) {
+    memcpy(dst, src, 80);
+    return 0;
+}
+
+fn fe_load(f, i) { return load64(f + i * 8); }
+fn fe_store(f, i, v) { store64(f + i * 8, v); return 0; }
+
+# ================================================================
+# Field element from 32 bytes (little-endian)
+# ================================================================
+
+fn fe_from_bytes(f, s) {
+    # Load 32 bytes as 256-bit little-endian, distribute into 10 limbs
+    var h0 = (load8(s) & 0xFF) | ((load8(s+1) & 0xFF) << 8) | ((load8(s+2) & 0xFF) << 16) | ((load8(s+3) & 0xFF) << 24);
+    var h1 = ((load8(s+3) & 0xFF) >> 2) | ((load8(s+4) & 0xFF) << 6) | ((load8(s+5) & 0xFF) << 14) | ((load8(s+6) & 0xFF) << 22);
+    var h2 = ((load8(s+6) & 0xFF) >> 3) | ((load8(s+7) & 0xFF) << 5) | ((load8(s+8) & 0xFF) << 13) | ((load8(s+9) & 0xFF) << 21);
+    var h3 = ((load8(s+9) & 0xFF) >> 5) | ((load8(s+10) & 0xFF) << 3) | ((load8(s+11) & 0xFF) << 11) | ((load8(s+12) & 0xFF) << 19);
+    var h4 = ((load8(s+12) & 0xFF) >> 6) | ((load8(s+13) & 0xFF) << 2) | ((load8(s+14) & 0xFF) << 10) | ((load8(s+15) & 0xFF) << 18);
+    var h5 = (load8(s+16) & 0xFF) | ((load8(s+17) & 0xFF) << 8) | ((load8(s+18) & 0xFF) << 16) | ((load8(s+19) & 0xFF) << 24);
+    var h6 = ((load8(s+19) & 0xFF) >> 1) | ((load8(s+20) & 0xFF) << 7) | ((load8(s+21) & 0xFF) << 15) | ((load8(s+22) & 0xFF) << 23);
+    var h7 = ((load8(s+22) & 0xFF) >> 3) | ((load8(s+23) & 0xFF) << 5) | ((load8(s+24) & 0xFF) << 13) | ((load8(s+25) & 0xFF) << 21);
+    var h8 = ((load8(s+25) & 0xFF) >> 4) | ((load8(s+26) & 0xFF) << 4) | ((load8(s+27) & 0xFF) << 12) | ((load8(s+28) & 0xFF) << 20);
+    var h9 = ((load8(s+28) & 0xFF) >> 6) | ((load8(s+29) & 0xFF) << 2) | ((load8(s+30) & 0xFF) << 10) | ((load8(s+31) & 0xFF) << 18);
+
+    # Mask to proper widths
+    h0 = h0 & 0x3FFFFFF;
+    h1 = h1 & 0x1FFFFFF;
+    h2 = h2 & 0x3FFFFFF;
+    h3 = h3 & 0x1FFFFFF;
+    h4 = h4 & 0x3FFFFFF;
+    h5 = h5 & 0x1FFFFFF;
+    h6 = h6 & 0x3FFFFFF;
+    h7 = h7 & 0x1FFFFFF;
+    h8 = h8 & 0x3FFFFFF;
+    h9 = h9 & 0x1FFFFFF;
+
+    fe_store(f, 0, h0);
+    fe_store(f, 1, h1);
+    fe_store(f, 2, h2);
+    fe_store(f, 3, h3);
+    fe_store(f, 4, h4);
+    fe_store(f, 5, h5);
+    fe_store(f, 6, h6);
+    fe_store(f, 7, h7);
+    fe_store(f, 8, h8);
+    fe_store(f, 9, h9);
+    return 0;
+}
+
+# ================================================================
+# Field element to 32 bytes (little-endian), fully reduced mod p
+# ================================================================
+
+# Carry and reduce
+fn _fe_carry(f) {
+    var c = 0;
+    var i = 0;
+    while (i < 9) {
+        var v = fe_load(f, i) + c;
+        if (i == 0) { c = v >> 26; v = v & 0x3FFFFFF; }
+        elif (i == 2) { c = v >> 26; v = v & 0x3FFFFFF; }
+        elif (i == 4) { c = v >> 26; v = v & 0x3FFFFFF; }
+        elif (i == 6) { c = v >> 26; v = v & 0x3FFFFFF; }
+        elif (i == 8) { c = v >> 26; v = v & 0x3FFFFFF; }
+        else { c = v >> 25; v = v & 0x1FFFFFF; }
+        fe_store(f, i, v);
+        i = i + 1;
+    }
+    var v9 = fe_load(f, 9) + c;
+    c = v9 >> 25;
+    v9 = v9 & 0x1FFFFFF;
+    fe_store(f, 9, v9);
+    # c wraps around: add 19*c to f[0]
+    fe_store(f, 0, fe_load(f, 0) + 19 * c);
+    return 0;
+}
+
+fn fe_to_bytes(out, f) {
+    # Work on a copy
+    var t[80];
+    fe_copy(&t, f);
+    _fe_carry(&t);
+    _fe_carry(&t);
+
+    # Final reduction: if h >= p, subtract p
+    # p = 2^255 - 19, so h >= p iff h + 19 >= 2^255
+    var q = (fe_load(&t, 0) + 19) >> 26;
+    q = (fe_load(&t, 1) + q) >> 25;
+    q = (fe_load(&t, 2) + q) >> 26;
+    q = (fe_load(&t, 3) + q) >> 25;
+    q = (fe_load(&t, 4) + q) >> 26;
+    q = (fe_load(&t, 5) + q) >> 25;
+    q = (fe_load(&t, 6) + q) >> 26;
+    q = (fe_load(&t, 7) + q) >> 25;
+    q = (fe_load(&t, 8) + q) >> 26;
+    q = (fe_load(&t, 9) + q) >> 25;
+
+    fe_store(&t, 0, fe_load(&t, 0) + 19 * q);
+    _fe_carry(&t);
+
+    var h0 = fe_load(&t, 0);
+    var h1 = fe_load(&t, 1);
+    var h2 = fe_load(&t, 2);
+    var h3 = fe_load(&t, 3);
+    var h4 = fe_load(&t, 4);
+    var h5 = fe_load(&t, 5);
+    var h6 = fe_load(&t, 6);
+    var h7 = fe_load(&t, 7);
+    var h8 = fe_load(&t, 8);
+    var h9 = fe_load(&t, 9);
+
+    # Pack into 32 bytes little-endian
+    # bits: 26+25+26+25+26+25+26+25+26+25 = 255
+    store8(out, h0 & 0xFF);
+    store8(out+1, (h0 >> 8) & 0xFF);
+    store8(out+2, (h0 >> 16) & 0xFF);
+    store8(out+3, ((h0 >> 24) | (h1 << 2)) & 0xFF);
+    store8(out+4, (h1 >> 6) & 0xFF);
+    store8(out+5, (h1 >> 14) & 0xFF);
+    store8(out+6, ((h1 >> 22) | (h2 << 3)) & 0xFF);
+    store8(out+7, (h2 >> 5) & 0xFF);
+    store8(out+8, (h2 >> 13) & 0xFF);
+    store8(out+9, ((h2 >> 21) | (h3 << 5)) & 0xFF);
+    store8(out+10, (h3 >> 3) & 0xFF);
+    store8(out+11, (h3 >> 11) & 0xFF);
+    store8(out+12, ((h3 >> 19) | (h4 << 6)) & 0xFF);
+    store8(out+13, (h4 >> 2) & 0xFF);
+    store8(out+14, (h4 >> 10) & 0xFF);
+    store8(out+15, (h4 >> 18) & 0xFF);
+    store8(out+16, h5 & 0xFF);
+    store8(out+17, (h5 >> 8) & 0xFF);
+    store8(out+18, (h5 >> 16) & 0xFF);
+    store8(out+19, ((h5 >> 24) | (h6 << 1)) & 0xFF);
+    store8(out+20, (h6 >> 7) & 0xFF);
+    store8(out+21, (h6 >> 15) & 0xFF);
+    store8(out+22, ((h6 >> 23) | (h7 << 3)) & 0xFF);
+    store8(out+23, (h7 >> 5) & 0xFF);
+    store8(out+24, (h7 >> 13) & 0xFF);
+    store8(out+25, ((h7 >> 21) | (h8 << 4)) & 0xFF);
+    store8(out+26, (h8 >> 4) & 0xFF);
+    store8(out+27, (h8 >> 12) & 0xFF);
+    store8(out+28, ((h8 >> 20) | (h9 << 6)) & 0xFF);
+    store8(out+29, (h9 >> 2) & 0xFF);
+    store8(out+30, (h9 >> 10) & 0xFF);
+    store8(out+31, (h9 >> 18) & 0xFF);
+    return 0;
+}
+
+# ================================================================
+# Field arithmetic: add, sub, neg, mul, sq, pow, invert
+# ================================================================
+
+fn fe_add(h, f, g) {
+    var i = 0;
+    while (i < 10) {
+        fe_store(h, i, fe_load(f, i) + fe_load(g, i));
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn fe_sub(h, f, g) {
+    # Add 2*p to prevent underflow before subtracting
+    # For 26-bit limbs: 2*p limb = 2*(2^26-1) + correction
+    # Simpler: add large multiples of p then subtract
+    fe_store(h, 0, fe_load(f, 0) - fe_load(g, 0) + 0x7FFFFDA);
+    fe_store(h, 1, fe_load(f, 1) - fe_load(g, 1) + 0x3FFFFFE);
+    fe_store(h, 2, fe_load(f, 2) - fe_load(g, 2) + 0x7FFFFFE);
+    fe_store(h, 3, fe_load(f, 3) - fe_load(g, 3) + 0x3FFFFFE);
+    fe_store(h, 4, fe_load(f, 4) - fe_load(g, 4) + 0x7FFFFFE);
+    fe_store(h, 5, fe_load(f, 5) - fe_load(g, 5) + 0x3FFFFFE);
+    fe_store(h, 6, fe_load(f, 6) - fe_load(g, 6) + 0x7FFFFFE);
+    fe_store(h, 7, fe_load(f, 7) - fe_load(g, 7) + 0x3FFFFFE);
+    fe_store(h, 8, fe_load(f, 8) - fe_load(g, 8) + 0x7FFFFFE);
+    fe_store(h, 9, fe_load(f, 9) - fe_load(g, 9) + 0x3FFFFFE);
+    return 0;
+}
+
+fn fe_neg(h, f) {
+    var z[80];
+    fe_zero(&z);
+    fe_sub(h, &z, f);
+    return 0;
+}
+
+# ================================================================
+# Field multiplication (schoolbook with carry chain)
+# ================================================================
+# With 26/25-bit limbs, products are at most 52 bits — fits in i64.
+# We need to accumulate up to 10 such products per output limb.
+# Max accumulator: 10 * 2^52 < 2^56 — safe in i64 (63-bit signed).
+
+# Global accumulators for multiplication (compiler clobber workaround)
+var _fm_h0 = 0; var _fm_h1 = 0; var _fm_h2 = 0; var _fm_h3 = 0; var _fm_h4 = 0;
+var _fm_h5 = 0; var _fm_h6 = 0; var _fm_h7 = 0; var _fm_h8 = 0; var _fm_h9 = 0;
+
+fn fe_mul(h, f, g) {
+    var f0 = fe_load(f, 0); var f1 = fe_load(f, 1); var f2 = fe_load(f, 2);
+    var f3 = fe_load(f, 3); var f4 = fe_load(f, 4); var f5 = fe_load(f, 5);
+    var f6 = fe_load(f, 6); var f7 = fe_load(f, 7); var f8 = fe_load(f, 8);
+    var f9 = fe_load(f, 9);
+
+    var g0 = fe_load(g, 0); var g1 = fe_load(g, 1); var g2 = fe_load(g, 2);
+    var g3 = fe_load(g, 3); var g4 = fe_load(g, 4); var g5 = fe_load(g, 5);
+    var g6 = fe_load(g, 6); var g7 = fe_load(g, 7); var g8 = fe_load(g, 8);
+    var g9 = fe_load(g, 9);
+
+    # Pre-multiply odd-index g values by 2 (for the * 19 reduction)
+    var g1_19 = 19 * g1; var g2_19 = 19 * g2; var g3_19 = 19 * g3;
+    var g4_19 = 19 * g4; var g5_19 = 19 * g5; var g6_19 = 19 * g6;
+    var g7_19 = 19 * g7; var g8_19 = 19 * g8; var g9_19 = 19 * g9;
+
+    # Double even-index f values for cross terms
+    var f1_2 = 2 * f1; var f3_2 = 2 * f3; var f5_2 = 2 * f5;
+    var f7_2 = 2 * f7; var f9_2 = 2 * f9;
+
+    _fm_h0 = f0*g0 + f1_2*g9_19 + f2*g8_19 + f3_2*g7_19 + f4*g6_19 + f5_2*g5_19 + f6*g4_19 + f7_2*g3_19 + f8*g2_19 + f9_2*g1_19;
+    _fm_h1 = f0*g1 + f1*g0 + f2*g9_19 + f3*g8_19 + f4*g7_19 + f5*g6_19 + f6*g5_19 + f7*g4_19 + f8*g3_19 + f9*g2_19;
+    _fm_h2 = f0*g2 + f1_2*g1 + f2*g0 + f3_2*g9_19 + f4*g8_19 + f5_2*g7_19 + f6*g6_19 + f7_2*g5_19 + f8*g4_19 + f9_2*g3_19;
+    _fm_h3 = f0*g3 + f1*g2 + f2*g1 + f3*g0 + f4*g9_19 + f5*g8_19 + f6*g7_19 + f7*g6_19 + f8*g5_19 + f9*g4_19;
+    _fm_h4 = f0*g4 + f1_2*g3 + f2*g2 + f3_2*g1 + f4*g0 + f5_2*g9_19 + f6*g8_19 + f7_2*g7_19 + f8*g6_19 + f9_2*g5_19;
+    _fm_h5 = f0*g5 + f1*g4 + f2*g3 + f3*g2 + f4*g1 + f5*g0 + f6*g9_19 + f7*g8_19 + f8*g7_19 + f9*g6_19;
+    _fm_h6 = f0*g6 + f1_2*g5 + f2*g4 + f3_2*g3 + f4*g2 + f5_2*g1 + f6*g0 + f7_2*g9_19 + f8*g8_19 + f9_2*g7_19;
+    _fm_h7 = f0*g7 + f1*g6 + f2*g5 + f3*g4 + f4*g3 + f5*g2 + f6*g1 + f7*g0 + f8*g9_19 + f9*g8_19;
+    _fm_h8 = f0*g8 + f1_2*g7 + f2*g6 + f3_2*g5 + f4*g4 + f5_2*g3 + f6*g2 + f7_2*g1 + f8*g0 + f9_2*g9_19;
+    _fm_h9 = f0*g9 + f1*g8 + f2*g7 + f3*g6 + f4*g5 + f5*g4 + f6*g3 + f7*g2 + f8*g1 + f9*g0;
+
+    # Carry chain
+    var c = 0;
+    c = _fm_h0 >> 26; _fm_h1 = _fm_h1 + c; _fm_h0 = _fm_h0 & 0x3FFFFFF;
+    c = _fm_h1 >> 25; _fm_h2 = _fm_h2 + c; _fm_h1 = _fm_h1 & 0x1FFFFFF;
+    c = _fm_h2 >> 26; _fm_h3 = _fm_h3 + c; _fm_h2 = _fm_h2 & 0x3FFFFFF;
+    c = _fm_h3 >> 25; _fm_h4 = _fm_h4 + c; _fm_h3 = _fm_h3 & 0x1FFFFFF;
+    c = _fm_h4 >> 26; _fm_h5 = _fm_h5 + c; _fm_h4 = _fm_h4 & 0x3FFFFFF;
+    c = _fm_h5 >> 25; _fm_h6 = _fm_h6 + c; _fm_h5 = _fm_h5 & 0x1FFFFFF;
+    c = _fm_h6 >> 26; _fm_h7 = _fm_h7 + c; _fm_h6 = _fm_h6 & 0x3FFFFFF;
+    c = _fm_h7 >> 25; _fm_h8 = _fm_h8 + c; _fm_h7 = _fm_h7 & 0x1FFFFFF;
+    c = _fm_h8 >> 26; _fm_h9 = _fm_h9 + c; _fm_h8 = _fm_h8 & 0x3FFFFFF;
+    c = _fm_h9 >> 25; _fm_h0 = _fm_h0 + 19 * c; _fm_h9 = _fm_h9 & 0x1FFFFFF;
+    c = _fm_h0 >> 26; _fm_h1 = _fm_h1 + c; _fm_h0 = _fm_h0 & 0x3FFFFFF;
+
+    fe_store(h, 0, _fm_h0); fe_store(h, 1, _fm_h1); fe_store(h, 2, _fm_h2);
+    fe_store(h, 3, _fm_h3); fe_store(h, 4, _fm_h4); fe_store(h, 5, _fm_h5);
+    fe_store(h, 6, _fm_h6); fe_store(h, 7, _fm_h7); fe_store(h, 8, _fm_h8);
+    fe_store(h, 9, _fm_h9);
+    return 0;
+}
+
+# ================================================================
+# Field squaring (optimized: fewer multiplications)
+# ================================================================
+
+fn fe_sq(h, f) {
+    fe_mul(h, f, f);
+    return 0;
+}
+
+# ================================================================
+# Modular inversion: f^(p-2) mod p using repeated squaring
+# p - 2 = 2^255 - 21
+# Uses addition chain from ref10
+# ================================================================
+
+fn fe_invert(out, z) {
+    var t0[80]; var t1[80]; var t2[80]; var t3[80];
+
+    fe_sq(&t0, z);            # t0 = z^2
+    fe_sq(&t1, &t0);          # t1 = z^4
+    fe_sq(&t1, &t1);          # t1 = z^8
+    fe_mul(&t1, z, &t1);      # t1 = z^9
+    fe_mul(&t0, &t0, &t1);    # t0 = z^11
+    fe_sq(&t2, &t0);          # t2 = z^22
+    fe_mul(&t1, &t1, &t2);    # t1 = z^(2^5 - 1)
+
+    fe_sq(&t2, &t1);
+    var i = 1;
+    while (i < 5) { fe_sq(&t2, &t2); i = i + 1; }
+    fe_mul(&t1, &t2, &t1);    # t1 = z^(2^10 - 1)
+
+    fe_sq(&t2, &t1);
+    i = 1;
+    while (i < 10) { fe_sq(&t2, &t2); i = i + 1; }
+    fe_mul(&t2, &t2, &t1);    # t2 = z^(2^20 - 1)
+
+    fe_sq(&t3, &t2);
+    i = 1;
+    while (i < 20) { fe_sq(&t3, &t3); i = i + 1; }
+    fe_mul(&t2, &t3, &t2);    # t2 = z^(2^40 - 1)
+
+    fe_sq(&t2, &t2);
+    i = 1;
+    while (i < 10) { fe_sq(&t2, &t2); i = i + 1; }
+    fe_mul(&t1, &t2, &t1);    # t1 = z^(2^50 - 1)
+
+    fe_sq(&t2, &t1);
+    i = 1;
+    while (i < 50) { fe_sq(&t2, &t2); i = i + 1; }
+    fe_mul(&t2, &t2, &t1);    # t2 = z^(2^100 - 1)
+
+    fe_sq(&t3, &t2);
+    i = 1;
+    while (i < 100) { fe_sq(&t3, &t3); i = i + 1; }
+    fe_mul(&t2, &t3, &t2);    # t2 = z^(2^200 - 1)
+
+    fe_sq(&t2, &t2);
+    i = 1;
+    while (i < 50) { fe_sq(&t2, &t2); i = i + 1; }
+    fe_mul(&t1, &t2, &t1);    # t1 = z^(2^250 - 1)
+
+    fe_sq(&t1, &t1);
+    fe_sq(&t1, &t1);          # t1 = z^(2^252 - 4)
+
+    fe_mul(out, &t1, &t0);    # out = z^(2^252 - 4) * z^11 = z^(2^255 - 21) = z^(p-2)
+    return 0;
+}
+
+# ================================================================
+# Conditional swap (constant-time)
+# ================================================================
+
+fn fe_cswap(f, g, b) {
+    var mask = 0 - b;  # b=1 -> mask = -1 (all bits set), b=0 -> mask = 0
+    var i = 0;
+    while (i < 10) {
+        var x = mask & (fe_load(f, i) ^ fe_load(g, i));
+        fe_store(f, i, fe_load(f, i) ^ x);
+        fe_store(g, i, fe_load(g, i) ^ x);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ================================================================
+# Point operations (extended coordinates: X, Y, Z, T)
+# ================================================================
+# Point layout: 320 bytes = 4 * 80 bytes
+# +0:   X (fe)
+# +80:  Y (fe)
+# +160: Z (fe)
+# +240: T (fe)  where T = X*Y/Z
+
+fn ge_zero(p) {
+    fe_zero(p);           # X = 0
+    fe_one(p + 80);       # Y = 1
+    fe_one(p + 160);      # Z = 1
+    fe_zero(p + 240);     # T = 0
+    return 0;
+}
+
+# ================================================================
+# Point addition (extended + extended -> extended)
+# Algorithm from "Twisted Edwards Curves Revisited" (HWCD08)
+# ================================================================
+
+var _ga_A = 0; var _ga_B = 0; var _ga_C = 0; var _ga_D = 0;
+var _ga_E = 0; var _ga_F = 0; var _ga_G = 0; var _ga_H = 0;
+
+fn _ge_alloc_temps() {
+    if (_ga_A != 0) { return 0; }
+    _ga_A = alloc(80); _ga_B = alloc(80); _ga_C = alloc(80); _ga_D = alloc(80);
+    _ga_E = alloc(80); _ga_F = alloc(80); _ga_G = alloc(80); _ga_H = alloc(80);
+    return 0;
+}
+
+fn ge_add(r, p, q) {
+    _ge_alloc_temps();
+
+    # A = (Y1-X1)*(Y2-X2)
+    var t1[80]; var t2[80];
+    fe_sub(&t1, p + 80, p);       # Y1 - X1
+    fe_sub(&t2, q + 80, q);       # Y2 - X2
+    fe_mul(_ga_A, &t1, &t2);
+
+    # B = (Y1+X1)*(Y2+X2)
+    fe_add(&t1, p + 80, p);       # Y1 + X1
+    fe_add(&t2, q + 80, q);       # Y2 + X2
+    fe_mul(_ga_B, &t1, &t2);
+
+    # C = T1*2*d*T2
+    fe_mul(_ga_C, p + 240, q + 240);
+    fe_mul(_ga_C, _ga_C, _ed_2d);
+
+    # D = Z1*2*Z2
+    fe_mul(_ga_D, p + 160, q + 160);
+    fe_add(_ga_D, _ga_D, _ga_D);
+
+    # E = B - A, F = D - C, G = D + C, H = B + A
+    fe_sub(_ga_E, _ga_B, _ga_A);
+    fe_sub(_ga_F, _ga_D, _ga_C);
+    fe_add(_ga_G, _ga_D, _ga_C);
+    fe_add(_ga_H, _ga_B, _ga_A);
+
+    # X3 = E*F, Y3 = G*H, T3 = E*H, Z3 = F*G
+    fe_mul(r, _ga_E, _ga_F);
+    fe_mul(r + 80, _ga_G, _ga_H);
+    fe_mul(r + 240, _ga_E, _ga_H);
+    fe_mul(r + 160, _ga_F, _ga_G);
+    return 0;
+}
+
+# ================================================================
+# Point doubling
+# ================================================================
+
+fn ge_double(r, p) {
+    _ge_alloc_temps();
+
+    # A = X1^2
+    fe_sq(_ga_A, p);
+    # B = Y1^2
+    fe_sq(_ga_B, p + 80);
+    # C = 2*Z1^2
+    fe_sq(_ga_C, p + 160);
+    fe_add(_ga_C, _ga_C, _ga_C);
+    # D = -A (since a = -1 for ed25519)
+    fe_neg(_ga_D, _ga_A);
+    # E = (X1+Y1)^2 - A - B
+    var t[80];
+    fe_add(&t, p, p + 80);
+    fe_sq(_ga_E, &t);
+    fe_sub(_ga_E, _ga_E, _ga_A);
+    fe_sub(_ga_E, _ga_E, _ga_B);
+    # G = D + B
+    fe_add(_ga_G, _ga_D, _ga_B);
+    # F = G - C
+    fe_sub(_ga_F, _ga_G, _ga_C);
+    # H = D - B
+    fe_sub(_ga_H, _ga_D, _ga_B);
+
+    # X3 = E*F, Y3 = G*H, T3 = E*H, Z3 = F*G
+    fe_mul(r, _ga_E, _ga_F);
+    fe_mul(r + 80, _ga_G, _ga_H);
+    fe_mul(r + 240, _ga_E, _ga_H);
+    fe_mul(r + 160, _ga_F, _ga_G);
+    return 0;
+}
+
+# ================================================================
+# Scalar multiplication: R = [s]P
+# Uses double-and-add (constant-time is NOT needed for verification,
+# but we do need it for signing — use fixed-base for sign later)
+# ================================================================
+
+fn ge_scalarmult(r, s, p) {
+    # s is 32 bytes (256 bits), little-endian
+    ge_zero(r);
+    var q[320];
+    memcpy(&q, p, 320);
+
+    var i = 0;
+    while (i < 256) {
+        var byte_idx = i / 8;
+        var bit_idx = i % 8;
+        var bit = (load8(s + byte_idx) >> bit_idx) & 1;
+        if (bit == 1) {
+            var tmp[320];
+            ge_add(&tmp, r, &q);
+            memcpy(r, &tmp, 320);
+        }
+        var tmp2[320];
+        ge_double(&tmp2, &q);
+        memcpy(&q, &tmp2, 320);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ================================================================
+# Point compression: extended point -> 32 bytes
+# ================================================================
+
+fn ge_to_bytes(out, p) {
+    var recip[80];
+    fe_invert(&recip, p + 160);    # 1/Z
+
+    var x[80]; var y[80];
+    fe_mul(&x, p, &recip);         # x = X/Z
+    fe_mul(&y, p + 80, &recip);    # y = Y/Z
+
+    fe_to_bytes(out, &y);
+    # Set high bit of last byte to sign of x
+    var x_bytes[32];
+    fe_to_bytes(&x_bytes, &x);
+    var sign = load8(&x_bytes) & 1;
+    store8(out + 31, (load8(out + 31) & 0xFF) | (sign << 7));
+    return 0;
+}
+
+# ================================================================
+# Point decompression: 32 bytes -> extended point
+# ================================================================
+# y is encoded in the bytes, x is recovered from curve equation
+# x^2 = (y^2 - 1) / (d*y^2 + 1)
+
+fn ge_from_bytes(p, s) {
+    var y[80];
+    # Clear the sign bit before decoding y
+    var s_copy[32];
+    memcpy(&s_copy, s, 32);
+    var x_sign = (load8(&s_copy + 31) >> 7) & 1;
+    store8(&s_copy + 31, load8(&s_copy + 31) & 0x7F);
+    fe_from_bytes(&y, &s_copy);
+
+    # u = y^2 - 1
+    var u[80]; var v[80]; var y2[80];
+    fe_sq(&y2, &y);
+    fe_sub(&u, &y2, p + 160);  # Oops, this would need fe_one... fix:
+    var one[80];
+    fe_one(&one);
+    fe_sub(&u, &y2, &one);
+
+    # v = d*y^2 + 1
+    fe_mul(&v, _ed_d, &y2);
+    fe_add(&v, &v, &one);
+
+    # x = sqrt(u/v)
+    # Using Tonelli-Shanks for p = 5 mod 8:
+    # candidate = (u/v)^((p+3)/8) = u * v^3 * (u*v^7)^((p-5)/8)
+    var v3[80]; var v7[80]; var uv3[80]; var uv7[80];
+    fe_sq(&v3, &v);          # v^2
+    fe_mul(&v3, &v3, &v);    # v^3
+    fe_sq(&v7, &v3);         # v^6
+    fe_mul(&v7, &v7, &v);    # v^7
+    fe_mul(&uv7, &u, &v7);   # u*v^7
+    fe_mul(&uv3, &u, &v3);   # u*v^3
+
+    # (u*v^7)^((p-5)/8)
+    # (p-5)/8 = (2^255 - 24) / 8 = 2^252 - 3
+    var pow[80];
+    _fe_pow_2_252_3(&pow, &uv7);
+
+    # x = u*v^3 * pow
+    var x[80];
+    fe_mul(&x, &uv3, &pow);
+
+    # Check: v*x^2 == u?
+    var check[80]; var vx2[80];
+    fe_sq(&vx2, &x);
+    fe_mul(&check, &v, &vx2);
+    var diff[80];
+    fe_sub(&diff, &check, &u);
+    var diff_bytes[32];
+    fe_to_bytes(&diff_bytes, &diff);
+    var is_zero = 1;
+    var i = 0;
+    while (i < 32) {
+        if ((load8(&diff_bytes + i) & 0xFF) != 0) { is_zero = 0; }
+        i = i + 1;
+    }
+
+    if (is_zero == 0) {
+        # Try x * sqrt(-1)
+        fe_mul(&x, &x, _ed_sqrtm1);
+    }
+
+    # Adjust sign
+    var x_bytes[32];
+    fe_to_bytes(&x_bytes, &x);
+    if ((load8(&x_bytes) & 1) != x_sign) {
+        fe_neg(&x, &x);
+    }
+
+    # Set point
+    fe_copy(p, &x);
+    fe_copy(p + 80, &y);
+    fe_one(p + 160);
+    fe_mul(p + 240, &x, &y);
+    return 0;
+}
+
+# ================================================================
+# fe^(2^252 - 3) — used in point decompression
+# ================================================================
+
+fn _fe_pow_2_252_3(out, z) {
+    var t0[80]; var t1[80]; var t2[80]; var t3[80];
+
+    fe_sq(&t0, z);
+    fe_sq(&t1, &t0);
+    fe_sq(&t1, &t1);
+    fe_mul(&t1, z, &t1);
+    fe_mul(&t0, &t0, &t1);
+    fe_sq(&t0, &t0);
+    fe_mul(&t0, &t1, &t0);
+
+    fe_sq(&t1, &t0);
+    var i = 1;
+    while (i < 5) { fe_sq(&t1, &t1); i = i + 1; }
+    fe_mul(&t0, &t1, &t0);
+
+    fe_sq(&t1, &t0);
+    i = 1;
+    while (i < 10) { fe_sq(&t1, &t1); i = i + 1; }
+    fe_mul(&t1, &t1, &t0);
+
+    fe_sq(&t2, &t1);
+    i = 1;
+    while (i < 20) { fe_sq(&t2, &t2); i = i + 1; }
+    fe_mul(&t1, &t2, &t1);
+
+    fe_sq(&t1, &t1);
+    i = 1;
+    while (i < 10) { fe_sq(&t1, &t1); i = i + 1; }
+    fe_mul(&t0, &t1, &t0);
+
+    fe_sq(&t1, &t0);
+    i = 1;
+    while (i < 50) { fe_sq(&t1, &t1); i = i + 1; }
+    fe_mul(&t1, &t1, &t0);
+
+    fe_sq(&t2, &t1);
+    i = 1;
+    while (i < 100) { fe_sq(&t2, &t2); i = i + 1; }
+    fe_mul(&t1, &t2, &t1);
+
+    fe_sq(&t1, &t1);
+    i = 1;
+    while (i < 50) { fe_sq(&t1, &t1); i = i + 1; }
+    fe_mul(&t0, &t1, &t0);
+
+    fe_sq(&t0, &t0);
+    fe_sq(&t0, &t0);
+    fe_mul(out, &t0, z);
+    return 0;
+}
+
+# ================================================================
+# Ed25519 initialization — constants
+# ================================================================
+
+var _ed_sqrtm1 = 0;
+
+fn ed25519_init() {
+    if (_ed25519_inited == 1) { return 0; }
+
+    # d = -121665/121666 mod p
+    # Encoded as 32 bytes (little-endian):
+    _ed_d = alloc(80);
+    var d_bytes[32];
+    store8(&d_bytes, 0xa3); store8(&d_bytes+1, 0x78); store8(&d_bytes+2, 0x59);
+    store8(&d_bytes+3, 0x13); store8(&d_bytes+4, 0xca); store8(&d_bytes+5, 0x4d);
+    store8(&d_bytes+6, 0xeb); store8(&d_bytes+7, 0x75);
+    store8(&d_bytes+8, 0xab); store8(&d_bytes+9, 0xd1);
+    store8(&d_bytes+10, 0x68); store8(&d_bytes+11, 0x80);
+    store8(&d_bytes+12, 0x18); store8(&d_bytes+13, 0x98);
+    store8(&d_bytes+14, 0x10); store8(&d_bytes+15, 0x21);
+    store8(&d_bytes+16, 0x36); store8(&d_bytes+17, 0x12);
+    store8(&d_bytes+18, 0x17); store8(&d_bytes+19, 0xd1);
+    store8(&d_bytes+20, 0x30); store8(&d_bytes+21, 0xb6);
+    store8(&d_bytes+22, 0x70); store8(&d_bytes+23, 0x04);
+    store8(&d_bytes+24, 0x76); store8(&d_bytes+25, 0xd3);
+    store8(&d_bytes+26, 0x69); store8(&d_bytes+27, 0x5b);
+    store8(&d_bytes+28, 0x93); store8(&d_bytes+29, 0x68);
+    store8(&d_bytes+30, 0x22); store8(&d_bytes+31, 0x52);
+    fe_from_bytes(_ed_d, &d_bytes);
+
+    # 2*d
+    _ed_2d = alloc(80);
+    fe_add(_ed_2d, _ed_d, _ed_d);
+
+    # sqrt(-1) mod p
+    # = 2^((p-1)/4) mod p
+    # Encoded bytes:
+    _ed_sqrtm1 = alloc(80);
+    var sqrtm1_bytes[32];
+    store8(&sqrtm1_bytes, 0xb0); store8(&sqrtm1_bytes+1, 0xa0);
+    store8(&sqrtm1_bytes+2, 0x0e); store8(&sqrtm1_bytes+3, 0x4a);
+    store8(&sqrtm1_bytes+4, 0x27); store8(&sqrtm1_bytes+5, 0x1b);
+    store8(&sqrtm1_bytes+6, 0xee); store8(&sqrtm1_bytes+7, 0xc4);
+    store8(&sqrtm1_bytes+8, 0x78); store8(&sqrtm1_bytes+9, 0xe4);
+    store8(&sqrtm1_bytes+10, 0x2f); store8(&sqrtm1_bytes+11, 0xad);
+    store8(&sqrtm1_bytes+12, 0x06); store8(&sqrtm1_bytes+13, 0x18);
+    store8(&sqrtm1_bytes+14, 0x43); store8(&sqrtm1_bytes+15, 0x2f);
+    store8(&sqrtm1_bytes+16, 0xa7); store8(&sqrtm1_bytes+17, 0xd7);
+    store8(&sqrtm1_bytes+18, 0xfb); store8(&sqrtm1_bytes+19, 0x3d);
+    store8(&sqrtm1_bytes+20, 0x99); store8(&sqrtm1_bytes+21, 0x00);
+    store8(&sqrtm1_bytes+22, 0x4d); store8(&sqrtm1_bytes+23, 0x2b);
+    store8(&sqrtm1_bytes+24, 0x0b); store8(&sqrtm1_bytes+25, 0xdf);
+    store8(&sqrtm1_bytes+26, 0xc1); store8(&sqrtm1_bytes+27, 0x4f);
+    store8(&sqrtm1_bytes+28, 0x80); store8(&sqrtm1_bytes+29, 0x24);
+    store8(&sqrtm1_bytes+30, 0x28); store8(&sqrtm1_bytes+31, 0x2b);
+    fe_from_bytes(_ed_sqrtm1, &sqrtm1_bytes);
+
+    # Base point B (encoded as 32 bytes)
+    _ed_B = alloc(320);
+    var B_bytes[32];
+    store8(&B_bytes, 0x58); store8(&B_bytes+1, 0x66);
+    store8(&B_bytes+2, 0x66); store8(&B_bytes+3, 0x66);
+    store8(&B_bytes+4, 0x66); store8(&B_bytes+5, 0x66);
+    store8(&B_bytes+6, 0x66); store8(&B_bytes+7, 0x66);
+    store8(&B_bytes+8, 0x66); store8(&B_bytes+9, 0x66);
+    store8(&B_bytes+10, 0x66); store8(&B_bytes+11, 0x66);
+    store8(&B_bytes+12, 0x66); store8(&B_bytes+13, 0x66);
+    store8(&B_bytes+14, 0x66); store8(&B_bytes+15, 0x66);
+    store8(&B_bytes+16, 0x66); store8(&B_bytes+17, 0x66);
+    store8(&B_bytes+18, 0x66); store8(&B_bytes+19, 0x66);
+    store8(&B_bytes+20, 0x66); store8(&B_bytes+21, 0x66);
+    store8(&B_bytes+22, 0x66); store8(&B_bytes+23, 0x66);
+    store8(&B_bytes+24, 0x66); store8(&B_bytes+25, 0x66);
+    store8(&B_bytes+26, 0x66); store8(&B_bytes+27, 0x66);
+    store8(&B_bytes+28, 0x66); store8(&B_bytes+29, 0x66);
+    store8(&B_bytes+30, 0x66); store8(&B_bytes+31, 0x66);
+    ge_from_bytes(_ed_B, &B_bytes);
+
+    # L (scalar order) as 4 x 64-bit limbs (little-endian)
+    _ed_L = alloc(32);
+    store8(_ed_L, 0xed); store8(_ed_L+1, 0xd3); store8(_ed_L+2, 0xf5);
+    store8(_ed_L+3, 0x5c); store8(_ed_L+4, 0x1a); store8(_ed_L+5, 0x63);
+    store8(_ed_L+6, 0x12); store8(_ed_L+7, 0x58);
+    store8(_ed_L+8, 0xd6); store8(_ed_L+9, 0x9c); store8(_ed_L+10, 0xf7);
+    store8(_ed_L+11, 0xa2); store8(_ed_L+12, 0xde); store8(_ed_L+13, 0xf9);
+    store8(_ed_L+14, 0xde); store8(_ed_L+15, 0x14);
+    store8(_ed_L+16, 0); store8(_ed_L+17, 0); store8(_ed_L+18, 0);
+    store8(_ed_L+19, 0); store8(_ed_L+20, 0); store8(_ed_L+21, 0);
+    store8(_ed_L+22, 0); store8(_ed_L+23, 0);
+    store8(_ed_L+24, 0); store8(_ed_L+25, 0); store8(_ed_L+26, 0);
+    store8(_ed_L+27, 0); store8(_ed_L+28, 0); store8(_ed_L+29, 0);
+    store8(_ed_L+30, 0); store8(_ed_L+31, 0x10);
+
+    _ed25519_inited = 1;
+    return 0;
+}
+
+# ================================================================
+# Scalar reduction mod L (512-bit -> 256-bit)
+# Uses Barrett reduction with precomputed constants
+# Input: 64 bytes (from SHA-512 output), output: 32 bytes
+# ================================================================
+
+fn sc_reduce(out, s) {
+    # Reference implementation uses schoolbook reduction
+    # For now, implement using the standard ref10 approach:
+    # Load 64 bytes as 24 x 21-bit limbs, then reduce mod L
+
+    # Load s as array of 21-bit signed digits
+    var a[192];  # 24 * 8 bytes
+    store64(&a, 0x1FFFFF & _load_3(s));
+    store64(&a + 8, 0x1FFFFF & (_load_4(s + 2) >> 5));
+    store64(&a + 16, 0x1FFFFF & (_load_3(s + 5) >> 2));
+    store64(&a + 24, 0x1FFFFF & (_load_4(s + 7) >> 7));
+    store64(&a + 32, 0x1FFFFF & (_load_4(s + 10) >> 4));
+    store64(&a + 40, 0x1FFFFF & (_load_3(s + 13) >> 1));
+    store64(&a + 48, 0x1FFFFF & (_load_4(s + 15) >> 6));
+    store64(&a + 56, 0x1FFFFF & (_load_3(s + 18) >> 3));
+    store64(&a + 64, 0x1FFFFF & _load_3(s + 21));
+    store64(&a + 72, 0x1FFFFF & (_load_4(s + 23) >> 5));
+    store64(&a + 80, 0x1FFFFF & (_load_3(s + 26) >> 2));
+    store64(&a + 88, (_load_4(s + 28) >> 7));
+    store64(&a + 96, 0x1FFFFF & _load_3(s + 32));
+    store64(&a + 104, 0x1FFFFF & (_load_4(s + 34) >> 5));
+    store64(&a + 112, 0x1FFFFF & (_load_3(s + 37) >> 2));
+    store64(&a + 120, 0x1FFFFF & (_load_4(s + 39) >> 7));
+    store64(&a + 128, 0x1FFFFF & (_load_4(s + 42) >> 4));
+    store64(&a + 136, 0x1FFFFF & (_load_3(s + 45) >> 1));
+    store64(&a + 144, 0x1FFFFF & (_load_4(s + 47) >> 6));
+    store64(&a + 152, 0x1FFFFF & (_load_3(s + 50) >> 3));
+    store64(&a + 160, 0x1FFFFF & _load_3(s + 53));
+    store64(&a + 168, 0x1FFFFF & (_load_4(s + 55) >> 5));
+    store64(&a + 176, 0x1FFFFF & (_load_3(s + 58) >> 2));
+    store64(&a + 184, (_load_4(s + 60) >> 7));
+
+    # Reduce using ref10's schoolbook approach with L's digits
+    # This is lengthy but correct — follows SUPERCOP ref10/sc_reduce.c
+    _sc_reduce_impl(&a);
+
+    # Pack 12 limbs back to 32 bytes
+    _sc_pack(out, &a);
+    return 0;
+}
+
+fn _load_3(s) {
+    return (load8(s) & 0xFF) | ((load8(s+1) & 0xFF) << 8) | ((load8(s+2) & 0xFF) << 16);
+}
+
+fn _load_4(s) {
+    return (load8(s) & 0xFF) | ((load8(s+1) & 0xFF) << 8) | ((load8(s+2) & 0xFF) << 16) | ((load8(s+3) & 0xFF) << 24);
+}
+
+fn _sc_reduce_impl(a) {
+    # Reduce a[0..23] mod L into a[0..11]
+    # L digits (21-bit):
+    # L = 0x1000000000000000000000000000000014def9dea2f79cd65812631a5cf5d3ed
+    # In 21-bit limbs... this is very tedious to write inline.
+    #
+    # Simplified approach: reduce from top limbs down
+    # a[23] * 2^(23*21) mod L, etc.
+
+    # Using the standard sc_reduce from ref10 (converted to Cyrius)
+    # The reduction uses the fact that 2^252 ≡ -27742317777372353535851937790883648493 mod L
+    # We fold the high limbs (12-23) into the low limbs (0-11)
+
+    var s0 = load64(a); var s1 = load64(a+8); var s2 = load64(a+16);
+    var s3 = load64(a+24); var s4 = load64(a+32); var s5 = load64(a+40);
+    var s6 = load64(a+48); var s7 = load64(a+56); var s8 = load64(a+64);
+    var s9 = load64(a+72); var s10 = load64(a+80); var s11 = load64(a+88);
+    var s12 = load64(a+96); var s13 = load64(a+104); var s14 = load64(a+112);
+    var s15 = load64(a+120); var s16 = load64(a+128); var s17 = load64(a+136);
+    var s18 = load64(a+144); var s19 = load64(a+152); var s20 = load64(a+160);
+    var s21 = load64(a+168); var s22 = load64(a+176); var s23 = load64(a+184);
+
+    # Reduce s23..s18 into s0..s17
+    s11 = s11 + s23 * 666643;
+    s12 = s12 + s23 * 470296;
+    s13 = s13 + s23 * 654183;
+    s14 = s14 - s23 * 997805;
+    s15 = s15 + s23 * 136657;
+    s16 = s16 - s23 * 683901;
+    s23 = 0;
+
+    s10 = s10 + s22 * 666643;
+    s11 = s11 + s22 * 470296;
+    s12 = s12 + s22 * 654183;
+    s13 = s13 - s22 * 997805;
+    s14 = s14 + s22 * 136657;
+    s15 = s15 - s22 * 683901;
+    s22 = 0;
+
+    s9 = s9 + s21 * 666643;
+    s10 = s10 + s21 * 470296;
+    s11 = s11 + s21 * 654183;
+    s12 = s12 - s21 * 997805;
+    s13 = s13 + s21 * 136657;
+    s14 = s14 - s21 * 683901;
+    s21 = 0;
+
+    s8 = s8 + s20 * 666643;
+    s9 = s9 + s20 * 470296;
+    s10 = s10 + s20 * 654183;
+    s11 = s11 - s20 * 997805;
+    s12 = s12 + s20 * 136657;
+    s13 = s13 - s20 * 683901;
+    s20 = 0;
+
+    s7 = s7 + s19 * 666643;
+    s8 = s8 + s19 * 470296;
+    s9 = s9 + s19 * 654183;
+    s10 = s10 - s19 * 997805;
+    s11 = s11 + s19 * 136657;
+    s12 = s12 - s19 * 683901;
+    s19 = 0;
+
+    s6 = s6 + s18 * 666643;
+    s7 = s7 + s18 * 470296;
+    s8 = s8 + s18 * 654183;
+    s9 = s9 - s18 * 997805;
+    s10 = s10 + s18 * 136657;
+    s11 = s11 - s18 * 683901;
+    s18 = 0;
+
+    # First carry pass
+    var carry = 0;
+    carry = (s6 + (1 << 20)) >> 21; s7 = s7 + carry; s6 = s6 - (carry << 21);
+    carry = (s8 + (1 << 20)) >> 21; s9 = s9 + carry; s8 = s8 - (carry << 21);
+    carry = (s10 + (1 << 20)) >> 21; s11 = s11 + carry; s10 = s10 - (carry << 21);
+    carry = (s12 + (1 << 20)) >> 21; s13 = s13 + carry; s12 = s12 - (carry << 21);
+    carry = (s14 + (1 << 20)) >> 21; s15 = s15 + carry; s14 = s14 - (carry << 21);
+    carry = (s16 + (1 << 20)) >> 21; s17 = s17 + carry; s16 = s16 - (carry << 21);
+
+    carry = (s7 + (1 << 20)) >> 21; s8 = s8 + carry; s7 = s7 - (carry << 21);
+    carry = (s9 + (1 << 20)) >> 21; s10 = s10 + carry; s9 = s9 - (carry << 21);
+    carry = (s11 + (1 << 20)) >> 21; s12 = s12 + carry; s11 = s11 - (carry << 21);
+    carry = (s13 + (1 << 20)) >> 21; s14 = s14 + carry; s13 = s13 - (carry << 21);
+    carry = (s15 + (1 << 20)) >> 21; s16 = s16 + carry; s15 = s15 - (carry << 21);
+
+    # Reduce s17..s12 into s0..s11
+    s5 = s5 + s17 * 666643;
+    s6 = s6 + s17 * 470296;
+    s7 = s7 + s17 * 654183;
+    s8 = s8 - s17 * 997805;
+    s9 = s9 + s17 * 136657;
+    s10 = s10 - s17 * 683901;
+
+    s4 = s4 + s16 * 666643;
+    s5 = s5 + s16 * 470296;
+    s6 = s6 + s16 * 654183;
+    s7 = s7 - s16 * 997805;
+    s8 = s8 + s16 * 136657;
+    s9 = s9 - s16 * 683901;
+
+    s3 = s3 + s15 * 666643;
+    s4 = s4 + s15 * 470296;
+    s5 = s5 + s15 * 654183;
+    s6 = s6 - s15 * 997805;
+    s7 = s7 + s15 * 136657;
+    s8 = s8 - s15 * 683901;
+
+    s2 = s2 + s14 * 666643;
+    s3 = s3 + s14 * 470296;
+    s4 = s4 + s14 * 654183;
+    s5 = s5 - s14 * 997805;
+    s6 = s6 + s14 * 136657;
+    s7 = s7 - s14 * 683901;
+
+    s1 = s1 + s13 * 666643;
+    s2 = s2 + s13 * 470296;
+    s3 = s3 + s13 * 654183;
+    s4 = s4 - s13 * 997805;
+    s5 = s5 + s13 * 136657;
+    s6 = s6 - s13 * 683901;
+
+    s0 = s0 + s12 * 666643;
+    s1 = s1 + s12 * 470296;
+    s2 = s2 + s12 * 654183;
+    s3 = s3 - s12 * 997805;
+    s4 = s4 + s12 * 136657;
+    s5 = s5 - s12 * 683901;
+    s12 = 0;
+
+    # Second carry pass
+    carry = (s0 + (1 << 20)) >> 21; s1 = s1 + carry; s0 = s0 - (carry << 21);
+    carry = (s2 + (1 << 20)) >> 21; s3 = s3 + carry; s2 = s2 - (carry << 21);
+    carry = (s4 + (1 << 20)) >> 21; s5 = s5 + carry; s4 = s4 - (carry << 21);
+    carry = (s6 + (1 << 20)) >> 21; s7 = s7 + carry; s6 = s6 - (carry << 21);
+    carry = (s8 + (1 << 20)) >> 21; s9 = s9 + carry; s8 = s8 - (carry << 21);
+    carry = (s10 + (1 << 20)) >> 21; s11 = s11 + carry; s10 = s10 - (carry << 21);
+
+    carry = (s1 + (1 << 20)) >> 21; s2 = s2 + carry; s1 = s1 - (carry << 21);
+    carry = (s3 + (1 << 20)) >> 21; s4 = s4 + carry; s3 = s3 - (carry << 21);
+    carry = (s5 + (1 << 20)) >> 21; s6 = s6 + carry; s5 = s5 - (carry << 21);
+    carry = (s7 + (1 << 20)) >> 21; s8 = s8 + carry; s7 = s7 - (carry << 21);
+    carry = (s9 + (1 << 20)) >> 21; s10 = s10 + carry; s9 = s9 - (carry << 21);
+    carry = (s11 + (1 << 20)) >> 21; s12 = s12 + carry; s11 = s11 - (carry << 21);
+
+    # Final fold of s12
+    s0 = s0 + s12 * 666643;
+    s1 = s1 + s12 * 470296;
+    s2 = s2 + s12 * 654183;
+    s3 = s3 - s12 * 997805;
+    s4 = s4 + s12 * 136657;
+    s5 = s5 - s12 * 683901;
+    s12 = 0;
+
+    carry = s0 >> 21; s1 = s1 + carry; s0 = s0 - (carry << 21);
+    carry = s1 >> 21; s2 = s2 + carry; s1 = s1 - (carry << 21);
+    carry = s2 >> 21; s3 = s3 + carry; s2 = s2 - (carry << 21);
+    carry = s3 >> 21; s4 = s4 + carry; s3 = s3 - (carry << 21);
+    carry = s4 >> 21; s5 = s5 + carry; s4 = s4 - (carry << 21);
+    carry = s5 >> 21; s6 = s6 + carry; s5 = s5 - (carry << 21);
+    carry = s6 >> 21; s7 = s7 + carry; s6 = s6 - (carry << 21);
+    carry = s7 >> 21; s8 = s8 + carry; s7 = s7 - (carry << 21);
+    carry = s8 >> 21; s9 = s9 + carry; s8 = s8 - (carry << 21);
+    carry = s9 >> 21; s10 = s10 + carry; s9 = s9 - (carry << 21);
+    carry = s10 >> 21; s11 = s11 + carry; s10 = s10 - (carry << 21);
+
+    store64(a, s0); store64(a+8, s1); store64(a+16, s2);
+    store64(a+24, s3); store64(a+32, s4); store64(a+40, s5);
+    store64(a+48, s6); store64(a+56, s7); store64(a+64, s8);
+    store64(a+72, s9); store64(a+80, s10); store64(a+88, s11);
+    return 0;
+}
+
+fn _sc_pack(out, a) {
+    var s0 = load64(a); var s1 = load64(a+8); var s2 = load64(a+16);
+    var s3 = load64(a+24); var s4 = load64(a+32); var s5 = load64(a+40);
+    var s6 = load64(a+48); var s7 = load64(a+56); var s8 = load64(a+64);
+    var s9 = load64(a+72); var s10 = load64(a+80); var s11 = load64(a+88);
+
+    store8(out, s0 & 0xFF);
+    store8(out+1, (s0 >> 8) & 0xFF);
+    store8(out+2, ((s0 >> 16) | (s1 << 5)) & 0xFF);
+    store8(out+3, (s1 >> 3) & 0xFF);
+    store8(out+4, (s1 >> 11) & 0xFF);
+    store8(out+5, ((s1 >> 19) | (s2 << 2)) & 0xFF);
+    store8(out+6, (s2 >> 6) & 0xFF);
+    store8(out+7, ((s2 >> 14) | (s3 << 7)) & 0xFF);
+    store8(out+8, (s3 >> 1) & 0xFF);
+    store8(out+9, (s3 >> 9) & 0xFF);
+    store8(out+10, ((s3 >> 17) | (s4 << 4)) & 0xFF);
+    store8(out+11, (s4 >> 4) & 0xFF);
+    store8(out+12, (s4 >> 12) & 0xFF);
+    store8(out+13, ((s4 >> 20) | (s5 << 1)) & 0xFF);
+    store8(out+14, (s5 >> 7) & 0xFF);
+    store8(out+15, ((s5 >> 15) | (s6 << 6)) & 0xFF);
+    store8(out+16, (s6 >> 2) & 0xFF);
+    store8(out+17, (s6 >> 10) & 0xFF);
+    store8(out+18, ((s6 >> 18) | (s7 << 3)) & 0xFF);
+    store8(out+19, (s7 >> 5) & 0xFF);
+    store8(out+20, (s7 >> 13) & 0xFF);
+    store8(out+21, s8 & 0xFF);
+    store8(out+22, (s8 >> 8) & 0xFF);
+    store8(out+23, ((s8 >> 16) | (s9 << 5)) & 0xFF);
+    store8(out+24, (s9 >> 3) & 0xFF);
+    store8(out+25, (s9 >> 11) & 0xFF);
+    store8(out+26, ((s9 >> 19) | (s10 << 2)) & 0xFF);
+    store8(out+27, (s10 >> 6) & 0xFF);
+    store8(out+28, ((s10 >> 14) | (s11 << 7)) & 0xFF);
+    store8(out+29, (s11 >> 1) & 0xFF);
+    store8(out+30, (s11 >> 9) & 0xFF);
+    store8(out+31, (s11 >> 17) & 0xFF);
+    return 0;
+}
+
+# ================================================================
+# sc_muladd: out = a*b + c mod L
+# Used in signing: S = r + H(R,A,M) * a mod L
+# ================================================================
+# This is the full 64-byte product reduction — another large function.
+# For now, we implement a simplified version using sc_reduce.
+
+fn sc_muladd(out, a, b, c) {
+    # Compute a*b as 64 bytes, add c, reduce mod L
+    # a, b, c are 32-byte scalars (little-endian)
+    # Product needs 64 bytes. We do schoolbook multiplication.
+    var product[64];
+    memset(&product, 0, 64);
+
+    # Schoolbook multiply 32x32 bytes
+    var i = 0;
+    while (i < 32) {
+        var ai = load8(a + i) & 0xFF;
+        var carry_mul = 0;
+        var j = 0;
+        while (j < 32) {
+            var bj = load8(b + j) & 0xFF;
+            var cur = (load8(&product + i + j) & 0xFF) + ai * bj + carry_mul;
+            store8(&product + i + j, cur & 0xFF);
+            carry_mul = cur >> 8;
+            j = j + 1;
+        }
+        store8(&product + i + 32, (load8(&product + i + 32) & 0xFF) + (carry_mul & 0xFF));
+        i = i + 1;
+    }
+
+    # Add c
+    var carry_add = 0;
+    i = 0;
+    while (i < 32) {
+        var sum = (load8(&product + i) & 0xFF) + (load8(c + i) & 0xFF) + carry_add;
+        store8(&product + i, sum & 0xFF);
+        carry_add = sum >> 8;
+        i = i + 1;
+    }
+    while (i < 64) {
+        var sum = (load8(&product + i) & 0xFF) + carry_add;
+        store8(&product + i, sum & 0xFF);
+        carry_add = sum >> 8;
+        i = i + 1;
+    }
+
+    sc_reduce(out, &product);
+    return 0;
+}
+
+# ================================================================
+# Ed25519 keypair generation
+# ================================================================
+# Input: 32-byte seed (random)
+# Output: sk_out (64 bytes: seed || public_key)
+#         pk_out (32 bytes: compressed public key)
+
+fn ed25519_keypair(seed, sk_out, pk_out) {
+    ed25519_init();
+
+    # Hash seed with SHA-512
+    var h[64];
+    sha512(seed, 32, &h);
+
+    # Clamp
+    store8(&h, load8(&h) & 0xF8);
+    store8(&h + 31, (load8(&h + 31) & 0x7F) | 0x40);
+
+    # Compute A = [a]B
+    var A[320];
+    ge_scalarmult(&A, &h, _ed_B);
+
+    # Compress A to get public key
+    ge_to_bytes(pk_out, &A);
+
+    # sk = seed || pk
+    memcpy(sk_out, seed, 32);
+    memcpy(sk_out + 32, pk_out, 32);
+    return 0;
+}
+
+# ================================================================
+# Ed25519 signing
+# ================================================================
+# Input: sk (64 bytes: seed || pk), msg, msg_len
+# Output: sig_out (64 bytes: R || S)
+
+fn ed25519_sign(sk, msg, msg_len, sig_out) {
+    ed25519_init();
+
+    # Re-derive a and prefix from SHA-512(seed)
+    var az[64];
+    sha512(sk, 32, &az);
+    store8(&az, load8(&az) & 0xF8);
+    store8(&az + 31, (load8(&az + 31) & 0x7F) | 0x40);
+
+    # r = SHA-512(az[32..64] || msg) mod L
+    var nonce_input_ctx = sha512_init();
+    sha512_update(nonce_input_ctx, &az + 32, 32);
+    sha512_update(nonce_input_ctx, msg, msg_len);
+    var nonce_hash[64];
+    sha512_finalize(nonce_input_ctx, &nonce_hash);
+    fl_free(nonce_input_ctx);
+
+    var r[32];
+    sc_reduce(&r, &nonce_hash);
+
+    # R = [r]B
+    var R_point[320];
+    ge_scalarmult(&R_point, &r, _ed_B);
+    ge_to_bytes(sig_out, &R_point);  # First 32 bytes of sig = R
+
+    # h = SHA-512(R || pk || msg) mod L
+    var hram_ctx = sha512_init();
+    sha512_update(hram_ctx, sig_out, 32);        # R
+    sha512_update(hram_ctx, sk + 32, 32);        # pk
+    sha512_update(hram_ctx, msg, msg_len);        # msg
+    var hram[64];
+    sha512_finalize(hram_ctx, &hram);
+    fl_free(hram_ctx);
+
+    var hram_reduced[32];
+    sc_reduce(&hram_reduced, &hram);
+
+    # S = r + h*a mod L
+    sc_muladd(sig_out + 32, &hram_reduced, &az, &r);
+
+    # Zeroize sensitive data
+    memset(&az, 0, 64);
+    memset(&r, 0, 32);
+    return 0;
+}
+
+# ================================================================
+# Ed25519 verification
+# ================================================================
+# Input: pk (32 bytes), msg, msg_len, sig (64 bytes)
+# Returns: 1 if valid, 0 if invalid
+
+fn ed25519_verify(pk, msg, msg_len, sig) {
+    ed25519_init();
+
+    # Decode public key
+    var A[320];
+    ge_from_bytes(&A, pk);
+
+    # h = SHA-512(R || pk || msg) mod L
+    var hram_ctx = sha512_init();
+    sha512_update(hram_ctx, sig, 32);         # R
+    sha512_update(hram_ctx, pk, 32);          # pk
+    sha512_update(hram_ctx, msg, msg_len);    # msg
+    var hram[64];
+    sha512_finalize(hram_ctx, &hram);
+    fl_free(hram_ctx);
+
+    var h[32];
+    sc_reduce(&h, &hram);
+
+    # Check: [S]B == R + [h]A
+    # Compute [S]B
+    var SB[320];
+    ge_scalarmult(&SB, sig + 32, _ed_B);
+
+    # Compute [h]A
+    var hA[320];
+    ge_scalarmult(&hA, &h, &A);
+
+    # Compute R_check = [S]B - [h]A
+    # Negate A: negate X and T coordinates
+    fe_neg(&hA, &hA);
+    fe_neg(hA + 240, hA + 240);
+    var R_check[320];
+    ge_add(&R_check, &SB, &hA);
+
+    # Compress R_check and compare with sig[0..32]
+    var R_bytes[32];
+    ge_to_bytes(&R_bytes, &R_check);
+
+    return ct_eq(&R_bytes, 32, sig, 32);
+}
+
+# ================================================================
+# Convenience: generate random keypair from /dev/urandom
+# ================================================================
+
+fn ed25519_generate_keypair(sk_out, pk_out) {
+    var seed[32];
+    var fd = file_open("/dev/urandom", 0, 0);
+    file_read(fd, &seed, 32);
+    file_close(fd);
+    ed25519_keypair(&seed, sk_out, pk_out);
+    memset(&seed, 0, 32);
+    return 0;
+}

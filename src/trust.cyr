@@ -1,0 +1,235 @@
+# trust.cyr — signing, verification, key management
+# Uses HMAC-SHA256 for now; Ed25519 swaps in when bigint.cyr is ready.
+
+# ================================================================
+# KeyRole
+# ================================================================
+
+enum KeyRole {
+    KEY_ROLE_ROOT = 0;
+    KEY_ROLE_INTERMEDIATE = 1;
+    KEY_ROLE_PUBLISHER = 2;
+}
+
+fn key_role_name(role) {
+    if (role == KEY_ROLE_ROOT) { return "Root"; }
+    if (role == KEY_ROLE_INTERMEDIATE) { return "Intermediate"; }
+    if (role == KEY_ROLE_PUBLISHER) { return "Publisher"; }
+    return "unknown";
+}
+
+# ================================================================
+# KeyVersion (88 bytes)
+# ================================================================
+# Layout:
+#   +0   key_id          (C-string ptr)
+#   +8   valid_from      (epoch seconds)
+#   +16  valid_until     (epoch seconds, 0 = no expiry)
+#   +24  public_key_hex  (C-string ptr, 64-char hex)
+#   +32  role            (i64 KEY_ROLE_*)
+#   +40  issued_by       (C-string ptr, 0 = self-signed)
+#   +48  issuer_sig      (ptr to raw bytes, 0 = none)
+#   +56  issuer_sig_len  (i64)
+#   +64  pub_name        (C-string ptr, 0 = none)
+#   +72  pub_contact     (C-string ptr, 0 = none)
+#   +80  secret_key      (ptr to 32 raw bytes, 0 = none, for HMAC signing)
+
+fn key_version_new(key_id, public_key_hex) {
+    var kv = fl_alloc(88);
+    store64(kv, key_id);
+    store64(kv + 8, clock_epoch_secs());
+    store64(kv + 16, 0);
+    store64(kv + 24, public_key_hex);
+    store64(kv + 32, KEY_ROLE_PUBLISHER);
+    store64(kv + 40, 0);
+    store64(kv + 48, 0);
+    store64(kv + 56, 0);
+    store64(kv + 64, 0);
+    store64(kv + 72, 0);
+    store64(kv + 80, 0);
+    return kv;
+}
+
+fn kv_key_id(kv) { return load64(kv); }
+fn kv_valid_from(kv) { return load64(kv + 8); }
+fn kv_valid_until(kv) { return load64(kv + 16); }
+fn kv_public_key_hex(kv) { return load64(kv + 24); }
+fn kv_role(kv) { return load64(kv + 32); }
+fn kv_issued_by(kv) { return load64(kv + 40); }
+fn kv_pub_name(kv) { return load64(kv + 64); }
+fn kv_pub_contact(kv) { return load64(kv + 72); }
+fn kv_secret_key(kv) { return load64(kv + 80); }
+
+fn kv_set_valid_from(kv, v) { store64(kv + 8, v); return kv; }
+fn kv_set_valid_until(kv, v) { store64(kv + 16, v); return kv; }
+fn kv_set_role(kv, r) { store64(kv + 32, r); return kv; }
+fn kv_set_issued_by(kv, v) { store64(kv + 40, v); return kv; }
+fn kv_set_pub_name(kv, v) { store64(kv + 64, v); return kv; }
+fn kv_set_pub_contact(kv, v) { store64(kv + 72, v); return kv; }
+fn kv_set_secret_key(kv, sk) { store64(kv + 80, sk); return kv; }
+
+fn kv_is_valid_at(kv, when) {
+    if (when < load64(kv + 8)) { return 0; }
+    var until = load64(kv + 16);
+    if (until != 0) {
+        if (when > until) { return 0; }
+    }
+    return 1;
+}
+
+# ================================================================
+# PublisherKeyring (16 bytes)
+# ================================================================
+# Layout:
+#   +0   keys_map   (hashmap: key_id -> vec of KeyVersion)
+#   +8   keys_dir   (C-string ptr)
+
+fn keyring_new(keys_dir) {
+    var kr = fl_alloc(16);
+    store64(kr, map_new());
+    store64(kr + 8, keys_dir);
+    return kr;
+}
+
+fn keyring_add_key(kr, kv) {
+    var m = load64(kr);
+    var kid = kv_key_id(kv);
+    var existing = map_get(m, kid);
+    if (existing == 0) {
+        var v = vec_new();
+        vec_push(v, kv);
+        map_set(m, kid, v);
+    } else {
+        vec_push(existing, kv);
+    }
+    return kr;
+}
+
+fn keyring_get_current(kr, key_id) {
+    var m = load64(kr);
+    var versions = map_get(m, key_id);
+    if (versions == 0) { return 0; }
+    var now = clock_epoch_secs();
+    var vlen = vec_len(versions);
+    # Return last valid key
+    var i = vlen - 1;
+    while (i >= 0) {
+        var kv = vec_get(versions, i);
+        if (kv_is_valid_at(kv, now) == 1) { return kv; }
+        i = i - 1;
+    }
+    return 0;
+}
+
+fn keyring_get_all_versions(kr, key_id) {
+    var m = load64(kr);
+    var versions = map_get(m, key_id);
+    return versions;
+}
+
+fn keyring_len(kr) {
+    var m = load64(kr);
+    return map_count(m);
+}
+
+fn keyring_find_by_role(kr, role) {
+    var result = vec_new();
+    var m = load64(kr);
+    var keys = map_keys(m);
+    var klen = vec_len(keys);
+    var i = 0;
+    while (i < klen) {
+        var kid = vec_get(keys, i);
+        var versions = map_get(m, kid);
+        var vlen = vec_len(versions);
+        var j = 0;
+        while (j < vlen) {
+            var kv = vec_get(versions, j);
+            if (kv_role(kv) == role) {
+                vec_push(result, kv);
+            }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return result;
+}
+
+# ================================================================
+# Hash functions
+# ================================================================
+
+fn hash_data(data, len) {
+    return sha256_hex(data, len);
+}
+
+fn hash_file(path) {
+    var fd = file_open(path, 0, 0);
+    if (fd < 0) { return 0; }
+    var ctx = sha256_init();
+    var buf[4096];
+    var n = file_read(fd, &buf, 4096);
+    while (n > 0) {
+        sha256_update(ctx, &buf, n);
+        n = file_read(fd, &buf, 4096);
+    }
+    file_close(fd);
+    var digest[32];
+    sha256_finalize(ctx, &digest);
+    fl_free(ctx);
+    return hex_encode(&digest, 32);
+}
+
+# ================================================================
+# Signing / verification (HMAC-SHA256 for now)
+# ================================================================
+
+fn sign_data(data, len, secret_key) {
+    return hmac_sign(secret_key, 32, data, len);
+}
+
+fn verify_signature(data, len, sig, secret_key) {
+    return hmac_verify(secret_key, 32, data, len, sig);
+}
+
+# ================================================================
+# Key generation
+# ================================================================
+
+fn generate_keypair(sk_out, pk_hex_out) {
+    # Generate 32 random bytes for secret key
+    var fd = file_open("/dev/urandom", 0, 0);
+    file_read(fd, sk_out, 32);
+    file_close(fd);
+
+    # Derive "public key" = SHA-256(secret_key) for HMAC scheme
+    var pk[32];
+    sha256(sk_out, 32, &pk);
+    var hex = hex_encode(&pk, 32);
+
+    # Generate key_id = first 16 chars of public key hex
+    var kid = alloc(17);
+    memcpy(kid, hex, 16);
+    store8(kid + 16, 0);
+
+    # Store hex in output
+    memcpy(pk_hex_out, hex, 65);
+
+    return kid;
+}
+
+fn key_id_from_public_hex(pk_hex) {
+    var kid = alloc(17);
+    memcpy(kid, pk_hex, 16);
+    store8(kid + 16, 0);
+    return kid;
+}
+
+# ================================================================
+# Key zeroization
+# ================================================================
+
+fn zeroize_key(key_buf, len) {
+    memset(key_buf, 0, len);
+    return 0;
+}

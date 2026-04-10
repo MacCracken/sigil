@@ -1,0 +1,74 @@
+# hmac.cyr — HMAC-SHA256 (RFC 2104)
+# Proper ipad/opad construction, not simplified SHA-256(key||msg).
+
+# HMAC(K, m) = H((K' xor opad) || H((K' xor ipad) || m))
+# where:
+#   K' = H(K) if len(K) > 64, else K padded to 64 bytes
+#   ipad = 0x36 repeated 64 times
+#   opad = 0x5c repeated 64 times
+
+# ================================================================
+# HMAC-SHA256
+# ================================================================
+
+fn hmac_sha256(key, key_len, msg, msg_len, out) {
+    # Step 1: Derive K' (64 bytes)
+    var kprime[64];
+    memset(&kprime, 0, 64);
+
+    if (key_len > 64) {
+        # Key too long — hash it
+        sha256(key, key_len, &kprime);
+        # kprime is now 32 bytes of hash + 32 bytes of zeros
+    } else {
+        memcpy(&kprime, key, key_len);
+        # Rest already zeroed
+    }
+
+    # Step 2: inner = SHA-256((K' xor ipad) || message)
+    var ipad[64];
+    var i = 0;
+    while (i < 64) {
+        store8(&ipad + i, (load8(&kprime + i) & 0xFF) ^ 0x36);
+        i = i + 1;
+    }
+
+    var inner_ctx = sha256_init();
+    sha256_update(inner_ctx, &ipad, 64);
+    sha256_update(inner_ctx, msg, msg_len);
+    var inner_hash[32];
+    sha256_finalize(inner_ctx, &inner_hash);
+    fl_free(inner_ctx);
+
+    # Step 3: outer = SHA-256((K' xor opad) || inner)
+    var opad[64];
+    i = 0;
+    while (i < 64) {
+        store8(&opad + i, (load8(&kprime + i) & 0xFF) ^ 0x5c);
+        i = i + 1;
+    }
+
+    var outer_ctx = sha256_init();
+    sha256_update(outer_ctx, &opad, 64);
+    sha256_update(outer_ctx, &inner_hash, 32);
+    sha256_finalize(outer_ctx, out);
+    fl_free(outer_ctx);
+
+    return 0;
+}
+
+# ================================================================
+# HMAC-SHA256 sign/verify convenience
+# ================================================================
+
+fn hmac_sign(key, key_len, data, data_len) {
+    var sig = alloc(32);
+    hmac_sha256(key, key_len, data, data_len, sig);
+    return sig;
+}
+
+fn hmac_verify(key, key_len, data, data_len, expected_sig) {
+    var computed[32];
+    hmac_sha256(key, key_len, data, data_len, &computed);
+    return ct_eq_32(&computed, expected_sig);
+}

@@ -1,0 +1,323 @@
+# types.cyr — sigil type system
+# Enums, structs, constructors, accessors for the trust verification module.
+
+# ================================================================
+# SignatureAlgorithm
+# ================================================================
+
+enum SignatureAlgorithm {
+    SIG_ALG_ED25519 = 0;
+    SIG_ALG_ML_DSA_65 = 1;
+    SIG_ALG_HYBRID = 2;
+}
+
+fn sig_alg_name(alg) {
+    if (alg == SIG_ALG_ED25519) { return "Ed25519"; }
+    if (alg == SIG_ALG_ML_DSA_65) { return "ML-DSA-65"; }
+    if (alg == SIG_ALG_HYBRID) { return "Hybrid(Ed25519+ML-DSA-65)"; }
+    return "unknown";
+}
+
+# ================================================================
+# HashAlgorithm
+# ================================================================
+
+enum HashAlgorithm {
+    HASH_ALG_SHA256 = 0;
+    HASH_ALG_SHA512 = 1;
+}
+
+fn hash_alg_name(alg) {
+    if (alg == HASH_ALG_SHA256) { return "SHA-256"; }
+    if (alg == HASH_ALG_SHA512) { return "SHA-512"; }
+    return "unknown";
+}
+
+# ================================================================
+# TrustLevel
+# ================================================================
+# Ordered from highest trust to lowest conceptually.
+# Rank: SystemCore(4) > Verified(3) > Community(2) > Unverified(1) > Revoked(0)
+
+enum TrustLevel {
+    TRUST_SYSTEM_CORE = 0;
+    TRUST_VERIFIED = 1;
+    TRUST_COMMUNITY = 2;
+    TRUST_UNVERIFIED = 3;
+    TRUST_REVOKED = 4;
+}
+
+fn trust_level_rank(level) {
+    if (level == TRUST_SYSTEM_CORE) { return 4; }
+    if (level == TRUST_VERIFIED) { return 3; }
+    if (level == TRUST_COMMUNITY) { return 2; }
+    if (level == TRUST_UNVERIFIED) { return 1; }
+    if (level == TRUST_REVOKED) { return 0; }
+    return 0;
+}
+
+fn trust_level_ge(a, b) {
+    if (trust_level_rank(a) >= trust_level_rank(b)) { return 1; }
+    return 0;
+}
+
+fn trust_level_gt(a, b) {
+    if (trust_level_rank(a) > trust_level_rank(b)) { return 1; }
+    return 0;
+}
+
+fn trust_level_name(level) {
+    if (level == TRUST_SYSTEM_CORE) { return "SystemCore"; }
+    if (level == TRUST_VERIFIED) { return "Verified"; }
+    if (level == TRUST_COMMUNITY) { return "Community"; }
+    if (level == TRUST_UNVERIFIED) { return "Unverified"; }
+    if (level == TRUST_REVOKED) { return "Revoked"; }
+    return "unknown";
+}
+
+# ================================================================
+# TrustEnforcement
+# ================================================================
+
+enum TrustEnforcement {
+    ENFORCE_STRICT = 0;
+    ENFORCE_PERMISSIVE = 1;
+    ENFORCE_AUDIT_ONLY = 2;
+}
+
+fn enforcement_name(mode) {
+    if (mode == ENFORCE_STRICT) { return "Strict"; }
+    if (mode == ENFORCE_PERMISSIVE) { return "Permissive"; }
+    if (mode == ENFORCE_AUDIT_ONLY) { return "AuditOnly"; }
+    return "unknown";
+}
+
+# ================================================================
+# ArtifactType
+# ================================================================
+
+enum ArtifactType {
+    ARTIFACT_AGENT_BINARY = 0;
+    ARTIFACT_SYSTEM_BINARY = 1;
+    ARTIFACT_CONFIG = 2;
+    ARTIFACT_PACKAGE = 3;
+    ARTIFACT_BOOT_COMPONENT = 4;
+}
+
+fn artifact_type_name(t) {
+    if (t == ARTIFACT_AGENT_BINARY) { return "AgentBinary"; }
+    if (t == ARTIFACT_SYSTEM_BINARY) { return "SystemBinary"; }
+    if (t == ARTIFACT_CONFIG) { return "Config"; }
+    if (t == ARTIFACT_PACKAGE) { return "Package"; }
+    if (t == ARTIFACT_BOOT_COMPONENT) { return "BootComponent"; }
+    return "unknown";
+}
+
+# ================================================================
+# TrustPolicy (64 bytes)
+# ================================================================
+# Layout:
+#   +0   enforcement        (i64)
+#   +8   minimum_trust_level (i64)
+#   +16  allow_unsigned     (i64, 0=false 1=true)
+#   +24  verify_on_boot     (i64)
+#   +32  verify_on_install  (i64)
+#   +40  verify_on_execute  (i64)
+#   +48  revocation_check   (i64)
+#   +56  hash_algorithm     (i64)
+
+fn trust_policy_new() {
+    var p = fl_alloc(64);
+    store64(p, ENFORCE_STRICT);
+    store64(p + 8, TRUST_VERIFIED);
+    store64(p + 16, 0);
+    store64(p + 24, 1);
+    store64(p + 32, 1);
+    store64(p + 40, 1);
+    store64(p + 48, 1);
+    store64(p + 56, HASH_ALG_SHA256);
+    return p;
+}
+
+fn policy_enforcement(p) { return load64(p); }
+fn policy_min_trust(p) { return load64(p + 8); }
+fn policy_allow_unsigned(p) { return load64(p + 16); }
+fn policy_verify_on_boot(p) { return load64(p + 24); }
+fn policy_verify_on_install(p) { return load64(p + 32); }
+fn policy_verify_on_execute(p) { return load64(p + 40); }
+fn policy_revocation_check(p) { return load64(p + 48); }
+fn policy_hash_alg(p) { return load64(p + 56); }
+
+fn policy_set_enforcement(p, v) { store64(p, v); return p; }
+fn policy_set_min_trust(p, v) { store64(p + 8, v); return p; }
+fn policy_set_allow_unsigned(p, v) { store64(p + 16, v); return p; }
+fn policy_set_verify_on_boot(p, v) { store64(p + 24, v); return p; }
+fn policy_set_verify_on_install(p, v) { store64(p + 32, v); return p; }
+fn policy_set_verify_on_execute(p, v) { store64(p + 40, v); return p; }
+fn policy_set_revocation_check(p, v) { store64(p + 48, v); return p; }
+fn policy_set_hash_alg(p, v) { store64(p + 56, v); return p; }
+
+fn trust_policy_free(p) { fl_free(p); return 0; }
+
+# ================================================================
+# TrustCheck (24 bytes)
+# ================================================================
+# Layout:
+#   +0   name     (C-string pointer)
+#   +8   passed   (i64, 0 or 1)
+#   +16  detail   (C-string pointer)
+
+fn trust_check_new(name, passed, detail) {
+    var tc = fl_alloc(24);
+    store64(tc, name);
+    store64(tc + 8, passed);
+    store64(tc + 16, detail);
+    return tc;
+}
+
+fn check_name(tc) { return load64(tc); }
+fn check_passed(tc) { return load64(tc + 8); }
+fn check_detail(tc) { return load64(tc + 16); }
+fn trust_check_free(tc) { fl_free(tc); return 0; }
+
+# ================================================================
+# Cosignature (16 bytes)
+# ================================================================
+# Layout:
+#   +0   key_id      (C-string pointer)
+#   +8   signature   (pointer to raw bytes)
+
+fn cosignature_new(key_id, sig_ptr) {
+    var cs = fl_alloc(16);
+    store64(cs, key_id);
+    store64(cs + 8, sig_ptr);
+    return cs;
+}
+
+fn cosig_key_id(cs) { return load64(cs); }
+fn cosig_signature(cs) { return load64(cs + 8); }
+
+# ================================================================
+# TrustedArtifact (96 bytes)
+# ================================================================
+# Layout:
+#   +0   path              (C-string pointer)
+#   +8   artifact_type     (i64)
+#   +16  content_hash      (C-string pointer, hex)
+#   +24  signature         (pointer to raw bytes, 0 = none)
+#   +32  signature_len     (i64)
+#   +40  signature_algorithm (i64)
+#   +48  signer_key_id     (C-string pointer, 0 = none)
+#   +56  trust_level       (i64)
+#   +64  verified_at       (i64, epoch seconds, 0 = never)
+#   +72  metadata          (hashmap pointer, 0 = none)
+#   +80  cosigners         (vec pointer, 0 = none)
+#   +88  cosigner_count    (i64)
+
+fn trusted_artifact_new(path, artifact_type, content_hash) {
+    var a = fl_alloc(96);
+    store64(a, path);
+    store64(a + 8, artifact_type);
+    store64(a + 16, content_hash);
+    store64(a + 24, 0);
+    store64(a + 32, 0);
+    store64(a + 40, SIG_ALG_ED25519);
+    store64(a + 48, 0);
+    store64(a + 56, TRUST_UNVERIFIED);
+    store64(a + 64, 0);
+    store64(a + 72, 0);
+    store64(a + 80, 0);
+    store64(a + 88, 0);
+    return a;
+}
+
+fn artifact_path(a) { return load64(a); }
+fn artifact_type(a) { return load64(a + 8); }
+fn artifact_content_hash(a) { return load64(a + 16); }
+fn artifact_signature(a) { return load64(a + 24); }
+fn artifact_signature_len(a) { return load64(a + 32); }
+fn artifact_sig_alg(a) { return load64(a + 40); }
+fn artifact_signer_key_id(a) { return load64(a + 48); }
+fn artifact_trust_level(a) { return load64(a + 56); }
+fn artifact_verified_at(a) { return load64(a + 64); }
+fn artifact_metadata(a) { return load64(a + 72); }
+fn artifact_cosigners(a) { return load64(a + 80); }
+fn artifact_cosigner_count(a) { return load64(a + 88); }
+
+fn artifact_set_signature(a, sig, sig_len) {
+    store64(a + 24, sig);
+    store64(a + 32, sig_len);
+    return a;
+}
+fn artifact_set_sig_alg(a, alg) { store64(a + 40, alg); return a; }
+fn artifact_set_signer(a, key_id) { store64(a + 48, key_id); return a; }
+fn artifact_set_trust_level(a, level) { store64(a + 56, level); return a; }
+fn artifact_set_verified_at(a, epoch) { store64(a + 64, epoch); return a; }
+fn artifact_set_metadata(a, m) { store64(a + 72, m); return a; }
+
+fn artifact_add_cosigner(a, cs) {
+    var cosigners = load64(a + 80);
+    if (cosigners == 0) {
+        cosigners = vec_new();
+        store64(a + 80, cosigners);
+    }
+    vec_push(cosigners, cs);
+    store64(a + 88, load64(a + 88) + 1);
+    return a;
+}
+
+# ================================================================
+# VerificationResult (32 bytes)
+# ================================================================
+# Layout:
+#   +0   artifact     (TrustedArtifact pointer)
+#   +8   passed       (i64)
+#   +16  checks       (vec of TrustCheck pointers)
+#   +24  verified_at  (i64, epoch seconds)
+
+fn verification_result_new(artifact, passed, verified_at) {
+    var vr = fl_alloc(32);
+    store64(vr, artifact);
+    store64(vr + 8, passed);
+    store64(vr + 16, vec_new());
+    store64(vr + 24, verified_at);
+    return vr;
+}
+
+fn vresult_artifact(vr) { return load64(vr); }
+fn vresult_passed(vr) { return load64(vr + 8); }
+fn vresult_checks(vr) { return load64(vr + 16); }
+fn vresult_verified_at(vr) { return load64(vr + 24); }
+
+fn vresult_add_check(vr, tc) {
+    vec_push(load64(vr + 16), tc);
+    return vr;
+}
+
+fn vresult_set_passed(vr, passed) {
+    store64(vr + 8, passed);
+    return vr;
+}
+
+# ================================================================
+# SigilStats (40 bytes)
+# ================================================================
+# Layout:
+#   +0   total_artifacts   (i64)
+#   +8   verified_count    (i64)
+#   +16  revoked_count     (i64)
+#   +24  trust_level_counts (hashmap pointer)
+
+fn sigil_stats_new() {
+    var s = fl_alloc(32);
+    store64(s, 0);
+    store64(s + 8, 0);
+    store64(s + 16, 0);
+    store64(s + 24, 0);
+    return s;
+}
+
+fn stats_total(s) { return load64(s); }
+fn stats_verified(s) { return load64(s + 8); }
+fn stats_revoked(s) { return load64(s + 16); }
+fn stats_counts(s) { return load64(s + 24); }

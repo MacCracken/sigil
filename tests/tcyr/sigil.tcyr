@@ -1,0 +1,264 @@
+# sigil.tcyr — integration tests for trust, integrity, policy, audit modules
+
+# Stdlib
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fmt.cyr"
+include "lib/json.cyr"
+include "lib/sakshi.cyr"
+include "lib/chrono.cyr"
+
+# Sigil modules
+include "src/types.cyr"
+include "src/error.cyr"
+include "src/sha256.cyr"
+include "src/hex.cyr"
+include "src/ct.cyr"
+include "src/hmac.cyr"
+include "src/sha512.cyr"
+include "src/trust.cyr"
+include "src/integrity.cyr"
+include "src/policy.cyr"
+include "src/audit.cyr"
+
+fn main() {
+    alloc_init();
+
+    # ============================================================
+    # Trust: key generation and signing
+    # ============================================================
+    test_group("key generation");
+    var sk[32];
+    var pk_hex[65];
+    var kid = generate_keypair(&sk, &pk_hex);
+    assert(strlen(kid) == 16, "key_id is 16 chars");
+    assert(strlen(&pk_hex) == 64, "pk_hex is 64 chars");
+
+    test_group("hash_data");
+    var h = hash_data("hello world", 11);
+    assert_streq(h, "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9", "sha256 hello world");
+
+    test_group("sign and verify");
+    var sig = sign_data("test message", 12, &sk);
+    assert(sig != 0, "signature not null");
+    var valid = verify_signature("test message", 12, sig, &sk);
+    assert_eq(valid, 1, "valid signature");
+
+    test_group("verify wrong message");
+    var invalid = verify_signature("wrong message", 13, sig, &sk);
+    assert_eq(invalid, 0, "wrong message rejected");
+
+    test_group("verify wrong key");
+    var sk2[32];
+    var pk2[65];
+    generate_keypair(&sk2, &pk2);
+    var invalid2 = verify_signature("test message", 12, sig, &sk2);
+    assert_eq(invalid2, 0, "wrong key rejected");
+
+    # ============================================================
+    # Trust: keyring
+    # ============================================================
+    test_group("keyring");
+    var kr = keyring_new("/tmp/sigil_test_keys");
+    var kv = key_version_new(kid, &pk_hex);
+    kv_set_pub_name(kv, "Test Publisher");
+    keyring_add_key(kr, kv);
+    assert_eq(keyring_len(kr), 1, "keyring has 1 key");
+
+    var found = keyring_get_current(kr, kid);
+    assert(found != 0, "found key in keyring");
+    assert_streq(kv_key_id(found), kid, "key_id matches");
+    assert_eq(kv_role(found), KEY_ROLE_PUBLISHER, "default role publisher");
+    assert_eq(kv_is_valid_at(found, clock_epoch_secs()), 1, "key valid now");
+
+    # Not-found
+    var missing = keyring_get_current(kr, "nonexistent");
+    assert_eq(missing, 0, "missing key returns 0");
+
+    # ============================================================
+    # Trust: key validity
+    # ============================================================
+    test_group("key validity");
+    var kv2 = key_version_new("test2", "abcd1234");
+    kv_set_valid_from(kv2, 1000);
+    kv_set_valid_until(kv2, 2000);
+    assert_eq(kv_is_valid_at(kv2, 500), 0, "before valid_from");
+    assert_eq(kv_is_valid_at(kv2, 1500), 1, "within range");
+    assert_eq(kv_is_valid_at(kv2, 2500), 0, "after valid_until");
+
+    # ============================================================
+    # Trust: key zeroization
+    # ============================================================
+    test_group("key zeroization");
+    var zk[32];
+    memset(&zk, 0xAA, 32);
+    zeroize_key(&zk, 32);
+    var all_zero = 1;
+    var zi = 0;
+    while (zi < 32) {
+        if ((load8(&zk + zi) & 0xFF) != 0) { all_zero = 0; }
+        zi = zi + 1;
+    }
+    assert_eq(all_zero, 1, "key zeroed");
+
+    # ============================================================
+    # Integrity: file hashing
+    # ============================================================
+    test_group("file hashing");
+    # Create a temp file
+    var tmppath = "/tmp/sigil_test_integrity.txt";
+    var tfd = file_open(tmppath, 577, 420);  # O_WRONLY|O_CREAT|O_TRUNC, 0644
+    file_write(tfd, "hello world", 11);
+    file_close(tfd);
+
+    var fh = hash_file(tmppath);
+    assert(fh != 0, "hash_file succeeds");
+    assert_streq(fh, "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9", "file hash matches");
+
+    test_group("file hash nonexistent");
+    var fh2 = hash_file("/tmp/sigil_test_nonexistent_99999");
+    assert_eq(fh2, 0, "nonexistent returns 0");
+
+    # ============================================================
+    # Integrity: verifier
+    # ============================================================
+    test_group("integrity verifier");
+    var ipol = integrity_policy_new();
+    ipolicy_add(ipol, tmppath, "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9");
+    var iv = integrity_verifier_new(ipol);
+
+    var status = iv_verify_file(iv, tmppath);
+    assert_eq(status, MSTATUS_VERIFIED, "file verified");
+
+    test_group("integrity mismatch");
+    var ipol2 = integrity_policy_new();
+    ipolicy_add(ipol2, tmppath, "0000000000000000000000000000000000000000000000000000000000000000");
+    var iv2 = integrity_verifier_new(ipol2);
+    var status2 = iv_verify_file(iv2, tmppath);
+    assert_eq(status2, MSTATUS_MISMATCH, "mismatch detected");
+
+    test_group("integrity verify_all");
+    var report = iv_verify_all(iv);
+    assert_eq(ireport_total(report), 1, "total = 1");
+    assert_eq(ireport_verified(report), 1, "verified = 1");
+    assert_eq(ireport_is_clean(report), 1, "report is clean");
+
+    # ============================================================
+    # Policy: revocation list
+    # ============================================================
+    test_group("revocation list");
+    var rl = revocation_list_new();
+    assert_eq(rl_len(rl), 0, "empty");
+    assert_eq(rl_is_empty(rl), 1, "is empty");
+
+    var re = revocation_entry_new("bad_key_001", 0, "compromised", "admin");
+    var add_result = rl_add(rl, re);
+    assert_eq(add_result, ERR_NONE, "add ok");
+    assert_eq(rl_len(rl), 1, "len = 1");
+    assert_eq(rl_is_key_revoked(rl, "bad_key_001"), 1, "key revoked");
+    assert_eq(rl_is_key_revoked(rl, "good_key"), 0, "good key not revoked");
+
+    test_group("hash revocation");
+    var re2 = revocation_entry_new(0, "deadbeef1234", "malware", "admin");
+    rl_add(rl, re2);
+    assert_eq(rl_is_artifact_revoked(rl, "deadbeef1234"), 1, "hash revoked");
+    assert_eq(rl_is_artifact_revoked(rl, "cafebabe"), 0, "other hash not revoked");
+
+    test_group("revoked_after semantics");
+    var re3 = revocation_entry_new("temporal_key", 0, "key compromise at T=1000", "admin");
+    rev_set_after(re3, 1000);
+    rl_add(rl, re3);
+    assert_eq(rl_is_key_revoked_at(rl, "temporal_key", 500), 0, "before revoked_after");
+    assert_eq(rl_is_key_revoked_at(rl, "temporal_key", 1500), 1, "after revoked_after");
+    assert_eq(rl_is_key_revoked(rl, "temporal_key"), 1, "unconditional check");
+
+    test_group("invalid revocation");
+    var bad_re = revocation_entry_new(0, 0, "no target", "admin");
+    var bad_result = rl_add(rl, bad_re);
+    assert_eq(bad_result, ERR_INVALID_INPUT, "reject no target");
+
+    # ============================================================
+    # Policy: CRL
+    # ============================================================
+    test_group("CRL");
+    var crl = crl_new(1, "root_key_001");
+    assert_eq(crl_version(crl), 1, "version 1");
+    assert_eq(crl_is_stale(crl), 0, "not stale");
+
+    var crl_re = revocation_entry_new("crl_revoked_key", 0, "via CRL", "root");
+    crl_add_entry(crl, crl_re);
+
+    var rl2 = revocation_list_new();
+    var applied = crl_apply_to(crl, rl2);
+    assert_eq(applied, 1, "applied 1 entry");
+    assert_eq(rl_is_key_revoked(rl2, "crl_revoked_key"), 1, "crl key revoked");
+
+    # ============================================================
+    # Policy: merge
+    # ============================================================
+    test_group("revocation merge");
+    var rl_a = revocation_list_new();
+    var rl_b = revocation_list_new();
+    rl_add(rl_a, revocation_entry_new("key_a", 0, "reason", "admin"));
+    rl_add(rl_b, revocation_entry_new("key_b", 0, "reason", "admin"));
+    rl_add(rl_b, revocation_entry_new("key_a", 0, "dup", "admin"));
+    var merged = rl_merge(rl_a, rl_b);
+    assert_eq(merged, 1, "1 new entry (dedup)");
+    assert_eq(rl_len(rl_a), 2, "total 2 entries");
+
+    # ============================================================
+    # Audit: event logging
+    # ============================================================
+    test_group("audit log");
+    var alog = audit_log_new();
+    assert_eq(alog_is_empty(alog), 1, "empty log");
+
+    var ev1 = audit_artifact_verified("/usr/bin/test", ARTIFACT_SYSTEM_BINARY, TRUST_VERIFIED, 1, "abc123");
+    alog_record(alog, ev1);
+    assert_eq(alog_len(alog), 1, "1 event");
+
+    var ev2 = audit_artifact_signed("/usr/bin/test", ARTIFACT_SYSTEM_BINARY, "key001", "abc123");
+    alog_record(alog, ev2);
+    assert_eq(alog_len(alog), 2, "2 events");
+
+    # Check event fields
+    var events = alog_events(alog);
+    var first = vec_get(events, 0);
+    assert_eq(ae_type(first), AUDIT_ARTIFACT_VERIFIED, "event type");
+    assert_eq(ae_passed(first), 1, "event passed");
+    assert_streq(ae_path(first), "/usr/bin/test", "event path");
+
+    test_group("audit clear");
+    alog_clear(alog);
+    assert_eq(alog_is_empty(alog), 1, "cleared");
+
+    # ============================================================
+    # Audit: file append
+    # ============================================================
+    test_group("audit file");
+    var alog2 = audit_log_new();
+    alog_record(alog2, audit_artifact_verified("/test", ARTIFACT_CONFIG, TRUST_COMMUNITY, 1, "hash1"));
+    var apath = "/tmp/sigil_test_audit.jsonl";
+    var aresult = alog_append_to_file(alog2, apath);
+    assert_eq(aresult, ERR_NONE, "append ok");
+
+    # Verify file was written
+    var afd = file_open(apath, 0, 0);
+    assert(afd >= 0, "audit file exists");
+    file_close(afd);
+
+    # Cleanup
+    syscall(87, tmppath);    # unlink
+    syscall(87, apath);      # unlink
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

@@ -1,0 +1,205 @@
+# policy.cyr — revocation list management
+
+# ================================================================
+# RevocationEntry (48 bytes)
+# ================================================================
+# Layout:
+#   +0   key_id        (C-string ptr, 0 = none)
+#   +8   content_hash  (C-string ptr, 0 = none)
+#   +16  reason        (C-string ptr)
+#   +24  revoked_at    (epoch seconds)
+#   +32  revoked_by    (C-string ptr)
+#   +40  revoked_after (epoch seconds, 0 = unconditional)
+
+fn revocation_entry_new(key_id, content_hash, reason, revoked_by) {
+    var e = fl_alloc(48);
+    store64(e, key_id);
+    store64(e + 8, content_hash);
+    store64(e + 16, reason);
+    store64(e + 24, clock_epoch_secs());
+    store64(e + 32, revoked_by);
+    store64(e + 40, 0);
+    return e;
+}
+
+fn rev_key_id(e) { return load64(e); }
+fn rev_content_hash(e) { return load64(e + 8); }
+fn rev_reason(e) { return load64(e + 16); }
+fn rev_at(e) { return load64(e + 24); }
+fn rev_by(e) { return load64(e + 32); }
+fn rev_after(e) { return load64(e + 40); }
+fn rev_set_after(e, v) { store64(e + 40, v); return e; }
+
+# ================================================================
+# RevocationList (24 bytes)
+# ================================================================
+# Layout:
+#   +0   entries       (vec of RevocationEntry ptrs)
+#   +8   revoked_keys  (hashmap key_id -> 1)
+#   +16  revoked_hashes (hashmap content_hash -> 1)
+
+fn revocation_list_new() {
+    var rl = fl_alloc(24);
+    store64(rl, vec_new());
+    store64(rl + 8, map_new());
+    store64(rl + 16, map_new());
+    return rl;
+}
+
+fn rl_add(rl, entry) {
+    var kid = load64(entry);
+    var chash = load64(entry + 8);
+    if (kid == 0) {
+        if (chash == 0) { return ERR_INVALID_INPUT; }
+    }
+    if (kid != 0) {
+        map_set(load64(rl + 8), kid, 1);
+    }
+    if (chash != 0) {
+        map_set(load64(rl + 16), chash, 1);
+    }
+    vec_push(load64(rl), entry);
+    return ERR_NONE;
+}
+
+fn rl_is_key_revoked(rl, key_id) {
+    return rl_is_key_revoked_at(rl, key_id, 0);
+}
+
+fn rl_is_key_revoked_at(rl, key_id, at) {
+    var keys = load64(rl + 8);
+    if (map_get(keys, key_id) == 0) { return 0; }
+    if (at == 0) { return 1; }
+    # Check entries for revoked_after semantics
+    var entries = load64(rl);
+    var elen = vec_len(entries);
+    var i = 0;
+    while (i < elen) {
+        var e = vec_get(entries, i);
+        var ekid = load64(e);
+        if (ekid != 0) {
+            if (streq(ekid, key_id) == 1) {
+                var after = load64(e + 40);
+                if (after == 0) { return 1; }
+                if (at >= after) { return 1; }
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn rl_is_artifact_revoked(rl, content_hash) {
+    return rl_is_artifact_revoked_at(rl, content_hash, 0);
+}
+
+fn rl_is_artifact_revoked_at(rl, content_hash, at) {
+    var hashes = load64(rl + 16);
+    if (map_get(hashes, content_hash) == 0) { return 0; }
+    if (at == 0) { return 1; }
+    var entries = load64(rl);
+    var elen = vec_len(entries);
+    var i = 0;
+    while (i < elen) {
+        var e = vec_get(entries, i);
+        var ehash = load64(e + 8);
+        if (ehash != 0) {
+            if (streq(ehash, content_hash) == 1) {
+                var after = load64(e + 40);
+                if (after == 0) { return 1; }
+                if (at >= after) { return 1; }
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn rl_len(rl) { return vec_len(load64(rl)); }
+fn rl_is_empty(rl) { if (rl_len(rl) == 0) { return 1; } return 0; }
+
+fn rl_merge(rl, other) {
+    var other_entries = load64(other);
+    var olen = vec_len(other_entries);
+    var added = 0;
+    var i = 0;
+    while (i < olen) {
+        var e = vec_get(other_entries, i);
+        # Check for duplicate
+        var dup = 0;
+        var our_entries = load64(rl);
+        var ulen = vec_len(our_entries);
+        var j = 0;
+        while (j < ulen) {
+            var oe = vec_get(our_entries, j);
+            var kid_match = 0;
+            var hash_match = 0;
+            if (load64(e) == 0) { if (load64(oe) == 0) { kid_match = 1; } }
+            else { if (load64(oe) != 0) { if (streq(load64(e), load64(oe)) == 1) { kid_match = 1; } } }
+            if (load64(e + 8) == 0) { if (load64(oe + 8) == 0) { hash_match = 1; } }
+            else { if (load64(oe + 8) != 0) { if (streq(load64(e + 8), load64(oe + 8)) == 1) { hash_match = 1; } } }
+            if (kid_match == 1) { if (hash_match == 1) { dup = 1; } }
+            j = j + 1;
+        }
+        if (dup == 0) {
+            rl_add(rl, e);
+            added = added + 1;
+        }
+        i = i + 1;
+    }
+    return added;
+}
+
+# ================================================================
+# CRL — Certificate Revocation List (40 bytes)
+# ================================================================
+# Layout:
+#   +0   version     (i64)
+#   +8   issuer      (C-string ptr)
+#   +16  issued_at   (epoch seconds)
+#   +24  next_update (epoch seconds, 0 = none)
+#   +32  entries     (vec of RevocationEntry ptrs)
+
+fn crl_new(version, issuer) {
+    var c = fl_alloc(40);
+    store64(c, version);
+    store64(c + 8, issuer);
+    store64(c + 16, clock_epoch_secs());
+    store64(c + 24, 0);
+    store64(c + 32, vec_new());
+    return c;
+}
+
+fn crl_version(c) { return load64(c); }
+fn crl_issuer(c) { return load64(c + 8); }
+fn crl_issued_at(c) { return load64(c + 16); }
+fn crl_next_update(c) { return load64(c + 24); }
+fn crl_entries(c) { return load64(c + 32); }
+
+fn crl_set_next_update(c, v) { store64(c + 24, v); return c; }
+
+fn crl_add_entry(c, entry) {
+    vec_push(load64(c + 32), entry);
+    return c;
+}
+
+fn crl_is_stale(c) {
+    var next = load64(c + 24);
+    if (next == 0) { return 0; }
+    if (clock_epoch_secs() > next) { return 1; }
+    return 0;
+}
+
+fn crl_apply_to(c, rl) {
+    var entries = load64(c + 32);
+    var elen = vec_len(entries);
+    var added = 0;
+    var i = 0;
+    while (i < elen) {
+        var e = vec_get(entries, i);
+        var result = rl_add(rl, e);
+        if (result == ERR_NONE) { added = added + 1; }
+        i = i + 1;
+    }
+    return added;
+}

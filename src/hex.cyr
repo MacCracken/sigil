@@ -1,0 +1,56 @@
+# hex.cyr — hex encoding and decoding
+
+# ================================================================
+# Hex encode: bytes -> lowercase hex C-string
+# ================================================================
+
+fn hex_encode(bytes, len) {
+    var out = alloc(len * 2 + 1);
+    var i = 0;
+    while (i < len) {
+        var b = load8(bytes + i) & 0xFF;
+        var hi = (b >> 4) & 0xF;
+        var lo = b & 0xF;
+        if (hi < 10) { store8(out + i * 2, 48 + hi); }
+        else { store8(out + i * 2, 87 + hi); }
+        if (lo < 10) { store8(out + i * 2 + 1, 48 + lo); }
+        else { store8(out + i * 2 + 1, 87 + lo); }
+        i = i + 1;
+    }
+    store8(out + len * 2, 0);
+    return out;
+}
+
+# ================================================================
+# Hex decode: hex C-string + length -> raw bytes
+# ================================================================
+
+fn _hex_nibble(c) {
+    if (c >= 48) { if (c <= 57) { return c - 48; } }
+    if (c >= 97) { if (c <= 102) { return c - 87; } }
+    if (c >= 65) { if (c <= 70) { return c - 55; } }
+    return 0;
+}
+
+fn hex_decode(hex_str, hex_len) {
+    var blen = hex_len / 2;
+    var out = alloc(blen);
+    var i = 0;
+    while (i < blen) {
+        var hi = _hex_nibble(load8(hex_str + i * 2));
+        var lo = _hex_nibble(load8(hex_str + i * 2 + 1));
+        store8(out + i, (hi << 4) | lo);
+        i = i + 1;
+    }
+    return out;
+}
+
+# ================================================================
+# Convenience: hash bytes to hex string
+# ================================================================
+
+fn sha256_hex(data, len) {
+    var digest[32];
+    sha256(data, len, &digest);
+    return hex_encode(&digest, 32);
+}

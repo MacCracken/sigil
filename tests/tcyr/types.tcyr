@@ -1,0 +1,166 @@
+# types.tcyr — tests for sigil type system
+# Tests enums, structs, constructors, accessors, ordering, display
+
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/chrono.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fmt.cyr"
+include "lib/json.cyr"
+include "lib/sakshi.cyr"
+
+include "src/types.cyr"
+include "src/error.cyr"
+
+fn main() {
+    alloc_init();
+
+    # ============================================================
+    # SignatureAlgorithm enum
+    # ============================================================
+    test_group("SignatureAlgorithm");
+    assert_eq(SIG_ALG_ED25519, 0, "ed25519 = 0");
+    assert_eq(SIG_ALG_ML_DSA_65, 1, "ml-dsa-65 = 1");
+    assert_eq(SIG_ALG_HYBRID, 2, "hybrid = 2");
+    assert_streq(sig_alg_name(SIG_ALG_ED25519), "Ed25519", "ed25519 name");
+    assert_streq(sig_alg_name(SIG_ALG_ML_DSA_65), "ML-DSA-65", "ml-dsa name");
+    assert_streq(sig_alg_name(SIG_ALG_HYBRID), "Hybrid(Ed25519+ML-DSA-65)", "hybrid name");
+
+    # ============================================================
+    # HashAlgorithm enum
+    # ============================================================
+    test_group("HashAlgorithm");
+    assert_eq(HASH_ALG_SHA256, 0, "sha256 = 0");
+    assert_eq(HASH_ALG_SHA512, 1, "sha512 = 1");
+    assert_streq(hash_alg_name(HASH_ALG_SHA256), "SHA-256", "sha256 name");
+    assert_streq(hash_alg_name(HASH_ALG_SHA512), "SHA-512", "sha512 name");
+
+    # ============================================================
+    # TrustLevel enum + ordering
+    # ============================================================
+    test_group("TrustLevel");
+    assert_eq(TRUST_SYSTEM_CORE, 0, "system_core = 0");
+    assert_eq(TRUST_VERIFIED, 1, "verified = 1");
+    assert_eq(TRUST_COMMUNITY, 2, "community = 2");
+    assert_eq(TRUST_UNVERIFIED, 3, "unverified = 3");
+    assert_eq(TRUST_REVOKED, 4, "revoked = 4");
+
+    # Rank: higher = more trusted
+    assert_eq(trust_level_rank(TRUST_SYSTEM_CORE), 4, "system_core rank 4");
+    assert_eq(trust_level_rank(TRUST_VERIFIED), 3, "verified rank 3");
+    assert_eq(trust_level_rank(TRUST_COMMUNITY), 2, "community rank 2");
+    assert_eq(trust_level_rank(TRUST_UNVERIFIED), 1, "unverified rank 1");
+    assert_eq(trust_level_rank(TRUST_REVOKED), 0, "revoked rank 0");
+
+    # Ordering: system_core > verified > community > unverified > revoked
+    assert(trust_level_ge(TRUST_SYSTEM_CORE, TRUST_VERIFIED) == 1, "core >= verified");
+    assert(trust_level_ge(TRUST_VERIFIED, TRUST_COMMUNITY) == 1, "verified >= community");
+    assert(trust_level_ge(TRUST_COMMUNITY, TRUST_UNVERIFIED) == 1, "community >= unverified");
+    assert(trust_level_ge(TRUST_UNVERIFIED, TRUST_REVOKED) == 1, "unverified >= revoked");
+    assert(trust_level_ge(TRUST_REVOKED, TRUST_SYSTEM_CORE) == 0, "revoked < system_core");
+    assert(trust_level_ge(TRUST_VERIFIED, TRUST_VERIFIED) == 1, "verified >= verified");
+
+    # Display
+    assert_streq(trust_level_name(TRUST_SYSTEM_CORE), "SystemCore", "core name");
+    assert_streq(trust_level_name(TRUST_VERIFIED), "Verified", "verified name");
+    assert_streq(trust_level_name(TRUST_COMMUNITY), "Community", "community name");
+    assert_streq(trust_level_name(TRUST_UNVERIFIED), "Unverified", "unverified name");
+    assert_streq(trust_level_name(TRUST_REVOKED), "Revoked", "revoked name");
+
+    # ============================================================
+    # TrustEnforcement enum
+    # ============================================================
+    test_group("TrustEnforcement");
+    assert_eq(ENFORCE_STRICT, 0, "strict = 0");
+    assert_eq(ENFORCE_PERMISSIVE, 1, "permissive = 1");
+    assert_eq(ENFORCE_AUDIT_ONLY, 2, "audit_only = 2");
+    assert_streq(enforcement_name(ENFORCE_STRICT), "Strict", "strict name");
+    assert_streq(enforcement_name(ENFORCE_PERMISSIVE), "Permissive", "permissive name");
+    assert_streq(enforcement_name(ENFORCE_AUDIT_ONLY), "AuditOnly", "audit name");
+
+    # ============================================================
+    # ArtifactType enum
+    # ============================================================
+    test_group("ArtifactType");
+    assert_eq(ARTIFACT_AGENT_BINARY, 0, "agent = 0");
+    assert_eq(ARTIFACT_SYSTEM_BINARY, 1, "system = 1");
+    assert_eq(ARTIFACT_CONFIG, 2, "config = 2");
+    assert_eq(ARTIFACT_PACKAGE, 3, "package = 3");
+    assert_eq(ARTIFACT_BOOT_COMPONENT, 4, "boot = 4");
+    assert_streq(artifact_type_name(ARTIFACT_AGENT_BINARY), "AgentBinary", "agent name");
+    assert_streq(artifact_type_name(ARTIFACT_BOOT_COMPONENT), "BootComponent", "boot name");
+
+    # ============================================================
+    # TrustPolicy — default constructor
+    # ============================================================
+    test_group("TrustPolicy default");
+    var p = trust_policy_new();
+    assert_eq(policy_enforcement(p), ENFORCE_STRICT, "default strict");
+    assert_eq(policy_min_trust(p), TRUST_VERIFIED, "default min verified");
+    assert_eq(policy_allow_unsigned(p), 0, "default no unsigned");
+    assert_eq(policy_verify_on_boot(p), 1, "default verify boot");
+    assert_eq(policy_verify_on_install(p), 1, "default verify install");
+    assert_eq(policy_verify_on_execute(p), 1, "default verify execute");
+    assert_eq(policy_revocation_check(p), 1, "default revocation check");
+    assert_eq(policy_hash_alg(p), HASH_ALG_SHA256, "default hash sha256");
+
+    # ============================================================
+    # TrustPolicy — builder-style setters
+    # ============================================================
+    test_group("TrustPolicy builder");
+    var p2 = trust_policy_new();
+    policy_set_enforcement(p2, ENFORCE_PERMISSIVE);
+    assert_eq(policy_enforcement(p2), ENFORCE_PERMISSIVE, "set permissive");
+    policy_set_min_trust(p2, TRUST_COMMUNITY);
+    assert_eq(policy_min_trust(p2), TRUST_COMMUNITY, "set community");
+    policy_set_allow_unsigned(p2, 1);
+    assert_eq(policy_allow_unsigned(p2), 1, "set unsigned");
+    policy_set_verify_on_boot(p2, 0);
+    assert_eq(policy_verify_on_boot(p2), 0, "disable boot");
+    policy_set_hash_alg(p2, HASH_ALG_SHA512);
+    assert_eq(policy_hash_alg(p2), HASH_ALG_SHA512, "set sha512");
+
+    # ============================================================
+    # TrustCheck
+    # ============================================================
+    test_group("TrustCheck");
+    var tc = trust_check_new("signature", 1, "valid ed25519");
+    assert_streq(check_name(tc), "signature", "check name");
+    assert_eq(check_passed(tc), 1, "check passed");
+    assert_streq(check_detail(tc), "valid ed25519", "check detail");
+
+    # ============================================================
+    # SigilError codes
+    # ============================================================
+    test_group("SigilError");
+    assert_eq(ERR_NONE, 0, "err none = 0");
+    assert_eq(ERR_KEY_NOT_FOUND, 1, "key not found = 1");
+    assert_eq(ERR_SIGNATURE_INVALID, 2, "sig invalid = 2");
+    assert_eq(ERR_REVOCATION, 3, "revocation = 3");
+    assert_eq(ERR_INTEGRITY_MISMATCH, 4, "integrity = 4");
+    assert_eq(ERR_INVALID_INPUT, 5, "invalid input = 5");
+    assert_eq(ERR_IO, 6, "io = 6");
+    assert_eq(ERR_SERIALIZATION, 7, "serialization = 7");
+    assert_eq(ERR_CRYPTO, 8, "crypto = 8");
+
+    # Error construction + accessors
+    var e1 = sigil_err(ERR_KEY_NOT_FOUND, "key abc123 missing");
+    assert_eq(sigil_err_code(e1), ERR_KEY_NOT_FOUND, "err code");
+    assert_streq(sigil_err_msg(e1), "key abc123 missing", "err msg");
+
+    # is_ok / is_err
+    assert_eq(sigil_is_ok(ERR_NONE), 1, "0 is ok");
+    assert_eq(sigil_is_ok(ERR_CRYPTO), 0, "crypto is not ok");
+    assert_eq(sigil_is_err(ERR_NONE), 0, "0 is not err");
+    assert_eq(sigil_is_err(ERR_IO), 1, "io is err");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

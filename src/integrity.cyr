@@ -1,0 +1,258 @@
+# integrity.cyr — file integrity measurement and verification
+
+# ================================================================
+# MeasurementStatus
+# ================================================================
+
+enum MeasurementStatus {
+    MSTATUS_PENDING = 0;
+    MSTATUS_VERIFIED = 1;
+    MSTATUS_MISMATCH = 2;
+    MSTATUS_FILE_NOT_FOUND = 3;
+    MSTATUS_ERROR = 4;
+}
+
+fn mstatus_name(s) {
+    if (s == MSTATUS_PENDING) { return "Pending"; }
+    if (s == MSTATUS_VERIFIED) { return "Verified"; }
+    if (s == MSTATUS_MISMATCH) { return "Mismatch"; }
+    if (s == MSTATUS_FILE_NOT_FOUND) { return "FileNotFound"; }
+    if (s == MSTATUS_ERROR) { return "Error"; }
+    return "unknown";
+}
+
+# ================================================================
+# IntegrityMeasurement (48 bytes)
+# ================================================================
+# Layout:
+#   +0   path          (C-string ptr)
+#   +8   expected_hash (C-string ptr)
+#   +16  actual_hash   (C-string ptr, 0 = not yet measured)
+#   +24  measured_at   (epoch seconds)
+#   +32  status        (i64 MSTATUS_*)
+#   +40  error_msg     (C-string ptr, 0 = none)
+
+fn measurement_new(path, expected_hash) {
+    var m = fl_alloc(48);
+    store64(m, path);
+    store64(m + 8, expected_hash);
+    store64(m + 16, 0);
+    store64(m + 24, clock_epoch_secs());
+    store64(m + 32, MSTATUS_PENDING);
+    store64(m + 40, 0);
+    return m;
+}
+
+fn meas_path(m) { return load64(m); }
+fn meas_expected(m) { return load64(m + 8); }
+fn meas_actual(m) { return load64(m + 16); }
+fn meas_at(m) { return load64(m + 24); }
+fn meas_status(m) { return load64(m + 32); }
+fn meas_error(m) { return load64(m + 40); }
+
+# ================================================================
+# IntegrityPolicy (24 bytes)
+# ================================================================
+# Layout:
+#   +0   measurements   (vec of measurement pointers)
+#   +8   check_interval (seconds)
+#   +16  enforce        (i64, 0 or 1)
+
+fn integrity_policy_new() {
+    var p = fl_alloc(24);
+    store64(p, vec_new());
+    store64(p + 8, 300);
+    store64(p + 16, 0);
+    return p;
+}
+
+fn ipolicy_measurements(p) { return load64(p); }
+fn ipolicy_check_interval(p) { return load64(p + 8); }
+fn ipolicy_enforce(p) { return load64(p + 16); }
+
+fn ipolicy_set_enforce(p, v) { store64(p + 16, v); return p; }
+fn ipolicy_set_interval(p, v) { store64(p + 8, v); return p; }
+
+fn ipolicy_add(p, path, expected_hash) {
+    var m = measurement_new(path, expected_hash);
+    vec_push(load64(p), m);
+    return p;
+}
+
+fn ipolicy_remove(p, path) {
+    var measurements = load64(p);
+    var mlen = vec_len(measurements);
+    var i = 0;
+    while (i < mlen) {
+        var m = vec_get(measurements, i);
+        if (streq(load64(m), path) == 1) {
+            vec_remove(measurements, i);
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn ipolicy_count(p) {
+    return vec_len(load64(p));
+}
+
+# ================================================================
+# IntegrityReport (40 bytes)
+# ================================================================
+# Layout:
+#   +0   total       (i64)
+#   +8   verified    (i64)
+#   +16  mismatches  (vec)
+#   +24  errors      (vec)
+#   +32  checked_at  (epoch seconds)
+
+fn integrity_report_new() {
+    var r = fl_alloc(40);
+    store64(r, 0);
+    store64(r + 8, 0);
+    store64(r + 16, vec_new());
+    store64(r + 24, vec_new());
+    store64(r + 32, clock_epoch_secs());
+    return r;
+}
+
+fn ireport_total(r) { return load64(r); }
+fn ireport_verified(r) { return load64(r + 8); }
+fn ireport_mismatches(r) { return load64(r + 16); }
+fn ireport_errors(r) { return load64(r + 24); }
+fn ireport_checked_at(r) { return load64(r + 32); }
+
+fn ireport_is_clean(r) {
+    if (vec_len(load64(r + 16)) == 0) {
+        if (vec_len(load64(r + 24)) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+# ================================================================
+# IntegrityVerifier (24 bytes)
+# ================================================================
+# Layout:
+#   +0   policy       (IntegrityPolicy ptr)
+#   +8   last_report  (IntegrityReport ptr, 0 = none)
+#   +16  callback     (fn ptr, 0 = none)
+
+fn integrity_verifier_new(policy) {
+    var v = fl_alloc(24);
+    store64(v, policy);
+    store64(v + 8, 0);
+    store64(v + 16, 0);
+    return v;
+}
+
+fn iv_policy(v) { return load64(v); }
+fn iv_last_report(v) { return load64(v + 8); }
+
+fn iv_set_callback(v, cb) { store64(v + 16, cb); return v; }
+fn iv_clear_callback(v) { store64(v + 16, 0); return v; }
+
+fn iv_set_policy(v, policy) {
+    store64(v, policy);
+    store64(v + 8, 0);
+    return v;
+}
+
+# Compute hash of file contents
+fn compute_file_hash(path) {
+    return hash_file(path);
+}
+
+# Verify a single file against policy
+fn iv_verify_file(v, path) {
+    var policy = load64(v);
+    var measurements = load64(policy);
+    var mlen = vec_len(measurements);
+    var i = 0;
+    while (i < mlen) {
+        var m = vec_get(measurements, i);
+        if (streq(load64(m), path) == 1) {
+            var h = hash_file(path);
+            if (h == 0) { return MSTATUS_FILE_NOT_FOUND; }
+            var expected = load64(m + 8);
+            if (ct_eq(h, strlen(h), expected, strlen(expected)) == 1) {
+                return MSTATUS_VERIFIED;
+            }
+            return MSTATUS_MISMATCH;
+        }
+        i = i + 1;
+    }
+    return MSTATUS_ERROR;
+}
+
+# Verify all files in policy
+fn iv_verify_all(v) {
+    var policy = load64(v);
+    var measurements = load64(policy);
+    var mlen = vec_len(measurements);
+    var report = integrity_report_new();
+    store64(report, mlen);
+
+    var verified = 0;
+    var i = 0;
+    while (i < mlen) {
+        var m = vec_get(measurements, i);
+        var path = load64(m);
+        var h = hash_file(path);
+        var now = clock_epoch_secs();
+
+        if (h == 0) {
+            # File not found or error
+            var rm = measurement_new(path, load64(m + 8));
+            store64(rm + 24, now);
+            store64(rm + 32, MSTATUS_FILE_NOT_FOUND);
+            vec_push(load64(report + 24), rm);
+        } else {
+            var expected = load64(m + 8);
+            if (ct_eq(h, strlen(h), expected, strlen(expected)) == 1) {
+                verified = verified + 1;
+                store64(m + 16, h);
+                store64(m + 24, now);
+                store64(m + 32, MSTATUS_VERIFIED);
+            } else {
+                var rm = measurement_new(path, expected);
+                store64(rm + 16, h);
+                store64(rm + 24, now);
+                store64(rm + 32, MSTATUS_MISMATCH);
+                vec_push(load64(report + 16), rm);
+            }
+        }
+        i = i + 1;
+    }
+    store64(report + 8, verified);
+    store64(v + 8, report);
+    return report;
+}
+
+# Add baseline: hash file and add to policy
+fn iv_add_baseline(v, path) {
+    var h = hash_file(path);
+    if (h == 0) { return 0; }
+    var policy = load64(v);
+    ipolicy_add(policy, path, h);
+    store64(v + 8, 0);
+    return h;
+}
+
+# Remove baseline
+fn iv_remove_baseline(v, path) {
+    var policy = load64(v);
+    var removed = ipolicy_remove(policy, path);
+    if (removed == 1) { store64(v + 8, 0); }
+    return removed;
+}
+
+# Get tampered files from last report
+fn iv_tampered_files(v) {
+    var report = load64(v + 8);
+    if (report == 0) { return vec_new(); }
+    return load64(report + 16);
+}

@@ -1,0 +1,205 @@
+# audit.cyr — structured audit event logging
+
+# ================================================================
+# AuditEvent types
+# ================================================================
+
+enum AuditEventType {
+    AUDIT_ARTIFACT_VERIFIED = 0;
+    AUDIT_ARTIFACT_SIGNED = 1;
+    AUDIT_REVOCATION_ADDED = 2;
+    AUDIT_KEY_ROTATED = 3;
+    AUDIT_CHAIN_VALIDATED = 4;
+}
+
+fn audit_event_name(t) {
+    if (t == AUDIT_ARTIFACT_VERIFIED) { return "artifact_verified"; }
+    if (t == AUDIT_ARTIFACT_SIGNED) { return "artifact_signed"; }
+    if (t == AUDIT_REVOCATION_ADDED) { return "revocation_added"; }
+    if (t == AUDIT_KEY_ROTATED) { return "key_rotated"; }
+    if (t == AUDIT_CHAIN_VALIDATED) { return "chain_validated"; }
+    return "unknown";
+}
+
+# ================================================================
+# AuditEvent (64 bytes)
+# ================================================================
+# Generic event struct that holds all possible fields.
+# Layout:
+#   +0   event_type    (i64 AUDIT_*)
+#   +8   path          (C-string ptr, 0 = n/a)
+#   +16  artifact_type (i64, -1 = n/a)
+#   +24  trust_level   (i64, -1 = n/a)
+#   +32  passed        (i64, -1 = n/a)
+#   +40  content_hash  (C-string ptr, 0 = n/a)
+#   +48  key_id        (C-string ptr, 0 = n/a)
+#   +56  timestamp     (epoch seconds)
+
+fn audit_event_new(event_type) {
+    var e = fl_alloc(64);
+    store64(e, event_type);
+    store64(e + 8, 0);
+    store64(e + 16, 0 - 1);
+    store64(e + 24, 0 - 1);
+    store64(e + 32, 0 - 1);
+    store64(e + 40, 0);
+    store64(e + 48, 0);
+    store64(e + 56, clock_epoch_secs());
+    return e;
+}
+
+fn ae_type(e) { return load64(e); }
+fn ae_path(e) { return load64(e + 8); }
+fn ae_artifact_type(e) { return load64(e + 16); }
+fn ae_trust_level(e) { return load64(e + 24); }
+fn ae_passed(e) { return load64(e + 32); }
+fn ae_content_hash(e) { return load64(e + 40); }
+fn ae_key_id(e) { return load64(e + 48); }
+fn ae_timestamp(e) { return load64(e + 56); }
+
+fn ae_set_path(e, v) { store64(e + 8, v); return e; }
+fn ae_set_artifact_type(e, v) { store64(e + 16, v); return e; }
+fn ae_set_trust_level(e, v) { store64(e + 24, v); return e; }
+fn ae_set_passed(e, v) { store64(e + 32, v); return e; }
+fn ae_set_content_hash(e, v) { store64(e + 40, v); return e; }
+fn ae_set_key_id(e, v) { store64(e + 48, v); return e; }
+
+# ================================================================
+# Convenience constructors
+# ================================================================
+
+fn audit_artifact_verified(path, atype, tlevel, passed, chash) {
+    var e = audit_event_new(AUDIT_ARTIFACT_VERIFIED);
+    ae_set_path(e, path);
+    ae_set_artifact_type(e, atype);
+    ae_set_trust_level(e, tlevel);
+    ae_set_passed(e, passed);
+    ae_set_content_hash(e, chash);
+    return e;
+}
+
+fn audit_artifact_signed(path, atype, key_id, chash) {
+    var e = audit_event_new(AUDIT_ARTIFACT_SIGNED);
+    ae_set_path(e, path);
+    ae_set_artifact_type(e, atype);
+    ae_set_key_id(e, key_id);
+    ae_set_content_hash(e, chash);
+    return e;
+}
+
+fn audit_revocation_added(key_id, chash, reason) {
+    var e = audit_event_new(AUDIT_REVOCATION_ADDED);
+    ae_set_key_id(e, key_id);
+    ae_set_content_hash(e, chash);
+    return e;
+}
+
+fn audit_key_rotated(old_kid, new_kid) {
+    var e = audit_event_new(AUDIT_KEY_ROTATED);
+    ae_set_key_id(e, old_kid);
+    ae_set_content_hash(e, new_kid);  # reuse field for new key id
+    return e;
+}
+
+# ================================================================
+# AuditLog (8 bytes)
+# ================================================================
+# Layout:
+#   +0   events  (vec of AuditEvent ptrs)
+
+fn audit_log_new() {
+    var log = fl_alloc(8);
+    store64(log, vec_new());
+    return log;
+}
+
+fn alog_record(log, event) {
+    vec_push(load64(log), event);
+    return log;
+}
+
+fn alog_events(log) { return load64(log); }
+fn alog_len(log) { return vec_len(load64(log)); }
+fn alog_is_empty(log) { if (alog_len(log) == 0) { return 1; } return 0; }
+
+fn alog_clear(log) {
+    store64(log, vec_new());
+    return log;
+}
+
+# Append audit events to file (one JSON line per event)
+fn alog_append_to_file(log, path) {
+    var fd = file_open(path, 1089, 420);  # O_WRONLY|O_CREAT|O_APPEND, 0644
+    if (fd < 0) { return ERR_IO; }
+    var events = load64(log);
+    var elen = vec_len(events);
+    var i = 0;
+    while (i < elen) {
+        var e = vec_get(events, i);
+        # Simple JSON line: {"type":"...","timestamp":...}
+        var line = alloc(512);
+        var pos = 0;
+        pos = pos + _alog_write_str(line + pos, "{\"type\":\"");
+        pos = pos + _alog_write_str(line + pos, audit_event_name(ae_type(e)));
+        pos = pos + _alog_write_str(line + pos, "\",\"timestamp\":");
+        pos = pos + _alog_write_int(line + pos, ae_timestamp(e));
+        if (ae_path(e) != 0) {
+            pos = pos + _alog_write_str(line + pos, ",\"path\":\"");
+            pos = pos + _alog_write_str(line + pos, ae_path(e));
+            pos = pos + _alog_write_str(line + pos, "\"");
+        }
+        if (ae_key_id(e) != 0) {
+            pos = pos + _alog_write_str(line + pos, ",\"key_id\":\"");
+            pos = pos + _alog_write_str(line + pos, ae_key_id(e));
+            pos = pos + _alog_write_str(line + pos, "\"");
+        }
+        if (ae_content_hash(e) != 0) {
+            pos = pos + _alog_write_str(line + pos, ",\"content_hash\":\"");
+            pos = pos + _alog_write_str(line + pos, ae_content_hash(e));
+            pos = pos + _alog_write_str(line + pos, "\"");
+        }
+        if (ae_passed(e) != (0 - 1)) {
+            pos = pos + _alog_write_str(line + pos, ",\"passed\":");
+            if (ae_passed(e) == 1) { pos = pos + _alog_write_str(line + pos, "true"); }
+            else { pos = pos + _alog_write_str(line + pos, "false"); }
+        }
+        pos = pos + _alog_write_str(line + pos, "}\n");
+        store8(line + pos, 0);
+        file_write(fd, line, pos);
+        i = i + 1;
+    }
+    file_close(fd);
+    return ERR_NONE;
+}
+
+fn _alog_write_str(dst, src) {
+    var len = strlen(src);
+    memcpy(dst, src, len);
+    return len;
+}
+
+# Global to survive nested calls
+var _alog_int_buf = 0;
+
+fn _alog_write_int(dst, val) {
+    if (_alog_int_buf == 0) { _alog_int_buf = alloc(24); }
+    # Manual int-to-string into global buffer
+    var v = val;
+    var pos = 23;
+    store8(_alog_int_buf + pos, 0);
+    pos = pos - 1;
+    if (v == 0) {
+        store8(_alog_int_buf + pos, 48);
+        pos = pos - 1;
+    } else {
+        while (v > 0) {
+            store8(_alog_int_buf + pos, 48 + (v % 10));
+            v = v / 10;
+            pos = pos - 1;
+        }
+    }
+    pos = pos + 1;
+    var len = 23 - pos;
+    memcpy(dst, _alog_int_buf + pos, len);
+    return len;
+}

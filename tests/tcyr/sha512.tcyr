@@ -1,0 +1,49 @@
+# sha512.tcyr — SHA-512 NIST test vectors
+
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fmt.cyr"
+include "lib/json.cyr"
+include "lib/sakshi.cyr"
+include "lib/chrono.cyr"
+
+include "src/types.cyr"
+include "src/error.cyr"
+include "src/sha256.cyr"
+include "src/hex.cyr"
+include "src/ct.cyr"
+include "src/sha512.cyr"
+
+fn main() {
+    alloc_init();
+
+    test_group("SHA-512 empty");
+    var d[64];
+    sha512("", 0, &d);
+    var h = hex_encode(&d, 64);
+    assert_streq(h, "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e", "sha512 empty");
+
+    test_group("SHA-512 abc");
+    sha512("abc", 3, &d);
+    var h2 = hex_encode(&d, 64);
+    assert_streq(h2, "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f", "sha512 abc");
+
+    test_group("SHA-512 streaming");
+    var ctx = sha512_init();
+    sha512_update(ctx, "ab", 2);
+    sha512_update(ctx, "c", 1);
+    var d2[64];
+    sha512_finalize(ctx, &d2);
+    assert(ct_eq(&d, 64, &d2, 64) == 1, "streaming == oneshot");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

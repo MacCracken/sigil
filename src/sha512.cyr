@@ -1,0 +1,343 @@
+# sha512.cyr — FIPS 180-4 SHA-512 implementation
+# Required by Ed25519 (RFC 8032) for key expansion and signing.
+# All arithmetic uses 64-bit words (native Cyrius i64).
+
+# ================================================================
+# SHA-512 round constants K[0..79]
+# ================================================================
+
+var _sha512_K = 0;
+var _sha512_W = 0;
+var _sha512_inited = 0;
+
+fn _sha512_rotr(x, n) {
+    return (x >> n) | (x << (64 - n));
+}
+
+fn sha512_ch(x, y, z) {
+    return (x & y) ^ ((x ^ 0xFFFFFFFFFFFFFFFF) & z);
+}
+
+fn sha512_maj(x, y, z) {
+    return (x & y) ^ (x & z) ^ (y & z);
+}
+
+fn sha512_bsig0(x) {
+    return _sha512_rotr(x, 28) ^ _sha512_rotr(x, 34) ^ _sha512_rotr(x, 39);
+}
+
+fn sha512_bsig1(x) {
+    return _sha512_rotr(x, 14) ^ _sha512_rotr(x, 18) ^ _sha512_rotr(x, 41);
+}
+
+fn sha512_ssig0(x) {
+    return _sha512_rotr(x, 1) ^ _sha512_rotr(x, 8) ^ (x >> 7);
+}
+
+fn sha512_ssig1(x) {
+    return _sha512_rotr(x, 19) ^ _sha512_rotr(x, 61) ^ (x >> 6);
+}
+
+fn sha512_global_init() {
+    if (_sha512_inited == 1) { return 0; }
+
+    _sha512_K = alloc(640);
+    store64(_sha512_K + 0, 0x428a2f98d728ae22);
+    store64(_sha512_K + 8, 0x7137449123ef65cd);
+    store64(_sha512_K + 16, 0xb5c0fbcfec4d3b2f);
+    store64(_sha512_K + 24, 0xe9b5dba58189dbbc);
+    store64(_sha512_K + 32, 0x3956c25bf348b538);
+    store64(_sha512_K + 40, 0x59f111f1b605d019);
+    store64(_sha512_K + 48, 0x923f82a4af194f9b);
+    store64(_sha512_K + 56, 0xab1c5ed5da6d8118);
+    store64(_sha512_K + 64, 0xd807aa98a3030242);
+    store64(_sha512_K + 72, 0x12835b0145706fbe);
+    store64(_sha512_K + 80, 0x243185be4ee4b28c);
+    store64(_sha512_K + 88, 0x550c7dc3d5ffb4e2);
+    store64(_sha512_K + 96, 0x72be5d74f27b896f);
+    store64(_sha512_K + 104, 0x80deb1fe3b1696b1);
+    store64(_sha512_K + 112, 0x9bdc06a725c71235);
+    store64(_sha512_K + 120, 0xc19bf174cf692694);
+    store64(_sha512_K + 128, 0xe49b69c19ef14ad2);
+    store64(_sha512_K + 136, 0xefbe4786384f25e3);
+    store64(_sha512_K + 144, 0x0fc19dc68b8cd5b5);
+    store64(_sha512_K + 152, 0x240ca1cc77ac9c65);
+    store64(_sha512_K + 160, 0x2de92c6f592b0275);
+    store64(_sha512_K + 168, 0x4a7484aa6ea6e483);
+    store64(_sha512_K + 176, 0x5cb0a9dcbd41fbd4);
+    store64(_sha512_K + 184, 0x76f988da831153b5);
+    store64(_sha512_K + 192, 0x983e5152ee66dfab);
+    store64(_sha512_K + 200, 0xa831c66d2db43210);
+    store64(_sha512_K + 208, 0xb00327c898fb213f);
+    store64(_sha512_K + 216, 0xbf597fc7beef0ee4);
+    store64(_sha512_K + 224, 0xc6e00bf33da88fc2);
+    store64(_sha512_K + 232, 0xd5a79147930aa725);
+    store64(_sha512_K + 240, 0x06ca6351e003826f);
+    store64(_sha512_K + 248, 0x142929670a0e6e70);
+    store64(_sha512_K + 256, 0x27b70a8546d22ffc);
+    store64(_sha512_K + 264, 0x2e1b21385c26c926);
+    store64(_sha512_K + 272, 0x4d2c6dfc5ac42aed);
+    store64(_sha512_K + 280, 0x53380d139d95b3df);
+    store64(_sha512_K + 288, 0x650a73548baf63de);
+    store64(_sha512_K + 296, 0x766a0abb3c77b2a8);
+    store64(_sha512_K + 304, 0x81c2c92e47edaee6);
+    store64(_sha512_K + 312, 0x92722c851482353b);
+    store64(_sha512_K + 320, 0xa2bfe8a14cf10364);
+    store64(_sha512_K + 328, 0xa81a664bbc423001);
+    store64(_sha512_K + 336, 0xc24b8b70d0f89791);
+    store64(_sha512_K + 344, 0xc76c51a30654be30);
+    store64(_sha512_K + 352, 0xd192e819d6ef5218);
+    store64(_sha512_K + 360, 0xd69906245565a910);
+    store64(_sha512_K + 368, 0xf40e35855771202a);
+    store64(_sha512_K + 376, 0x106aa07032bbd1b8);
+    store64(_sha512_K + 384, 0x19a4c116b8d2d0c8);
+    store64(_sha512_K + 392, 0x1e376c085141ab53);
+    store64(_sha512_K + 400, 0x2748774cdf8eeb99);
+    store64(_sha512_K + 408, 0x34b0bcb5e19b48a8);
+    store64(_sha512_K + 416, 0x391c0cb3c5c95a63);
+    store64(_sha512_K + 424, 0x4ed8aa4ae3418acb);
+    store64(_sha512_K + 432, 0x5b9cca4f7763e373);
+    store64(_sha512_K + 440, 0x682e6ff3d6b2b8a3);
+    store64(_sha512_K + 448, 0x748f82ee5defb2fc);
+    store64(_sha512_K + 456, 0x78a5636f43172f60);
+    store64(_sha512_K + 464, 0x84c87814a1f0ab72);
+    store64(_sha512_K + 472, 0x8cc702081a6439ec);
+    store64(_sha512_K + 480, 0x90befffa23631e28);
+    store64(_sha512_K + 488, 0xa4506cebde82bde9);
+    store64(_sha512_K + 496, 0xbef9a3f7b2c67915);
+    store64(_sha512_K + 504, 0xc67178f2e372532b);
+    store64(_sha512_K + 512, 0xca273eceea26619c);
+    store64(_sha512_K + 520, 0xd186b8c721c0c207);
+    store64(_sha512_K + 528, 0xeada7dd6cde0eb1e);
+    store64(_sha512_K + 536, 0xf57d4f7fee6ed178);
+    store64(_sha512_K + 544, 0x06f067aa72176fba);
+    store64(_sha512_K + 552, 0x0a637dc5a2c898a6);
+    store64(_sha512_K + 560, 0x113f9804bef90dae);
+    store64(_sha512_K + 568, 0x1b710b35131c471b);
+    store64(_sha512_K + 576, 0x28db77f523047d84);
+    store64(_sha512_K + 584, 0x32caab7b40c72493);
+    store64(_sha512_K + 592, 0x3c9ebe0a15c9bebc);
+    store64(_sha512_K + 600, 0x431d67c49c100d4c);
+    store64(_sha512_K + 608, 0x4cc5d4becb3e42b6);
+    store64(_sha512_K + 616, 0x597f299cfc657e2a);
+    store64(_sha512_K + 624, 0x5fcb6fab3ad6faec);
+    store64(_sha512_K + 632, 0x6c44198c4a475817);
+
+    _sha512_W = alloc(640);
+    _sha512_inited = 1;
+    return 0;
+}
+
+# ================================================================
+# SHA-512 context (272 bytes)
+# ================================================================
+# Layout:
+#   +0    h0..h7 (8 x 8 = 64 bytes) hash state
+#   +64   buf    (128 bytes) partial block buffer
+#   +192  buf_len (8 bytes)
+#   +200  total_len (8 bytes)
+
+fn sha512_init() {
+    sha512_global_init();
+    var ctx = fl_alloc(208);
+    store64(ctx, 0x6a09e667f3bcc908);
+    store64(ctx + 8, 0xbb67ae8584caa73b);
+    store64(ctx + 16, 0x3c6ef372fe94f82b);
+    store64(ctx + 24, 0xa54ff53a5f1d36f1);
+    store64(ctx + 32, 0x510e527fade682d1);
+    store64(ctx + 40, 0x9b05688c2b3e6c1f);
+    store64(ctx + 48, 0x1f83d9abfb41bd6b);
+    store64(ctx + 56, 0x5be0cd19137e2179);
+    memset(ctx + 64, 0, 128);
+    store64(ctx + 192, 0);
+    store64(ctx + 200, 0);
+    return ctx;
+}
+
+# ================================================================
+# SHA-512 transform — globals for working state
+# ================================================================
+
+var _s5_a = 0;
+var _s5_b = 0;
+var _s5_c = 0;
+var _s5_d = 0;
+var _s5_e = 0;
+var _s5_f = 0;
+var _s5_g = 0;
+var _s5_hv = 0;
+var _s5_t1 = 0;
+var _s5_t2 = 0;
+var _s5_ctx = 0;
+var _s5_i = 0;
+
+fn sha512_transform(ctx) {
+    _s5_ctx = ctx;
+    var buf = ctx + 64;
+
+    # Prepare message schedule W[0..15] from block (big-endian 64-bit words)
+    _s5_i = 0;
+    while (_s5_i < 16) {
+        var off = _s5_i * 8;
+        var w = ((load8(buf + off) & 0xFF) << 56)
+        | ((load8(buf + off + 1) & 0xFF) << 48)
+        | ((load8(buf + off + 2) & 0xFF) << 40)
+        | ((load8(buf + off + 3) & 0xFF) << 32)
+        | ((load8(buf + off + 4) & 0xFF) << 24)
+        | ((load8(buf + off + 5) & 0xFF) << 16)
+        | ((load8(buf + off + 6) & 0xFF) << 8)
+        | (load8(buf + off + 7) & 0xFF);
+        store64(_sha512_W + _s5_i * 8, w);
+        _s5_i = _s5_i + 1;
+    }
+
+    # Extend W[16..79]
+    _s5_i = 16;
+    while (_s5_i < 80) {
+        var w16 = load64(_sha512_W + (_s5_i - 16) * 8);
+        var w15 = load64(_sha512_W + (_s5_i - 15) * 8);
+        var w7 = load64(_sha512_W + (_s5_i - 7) * 8);
+        var w2 = load64(_sha512_W + (_s5_i - 2) * 8);
+        var s0 = sha512_ssig0(w15);
+        var s1 = sha512_ssig1(w2);
+        store64(_sha512_W + _s5_i * 8, w16 + s0 + w7 + s1);
+        _s5_i = _s5_i + 1;
+    }
+
+    # Initialize working variables
+    _s5_a = load64(_s5_ctx);
+    _s5_b = load64(_s5_ctx + 8);
+    _s5_c = load64(_s5_ctx + 16);
+    _s5_d = load64(_s5_ctx + 24);
+    _s5_e = load64(_s5_ctx + 32);
+    _s5_f = load64(_s5_ctx + 40);
+    _s5_g = load64(_s5_ctx + 48);
+    _s5_hv = load64(_s5_ctx + 56);
+
+    # 80 rounds
+    _s5_i = 0;
+    while (_s5_i < 80) {
+        _s5_t1 = _s5_hv + sha512_bsig1(_s5_e) + sha512_ch(_s5_e, _s5_f, _s5_g) + load64(_sha512_K + _s5_i * 8) + load64(_sha512_W + _s5_i * 8);
+        _s5_t2 = sha512_bsig0(_s5_a) + sha512_maj(_s5_a, _s5_b, _s5_c);
+
+        _s5_hv = _s5_g;
+        _s5_g = _s5_f;
+        _s5_f = _s5_e;
+        _s5_e = _s5_d + _s5_t1;
+        _s5_d = _s5_c;
+        _s5_c = _s5_b;
+        _s5_b = _s5_a;
+        _s5_a = _s5_t1 + _s5_t2;
+        _s5_i = _s5_i + 1;
+    }
+
+    # Add compressed chunk to current hash value
+    store64(_s5_ctx, load64(_s5_ctx) + _s5_a);
+    store64(_s5_ctx + 8, load64(_s5_ctx + 8) + _s5_b);
+    store64(_s5_ctx + 16, load64(_s5_ctx + 16) + _s5_c);
+    store64(_s5_ctx + 24, load64(_s5_ctx + 24) + _s5_d);
+    store64(_s5_ctx + 32, load64(_s5_ctx + 32) + _s5_e);
+    store64(_s5_ctx + 40, load64(_s5_ctx + 40) + _s5_f);
+    store64(_s5_ctx + 48, load64(_s5_ctx + 48) + _s5_g);
+    store64(_s5_ctx + 56, load64(_s5_ctx + 56) + _s5_hv);
+    return 0;
+}
+
+# ================================================================
+# SHA-512 update
+# ================================================================
+
+fn sha512_update(ctx, data, len) {
+    var buf_len = load64(ctx + 192);
+    var total = load64(ctx + 200);
+    total = total + len;
+    store64(ctx + 200, total);
+
+    var pos = 0;
+
+    if (buf_len > 0) {
+        var need = 128 - buf_len;
+        if (len < need) {
+            memcpy(ctx + 64 + buf_len, data, len);
+            store64(ctx + 192, buf_len + len);
+            return 0;
+        }
+        memcpy(ctx + 64 + buf_len, data, need);
+        sha512_transform(ctx);
+        pos = need;
+        buf_len = 0;
+    }
+
+    while (pos + 128 <= len) {
+        memcpy(ctx + 64, data + pos, 128);
+        sha512_transform(ctx);
+        pos = pos + 128;
+    }
+
+    var remaining = len - pos;
+    if (remaining > 0) {
+        memcpy(ctx + 64, data + pos, remaining);
+    }
+    store64(ctx + 192, remaining);
+    return 0;
+}
+
+# ================================================================
+# SHA-512 finalize — produce 64-byte digest
+# ================================================================
+
+fn sha512_finalize(ctx, out) {
+    var buf_len = load64(ctx + 192);
+    var total_bits = load64(ctx + 200) * 8;
+
+    store8(ctx + 64 + buf_len, 0x80);
+    buf_len = buf_len + 1;
+
+    if (buf_len > 112) {
+        memset(ctx + 64 + buf_len, 0, 128 - buf_len);
+        sha512_transform(ctx);
+        buf_len = 0;
+    }
+    memset(ctx + 64 + buf_len, 0, 112 - buf_len);
+
+    # Append total length as 128-bit big-endian (high 64 bits = 0 for < 2^64 bits)
+    memset(ctx + 64 + 112, 0, 8);
+    store8(ctx + 64 + 120, (total_bits >> 56) & 0xFF);
+    store8(ctx + 64 + 121, (total_bits >> 48) & 0xFF);
+    store8(ctx + 64 + 122, (total_bits >> 40) & 0xFF);
+    store8(ctx + 64 + 123, (total_bits >> 32) & 0xFF);
+    store8(ctx + 64 + 124, (total_bits >> 24) & 0xFF);
+    store8(ctx + 64 + 125, (total_bits >> 16) & 0xFF);
+    store8(ctx + 64 + 126, (total_bits >> 8) & 0xFF);
+    store8(ctx + 64 + 127, total_bits & 0xFF);
+
+    sha512_transform(ctx);
+
+    # Write 64-byte digest in big-endian from h0-h7
+    var di = 0;
+    while (di < 8) {
+        var word = load64(ctx + di * 8);
+        store8(out + di * 8, (word >> 56) & 0xFF);
+        store8(out + di * 8 + 1, (word >> 48) & 0xFF);
+        store8(out + di * 8 + 2, (word >> 40) & 0xFF);
+        store8(out + di * 8 + 3, (word >> 32) & 0xFF);
+        store8(out + di * 8 + 4, (word >> 24) & 0xFF);
+        store8(out + di * 8 + 5, (word >> 16) & 0xFF);
+        store8(out + di * 8 + 6, (word >> 8) & 0xFF);
+        store8(out + di * 8 + 7, word & 0xFF);
+        di = di + 1;
+    }
+    return 0;
+}
+
+# ================================================================
+# Convenience — hash data in one shot
+# ================================================================
+
+fn sha512(data, len, out) {
+    var ctx = sha512_init();
+    sha512_update(ctx, data, len);
+    sha512_finalize(ctx, out);
+    fl_free(ctx);
+    return 0;
+}

@@ -4,14 +4,19 @@
 
 **Sigil** (Latin: seal) — System-wide trust verification for AGNOS
 
-- **Type**: Flat library crate
+- **Type**: Flat library (single-file compilation via `include`)
 - **License**: GPL-3.0-only
-- **MSRV**: 1.89
-- **Version**: SemVer 0.1.0
-- **Genesis repo**: [agnosticos](https://github.com/MacCracken/agnosticos)
-- **Philosophy**: [AGNOS Philosophy & Intention](https://github.com/MacCracken/agnosticos/blob/main/docs/philosophy.md)
-- **Standards**: [First-Party Standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-standards.md)
-- **Recipes**: [zugot](https://github.com/MacCracken/zugot) — takumi build recipes
+- **Language**: Cyrius (ported from Rust)
+- **Version**: SemVer, version file at `VERSION`
+- **Status**: Porting from Rust — TDD-first approach
+
+## Genesis Layer
+
+This project is part of **AGNOS** — an AI-native operating system. The genesis repo at `/home/macro/Repos/agnosticos` owns system-level docs, roadmap, and CI/CD.
+
+- **Recipes**: `MacCracken/zugot` (Hebrew: pairs that enter the ark)
+- **Standards**: `agnosticos/docs/development/applications/first-party-standards.md`
+- **Shared crates**: `agnosticos/docs/development/applications/shared-crates.md`
 
 ## What Sigil Is
 
@@ -22,96 +27,89 @@ Sigil is the **single crypto/trust boundary** for the AGNOS operating system. It
 - Revocation list management
 - Trust levels, policies, and enforcement modes
 
-Future: PQC (ML-KEM, ML-DSA) will be a `pqc` feature on sigil — no separate crate.
+Future: PQC (ML-KEM, ML-DSA) when Cyrius implementations mature.
 
 ## Consumers
 
 daimon, kavach, ark, aegis, phylax, mela, stiva, argonaut, and all consumer apps that need trust verification.
 
-## Modules
+## Architecture
 
-- `trust.rs` — Ed25519 keyring, sign/verify, key rotation, hash_data
-- `integrity.rs` — File hash measurement baselines, IntegrityVerifier
-- `verify.rs` — SigilVerifier (the main trust engine)
-- `chain.rs` — Boot chain verification
-- `policy.rs` — RevocationEntry, RevocationList
-- `types.rs` — TrustLevel, TrustPolicy, TrustedArtifact, VerificationResult, etc.
+```
+src/
+  lib.cyr         — public API entry point (includes all modules)
+  types.cyr       — TrustLevel, TrustPolicy, TrustedArtifact, VerificationResult, enums
+  error.cyr       — SigilError codes, Result pattern
+  trust.cyr       — Ed25519 keyring, sign/verify, key rotation, hash_data
+  integrity.cyr   — File hash measurement baselines, IntegrityVerifier
+  verify.cyr      — SigilVerifier (the main trust engine)
+  chain.cyr       — Boot chain verification
+  policy.cyr      — RevocationEntry, RevocationList, CRL
+  audit.cyr       — Structured audit event logging
+  tpm.cyr         — TPM interface (when agnosys exports available)
+  ed25519.cyr     — Ed25519 implementation (RFC 8032)
+  ct.cyr          — Constant-time comparison utilities
+```
 
 ## Development Process
 
-### P(-1): Scaffold Hardening (before any new features)
+### Work Loop
 
-This is the first phase every extracted crate goes through. The scaffold compiles and has basic tests, but hasn't been audited, optimized, or stress-tested. P(-1) pays the debt before it compounds.
-
-0. Read roadmap, CHANGELOG, and open issues — know what was intended before auditing what was built
-1. Test + benchmark sweep of existing code — identify gaps in coverage
-2. Cleanliness check: `cargo fmt --check`, `cargo clippy --all-features --all-targets -- -D warnings`, `cargo audit`, `cargo deny check`, `RUSTDOCFLAGS="-D warnings" cargo doc --all-features --no-deps`
-3. Get baseline benchmarks (`./scripts/bench-history.sh`) — first CSV entry is the starting line
-4. Internal deep review:
-   - **Security**: Are Ed25519 operations constant-time? Key material zeroed? No timing leaks?
-   - **Correctness**: Are trust levels correctly propagated? Revocations actually enforced?
-   - **Performance**: Hash chain operations, signature verification hot paths
-   - **Gaps**: Missing error variants, untested edge cases, incomplete API surface
-   - **Patterns**: `#[non_exhaustive]` on all public enums, `#[must_use]` on pure functions, zero unwrap/panic
-5. External research — Ed25519 best practices, trust chain standards, revocation patterns
-6. Cleanliness check — must be clean after review
-7. Additional tests/benchmarks from findings
-8. Post-review benchmarks — prove the wins
-9. Repeat if heavy
-10. Documentation audit — ADRs, source citations, guides, examples (see Documentation Standards in first-party-standards.md)
-
-**Exit criteria**: Crate is audit-clean, clippy-clean, fmt-clean, security-clean, with baseline benchmarks. Ready to enter the Work Loop.
-
-### Work Loop (continuous)
-
-1. Work phase — new features, roadmap items, bug fixes
-2. Cleanliness check: `cargo fmt --check`, `cargo clippy --all-features --all-targets -- -D warnings`, `cargo audit`, `cargo deny check`, `RUSTDOCFLAGS="-D warnings" cargo doc --all-features --no-deps`
-3. Test + benchmark additions for new code
-4. Run benchmarks (`./scripts/bench-history.sh`)
-5. Internal review — performance, memory, security, throughput, correctness
-6. Cleanliness check — must be clean after review
-7. Deeper tests/benchmarks from review observations
-8. Run benchmarks again — prove the wins
-9. If review heavy → return to step 5
-10. Documentation — update CHANGELOG, roadmap, docs, ADRs for design decisions, source citations for algorithms/formulas, update docs/sources.md, guides and examples for new API surface, verify recipe version in zugot
-11. Version check — VERSION, Cargo.toml, recipe (in zugot) all in sync
-12. Return to step 1
+1. **P(-1)** — Research: vidya entry before implementation
+2. Work phase — implement in Cyrius, test, benchmark
+3. `cyrius build` — verify compilation
+4. `cyrius test` — run .tcyr test files
+5. `cyrius bench` — run .bcyr benchmark files
+6. Documentation — CHANGELOG, roadmap
+7. Version check — VERSION and cyrius.toml in sync
 
 ### Task Sizing
 
-- **Low/Medium effort**: Batch freely — multiple items per work loop cycle
-- **Large effort**: Small bites only — break into sub-tasks, verify each before moving to the next. Never batch large items together
-- **If unsure**: Treat it as large. Smaller bites are always safer than overcommitting
+- **Low/Medium**: Batch freely
+- **Large**: Small bites, verify each
+- **If unsure**: Treat as large
 
-### Refactoring
+### Porting Approach (TDD)
 
-- Refactor when the code tells you to — duplication, unclear boundaries, performance bottlenecks
-- Never refactor speculatively. Wait for the third instance before extracting an abstraction
-- Refactoring is part of the work loop, not a separate phase
-- Every refactor must pass the same cleanliness + benchmark gates as new code
+- Write tests FIRST for each module, then implement until tests pass
+- Port module-by-module: types → error → trust → integrity → verify → chain → policy → audit → tpm
+- Benchmarks alongside, not after — compare against Rust baselines in `benchmarks-rust-v-cyrius.md`
+- Rust source preserved in `rust-old/` for reference
 
-### Key Principles
+## Key Design Constraints
 
-- Never skip benchmarks
-- Sigil IS the trust boundary — every crypto decision lives here
-- `#[non_exhaustive]` on ALL public enums (forward compatibility)
-- `#[must_use]` on all pure functions
-- Every type must be Serialize + Deserialize (serde)
-- Feature-gate optional modules — consumers pull only what they need
-- Zero unwrap/panic in library code
-- All types must have serde roundtrip tests
-- Key material must be zeroized on drop
-- No timing side-channels in crypto paths
+- **Sigil IS the trust boundary** — every crypto decision lives here
+- **Own the crypto** — Ed25519 (RFC 8032), SHA-256 (FIPS 180-4), HMAC-SHA256 (RFC 2104) implemented in Cyrius, no external deps
+- **Inherit from libro** — SHA-256, hex encode/decode, constant_time_eq, key zeroization pattern. Improve: proper HMAC (not simplified), add Ed25519 asymmetric signing
+- **Constant-time comparison** — bitwise OR accumulation for hash/signature comparison, no early exit
+- **Key material zeroization** — overwrite key buffers with zeros before free
+- **No timing side-channels** — crypto paths must not branch on secret data
+- **Zero external dependencies** — Cyrius stdlib only (plus sakshi for tracing)
+- **`fl_alloc` for structs, `alloc` for hashmaps** — freelist supports individual free; bump allocator for long-lived collections
+- **Globals for cross-call state** — Cyrius single-pass compiler clobbers locals; use globals when values must survive nested calls
+- **All types JSON-serializable** — `#derive(Serialize)` on all public types
+- **Runtime feature detection** over compile-time gating (follow libro pattern)
+- **Target size** — compiled binary contribution should be small and measurable
+
+## Known Cyrius Compiler Constraints
+
+1. Local variable clobbering — function parameters/locals overwritten by nested calls; workaround: save to globals
+2. `map_get` after `map_set` in same call chain — lookups may fail; workaround: restructure to minimize call depth
+3. No `\r` escape sequence — use raw byte 13 for carriage return
+4. Fixup table limit (8192) — split into multiple compilation units if exceeded
+5. `var buf[N]` is N bytes, not N elements — for 80 i64 values, declare `var buf[640]`
+6. Negative literals not supported — use `(0 - N)` instead of `-N`
+7. Max ~64 global vars with initializers — use enums for constants
+8. `match` is a reserved keyword — do not use as variable name
 
 ## DO NOT
 
 - **Do not commit or push** — the user handles all git operations
 - **NEVER use `gh` CLI** — use `curl` to GitHub API only
-- Do not add unnecessary dependencies
-- Do not break backward compatibility without a major version bump
+- Do not add unnecessary dependencies (there should be close to zero)
 - Do not skip benchmarks before claiming performance improvements
-- Do not implement custom crypto — use audited crates (ed25519-dalek, sha2, ml-kem, ml-dsa)
 - Do not store private keys in plaintext
+- Do not branch on secret data in crypto paths
 
 ## Documentation Structure
 
@@ -121,15 +119,12 @@ Root files (required):
 
 docs/ (required):
   architecture/overview.md — module map, data flow, consumers
-  development/roadmap.md — completed, backlog, future, v1.0 criteria
+  development/roadmap.md — completed, backlog, future
 
 docs/ (when earned):
   adr/ — architectural decision records
   guides/ — usage guides, integration patterns
-  examples/ — worked examples
-  standards/ — external spec conformance
-  compliance/ — regulatory, audit, security compliance
-  sources.md — source citations for algorithms/formulas (required for science/math crates)
+  sources.md — source citations for algorithms (Ed25519, SHA-256, etc.)
 ```
 
 ## CHANGELOG Format
@@ -138,9 +133,8 @@ Follow [Keep a Changelog](https://keepachangelog.com/). Performance claims MUST 
 
 ## Current Status
 
-- **Extracted from**: agnosticos/userland/agent-runtime/src/sigil/ + integrity.rs + marketplace/trust.rs
-- **Version**: 1.0.0
-- **Tests**: 149 passing
-- **Benchmarks**: 12 benchmarks, history in benches/history.csv
-- **Phase**: v1.0.0 released. API frozen.
-- **Post-v1**: PQC implementation (ML-DSA/ML-KEM when crates mature), TPM implementation (when agnosys exports available)
+- **Ported from**: Rust v1.0.0 (149 tests, 12 benchmarks)
+- **Rust source**: preserved in `rust-old/`
+- **Rust benchmarks**: preserved in `benchmarks-rust-v-cyrius.md`
+- **Version**: 0.1.0 (Cyrius port)
+- **Phase**: Porting — TDD module-by-module
