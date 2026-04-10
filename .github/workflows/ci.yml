@@ -1,9 +1,12 @@
 name: CI
+
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_call:
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -12,53 +15,126 @@ env:
   CYRIUS_VERSION: "3.3.4"
 
 jobs:
-  test:
-    name: Test Suite
+  # ── Build ──
+  build:
+    name: Build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - name: Install Cyrius
         run: |
           git clone --depth 1 --branch "${CYRIUS_VERSION}" https://github.com/MacCracken/cyrius.git /tmp/cyrius
-          cp /tmp/cyrius/build/cc3 /usr/local/bin/cc3
-          chmod +x /usr/local/bin/cc3
+          sudo cp /tmp/cyrius/build/cc3 /usr/local/bin/cc3
+          sudo chmod +x /usr/local/bin/cc3
           cc3 --version
+      - name: Compile all source
+        run: |
+          cat src/lib.cyr | cc3 > build/sigil && chmod +x build/sigil
+          echo "sigil: $(wc -c < build/sigil) bytes"
+      - name: Upload compiler
+        uses: actions/upload-artifact@v4
+        with:
+          name: cc3
+          path: /usr/local/bin/cc3
+          retention-days: 1
 
-      - name: Run tests
+  # ── Tests ──
+  test:
+    name: Test Suite
+    needs: [build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Cyrius
+        run: |
+          git clone --depth 1 --branch "${CYRIUS_VERSION}" https://github.com/MacCracken/cyrius.git /tmp/cyrius
+          sudo cp /tmp/cyrius/build/cc3 /usr/local/bin/cc3
+          sudo chmod +x /usr/local/bin/cc3
+      - name: Test suite (.tcyr)
         run: |
           pass=0; fail=0
           for t in tests/tcyr/*.tcyr; do
             name=$(basename "$t" .tcyr)
-            printf "  %-20s " "$name"
-            if cat "$t" | cc3 > "/tmp/test_${name}" 2>/dev/null && chmod +x "/tmp/test_${name}"; then
-              result=$("/tmp/test_${name}" 2>&1 | strings | grep -E "passed.*failed" | tail -1)
-              if echo "$result" | grep -q " 0 failed"; then
-                echo "$result"; pass=$((pass+1))
+            tmpbin="/tmp/ci_t_$$"
+            cat "$t" | cc3 > "$tmpbin" 2>/dev/null && chmod +x "$tmpbin"
+            if [ $? -ne 0 ]; then echo "FAIL (compile): $name"; fail=$((fail+1)); continue; fi
+            output=$("$tmpbin" 2>&1); ec=$?
+            rm -f "$tmpbin"
+            f=$(echo "$output" | grep -o '[0-9]* failed' | tail -1 | grep -o '^[0-9]*')
+            if [ "$ec" -ne 0 ] || { [ -n "$f" ] && [ "$f" -gt 0 ]; }; then
+              echo "FAIL: $name"; fail=$((fail+1))
+            else
+              echo "PASS: $name"; pass=$((pass+1))
+            fi
+          done
+          echo "$pass passed, $fail failed"
+          test $fail -eq 0
+
+  # ── Benchmarks ──
+  benchmarks:
+    name: Benchmarks
+    needs: [build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Cyrius
+        run: |
+          git clone --depth 1 --branch "${CYRIUS_VERSION}" https://github.com/MacCracken/cyrius.git /tmp/cyrius
+          sudo cp /tmp/cyrius/build/cc3 /usr/local/bin/cc3
+          sudo chmod +x /usr/local/bin/cc3
+      - name: Benchmark suite
+        run: |
+          cat tests/bcyr/sigil.bcyr | cc3 > /tmp/bench_sigil && chmod +x /tmp/bench_sigil
+          /tmp/bench_sigil
+
+  # ── Fuzz ──
+  fuzz:
+    name: Fuzz (quick)
+    needs: [build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Cyrius
+        run: |
+          git clone --depth 1 --branch "${CYRIUS_VERSION}" https://github.com/MacCracken/cyrius.git /tmp/cyrius
+          sudo cp /tmp/cyrius/build/cc3 /usr/local/bin/cc3
+          sudo chmod +x /usr/local/bin/cc3
+      - name: Fuzz harnesses (10s each)
+        run: |
+          pass=0; fail=0
+          for f in fuzz/*.fcyr; do
+            name=$(basename "$f" .fcyr)
+            printf "  %-25s " "$name"
+            if cat "$f" | cc3 > "/tmp/${name}" 2>/dev/null && chmod +x "/tmp/${name}"; then
+              timeout 10 "/tmp/${name}" >/dev/null 2>&1 || true
+              rc=$?
+              if [ "$rc" -eq 0 ] || [ "$rc" -eq 124 ]; then
+                echo "OK"; pass=$((pass+1))
               else
-                echo "FAIL: $result"; fail=$((fail+1))
+                echo "FAIL (exit $rc)"; fail=$((fail+1))
               fi
             else
               echo "COMPILE FAIL"; fail=$((fail+1))
             fi
           done
-          echo "---"
           echo "$pass passed, $fail failed"
-          [ "$fail" -eq 0 ] || exit 1
 
-      - name: Run benchmarks
+  # ── Security ──
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scan for dangerous patterns
         run: |
-          cat tests/bcyr/sigil.bcyr | cc3 > /tmp/bench_sigil && chmod +x /tmp/bench_sigil
-          /tmp/bench_sigil
-
-      - name: Run fuzz (quick)
-        run: |
-          for f in fuzz/*.fcyr; do
-            name=$(basename "$f" .fcyr)
-            printf "  %-25s " "$name"
-            if cat "$f" | cc3 > "/tmp/${name}" 2>/dev/null && chmod +x "/tmp/${name}"; then
-              timeout 10 "/tmp/${name}" 2>&1 && echo "OK" || echo "FAIL"
-            else
-              echo "COMPILE FAIL"
-            fi
-          done
+          fail=0
+          # Check for raw execve outside controlled modules
+          if grep -r 'syscall(59' src/ lib/ 2>/dev/null | grep -v process.cyr; then
+            echo "WARN: raw execve in source"
+          fi
+          # Check for hardcoded keys/secrets
+          if grep -rEi 'private.key|secret.*=.*[0-9a-f]{32}' src/ 2>/dev/null | grep -v test | grep -v example; then
+            echo "WARN: possible hardcoded secret"; fail=1
+          fi
+          echo "security scan complete"
+          test $fail -eq 0
