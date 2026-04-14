@@ -2233,8 +2233,8 @@ fn ed25519_sign(sk, msg, msg_len, sig_out) {
 
     # Zeroize all secret/derived material. _sign_az holds H(sk)[0..64]
     # (the clamped scalar a and nonce seed). _sign_r_scalar is the
-    # per-signature nonce; _sign_a_scalar is the private scalar a
-    # re-loaded as u256. Leaking any one reveals the private key.
+    # per-signature nonce; _sign_a_scalar is the long-term scalar a
+    # re-loaded as u256. Leaking any one recovers the signing secret.
     memset(_sign_az, 0, 64);
     memset(_sign_nhash, 0, 64);
     memset(_sign_r_scalar, 0, 32);
