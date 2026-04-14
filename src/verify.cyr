@@ -236,16 +236,26 @@ fn sv_verify_artifact(sv, path, artifact_type) {
                 if (kv != 0) {
                     var pk = kv_public_key_hex(kv);
                     if (pk != 0) {
-                        var pk_bytes = hex_decode(pk, 64);
-                        var valid = verify_data(chash, strlen(chash), sig, pk_bytes);
-                        if (valid == 1) {
-                            if (trust_level_rank(trust_level) < trust_level_rank(TRUST_VERIFIED)) {
-                                trust_level = TRUST_VERIFIED;
-                            }
-                            vresult_add_check(vr, trust_check_new("signature", 1, "Signature valid"));
-                        } else {
+                        if (strlen(pk) != 64) {
                             trust_level = TRUST_UNVERIFIED;
-                            vresult_add_check(vr, trust_check_new("signature", 0, "Signature invalid"));
+                            vresult_add_check(vr, trust_check_new("signature", 0, "Public key hex wrong length"));
+                        } else {
+                            var pk_bytes = hex_decode(pk, 64);
+                            if (pk_bytes == 0) {
+                                trust_level = TRUST_UNVERIFIED;
+                                vresult_add_check(vr, trust_check_new("signature", 0, "Public key hex invalid"));
+                            } else {
+                                var valid = verify_data(chash, strlen(chash), sig, pk_bytes);
+                                if (valid == 1) {
+                                    if (trust_level_rank(trust_level) < trust_level_rank(TRUST_VERIFIED)) {
+                                        trust_level = TRUST_VERIFIED;
+                                    }
+                                    vresult_add_check(vr, trust_check_new("signature", 1, "Signature valid"));
+                                } else {
+                                    trust_level = TRUST_UNVERIFIED;
+                                    vresult_add_check(vr, trust_check_new("signature", 0, "Signature invalid"));
+                                }
+                            }
                         }
                     } else {
                         vresult_add_check(vr, trust_check_new("signature", 0, "No public key for verification"));

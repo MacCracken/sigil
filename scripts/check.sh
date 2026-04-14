@@ -65,6 +65,9 @@ done
 echo ""
 
 # ── 3. Fuzz (quick, 5s each) ──
+# NOTE: `|| true` used to previously swallow crashes; removed so
+# exit codes >= 128 (signal termination) are treated as failures.
+# Acceptable exits: 0 (clean), 124 (SIGTERM from timeout).
 echo "── Fuzz (5s each) ──"
 for ffile in "$ROOT"/fuzz/*.fcyr; do
     [ -f "$ffile" ] || continue
@@ -72,7 +75,7 @@ for ffile in "$ROOT"/fuzz/*.fcyr; do
     tmpbin="/tmp/sigil_f_$$"
     printf "  %-25s " "$name"
     if cat "$ffile" | "$CC" > "$tmpbin" 2>/dev/null && chmod +x "$tmpbin"; then
-        timeout 5 "$tmpbin" >/dev/null 2>&1 || true
+        timeout 5 "$tmpbin" >/dev/null 2>&1
         rc=$?
         if [ "$rc" -eq 0 ] || [ "$rc" -eq 124 ]; then
             echo "OK"

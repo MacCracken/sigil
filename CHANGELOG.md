@@ -5,6 +5,84 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0] — 2026-04-13
+
+### Security
+
+Dedicated security hardening pass against the CLAUDE.md Security
+Hardening checklist. Full audit: `docs/audit/2026-04-13-audit.md`.
+This release fixes all CRITICAL and HIGH findings.
+
+- **CRITICAL (C1) — silent weak keys on entropy failure**: `generate_keypair`
+  (`src/trust.cyr`) and `tpm_random` (`src/tpm.cyr`) now check the
+  `/dev/urandom` fd and `file_read` return values. Previously, if the
+  fd open or read failed or returned a short count, keys were derived
+  from uninitialized stack memory with no error signal. Both functions
+  now loop until the requested byte count is filled and return 0 on
+  any failure.
+- **CRITICAL (C2) — silent fallback to zero public key**: `hex_decode`
+  (`src/hex.cyr`) now rejects odd-length input and non-hex characters
+  (returns 0 sentinel). Previously, `_hex_nibble` silently mapped
+  invalid chars to 0, and `sv_verify_artifact` blindly consumed the
+  result as a 32-byte public key. A tampered or truncated `public_key_hex`
+  would decode to all zeros, opening a path to small-subgroup / zero-pk
+  verification. `sv_verify_artifact` (`src/verify.cyr`) also validates
+  `strlen(pk) == 64` and decode success before calling verify.
+- **HIGH (H3) — Ed25519 signature malleability**: `ed25519_verify`
+  (`src/ed25519.cyr`) now rejects signatures whose S scalar is
+  outside `[0, L)`, per RFC 8032 §5.1.7 / §8.4. Without this check,
+  an attacker could produce `(R, S+L)` as a second valid signature
+  for the same `(pk, msg)` tuple.
+- **HIGH (H4) — path traversal + buffer overflow in `keyring_save`**:
+  `keyring_save` (`src/trust.cyr`) now validates key IDs via
+  `_is_safe_key_id` (ASCII alnum, `_`, `-`, max 64 chars) and rejects
+  any path whose total length exceeds the 256-byte buffer. Previously,
+  a `key_id` of `../etc/passwd` or a name longer than 245 chars could
+  escape `keys_dir` or overflow the heap path buffer.
+- **HIGH (H5) — fuzz harness SIGSEGV masked as OK**: `scripts/check.sh`
+  removed `|| true` that was swallowing crash exits. `fuzz/fuzz_integrity.fcyr`
+  and `fuzz/fuzz_revocation.fcyr` rewritten — previous versions called
+  `fmt_int(i)` (which prints to stdout and returns 0, not a C-string)
+  and then dereferenced the result. Fuzz keys all collapsed to the same
+  string and the trailing `strlen(0)` read eventually crashed on exit.
+  Now use `fmt_int_buf` into a local buffer; fuzz binaries exit 0.
+
+### Added
+- **`docs/audit/2026-04-13-audit.md`**: full security audit report
+  with severity, file, line, and fix plan for all 12 findings.
+- **`tests/tcyr/security.tcyr`**: 21 regression tests covering each
+  2.1.0 fix — hex decode validation, `hex_is_valid` predicate, Ed25519
+  S ≥ L rejection (malleability), and `_is_safe_key_id` boundary cases.
+- **`hex_is_valid(hex_str, hex_len)`**: new public predicate in
+  `src/hex.cyr` for callers that want to validate before decoding.
+
+### Changed
+- `hex_decode` is now fallible and returns `0` on invalid input.
+  **Breaking** for callers that assumed success — re-check call sites
+  if you consume `hex_decode` outside sigil. Consumers inside sigil
+  (`verify.cyr`) updated.
+- `generate_keypair` now returns `0` on entropy failure. Callers MUST
+  null-check the returned key_id before proceeding.
+
+### Performance
+
+No regressions vs 2.0.1 baseline (all within 3%):
+
+| Benchmark         | 2.0.1     | 2.1.0     |
+|-------------------|-----------|-----------|
+| sha256_4kb        | 296us     | 286us     |
+| sha512_4kb        | 156us     | 154us     |
+| sc_reduce         | 52us      | 49us      |
+| ge_scalarmult     | 5.773ms   | 5.457ms   |
+| ed25519_keypair   | 6.923ms   | 6.405ms   |
+| ed25519_sign      | 6.968ms   | 6.663ms   |
+| ed25519 verify    | (S<L check: ~1us overhead, below benchmark resolution) |
+
+### Test coverage
+- **227 assertions** across 10 `.tcyr` files (was 206 in 2.0.1). New
+  file: `security.tcyr` (21 assertions).
+- Both fuzz binaries now exit cleanly; previously exited 139 (SIGSEGV).
+
 ## [2.0.1] — 2026-04-10
 
 ### Added

@@ -138,19 +138,20 @@ fn tpm_unseal_data(sealed_blob, buf, buf_len) {
 # ================================================================
 
 fn tpm_random(buf, count) {
-    if (tpm_available() == 0) {
-        # Fallback to /dev/urandom
-        var fd = file_open("/dev/urandom", 0, 0);
-        if (fd < 0) { return 0; }
-        var n = file_read(fd, buf, count);
-        file_close(fd);
-        return n;
-    }
-    # In production: calls agnosys tpm_get_random(buf, count)
-    # For now, use urandom fallback
+    # Returns count on full success, 0 on any failure or short read.
+    # Caller MUST treat any non-count return as entropy failure.
+    if (count <= 0) { return 0; }
     var fd = file_open("/dev/urandom", 0, 0);
     if (fd < 0) { return 0; }
-    var n = file_read(fd, buf, count);
+    var got = 0;
+    while (got < count) {
+        var n = file_read(fd, buf + got, count - got);
+        if (n <= 0) {
+            file_close(fd);
+            return 0;
+        }
+        got = got + n;
+    }
     file_close(fd);
-    return n;
+    return count;
 }

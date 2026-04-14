@@ -1,4 +1,8 @@
 # fuzz_revocation.fcyr — fuzz revocation list operations
+#
+# NOTE on fmt_int: lib/fmt.cyr `fmt_int(n)` prints to stdout and
+# returns 0 (not a C-string). Use `fmt_int_buf(n, buf)` to write
+# digits into a buffer and get a length back.
 
 include "lib/assert.cyr"
 include "lib/alloc.cyr"
@@ -28,6 +32,18 @@ include "src/integrity.cyr"
 include "src/policy.cyr"
 include "src/audit.cyr"
 
+# Build "<prefix>{i}" as a null-terminated C-string on the heap.
+fn _fuzz_ns(prefix, plen, i) {
+    var out = alloc(48);
+    memcpy(out, prefix, plen);
+    var nbuf[24];
+    memset(&nbuf, 0, 24);
+    var nlen = fmt_int_buf(i, &nbuf);
+    memcpy(out + plen, &nbuf, nlen);
+    store8(out + plen + nlen, 0);
+    return out;
+}
+
 fn main() {
     alloc_init();
     ed25519_init();
@@ -37,16 +53,8 @@ fn main() {
     # Fuzz: add many entries with various key_id/hash combinations
     var i = 0;
     while (i < 200) {
-        var kid = alloc(20);
-        memcpy(kid, "fuzz_key_", 9);
-        var ns = fmt_int(i);
-        memcpy(kid + 9, ns, strlen(ns));
-        store8(kid + 9 + strlen(ns), 0);
-
-        var chash = alloc(20);
-        memcpy(chash, "fuzz_hash_", 10);
-        memcpy(chash + 10, ns, strlen(ns));
-        store8(chash + 10 + strlen(ns), 0);
+        var kid = _fuzz_ns("fuzz_key_", 9, i);
+        var chash = _fuzz_ns("fuzz_hash_", 10, i);
 
         # Alternate between key-only, hash-only, and both
         if (i % 3 == 0) {
@@ -70,11 +78,7 @@ fn main() {
     var rl2 = revocation_list_new();
     i = 0;
     while (i < 50) {
-        var kid = alloc(20);
-        memcpy(kid, "merge_key_", 10);
-        var ns = fmt_int(i);
-        memcpy(kid + 10, ns, strlen(ns));
-        store8(kid + 10 + strlen(ns), 0);
+        var kid = _fuzz_ns("merge_key_", 10, i);
         rl_add(rl2, revocation_entry_new(kid, 0, "merge", "admin"));
         i = i + 1;
     }

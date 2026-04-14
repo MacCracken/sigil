@@ -671,6 +671,11 @@ fn ed25519_verify(pk, msg, msg_len, sig) {
         li = li + 1;
     }
 
+    # RFC 8032 §5.1.7 / §8.4: reject non-canonical S (S must be < L).
+    # Prevents signature malleability — the same (pk, msg) must have
+    # exactly one valid signature encoding.
+    if (u256_cmp(_ver_S_scalar, _ed_L) >= 0) { return 0; }
+
     # [S]B
     var SB = ge_alloc();
     ge_scalarmult(SB, _ver_S_scalar, _ed_B);

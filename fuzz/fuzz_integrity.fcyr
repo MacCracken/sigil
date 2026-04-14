@@ -1,4 +1,8 @@
 # fuzz_integrity.fcyr — fuzz integrity verifier operations
+#
+# NOTE on fmt_int: lib/fmt.cyr `fmt_int(n)` prints to stdout and
+# returns 0 (not a C-string). Use `fmt_int_buf(n, buf)` to write
+# digits into a buffer and get a length back.
 
 include "lib/assert.cyr"
 include "lib/alloc.cyr"
@@ -26,6 +30,19 @@ include "src/ed25519.cyr"
 include "src/trust.cyr"
 include "src/integrity.cyr"
 
+# Build "/tmp/sigil_fuzz_{i}.bin" into a fresh heap allocation.
+fn _fuzz_path(i) {
+    var path = alloc(64);
+    memcpy(path, "/tmp/sigil_fuzz_", 16);
+    var nbuf[24];
+    memset(&nbuf, 0, 24);
+    var nlen = fmt_int_buf(i, &nbuf);
+    memcpy(path + 16, &nbuf, nlen);
+    memcpy(path + 16 + nlen, ".bin", 4);
+    store8(path + 20 + nlen, 0);
+    return path;
+}
+
 fn main() {
     alloc_init();
     ed25519_init();
@@ -33,15 +50,8 @@ fn main() {
     # Create temp files with known content
     var i = 0;
     while (i < 20) {
-        var path = alloc(64);
-        memcpy(path, "/tmp/sigil_fuzz_", 16);
-        var ns = fmt_int(i);
-        memcpy(path + 16, ns, strlen(ns));
-        memcpy(path + 16 + strlen(ns), ".bin", 4);
-        store8(path + 20 + strlen(ns), 0);
-
+        var path = _fuzz_path(i);
         var fd = file_open(path, 577, 420);
-        # Write varying content
         var content = alloc(256);
         memset(content, 0x41 + (i % 26), 256);
         file_write(fd, content, 256);
@@ -53,13 +63,7 @@ fn main() {
     var policy = integrity_policy_new();
     i = 0;
     while (i < 20) {
-        var path = alloc(64);
-        memcpy(path, "/tmp/sigil_fuzz_", 16);
-        var ns = fmt_int(i);
-        memcpy(path + 16, ns, strlen(ns));
-        memcpy(path + 16 + strlen(ns), ".bin", 4);
-        store8(path + 20 + strlen(ns), 0);
-
+        var path = _fuzz_path(i);
         var h = hash_file(path);
         if (h != 0) {
             ipolicy_add(policy, path, h);
@@ -94,12 +98,7 @@ fn main() {
     # Cleanup
     i = 0;
     while (i < 20) {
-        var path = alloc(64);
-        memcpy(path, "/tmp/sigil_fuzz_", 16);
-        var ns = fmt_int(i);
-        memcpy(path + 16, ns, strlen(ns));
-        memcpy(path + 16 + strlen(ns), ".bin", 4);
-        store8(path + 20 + strlen(ns), 0);
+        var path = _fuzz_path(i);
         syscall(87, path);
         i = i + 1;
     }

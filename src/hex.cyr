@@ -29,16 +29,41 @@ fn _hex_nibble(c) {
     if (c >= 48) { if (c <= 57) { return c - 48; } }
     if (c >= 97) { if (c <= 102) { return c - 87; } }
     if (c >= 65) { if (c <= 70) { return c - 55; } }
+    return (0 - 1);
+}
+
+fn _hex_is_valid_char(c) {
+    if (c >= 48) { if (c <= 57) { return 1; } }
+    if (c >= 97) { if (c <= 102) { return 1; } }
+    if (c >= 65) { if (c <= 70) { return 1; } }
     return 0;
 }
 
+# Returns 1 if hex_str is a valid even-length hex C-string of hex_len chars.
+fn hex_is_valid(hex_str, hex_len) {
+    if (hex_len == 0) { return 0; }
+    if ((hex_len & 1) == 1) { return 0; }
+    var i = 0;
+    while (i < hex_len) {
+        if (_hex_is_valid_char(load8(hex_str + i) & 0xFF) == 0) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# Decode hex to bytes. Returns 0 (null) on invalid input
+# (odd length, non-hex char). Caller MUST null-check.
 fn hex_decode(hex_str, hex_len) {
+    if ((hex_len & 1) == 1) { return 0; }
     var blen = hex_len / 2;
+    if (blen == 0) { return 0; }
     var out = alloc(blen);
     var i = 0;
     while (i < blen) {
-        var hi = _hex_nibble(load8(hex_str + i * 2));
-        var lo = _hex_nibble(load8(hex_str + i * 2 + 1));
+        var hi = _hex_nibble(load8(hex_str + i * 2) & 0xFF);
+        var lo = _hex_nibble(load8(hex_str + i * 2 + 1) & 0xFF);
+        if (hi < 0) { return 0; }
+        if (lo < 0) { return 0; }
         store8(out + i, (hi << 4) | lo);
         i = i + 1;
     }

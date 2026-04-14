@@ -1,0 +1,123 @@
+# security.tcyr — regression tests for 2.1.0 security fixes
+#
+# Each group corresponds to an audit finding in
+# docs/audit/2026-04-13-audit.md. These tests fail the build if a
+# hardened check is removed or regresses.
+
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fmt.cyr"
+include "lib/json.cyr"
+include "lib/sakshi.cyr"
+include "lib/chrono.cyr"
+
+include "src/types.cyr"
+include "src/error.cyr"
+include "src/sha256.cyr"
+include "src/hex.cyr"
+include "src/ct.cyr"
+include "src/hmac.cyr"
+include "src/sha512.cyr"
+include "lib/bigint.cyr"
+include "src/bigint_ext.cyr"
+include "src/ed25519.cyr"
+include "src/trust.cyr"
+
+fn main() {
+    alloc_init();
+    ed25519_init();
+
+    # ============================================================
+    # C2 — hex_decode rejects malformed input
+    # ============================================================
+    test_group("hex_decode odd length rejected");
+    assert_eq(hex_decode("abc", 3), 0, "odd length returns 0");
+    assert_eq(hex_decode("a", 1), 0, "single char returns 0");
+
+    test_group("hex_decode invalid chars rejected");
+    assert_eq(hex_decode("zz", 2), 0, "non-hex char returns 0");
+    assert_eq(hex_decode("0g", 2), 0, "out-of-range char returns 0");
+    assert_eq(hex_decode("  ", 2), 0, "whitespace returns 0");
+
+    test_group("hex_decode empty rejected");
+    assert_eq(hex_decode("", 0), 0, "empty returns 0");
+
+    test_group("hex_decode valid still works");
+    var ok = hex_decode("deadbeef", 8);
+    assert_eq(load8(ok) & 0xFF, 0xDE, "decode still succeeds");
+
+    test_group("hex_is_valid predicate");
+    assert_eq(hex_is_valid("deadbeef", 8), 1, "valid hex");
+    assert_eq(hex_is_valid("DEADBEEF", 8), 1, "uppercase valid");
+    assert_eq(hex_is_valid("deadbee", 7), 0, "odd rejected");
+    assert_eq(hex_is_valid("xy", 2), 0, "invalid rejected");
+
+    # ============================================================
+    # H3 — Ed25519 signature malleability: S >= L rejected
+    # ============================================================
+    # Per RFC 8032 §5.1.7 / §8.4, verify MUST reject signatures
+    # whose S scalar is >= L (the group order). Without this check,
+    # an attacker could produce (R, S+L) as a second valid signature.
+    test_group("Ed25519 rejects non-canonical S");
+    # Generate a valid keypair and sign a message
+    var seed[32];
+    memset(&seed, 0, 32);
+    var i = 0;
+    while (i < 32) { store8(&seed + i, i + 1); i = i + 1; }
+    var sk[64];
+    var pk[32];
+    ed25519_keypair(&seed, &sk, &pk);
+
+    var msg = "malleability test vector";
+    var sig[64];
+    ed25519_sign(&sk, msg, 24, &sig);
+    # Sanity: original signature verifies
+    assert_eq(ed25519_verify(&pk, msg, 24, &sig), 1, "original sig verifies");
+
+    # Mutate S -> S + L by flipping S's high bit above 2^252.
+    # L = 2^252 + 27742... < 2^253, so any S with bit 253 set is >= L.
+    # Easiest construction: set sig[63] to 0xFF (MSB). This makes S
+    # larger than 2^252 + anything, guaranteeing S >= L.
+    var mal_sig[64];
+    i = 0;
+    while (i < 64) { store8(&mal_sig + i, load8(&sig + i) & 0xFF); i = i + 1; }
+    store8(&mal_sig + 63, 0xFF);
+    assert_eq(ed25519_verify(&pk, msg, 24, &mal_sig), 0, "non-canonical S rejected");
+
+    # ============================================================
+    # H4 — keyring_save rejects unsafe key IDs
+    # ============================================================
+    test_group("_is_safe_key_id validation");
+    assert_eq(_is_safe_key_id("valid_key-01"), 1, "alnum/_/- allowed");
+    assert_eq(_is_safe_key_id("ABC123"), 1, "uppercase allowed");
+    assert_eq(_is_safe_key_id("../etc/passwd"), 0, "path traversal rejected");
+    assert_eq(_is_safe_key_id("has/slash"), 0, "slash rejected");
+    assert_eq(_is_safe_key_id("has.dot"), 0, "dot rejected");
+    assert_eq(_is_safe_key_id(""), 0, "empty rejected");
+    # 65-char key_id — over the 64 limit
+    var long_id = alloc(66);
+    i = 0;
+    while (i < 65) { store8(long_id + i, 97); i = i + 1; }
+    store8(long_id + 65, 0);
+    assert_eq(_is_safe_key_id(long_id), 0, "over-length rejected");
+    # 64-char key_id — right at limit
+    var max_id = alloc(65);
+    i = 0;
+    while (i < 64) { store8(max_id + i, 97); i = i + 1; }
+    store8(max_id + 64, 0);
+    assert_eq(_is_safe_key_id(max_id), 1, "max-length accepted");
+
+    # ============================================================
+    # Summary
+    # ============================================================
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

@@ -264,9 +264,36 @@ fn keyring_validate_chain(kr, key_id) {
     return 1;
 }
 
-# Save keyring to JSON files in keys_dir
+# Validate key_id as a safe filename:
+#   - non-empty, max 64 chars
+#   - only [A-Za-z0-9_-] (no '/', '.', or control bytes)
+# Returns 1 if safe, 0 otherwise. Prevents path traversal in keyring_save.
+fn _is_safe_key_id(kid) {
+    if (kid == 0) { return 0; }
+    var klen = strlen(kid);
+    if (klen == 0) { return 0; }
+    if (klen > 64) { return 0; }
+    var i = 0;
+    while (i < klen) {
+        var c = load8(kid + i) & 0xFF;
+        var ok = 0;
+        if (c >= 48) { if (c <= 57) { ok = 1; } }       # 0-9
+        if (c >= 65) { if (c <= 90) { ok = 1; } }       # A-Z
+        if (c >= 97) { if (c <= 122) { ok = 1; } }      # a-z
+        if (c == 95) { ok = 1; }                        # _
+        if (c == 45) { ok = 1; }                        # -
+        if (ok == 0) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# Save keyring to JSON files in keys_dir.
+# Returns count of key versions written. Skips any key_id that
+# fails _is_safe_key_id or whose full path exceeds 255 bytes.
 fn keyring_save(kr) {
     var keys_dir = load64(kr + 8);
+    if (keys_dir == 0) { return 0; }
     var m = load64(kr);
     var kids = map_keys(m);
     var klen = vec_len(kids);
@@ -276,15 +303,22 @@ fn keyring_save(kr) {
         var kid = vec_get(kids, i);
         var versions = map_get(m, kid);
         var vlen = vec_len(versions);
+        # Validate key_id — reject path traversal or oversized names
+        if (_is_safe_key_id(kid) == 0) { i = i + 1; }
+        else {
+        var dlen = strlen(keys_dir);
+        var kidlen = strlen(kid);
+        # dlen + "/" + kidlen + ".json" + NUL
+        var need = dlen + 1 + kidlen + 5 + 1;
+        if (need > 256) { i = i + 1; }
+        else {
         # Write JSON file: keys_dir/key_id.json
         var path = alloc(256);
         var pos = 0;
-        var dlen = strlen(keys_dir);
         memcpy(path, keys_dir, dlen);
         pos = pos + dlen;
         store8(path + pos, 47);  # /
         pos = pos + 1;
-        var kidlen = strlen(kid);
         memcpy(path + pos, kid, kidlen);
         pos = pos + kidlen;
         memcpy(path + pos, ".json", 5);
@@ -312,6 +346,8 @@ fn keyring_save(kr) {
             count = count + vlen;
         }
         i = i + 1;
+        }
+        }
     }
     return count;
 }
@@ -363,9 +399,21 @@ fn verify_data(data, len, sig, public_key) {
 
 fn generate_keypair(sk_out, pk_out) {
     # sk_out: 64 bytes (seed || pk), pk_out: 32 bytes
+    # Returns key_id (C-string) on success, 0 on entropy failure.
     var seed[32];
+    memset(&seed, 0, 32);
     var fd = file_open("/dev/urandom", 0, 0);
-    file_read(fd, &seed, 32);
+    if (fd < 0) { return 0; }
+    var got = 0;
+    while (got < 32) {
+        var n = file_read(fd, (&seed) + got, 32 - got);
+        if (n <= 0) {
+            file_close(fd);
+            memset(&seed, 0, 32);
+            return 0;
+        }
+        got = got + n;
+    }
     file_close(fd);
     ed25519_keypair(&seed, sk_out, pk_out);
     memset(&seed, 0, 32);
