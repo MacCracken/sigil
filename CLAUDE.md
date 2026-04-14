@@ -8,7 +8,7 @@
 - **License**: GPL-3.0-only
 - **Language**: Cyrius (ported from Rust)
 - **Version**: SemVer, version file at `VERSION`
-- **Status**: Porting from Rust — TDD-first approach
+- **Status**: Released (2.x), security hardening active
 
 ## Genesis Layer
 
@@ -120,12 +120,11 @@ Run a closeout pass before tagging x.Y.0 or x.0.0. Ship as the last patch of the
 - **Large**: Small bites only — break into sub-tasks, verify each before moving to the next
 - **If unsure**: Treat as large
 
-### Porting Approach (TDD)
+### TDD Discipline
 
-- Write tests FIRST for each module, then implement until tests pass
-- Port module-by-module: types → error → trust → integrity → verify → chain → policy → audit → tpm
-- Benchmarks alongside, not after — compare against Rust baselines in `benchmarks-rust-v-cyrius.md`
-- Rust source preserved in `rust-old/` for reference
+- Write tests FIRST for new modules/features, then implement until they pass
+- Benchmarks alongside, not after — regressions vs `benches/history.csv` are a release blocker
+- Rust source preserved in `rust-old/` for reference during cross-checks
 
 ## Key Design Constraints
 

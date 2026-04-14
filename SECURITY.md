@@ -33,11 +33,20 @@ The following are in scope:
 - Integer overflow in hash/signature operations
 - Path traversal in file operations
 
-## Cryptographic Dependencies
+## Cryptographic Implementations
 
-Sigil relies on audited crates for all cryptographic operations:
+As of the Cyrius port (v2.0.0), sigil owns all of its crypto
+primitives directly — zero external dependencies. Each implementation
+follows the referenced standard:
 
-- `ed25519-dalek` — Ed25519 signatures
-- `sha2` — SHA-256 hashing
-- `subtle` — Constant-time comparison
-- `rand` — Cryptographic RNG (via `OsRng`)
+- **Ed25519** (signatures) — RFC 8032, `src/ed25519.cyr`
+- **SHA-256** (hashing) — FIPS 180-4, `src/sha256.cyr`
+- **SHA-512** (Ed25519 hash) — FIPS 180-4, `src/sha512.cyr`
+- **HMAC-SHA256** — RFC 2104, `src/hmac.cyr`
+- **Constant-time comparison** — bitwise-OR accumulation, `src/ct.cyr`
+- **Cryptographic RNG** — `/dev/urandom` with short-read validation,
+  `tpm_random` in `src/tpm.cyr` and `generate_keypair` in `src/trust.cyr`
+
+Pre-port Rust crate dependencies (`ed25519-dalek`, `sha2`, `subtle`,
+`rand`) are no longer used and the Rust source is retained only for
+reference in `rust-old/`.

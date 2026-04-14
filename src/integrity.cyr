@@ -328,8 +328,9 @@ fn iv_import_baseline(v, snap) {
 # Report summary string
 fn ireport_summary(r) {
     # Returns: "Integrity: N/M verified, X mismatches, Y errors"
-    # Build string manually
-    var buf = alloc(128);
+    # Worst case: 4 × 19-digit i64 + fixed text ≈ 120 bytes.
+    # Size 192 gives defense-in-depth headroom for any future text changes.
+    var buf = alloc(192);
     var pos = 0;
     memcpy(buf, "Integrity: ", 11);
     pos = 11;

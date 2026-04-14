@@ -306,48 +306,48 @@ fn keyring_save(kr) {
         # Validate key_id — reject path traversal or oversized names
         if (_is_safe_key_id(kid) == 0) { i = i + 1; }
         else {
-        var dlen = strlen(keys_dir);
-        var kidlen = strlen(kid);
-        # dlen + "/" + kidlen + ".json" + NUL
-        var need = dlen + 1 + kidlen + 5 + 1;
-        if (need > 256) { i = i + 1; }
-        else {
-        # Write JSON file: keys_dir/key_id.json
-        var path = alloc(256);
-        var pos = 0;
-        memcpy(path, keys_dir, dlen);
-        pos = pos + dlen;
-        store8(path + pos, 47);  # /
-        pos = pos + 1;
-        memcpy(path + pos, kid, kidlen);
-        pos = pos + kidlen;
-        memcpy(path + pos, ".json", 5);
-        pos = pos + 5;
-        store8(path + pos, 0);
+            var dlen = strlen(keys_dir);
+            var kidlen = strlen(kid);
+            # dlen + "/" + kidlen + ".json" + NUL
+            var need = dlen + 1 + kidlen + 5 + 1;
+            if (need > 256) { i = i + 1; }
+            else {
+                # Write JSON file: keys_dir/key_id.json
+                var path = alloc(256);
+                var pos = 0;
+                memcpy(path, keys_dir, dlen);
+                pos = pos + dlen;
+                store8(path + pos, 47);  # /
+                pos = pos + 1;
+                memcpy(path + pos, kid, kidlen);
+                pos = pos + kidlen;
+                memcpy(path + pos, ".json", 5);
+                pos = pos + 5;
+                store8(path + pos, 0);
 
-        var fd = file_open(path, 577, 420);  # O_WRONLY|O_CREAT|O_TRUNC, 0644
-        if (fd >= 0) {
-            file_write(fd, "[", 1);
-            var j = 0;
-            while (j < vlen) {
-                var kv = vec_get(versions, j);
-                if (j > 0) { file_write(fd, ",", 1); }
-                file_write(fd, "{\"key_id\":\"", 11);
-                json_write_escaped(fd, kv_key_id(kv), strlen(kv_key_id(kv)));
-                file_write(fd, "\",\"public_key_hex\":\"", 20);
-                json_write_escaped(fd, kv_public_key_hex(kv), strlen(kv_public_key_hex(kv)));
-                file_write(fd, "\",\"role\":\"", 10);
-                var rn = key_role_name(kv_role(kv));
-                json_write_escaped(fd, rn, strlen(rn));
-                file_write(fd, "\"}", 2);
-                j = j + 1;
+                var fd = file_open(path, 577, 420);  # O_WRONLY|O_CREAT|O_TRUNC, 0644
+                if (fd >= 0) {
+                    file_write(fd, "[", 1);
+                    var j = 0;
+                    while (j < vlen) {
+                        var kv = vec_get(versions, j);
+                        if (j > 0) { file_write(fd, ",", 1); }
+                        file_write(fd, "{\"key_id\":\"", 11);
+                            json_write_escaped(fd, kv_key_id(kv), strlen(kv_key_id(kv)));
+                            file_write(fd, "\",\"public_key_hex\":\"", 20);
+                            json_write_escaped(fd, kv_public_key_hex(kv), strlen(kv_public_key_hex(kv)));
+                            file_write(fd, "\",\"role\":\"", 10);
+                            var rn = key_role_name(kv_role(kv));
+                            json_write_escaped(fd, rn, strlen(rn));
+                            file_write(fd, "\"}", 2);
+                        j = j + 1;
+                    }
+                    file_write(fd, "]", 1);
+                    file_close(fd);
+                    count = count + vlen;
+                }
+                i = i + 1;
             }
-            file_write(fd, "]", 1);
-            file_close(fd);
-            count = count + vlen;
-        }
-        i = i + 1;
-        }
         }
     }
     return count;

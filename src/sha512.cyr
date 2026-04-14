@@ -217,7 +217,8 @@ fn sha512_transform(ctx) {
     # 80 rounds
     _s5_i = 0;
     while (_s5_i < 80) {
-        _s5_t1 = _s5_hv + sha512_bsig1(_s5_e) + sha512_ch(_s5_e, _s5_f, _s5_g) + load64(_sha512_K + _s5_i * 8) + load64(_sha512_W + _s5_i * 8);
+        _s5_t1 = _s5_hv + sha512_bsig1(_s5_e) + sha512_ch(_s5_e, _s5_f, _s5_g);
+        _s5_t1 = _s5_t1 + load64(_sha512_K + _s5_i * 8) + load64(_sha512_W + _s5_i * 8);
         _s5_t2 = sha512_bsig0(_s5_a) + sha512_maj(_s5_a, _s5_b, _s5_c);
 
         _s5_hv = _s5_g;

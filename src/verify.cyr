@@ -88,6 +88,9 @@ fn sv_trust_store(sv) { return load64(sv + 32); }
 fn sv_key_pins(sv) { return load64(sv + 40); }
 fn sv_audit_log(sv) { return load64(sv + 56); }
 
+# Cache is currently a stub: these setters write to fields at +48 and
+# +64 but no read path consults them. Kept for API stability through
+# the 2.x line; candidate for removal or wiring up in 2.2.0.
 fn sv_set_cache_enabled(sv, enabled) {
     store64(sv + 48, enabled);
     return sv;
@@ -128,16 +131,22 @@ fn _sv_key_authorized(sv, path, signer_key_id) {
     var pins = load64(sv + 40);
     var plen = vec_len(pins);
     var has_matching_pin = 0;
+    var path_len = 0;
+    if (path != 0) { path_len = strlen(path); }
     var i = 0;
     while (i < plen) {
         var pin = vec_get(pins, i);
         var prefix = kpin_prefix(pin);
         var plen2 = strlen(prefix);
-        if (memeq(path, prefix, plen2) == 1) {
-            has_matching_pin = 1;
-            if (signer_key_id != 0) {
-                if (streq(kpin_key_id(pin), signer_key_id) == 1) {
-                    return 1;
+        # Guard against OOB read: memeq reads plen2 bytes from path,
+        # so path must be at least that long.
+        if (path_len >= plen2) {
+            if (memeq(path, prefix, plen2) == 1) {
+                has_matching_pin = 1;
+                if (signer_key_id != 0) {
+                    if (streq(kpin_key_id(pin), signer_key_id) == 1) {
+                        return 1;
+                    }
                 }
             }
         }
@@ -201,15 +210,15 @@ fn sv_verify_artifact(sv, path, artifact_type) {
     var chash = hash_file(path);
     if (chash == 0) {
         return verification_result_new(
-            trusted_artifact_new(path, artifact_type, ""),
-            0, clock_epoch_secs()
+        trusted_artifact_new(path, artifact_type, ""),
+        0, clock_epoch_secs()
         );
     }
 
     var trust_level = TRUST_UNVERIFIED;
     var vr = verification_result_new(
-        trusted_artifact_new(path, artifact_type, chash),
-        1, clock_epoch_secs()
+    trusted_artifact_new(path, artifact_type, chash),
+    1, clock_epoch_secs()
     );
 
     # Check: file readable
@@ -572,20 +581,20 @@ fn sv_save_trust_store(sv, path) {
         var art = map_get(store, chash);
         if (i > 0) { file_write(fd, ",", 1); }
         file_write(fd, "{\"hash\":\"", 9);
-        json_write_escaped(fd, chash, strlen(chash));
-        file_write(fd, "\",\"path\":\"", 10);
-        var ap = artifact_path(art);
-        json_write_escaped(fd, ap, strlen(ap));
-        file_write(fd, "\",\"type\":", 9);
-        # fmt_int prints to stdout — use fmt_int_buf for file output.
-        memset(&nbuf, 0, 24);
-        var nlen = fmt_int_buf(artifact_type(art), &nbuf);
-        file_write(fd, &nbuf, nlen);
-        file_write(fd, ",\"trust\":", 9);
-        memset(&nbuf, 0, 24);
-        nlen = fmt_int_buf(artifact_trust_level(art), &nbuf);
-        file_write(fd, &nbuf, nlen);
-        file_write(fd, "}", 1);
+            json_write_escaped(fd, chash, strlen(chash));
+            file_write(fd, "\",\"path\":\"", 10);
+            var ap = artifact_path(art);
+            json_write_escaped(fd, ap, strlen(ap));
+            file_write(fd, "\",\"type\":", 9);
+            # fmt_int prints to stdout — use fmt_int_buf for file output.
+            memset(&nbuf, 0, 24);
+            var nlen = fmt_int_buf(artifact_type(art), &nbuf);
+            file_write(fd, &nbuf, nlen);
+            file_write(fd, ",\"trust\":", 9);
+            memset(&nbuf, 0, 24);
+            nlen = fmt_int_buf(artifact_trust_level(art), &nbuf);
+            file_write(fd, &nbuf, nlen);
+            file_write(fd, "}", 1);
         i = i + 1;
     }
     file_write(fd, "]", 1);

@@ -5,6 +5,75 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.2] — 2026-04-13
+
+### Security
+
+Closeout pass for the 2.1.x series. Shipped as the last patch before
+2.2.0 per the CLAUDE.md closeout checklist. Addresses LOW findings
+from `docs/audit/2026-04-13-audit.md` and finishes the stale-doc
+sweep.
+
+- **LOW (L11) — `ireport_summary` buffer headroom**: `src/integrity.cyr`
+  enlarges the output buffer from 128 to 192 bytes. Worst-case write
+  (4 × 19-digit i64 + fixed text) is ~120 bytes; new size gives safe
+  headroom for any future format change.
+- **LOW (L12) — `_sv_key_authorized` OOB memeq**: `src/verify.cyr`
+  now bounds-checks `strlen(path) >= plen2` before calling
+  `memeq(path, prefix, plen2)`. Previously, a path shorter than the
+  pin prefix could read past its allocation. Bounded by the next
+  heap object but still undefined behavior.
+
+### Documentation
+
+- **`SECURITY.md` Cryptographic Implementations**: replaced the stale
+  Rust crate list (`ed25519-dalek`, `sha2`, `subtle`, `rand`) with
+  the current self-hosted implementations per file, referencing the
+  standards (RFC 8032, FIPS 180-4, RFC 2104). Rust `rust-old/` noted
+  as reference-only.
+- **`SECURITY.md` Supported Versions**: 0.2.x → 2.0.x / 2.1.x.
+- **`CLAUDE.md` Status**: "Porting from Rust — TDD-first" is no
+  longer accurate post-2.0 release. Updated to
+  "Released (2.x), security hardening active" and retitled the TDD
+  section to match (porting-specific language removed).
+
+### Fixed
+
+- **`src/verify.cyr` cache stubs marked**: `sv_set_cache_enabled` and
+  `sv_clear_cache` write to SigilVerifier fields at +48 and +64 but
+  no read path consults them. Identified during dead-code audit.
+  Removal is a breaking change — documented as a stub and deferred
+  to 2.2.0. No behavior change in 2.1.2.
+- **`src/sha512.cyr` inner-loop line length**: the 80-round SHA-512
+  inner loop's `t1` update was a single ~200-char line. Split into
+  two additions against the same global (safe — no local-variable
+  involvement, so the Cyrius local-clobber constraint does not
+  apply). No measurable performance change.
+
+### Chore
+
+- **`cyrius fmt`** applied to `src/audit.cyr`, `src/trust.cyr`,
+  `src/verify.cyr`. Re-indent of existing blocks; no behavioral
+  diffs.
+- **`cyrius lint`** clean across all `src/*.cyr`. Two residual
+  warnings in `tests/tcyr/sha512.tcyr` (128-char NIST test-vector
+  strings that can't be meaningfully wrapped) are accepted as
+  advisory.
+- **Clean build verified**: `rm -rf build && cyrius build` passes
+  from scratch.
+
+### Test coverage
+
+- **245 assertions** across 10 `.tcyr` files (unchanged from 2.1.1;
+  L11/L12 covered by existing buffer/length regression tests).
+- CI `Security Scan` grep: clean.
+- Fuzz harnesses: exit 0.
+
+### Remaining / deferred to 2.2.0
+- SigilVerifier cache fields removal (breaking) or wire-up.
+- CI security-scan regex is coarse (matches "private key" as a
+  comment phrase); tighten to require an assignment + hex literal.
+
 ## [2.1.1] — 2026-04-13
 
 ### Security

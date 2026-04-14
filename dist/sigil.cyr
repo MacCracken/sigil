@@ -1,5 +1,5 @@
 # sigil.cyr — system-wide trust verification for AGNOS
-# Bundled distribution of sigil v2.1.1
+# Bundled distribution of sigil v2.1.2
 # Source: https://github.com/MacCracken/sigil
 # License: GPL-3.0-only
 #
@@ -1224,7 +1224,8 @@ fn sha512_transform(ctx) {
     # 80 rounds
     _s5_i = 0;
     while (_s5_i < 80) {
-        _s5_t1 = _s5_hv + sha512_bsig1(_s5_e) + sha512_ch(_s5_e, _s5_f, _s5_g) + load64(_sha512_K + _s5_i * 8) + load64(_sha512_W + _s5_i * 8);
+        _s5_t1 = _s5_hv + sha512_bsig1(_s5_e) + sha512_ch(_s5_e, _s5_f, _s5_g);
+        _s5_t1 = _s5_t1 + load64(_sha512_K + _s5_i * 8) + load64(_sha512_W + _s5_i * 8);
         _s5_t2 = sha512_bsig0(_s5_a) + sha512_maj(_s5_a, _s5_b, _s5_c);
 
         _s5_hv = _s5_g;
@@ -2645,48 +2646,48 @@ fn keyring_save(kr) {
         # Validate key_id — reject path traversal or oversized names
         if (_is_safe_key_id(kid) == 0) { i = i + 1; }
         else {
-        var dlen = strlen(keys_dir);
-        var kidlen = strlen(kid);
-        # dlen + "/" + kidlen + ".json" + NUL
-        var need = dlen + 1 + kidlen + 5 + 1;
-        if (need > 256) { i = i + 1; }
-        else {
-        # Write JSON file: keys_dir/key_id.json
-        var path = alloc(256);
-        var pos = 0;
-        memcpy(path, keys_dir, dlen);
-        pos = pos + dlen;
-        store8(path + pos, 47);  # /
-        pos = pos + 1;
-        memcpy(path + pos, kid, kidlen);
-        pos = pos + kidlen;
-        memcpy(path + pos, ".json", 5);
-        pos = pos + 5;
-        store8(path + pos, 0);
+            var dlen = strlen(keys_dir);
+            var kidlen = strlen(kid);
+            # dlen + "/" + kidlen + ".json" + NUL
+            var need = dlen + 1 + kidlen + 5 + 1;
+            if (need > 256) { i = i + 1; }
+            else {
+                # Write JSON file: keys_dir/key_id.json
+                var path = alloc(256);
+                var pos = 0;
+                memcpy(path, keys_dir, dlen);
+                pos = pos + dlen;
+                store8(path + pos, 47);  # /
+                pos = pos + 1;
+                memcpy(path + pos, kid, kidlen);
+                pos = pos + kidlen;
+                memcpy(path + pos, ".json", 5);
+                pos = pos + 5;
+                store8(path + pos, 0);
 
-        var fd = file_open(path, 577, 420);  # O_WRONLY|O_CREAT|O_TRUNC, 0644
-        if (fd >= 0) {
-            file_write(fd, "[", 1);
-            var j = 0;
-            while (j < vlen) {
-                var kv = vec_get(versions, j);
-                if (j > 0) { file_write(fd, ",", 1); }
-                file_write(fd, "{\"key_id\":\"", 11);
-                json_write_escaped(fd, kv_key_id(kv), strlen(kv_key_id(kv)));
-                file_write(fd, "\",\"public_key_hex\":\"", 20);
-                json_write_escaped(fd, kv_public_key_hex(kv), strlen(kv_public_key_hex(kv)));
-                file_write(fd, "\",\"role\":\"", 10);
-                var rn = key_role_name(kv_role(kv));
-                json_write_escaped(fd, rn, strlen(rn));
-                file_write(fd, "\"}", 2);
-                j = j + 1;
+                var fd = file_open(path, 577, 420);  # O_WRONLY|O_CREAT|O_TRUNC, 0644
+                if (fd >= 0) {
+                    file_write(fd, "[", 1);
+                    var j = 0;
+                    while (j < vlen) {
+                        var kv = vec_get(versions, j);
+                        if (j > 0) { file_write(fd, ",", 1); }
+                        file_write(fd, "{\"key_id\":\"", 11);
+                            json_write_escaped(fd, kv_key_id(kv), strlen(kv_key_id(kv)));
+                            file_write(fd, "\",\"public_key_hex\":\"", 20);
+                            json_write_escaped(fd, kv_public_key_hex(kv), strlen(kv_public_key_hex(kv)));
+                            file_write(fd, "\",\"role\":\"", 10);
+                            var rn = key_role_name(kv_role(kv));
+                            json_write_escaped(fd, rn, strlen(rn));
+                            file_write(fd, "\"}", 2);
+                        j = j + 1;
+                    }
+                    file_write(fd, "]", 1);
+                    file_close(fd);
+                    count = count + vlen;
+                }
+                i = i + 1;
             }
-            file_write(fd, "]", 1);
-            file_close(fd);
-            count = count + vlen;
-        }
-        i = i + 1;
-        }
         }
     }
     return count;
@@ -3167,8 +3168,9 @@ fn iv_import_baseline(v, snap) {
 # Report summary string
 fn ireport_summary(r) {
     # Returns: "Integrity: N/M verified, X mismatches, Y errors"
-    # Build string manually
-    var buf = alloc(128);
+    # Worst case: 4 × 19-digit i64 + fixed text ≈ 120 bytes.
+    # Size 192 gives defense-in-depth headroom for any future text changes.
+    var buf = alloc(192);
     var pos = 0;
     memcpy(buf, "Integrity: ", 11);
     pos = 11;
@@ -3552,30 +3554,30 @@ fn alog_append_to_file(log, path) {
         var line = alloc(512);
         var pos = 0;
         pos = pos + _alog_write_str(line + pos, "{\"type\":\"");
-        pos = pos + _alog_write_str(line + pos, audit_event_name(ae_type(e)));
-        pos = pos + _alog_write_str(line + pos, "\",\"timestamp\":");
-        pos = pos + _alog_write_int(line + pos, ae_timestamp(e));
-        if (ae_path(e) != 0) {
-            pos = pos + _alog_write_str(line + pos, ",\"path\":\"");
-            pos = pos + _alog_write_str(line + pos, ae_path(e));
-            pos = pos + _alog_write_str(line + pos, "\"");
-        }
-        if (ae_key_id(e) != 0) {
-            pos = pos + _alog_write_str(line + pos, ",\"key_id\":\"");
-            pos = pos + _alog_write_str(line + pos, ae_key_id(e));
-            pos = pos + _alog_write_str(line + pos, "\"");
-        }
-        if (ae_content_hash(e) != 0) {
-            pos = pos + _alog_write_str(line + pos, ",\"content_hash\":\"");
-            pos = pos + _alog_write_str(line + pos, ae_content_hash(e));
-            pos = pos + _alog_write_str(line + pos, "\"");
-        }
-        if (ae_passed(e) != (0 - 1)) {
-            pos = pos + _alog_write_str(line + pos, ",\"passed\":");
-            if (ae_passed(e) == 1) { pos = pos + _alog_write_str(line + pos, "true"); }
-            else { pos = pos + _alog_write_str(line + pos, "false"); }
-        }
-        pos = pos + _alog_write_str(line + pos, "}\n");
+            pos = pos + _alog_write_str(line + pos, audit_event_name(ae_type(e)));
+            pos = pos + _alog_write_str(line + pos, "\",\"timestamp\":");
+            pos = pos + _alog_write_int(line + pos, ae_timestamp(e));
+            if (ae_path(e) != 0) {
+                pos = pos + _alog_write_str(line + pos, ",\"path\":\"");
+                pos = pos + _alog_write_str(line + pos, ae_path(e));
+                pos = pos + _alog_write_str(line + pos, "\"");
+            }
+            if (ae_key_id(e) != 0) {
+                pos = pos + _alog_write_str(line + pos, ",\"key_id\":\"");
+                pos = pos + _alog_write_str(line + pos, ae_key_id(e));
+                pos = pos + _alog_write_str(line + pos, "\"");
+            }
+            if (ae_content_hash(e) != 0) {
+                pos = pos + _alog_write_str(line + pos, ",\"content_hash\":\"");
+                pos = pos + _alog_write_str(line + pos, ae_content_hash(e));
+                pos = pos + _alog_write_str(line + pos, "\"");
+            }
+            if (ae_passed(e) != (0 - 1)) {
+                pos = pos + _alog_write_str(line + pos, ",\"passed\":");
+                if (ae_passed(e) == 1) { pos = pos + _alog_write_str(line + pos, "true"); }
+                else { pos = pos + _alog_write_str(line + pos, "false"); }
+            }
+            pos = pos + _alog_write_str(line + pos, "}\n");
         store8(line + pos, 0);
         file_write(fd, line, pos);
         i = i + 1;
@@ -3868,6 +3870,9 @@ fn sv_trust_store(sv) { return load64(sv + 32); }
 fn sv_key_pins(sv) { return load64(sv + 40); }
 fn sv_audit_log(sv) { return load64(sv + 56); }
 
+# Cache is currently a stub: these setters write to fields at +48 and
+# +64 but no read path consults them. Kept for API stability through
+# the 2.x line; candidate for removal or wiring up in 2.2.0.
 fn sv_set_cache_enabled(sv, enabled) {
     store64(sv + 48, enabled);
     return sv;
@@ -3908,16 +3913,22 @@ fn _sv_key_authorized(sv, path, signer_key_id) {
     var pins = load64(sv + 40);
     var plen = vec_len(pins);
     var has_matching_pin = 0;
+    var path_len = 0;
+    if (path != 0) { path_len = strlen(path); }
     var i = 0;
     while (i < plen) {
         var pin = vec_get(pins, i);
         var prefix = kpin_prefix(pin);
         var plen2 = strlen(prefix);
-        if (memeq(path, prefix, plen2) == 1) {
-            has_matching_pin = 1;
-            if (signer_key_id != 0) {
-                if (streq(kpin_key_id(pin), signer_key_id) == 1) {
-                    return 1;
+        # Guard against OOB read: memeq reads plen2 bytes from path,
+        # so path must be at least that long.
+        if (path_len >= plen2) {
+            if (memeq(path, prefix, plen2) == 1) {
+                has_matching_pin = 1;
+                if (signer_key_id != 0) {
+                    if (streq(kpin_key_id(pin), signer_key_id) == 1) {
+                        return 1;
+                    }
                 }
             }
         }
@@ -3981,15 +3992,15 @@ fn sv_verify_artifact(sv, path, artifact_type) {
     var chash = hash_file(path);
     if (chash == 0) {
         return verification_result_new(
-            trusted_artifact_new(path, artifact_type, ""),
-            0, clock_epoch_secs()
+        trusted_artifact_new(path, artifact_type, ""),
+        0, clock_epoch_secs()
         );
     }
 
     var trust_level = TRUST_UNVERIFIED;
     var vr = verification_result_new(
-        trusted_artifact_new(path, artifact_type, chash),
-        1, clock_epoch_secs()
+    trusted_artifact_new(path, artifact_type, chash),
+    1, clock_epoch_secs()
     );
 
     # Check: file readable
@@ -4352,20 +4363,20 @@ fn sv_save_trust_store(sv, path) {
         var art = map_get(store, chash);
         if (i > 0) { file_write(fd, ",", 1); }
         file_write(fd, "{\"hash\":\"", 9);
-        json_write_escaped(fd, chash, strlen(chash));
-        file_write(fd, "\",\"path\":\"", 10);
-        var ap = artifact_path(art);
-        json_write_escaped(fd, ap, strlen(ap));
-        file_write(fd, "\",\"type\":", 9);
-        # fmt_int prints to stdout — use fmt_int_buf for file output.
-        memset(&nbuf, 0, 24);
-        var nlen = fmt_int_buf(artifact_type(art), &nbuf);
-        file_write(fd, &nbuf, nlen);
-        file_write(fd, ",\"trust\":", 9);
-        memset(&nbuf, 0, 24);
-        nlen = fmt_int_buf(artifact_trust_level(art), &nbuf);
-        file_write(fd, &nbuf, nlen);
-        file_write(fd, "}", 1);
+            json_write_escaped(fd, chash, strlen(chash));
+            file_write(fd, "\",\"path\":\"", 10);
+            var ap = artifact_path(art);
+            json_write_escaped(fd, ap, strlen(ap));
+            file_write(fd, "\",\"type\":", 9);
+            # fmt_int prints to stdout — use fmt_int_buf for file output.
+            memset(&nbuf, 0, 24);
+            var nlen = fmt_int_buf(artifact_type(art), &nbuf);
+            file_write(fd, &nbuf, nlen);
+            file_write(fd, ",\"trust\":", 9);
+            memset(&nbuf, 0, 24);
+            nlen = fmt_int_buf(artifact_trust_level(art), &nbuf);
+            file_write(fd, &nbuf, nlen);
+            file_write(fd, "}", 1);
         i = i + 1;
     }
     file_write(fd, "]", 1);
