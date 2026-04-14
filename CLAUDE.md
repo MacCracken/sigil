@@ -191,5 +191,5 @@ Follow [Keep a Changelog](https://keepachangelog.com/). Performance claims MUST 
 - **Ported from**: Rust v1.0.0 (149 tests, 12 benchmarks)
 - **Rust source**: preserved in `rust-old/`
 - **Rust benchmarks**: preserved in `benchmarks-rust-v-cyrius.md`
-- **Version**: 0.1.0 (Cyrius port)
-- **Phase**: Porting — TDD module-by-module
+- **Version**: 2.1.1 (Cyrius, see `VERSION` for current)
+- **Phase**: Hardening — security audit workflow active
