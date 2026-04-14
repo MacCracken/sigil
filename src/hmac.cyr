@@ -54,6 +54,13 @@ fn hmac_sha256(key, key_len, msg, msg_len, out) {
     sha256_finalize(outer_ctx, out);
     fl_free(outer_ctx);
 
+    # Zeroize key-derived material on stack before return.
+    # kprime holds K', ipad/opad hold K' XOR 0x36/0x5c. inner_hash
+    # is a plain digest (public) but zero it too for consistency.
+    memset(&kprime, 0, 64);
+    memset(&ipad, 0, 64);
+    memset(&opad, 0, 64);
+    memset(&inner_hash, 0, 32);
     return 0;
 }
 

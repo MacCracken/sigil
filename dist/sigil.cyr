@@ -1,5 +1,5 @@
 # sigil.cyr — system-wide trust verification for AGNOS
-# Bundled distribution of sigil v2.1.0
+# Bundled distribution of sigil v2.1.1
 # Source: https://github.com/MacCracken/sigil
 # License: GPL-3.0-only
 #
@@ -977,6 +977,13 @@ fn hmac_sha256(key, key_len, msg, msg_len, out) {
     sha256_finalize(outer_ctx, out);
     fl_free(outer_ctx);
 
+    # Zeroize key-derived material on stack before return.
+    # kprime holds K', ipad/opad hold K' XOR 0x36/0x5c. inner_hash
+    # is a plain digest (public) but zero it too for consistency.
+    memset(&kprime, 0, 64);
+    memset(&ipad, 0, 64);
+    memset(&opad, 0, 64);
+    memset(&inner_hash, 0, 32);
     return 0;
 }
 
@@ -2124,6 +2131,11 @@ fn ed25519_keypair(seed, sk_out, pk_out) {
 
     memcpy(sk_out, seed, 32);
     memcpy(sk_out + 32, pk_out, 32);
+
+    # Zeroize secret scalar buffers. _kp_scalar holds the clamped
+    # private scalar a; _kp_hash[0..32] is a copy of it.
+    memset(_kp_hash, 0, 64);
+    memset(_kp_scalar, 0, 32);
     return 0;
 }
 
@@ -2219,7 +2231,14 @@ fn ed25519_sign(sk, msg, msg_len, sig_out) {
         li = li + 1;
     }
 
+    # Zeroize all secret/derived material. _sign_az holds H(sk)[0..64]
+    # (the clamped scalar a and nonce seed). _sign_r_scalar is the
+    # per-signature nonce; _sign_a_scalar is the private scalar a
+    # re-loaded as u256. Leaking any one reveals the private key.
     memset(_sign_az, 0, 64);
+    memset(_sign_nhash, 0, 64);
+    memset(_sign_r_scalar, 0, 32);
+    memset(_sign_a_scalar, 0, 32);
     return 0;
 }
 
@@ -2653,11 +2672,12 @@ fn keyring_save(kr) {
                 var kv = vec_get(versions, j);
                 if (j > 0) { file_write(fd, ",", 1); }
                 file_write(fd, "{\"key_id\":\"", 11);
-                file_write(fd, kv_key_id(kv), strlen(kv_key_id(kv)));
+                json_write_escaped(fd, kv_key_id(kv), strlen(kv_key_id(kv)));
                 file_write(fd, "\",\"public_key_hex\":\"", 20);
-                file_write(fd, kv_public_key_hex(kv), strlen(kv_public_key_hex(kv)));
+                json_write_escaped(fd, kv_public_key_hex(kv), strlen(kv_public_key_hex(kv)));
                 file_write(fd, "\",\"role\":\"", 10);
-                file_write(fd, key_role_name(kv_role(kv)), strlen(key_role_name(kv_role(kv))));
+                var rn = key_role_name(kv_role(kv));
+                json_write_escaped(fd, rn, strlen(rn));
                 file_write(fd, "\"}", 2);
                 j = j + 1;
             }
@@ -2670,6 +2690,59 @@ fn keyring_save(kr) {
         }
     }
     return count;
+}
+
+# ================================================================
+# JSON string escaping
+# ================================================================
+# Write `s` (length `slen`) to `fd`, escaping the minimal RFC 8259 set:
+# `"`, `\`, and control bytes < 0x20. Non-ASCII bytes pass through
+# verbatim (sigil stores UTF-8 path/hex content). Used by persistence
+# paths to prevent JSON injection from tampered field values.
+fn json_write_escaped(fd, s, slen) {
+    if (s == 0) { return 0; }
+    var i = 0;
+    var chunk_start = 0;
+    while (i < slen) {
+        var c = load8(s + i) & 0xFF;
+        var needs_escape = 0;
+        if (c == 34) { needs_escape = 1; }       # "
+        elif (c == 92) { needs_escape = 1; }     # \
+        elif (c < 32) { needs_escape = 1; }      # control
+        if (needs_escape == 1) {
+            if (i > chunk_start) {
+                file_write(fd, s + chunk_start, i - chunk_start);
+            }
+            if (c == 34) { file_write(fd, "\\\"", 2); }
+            elif (c == 92) { file_write(fd, "\\\\", 2); }
+            elif (c == 8) { file_write(fd, "\\b", 2); }
+            elif (c == 9) { file_write(fd, "\\t", 2); }
+            elif (c == 10) { file_write(fd, "\\n", 2); }
+            elif (c == 12) { file_write(fd, "\\f", 2); }
+            elif (c == 13) { file_write(fd, "\\r", 2); }
+            else {
+                # \u00XX for other control bytes
+                var hex_buf[6];
+                store8(&hex_buf, 92);   # \
+                store8(&hex_buf + 1, 117); # u
+                store8(&hex_buf + 2, 48);  # 0
+                store8(&hex_buf + 3, 48);  # 0
+                var hi = (c >> 4) & 0xF;
+                var lo = c & 0xF;
+                if (hi < 10) { store8(&hex_buf + 4, 48 + hi); }
+                else { store8(&hex_buf + 4, 87 + hi); }
+                if (lo < 10) { store8(&hex_buf + 5, 48 + lo); }
+                else { store8(&hex_buf + 5, 87 + lo); }
+                file_write(fd, &hex_buf, 6);
+            }
+            chunk_start = i + 1;
+        }
+        i = i + 1;
+    }
+    if (slen > chunk_start) {
+        file_write(fd, s + chunk_start, slen - chunk_start);
+    }
+    return 0;
 }
 
 # ================================================================
@@ -4273,20 +4346,25 @@ fn sv_save_trust_store(sv, path) {
     if (fd < 0) { return ERR_IO; }
     file_write(fd, "[", 1);
     var i = 0;
+    var nbuf[24];
     while (i < klen) {
         var chash = vec_get(keys, i);
         var art = map_get(store, chash);
         if (i > 0) { file_write(fd, ",", 1); }
         file_write(fd, "{\"hash\":\"", 9);
-        file_write(fd, chash, strlen(chash));
+        json_write_escaped(fd, chash, strlen(chash));
         file_write(fd, "\",\"path\":\"", 10);
-        file_write(fd, artifact_path(art), strlen(artifact_path(art)));
+        var ap = artifact_path(art);
+        json_write_escaped(fd, ap, strlen(ap));
         file_write(fd, "\",\"type\":", 9);
-        var ts = fmt_int(artifact_type(art));
-        file_write(fd, ts, strlen(ts));
+        # fmt_int prints to stdout — use fmt_int_buf for file output.
+        memset(&nbuf, 0, 24);
+        var nlen = fmt_int_buf(artifact_type(art), &nbuf);
+        file_write(fd, &nbuf, nlen);
         file_write(fd, ",\"trust\":", 9);
-        ts = fmt_int(artifact_trust_level(art));
-        file_write(fd, ts, strlen(ts));
+        memset(&nbuf, 0, 24);
+        nlen = fmt_int_buf(artifact_trust_level(art), &nbuf);
+        file_write(fd, &nbuf, nlen);
         file_write(fd, "}", 1);
         i = i + 1;
     }

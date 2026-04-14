@@ -518,6 +518,11 @@ fn ed25519_keypair(seed, sk_out, pk_out) {
 
     memcpy(sk_out, seed, 32);
     memcpy(sk_out + 32, pk_out, 32);
+
+    # Zeroize secret scalar buffers. _kp_scalar holds the clamped
+    # private scalar a; _kp_hash[0..32] is a copy of it.
+    memset(_kp_hash, 0, 64);
+    memset(_kp_scalar, 0, 32);
     return 0;
 }
 
@@ -613,7 +618,14 @@ fn ed25519_sign(sk, msg, msg_len, sig_out) {
         li = li + 1;
     }
 
+    # Zeroize all secret/derived material. _sign_az holds H(sk)[0..64]
+    # (the clamped scalar a and nonce seed). _sign_r_scalar is the
+    # per-signature nonce; _sign_a_scalar is the private scalar a
+    # re-loaded as u256. Leaking any one reveals the private key.
     memset(_sign_az, 0, 64);
+    memset(_sign_nhash, 0, 64);
+    memset(_sign_r_scalar, 0, 32);
+    memset(_sign_a_scalar, 0, 32);
     return 0;
 }
 

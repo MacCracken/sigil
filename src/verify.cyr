@@ -566,20 +566,25 @@ fn sv_save_trust_store(sv, path) {
     if (fd < 0) { return ERR_IO; }
     file_write(fd, "[", 1);
     var i = 0;
+    var nbuf[24];
     while (i < klen) {
         var chash = vec_get(keys, i);
         var art = map_get(store, chash);
         if (i > 0) { file_write(fd, ",", 1); }
         file_write(fd, "{\"hash\":\"", 9);
-        file_write(fd, chash, strlen(chash));
+        json_write_escaped(fd, chash, strlen(chash));
         file_write(fd, "\",\"path\":\"", 10);
-        file_write(fd, artifact_path(art), strlen(artifact_path(art)));
+        var ap = artifact_path(art);
+        json_write_escaped(fd, ap, strlen(ap));
         file_write(fd, "\",\"type\":", 9);
-        var ts = fmt_int(artifact_type(art));
-        file_write(fd, ts, strlen(ts));
+        # fmt_int prints to stdout — use fmt_int_buf for file output.
+        memset(&nbuf, 0, 24);
+        var nlen = fmt_int_buf(artifact_type(art), &nbuf);
+        file_write(fd, &nbuf, nlen);
         file_write(fd, ",\"trust\":", 9);
-        ts = fmt_int(artifact_trust_level(art));
-        file_write(fd, ts, strlen(ts));
+        memset(&nbuf, 0, 24);
+        nlen = fmt_int_buf(artifact_trust_level(art), &nbuf);
+        file_write(fd, &nbuf, nlen);
         file_write(fd, "}", 1);
         i = i + 1;
     }

@@ -333,11 +333,12 @@ fn keyring_save(kr) {
                 var kv = vec_get(versions, j);
                 if (j > 0) { file_write(fd, ",", 1); }
                 file_write(fd, "{\"key_id\":\"", 11);
-                file_write(fd, kv_key_id(kv), strlen(kv_key_id(kv)));
+                json_write_escaped(fd, kv_key_id(kv), strlen(kv_key_id(kv)));
                 file_write(fd, "\",\"public_key_hex\":\"", 20);
-                file_write(fd, kv_public_key_hex(kv), strlen(kv_public_key_hex(kv)));
+                json_write_escaped(fd, kv_public_key_hex(kv), strlen(kv_public_key_hex(kv)));
                 file_write(fd, "\",\"role\":\"", 10);
-                file_write(fd, key_role_name(kv_role(kv)), strlen(key_role_name(kv_role(kv))));
+                var rn = key_role_name(kv_role(kv));
+                json_write_escaped(fd, rn, strlen(rn));
                 file_write(fd, "\"}", 2);
                 j = j + 1;
             }
@@ -350,6 +351,59 @@ fn keyring_save(kr) {
         }
     }
     return count;
+}
+
+# ================================================================
+# JSON string escaping
+# ================================================================
+# Write `s` (length `slen`) to `fd`, escaping the minimal RFC 8259 set:
+# `"`, `\`, and control bytes < 0x20. Non-ASCII bytes pass through
+# verbatim (sigil stores UTF-8 path/hex content). Used by persistence
+# paths to prevent JSON injection from tampered field values.
+fn json_write_escaped(fd, s, slen) {
+    if (s == 0) { return 0; }
+    var i = 0;
+    var chunk_start = 0;
+    while (i < slen) {
+        var c = load8(s + i) & 0xFF;
+        var needs_escape = 0;
+        if (c == 34) { needs_escape = 1; }       # "
+        elif (c == 92) { needs_escape = 1; }     # \
+        elif (c < 32) { needs_escape = 1; }      # control
+        if (needs_escape == 1) {
+            if (i > chunk_start) {
+                file_write(fd, s + chunk_start, i - chunk_start);
+            }
+            if (c == 34) { file_write(fd, "\\\"", 2); }
+            elif (c == 92) { file_write(fd, "\\\\", 2); }
+            elif (c == 8) { file_write(fd, "\\b", 2); }
+            elif (c == 9) { file_write(fd, "\\t", 2); }
+            elif (c == 10) { file_write(fd, "\\n", 2); }
+            elif (c == 12) { file_write(fd, "\\f", 2); }
+            elif (c == 13) { file_write(fd, "\\r", 2); }
+            else {
+                # \u00XX for other control bytes
+                var hex_buf[6];
+                store8(&hex_buf, 92);   # \
+                store8(&hex_buf + 1, 117); # u
+                store8(&hex_buf + 2, 48);  # 0
+                store8(&hex_buf + 3, 48);  # 0
+                var hi = (c >> 4) & 0xF;
+                var lo = c & 0xF;
+                if (hi < 10) { store8(&hex_buf + 4, 48 + hi); }
+                else { store8(&hex_buf + 4, 87 + hi); }
+                if (lo < 10) { store8(&hex_buf + 5, 48 + lo); }
+                else { store8(&hex_buf + 5, 87 + lo); }
+                file_write(fd, &hex_buf, 6);
+            }
+            chunk_start = i + 1;
+        }
+        i = i + 1;
+    }
+    if (slen > chunk_start) {
+        file_write(fd, s + chunk_start, slen - chunk_start);
+    }
+    return 0;
 }
 
 # ================================================================

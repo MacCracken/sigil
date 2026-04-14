@@ -28,6 +28,10 @@ include "lib/bigint.cyr"
 include "src/bigint_ext.cyr"
 include "src/ed25519.cyr"
 include "src/trust.cyr"
+include "src/integrity.cyr"
+include "src/policy.cyr"
+include "src/audit.cyr"
+include "src/verify.cyr"
 
 fn main() {
     alloc_init();
@@ -112,6 +116,92 @@ fn main() {
     while (i < 64) { store8(max_id + i, 97); i = i + 1; }
     store8(max_id + 64, 0);
     assert_eq(_is_safe_key_id(max_id), 1, "max-length accepted");
+
+    # ============================================================
+    # M6 — HMAC stack buffers zeroed on return (2.1.1)
+    # ============================================================
+    # We can't observe the caller's stack after return, but we can
+    # verify repeated calls with the same key produce the same MAC
+    # (i.e. internal reuse of the now-zeroed buffers still works).
+    test_group("HMAC zeroization preserves correctness");
+    var hmac_key = "YELLOW SUBMARINE";
+    var hmac_msg = "hello hmac world";
+    var mac1[32];
+    var mac2[32];
+    hmac_sha256(hmac_key, 16, hmac_msg, 16, &mac1);
+    hmac_sha256(hmac_key, 16, hmac_msg, 16, &mac2);
+    assert_eq(ct_eq(&mac1, 32, &mac2, 32), 1, "repeated HMAC stable");
+
+    # ============================================================
+    # M7 — Ed25519 secret scalars zeroed after sign (2.1.1)
+    # ============================================================
+    # Similar to M6: we check that repeated signing of the same
+    # message with the same key produces the same signature, i.e.
+    # zeroization of globals does not corrupt determinism.
+    test_group("Ed25519 zeroization preserves determinism");
+    var sig1[64];
+    var sig2[64];
+    ed25519_sign(&sk, "det test", 8, &sig1);
+    ed25519_sign(&sk, "det test", 8, &sig2);
+    assert_eq(ct_eq(&sig1, 64, &sig2, 64), 1, "Ed25519 deterministic across zeroed state");
+    assert_eq(ed25519_verify(&pk, "det test", 8, &sig1), 1, "re-signed sig still verifies");
+
+    # ============================================================
+    # M9 — JSON escaping of user-controlled fields (2.1.1)
+    # ============================================================
+    # Write each problematic byte through json_write_escaped into a
+    # temp file and check the serialized form is the expected escape.
+    test_group("JSON escape dangerous bytes");
+    var tmp_path = "/tmp/sigil_json_escape_test";
+    var jfd = file_open(tmp_path, 577, 420);
+    # Input: quote, backslash, newline, tab, control (0x01), plain
+    var input[6];
+    store8(&input, 34);    # "
+    store8(&input + 1, 92); # \
+    store8(&input + 2, 10); # LF
+    store8(&input + 3, 9);  # TAB
+    store8(&input + 4, 1);  # SOH (control)
+    store8(&input + 5, 65); # A (plain)
+    json_write_escaped(jfd, &input, 6);
+    file_close(jfd);
+
+    # Read back and check escapes
+    var rfd = file_open(tmp_path, 0, 0);
+    var rbuf[64];
+    memset(&rbuf, 0, 64);
+    var rn = file_read(rfd, &rbuf, 63);
+    file_close(rfd);
+    syscall(87, tmp_path);
+    # Expected: \"\\\n\t\u0001A -> bytes:
+    #   \ " (2) + \ \ (2) + \ n (2) + \ t (2) + \ u 0 0 0 1 (6) + A (1) = 15
+    assert_eq(rn, 15, "escaped output length");
+    assert_eq(load8(&rbuf) & 0xFF, 92, "byte 0: backslash");
+    assert_eq(load8(&rbuf + 1) & 0xFF, 34, "byte 1: quote");
+    assert_eq(load8(&rbuf + 2) & 0xFF, 92, "byte 2: backslash");
+    assert_eq(load8(&rbuf + 3) & 0xFF, 92, "byte 3: backslash");
+    assert_eq(load8(&rbuf + 4) & 0xFF, 92, "byte 4: backslash");
+    assert_eq(load8(&rbuf + 5) & 0xFF, 110, "byte 5: n");
+    assert_eq(load8(&rbuf + 6) & 0xFF, 92, "byte 6: backslash");
+    assert_eq(load8(&rbuf + 7) & 0xFF, 116, "byte 7: t");
+    # \u0001 sequence at bytes 8-13
+    assert_eq(load8(&rbuf + 8) & 0xFF, 92, "byte 8: backslash");
+    assert_eq(load8(&rbuf + 9) & 0xFF, 117, "byte 9: u");
+    assert_eq(load8(&rbuf + 13) & 0xFF, 49, "byte 13: 1 (low nibble)");
+    assert_eq(load8(&rbuf + 14) & 0xFF, 65, "byte 14: A passthrough");
+
+    test_group("JSON escape no-op for safe content");
+    var spath = "/tmp/sigil_json_safe_test";
+    var sfd = file_open(spath, 577, 420);
+    json_write_escaped(sfd, "safe_key-01", 11);
+    file_close(sfd);
+    var srfd = file_open(spath, 0, 0);
+    var sbuf[16];
+    memset(&sbuf, 0, 16);
+    var srn = file_read(srfd, &sbuf, 15);
+    file_close(srfd);
+    syscall(87, spath);
+    assert_eq(srn, 11, "no-op length");
+    assert_eq(ct_eq(&sbuf, 11, "safe_key-01", 11), 1, "safe content passthrough");
 
     # ============================================================
     # Summary

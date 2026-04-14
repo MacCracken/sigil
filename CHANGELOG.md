@@ -5,6 +5,62 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.1] — 2026-04-13
+
+### Security
+
+Second security hardening pass — MEDIUM findings from
+`docs/audit/2026-04-13-audit.md`. Defense-in-depth against memory
+disclosure and log injection.
+
+- **MEDIUM (M6) — HMAC stack buffers zeroed on return**: `hmac_sha256`
+  (`src/hmac.cyr`) now `memset`s `kprime`, `ipad`, `opad`, and
+  `inner_hash` to zero before returning. Previously the derived-key
+  material `K'`, `K' ⊕ 0x36`, `K' ⊕ 0x5c` could be recovered from
+  stack frames via later process memory reads.
+- **MEDIUM (M7) — Ed25519 secret scalars zeroed on return**:
+  `ed25519_keypair` and `ed25519_sign` (`src/ed25519.cyr`) now zero
+  `_kp_hash`, `_kp_scalar`, `_sign_az`, `_sign_nhash`, `_sign_r_scalar`,
+  and `_sign_a_scalar` after use. These globals held the private
+  scalar `a`, the per-signature nonce `r`, and the full `H(sk)`
+  expansion — leaking any one recovers the private key.
+- **MEDIUM (M9) — JSON injection in persistence paths**: new
+  `json_write_escaped` helper in `src/trust.cyr` escapes `"`, `\`,
+  and control bytes (`\b`, `\t`, `\n`, `\f`, `\r`, `\u00XX`) when
+  writing user-controlled strings. `keyring_save` and
+  `sv_save_trust_store` route all `key_id`, `public_key_hex`,
+  `content_hash`, and `artifact_path` writes through it. Previously,
+  a `"` or newline in any field corrupted the JSON and could forge
+  adjacent records when re-parsed.
+
+### Fixed
+
+- **`sv_save_trust_store` wrote literal `"0"` for numeric fields**:
+  discovered during M9 review — the function called `fmt_int(n)`
+  (which prints to stdout and returns 0, not a C-string) and then
+  wrote the returned `0` pointer into the JSON. Type and trust level
+  fields were therefore always truncated/incorrect, and numbers leaked
+  to process stdout at save time. Switched to `fmt_int_buf`. Same
+  class of bug that caused the 2.1.0 fuzz harness SIGSEGV (H5).
+
+### Added
+
+- **`json_write_escaped(fd, s, slen)`**: public helper in
+  `src/trust.cyr` for any persistence path that serializes
+  user-controlled strings.
+- **`tests/tcyr/security.tcyr`** extended: 18 new assertions covering
+  HMAC/Ed25519 zeroization determinism and JSON escape output bytes
+  for each problematic input.
+
+### Test coverage
+
+- **245 assertions** across 10 `.tcyr` files (was 227 in 2.1.0).
+- Benchmarks within 2% of 2.1.0 (zeroization adds ~200ns per call,
+  below `ed25519_sign` resolution).
+
+### Remaining
+- LOW findings (L11, L12) deferred to 2.1.2 closeout pass.
+
 ## [2.1.0] — 2026-04-13
 
 ### Security
