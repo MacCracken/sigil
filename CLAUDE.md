@@ -53,20 +53,71 @@ src/
 
 ## Development Process
 
-### Work Loop
+### P(-1): Scaffold Hardening (before any new features)
+
+0. Read roadmap, CHANGELOG, and open issues — know what was intended
+1. Cleanliness check: `cyrius build`, `cyrlint`, all tests pass
+2. Benchmark baseline: `cyrius bench`
+3. Internal deep review — gaps, optimizations, correctness, docs
+4. External research — vidya entry, domain completeness, crypto best practices (RFC 8032, FIPS 180-4, RFC 2104)
+5. **Security audit** — review all crypto paths, key handling, constant-time comparisons, buffer sizes, pointer validation. Run against known CVE patterns for Ed25519/SHA-256/HMAC. File findings in `docs/audit/YYYY-MM-DD-audit.md`
+6. Additional tests/benchmarks from findings
+7. Post-review benchmarks — prove the wins (compare against `benchmarks-rust-v-cyrius.md`)
+8. Documentation audit
+9. Repeat if heavy
+
+### Work Loop (continuous)
 
 1. **P(-1)** — Research: vidya entry before implementation
 2. Work phase — implement in Cyrius, test, benchmark
 3. `cyrius build` — verify compilation
 4. `cyrius test` — run .tcyr test files
 5. `cyrius bench` — run .bcyr benchmark files
-6. Documentation — CHANGELOG, roadmap
-7. Version check — VERSION and cyrius.toml in sync
+6. Internal review — performance, memory, correctness
+7. **Security check** — any new crypto code, key material handling, or input parsing reviewed for timing side-channels, buffer safety, and zeroization
+8. Documentation — update CHANGELOG, roadmap, docs
+9. Version check — VERSION and cyrius.toml in sync
+10. Return to step 1
+
+### Security Hardening (before release)
+
+Run a dedicated security audit pass before any version release. Sigil IS the trust boundary — this is non-negotiable:
+
+1. **Input validation** — every function that accepts external data (signatures, hashes, file content, keys) validates bounds, lengths, and formats before use
+2. **Buffer safety** — every `var buf[N]` and `alloc(N)` verified: N is in BYTES, max access offset < N, no adjacent-variable overflow
+3. **Constant-time audit** — every hash/signature/MAC comparison uses bitwise OR accumulation with no early exit; no branches on secret data
+4. **Key material zeroization** — every private key, HMAC key, and intermediate secret buffer overwritten with zeros before free
+5. **Syscall review** — every `syscall()` and `sys_*()` call reviewed: arguments validated, return values checked, error paths handled
+6. **Pointer validation** — no raw pointer dereference of untrusted input without bounds checking
+7. **No command injection** — no `sys_system()` or `exec_cmd()` with unsanitized input. Use `exec_vec()` with explicit argv instead
+8. **No path traversal** — file paths from external input validated against allowed directories. No `../` escape
+9. **Known CVE check** — review Ed25519, SHA-256, HMAC implementations against current CVE databases
+10. **File findings** — all issues documented in `docs/audit/YYYY-MM-DD-audit.md` with severity, file, line, and fix
+
+Severity levels:
+- **CRITICAL** — exploitable immediately, remote or privilege escalation, key leakage, signature forgery
+- **HIGH** — exploitable with moderate effort, timing side-channel on secret data
+- **MEDIUM** — exploitable under specific conditions
+- **LOW** — defense-in-depth improvement
+
+### Closeout Pass (before every minor/major bump)
+
+Run a closeout pass before tagging x.Y.0 or x.0.0. Ship as the last patch of the current minor (e.g. 0.3.5 before 0.4.0):
+
+1. **Full test suite** — all .tcyr pass, zero failures
+2. **Benchmark baseline** — `cyrius bench`, save CSV; compare against `benchmarks-rust-v-cyrius.md`
+3. **Dead code audit** — check for unused functions, remove dead source code
+4. **Stale comment sweep** — grep for old version refs, outdated TODOs
+5. **Security re-scan** — grep for new `sys_system`, unchecked writes, non-constant-time compares, missing zeroization, buffer size mismatches
+6. **Downstream check** — all consumers (daimon, kavach, ark, aegis, phylax, mela, stiva, argonaut) still build and pass tests with the new version
+7. **CHANGELOG/roadmap sync** — all docs reflect current state, version numbers consistent
+8. **Version verify** — VERSION, cyrius.toml, CHANGELOG header all match
+9. **Full build from clean** — `rm -rf build && cyrius deps && cyrius build` passes clean
 
 ### Task Sizing
 
-- **Low/Medium**: Batch freely
-- **Large**: Small bites, verify each
+- **Low/Medium**: Batch freely — multiple items per work loop cycle
+- **Large**: Small bites only — break into sub-tasks, verify each before moving to the next
 - **If unsure**: Treat as large
 
 ### Porting Approach (TDD)
@@ -110,6 +161,9 @@ src/
 - Do not skip benchmarks before claiming performance improvements
 - Do not store private keys in plaintext
 - Do not branch on secret data in crypto paths
+- Do not use `sys_system()` with unsanitized input — command injection risk
+- Do not trust external data (signatures, hashes, file content, keys) without validation
+- Do not skip key zeroization — every secret buffer overwritten before free
 
 ## Documentation Structure
 
@@ -123,13 +177,14 @@ docs/ (required):
 
 docs/ (when earned):
   adr/ — architectural decision records
+  audit/ — security audit reports (YYYY-MM-DD-audit.md)
   guides/ — usage guides, integration patterns
   sources.md — source citations for algorithms (Ed25519, SHA-256, etc.)
 ```
 
 ## CHANGELOG Format
 
-Follow [Keep a Changelog](https://keepachangelog.com/). Performance claims MUST include benchmark numbers. Breaking changes get a **Breaking** section with migration guide.
+Follow [Keep a Changelog](https://keepachangelog.com/). Performance claims MUST include benchmark numbers. Breaking changes get a **Breaking** section with migration guide. Security fixes get a **Security** section with CVE references where applicable.
 
 ## Current Status
 
