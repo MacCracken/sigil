@@ -5,6 +5,47 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.4.2] — 2026-04-16
+
+### Test coverage
+
+Closes the two remaining 2.4.x items from `docs/development/roadmap.md`:
+RFC 8032 TEST 1024 and the fuzz-corpus expansion.
+
+- **RFC 8032 §7.1 TEST 1024** — 1023-byte message vector. Message
+  bytes live in `tests/data/rfc8032/test_1024.hex` (2046 hex chars,
+  no newline, extracted directly from the RFC text with byte-exact
+  `sed` range). Loaded at runtime via `file_read_all`, decoded with
+  `hex_decode`, then the test asserts the derived public key
+  (`278117fc…d426e`), the signature bytes
+  (`0aab4c90…a188a03`), and positive verify. Exercises the full
+  sign/verify path on a multi-block SHA-512 input (16 transform
+  blocks just for the message, plus framing).
+- **`fuzz_ed25519` corpus expanded** from 3 assertions to 11:
+  - **Multi-byte mutations** — 500 rounds of 5 simultaneous
+    random-byte flips across `(sig, msg, pk)`. Asserts zero false
+    accepts; a single false accept here would indicate a
+    catastrophic algebraic break.
+  - **Canonical-S reject path** (RFC 8032 §5.1.7 / §8.4) — three
+    crafted signatures with `S = L`, `S = L + 1`, and
+    `S = 2^256 − 1` replacing the `S` half of a valid signature.
+    All must be rejected to prevent signature malleability.
+  - **Point-decoding edge cases** — verify is called with an
+    all-zero `pk`, an all-ones `pk`, and a pk with only the
+    x-parity bit flipped. The first two must return 0 or 1 (no
+    crash) and the parity-flipped pk must fail verification.
+- Test-count deltas: `ed25519.tcyr` 15 → 19 assertions;
+  `fuzz_ed25519` 3 → 11 assertions.
+- 10/10 `.tcyr` files still pass; 3/3 fuzz harnesses OK under the
+  30 s CI budget.
+
+### Added
+
+- `tests/data/rfc8032/` — first bundled test-data directory. Future
+  large-input vectors (e.g. Ed25519ctx, SHAKE-based vectors if they
+  ever land) follow the same pattern: hex file under `tests/data/`,
+  loaded via `file_read_all` at test start.
+
 ## [2.4.1] — 2026-04-16
 
 ### Infrastructure

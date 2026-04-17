@@ -111,8 +111,100 @@ fn main() {
     # (e.g. flipping the high bit of pk that encodes the x-parity)
     # but most single-bit flips in sig/msg must fail the RFC 8032
     # algebraic check.
-    assert_eq(rejected + accepted, 2000, "all rounds returned 0 or 1");
-    assert_gt(rejected, 1900, "vast majority rejected (>95%)");
+    assert_eq(rejected + accepted, 2000, "all single-byte rounds returned 0 or 1");
+    assert_gt(rejected, 1900, "single-byte: >95% rejected");
+
+    # ============================================================
+    # Multi-byte mutations — 5 random bytes flipped per round.
+    # Any acceptance here would be a catastrophic failure: 5
+    # independent byte flips producing a valid (pk, msg, sig)
+    # triple by chance is astronomically unlikely.
+    # ============================================================
+    var mb_rejected = 0;
+    var mb_accepted = 0;
+    var mbr = 0;
+    while (mbr < 500) {
+        memcpy(pk_m, pk, 32);
+        memcpy(msg_m, msg, 64);
+        memcpy(sig_m, sig, 64);
+
+        var nb = 0;
+        while (nb < 5) {
+            var r2 = rng_next();
+            var which2 = r2 & 3;
+            if (which2 > 2) { which2 = 0; }
+            var off2 = (r2 >> 4) & 63;
+            var flip2 = (r2 >> 16) & 0xFF;
+            if (flip2 == 0) { flip2 = 1; }
+            if (which2 == 0) {
+                store8(sig_m + off2, (load8(sig_m + off2) & 0xFF) ^ flip2);
+            } elif (which2 == 1) {
+                store8(msg_m + off2, (load8(msg_m + off2) & 0xFF) ^ flip2);
+            } else {
+                var off32b = off2 & 31;
+                store8(pk_m + off32b, (load8(pk_m + off32b) & 0xFF) ^ flip2);
+            }
+            nb = nb + 1;
+        }
+
+        var v2 = ed25519_verify(pk_m, msg_m, 64, sig_m);
+        if (v2 == 0) { mb_rejected = mb_rejected + 1; }
+        elif (v2 == 1) { mb_accepted = mb_accepted + 1; }
+        mbr = mbr + 1;
+    }
+    assert_eq(mb_rejected + mb_accepted, 500, "all multi-byte rounds returned 0 or 1");
+    assert_eq(mb_accepted, 0, "multi-byte: zero false accepts");
+
+    # ============================================================
+    # Canonical-S reject (RFC 8032 §5.1.7 / §8.4).
+    # sigil's verify rejects S >= L to prevent malleability. Replace
+    # the S half of a valid signature with known out-of-range values
+    # and confirm verify returns 0.
+    # ============================================================
+    test_group("canonical-S");
+    memcpy(sig_m, sig, 64);
+
+    # S = L exactly (little-endian encoding of the group order).
+    # L = 2^252 + 27742317777372353535851937790883648493
+    #   = edd3f55c1a631258d69cf7a2def9de1400000000000000000000000000000010 (LE bytes)
+    var L_le = hex_decode("edd3f55c1a631258d69cf7a2def9de1400000000000000000000000000000010", 64);
+    memcpy(sig_m + 32, L_le, 32);
+    assert_eq(ed25519_verify(pk, msg, 64, sig_m), 0, "S = L rejected");
+
+    # S = L + 1 — increment low byte (0xed → 0xee, no carry).
+    memcpy(sig_m + 32, L_le, 32);
+    store8(sig_m + 32, (load8(sig_m + 32) & 0xFF) + 1);
+    assert_eq(ed25519_verify(pk, msg, 64, sig_m), 0, "S = L+1 rejected");
+
+    # S = all-ones (2^256 - 1) — comfortably above L.
+    memset(sig_m + 32, 0xFF, 32);
+    assert_eq(ed25519_verify(pk, msg, 64, sig_m), 0, "S = 2^256-1 rejected");
+
+    # ============================================================
+    # Point-decoding edge cases. Every call must return 0 or 1 —
+    # ge_from_bytes should not crash on malformed encodings.
+    # ============================================================
+    test_group("pk edge cases");
+    memcpy(sig_m, sig, 64);
+
+    # All-zero pk: encodes (y=0, x=1 or x=-1 via parity bit).
+    # Whether it's "on curve" depends on x-recovery; sigil must not
+    # crash regardless, and the sig against a genuine pk must fail.
+    memset(pk_m, 0, 32);
+    var e1 = ed25519_verify(pk_m, msg, 64, sig_m);
+    assert_eq(e1 | (1 - e1), 1, "pk all-zero: returns 0 or 1");
+
+    # All-ones pk: encodes y = 2^255-1 which is > p. Non-canonical
+    # y; ge_from_bytes should handle gracefully.
+    memset(pk_m, 0xFF, 32);
+    var e2 = ed25519_verify(pk_m, msg, 64, sig_m);
+    assert_eq(e2 | (1 - e2), 1, "pk all-ones: returns 0 or 1");
+
+    # Valid pk with only the x-parity bit flipped: swaps x vs -x.
+    # Sig against the original pk must no longer verify.
+    memcpy(pk_m, pk, 32);
+    store8(pk_m + 31, (load8(pk_m + 31) & 0xFF) ^ 0x80);
+    assert_eq(ed25519_verify(pk_m, msg, 64, sig), 0, "pk parity-flip rejected");
 
     return assert_summary();
 }

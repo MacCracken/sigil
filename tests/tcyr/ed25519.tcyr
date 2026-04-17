@@ -96,6 +96,34 @@ fn main() {
     assert_eq(valid3, 1, "TEST 3 verify");
 
     # ============================================================
+    # RFC 8032 §7.1 TEST 1024 — 1023-byte message
+    # Message lives in tests/data/rfc8032/test_1024.hex (2046 hex
+    # chars, no newline). Loaded at runtime because a 2046-char
+    # string literal is impractical to keep inline.
+    # ============================================================
+    test_group("rfc8032 TEST 1024");
+    var seed1024 = hex_decode("f5e5767cf153319517630f226876b86c8160cc583bc013744c6bf255f5cc0ee5", 64);
+    var sk1024 = alloc(64);
+    var pk1024 = alloc(32);
+    ed25519_keypair(seed1024, sk1024, pk1024);
+    var pk1024_hex = hex_encode(pk1024, 32);
+    assert_streq(pk1024_hex, "278117fc144c72340f67d0f2316e8386ceffbf2b2428c9c51fef7c597f1d426e", "TEST 1024 pk");
+
+    # Read the 2046-char hex message fixture.
+    var msg_hex = alloc(2048);
+    var n_read = file_read_all("tests/data/rfc8032/test_1024.hex", msg_hex, 2048);
+    assert_eq(n_read, 2046, "TEST 1024 fixture loaded");
+    var msg1024 = hex_decode(msg_hex, 2046);
+
+    var sig1024 = alloc(64);
+    ed25519_sign(sk1024, msg1024, 1023, sig1024);
+    var sig1024_hex = hex_encode(sig1024, 64);
+    assert_streq(sig1024_hex, "0aab4c900501b3e24d7cdf4663326a3a87df5e4843b2cbdb67cbf6e460fec350aa5371b1508f9f4528ecea23c436d94b5e8fcd4f681e30a6ac00a9704a188a03", "TEST 1024 sig");
+
+    var valid1024 = ed25519_verify(pk1024, msg1024, 1023, sig1024);
+    assert_eq(valid1024, 1, "TEST 1024 verify");
+
+    # ============================================================
     # Random keypair sign/verify roundtrip
     # ============================================================
     test_group("ed25519 roundtrip");
