@@ -1,6 +1,6 @@
 [package]
 name = "sigil"
-version = "2.8.1"
+version = "2.8.2"
 description = "Sigil — system-wide trust verification for AGNOS. Ed25519, SHA-256/512, HMAC, integrity, audit."
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/sigil"
@@ -11,6 +11,30 @@ cyrius = "5.2.0"
 entry = "programs/smoke.cyr"
 output = "build/sigil-smoke"
 defines = ["SIGIL_SMOKE"]
+# `modules` declares the dependency-sorted public src/ surface consumed
+# by `cyrius distlib`. Order matches src/lib.cyr's include list — a
+# module may reference any symbol defined earlier. Keep both files in
+# sync when adding a new src module.
+modules = [
+    "src/types.cyr",
+    "src/error.cyr",
+    "src/sha256.cyr",
+    "src/hex.cyr",
+    "src/ct.cyr",
+    "src/hmac.cyr",
+    "src/sha512.cyr",
+    "src/bigint_ext.cyr",
+    "src/ed25519.cyr",
+    "src/trust.cyr",
+    "src/integrity.cyr",
+    "src/policy.cyr",
+    "src/audit.cyr",
+    "src/tpm.cyr",
+    "src/ima.cyr",
+    "src/secureboot.cyr",
+    "src/certpin.cyr",
+    "src/verify.cyr",
+]
 
 [deps]
 stdlib = ["syscalls", "alloc", "freelist", "assert", "str", "string", "vec", "hashmap", "io", "fmt", "json", "chrono", "bigint", "tagged", "process", "fs"]

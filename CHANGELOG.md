@@ -5,6 +5,54 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.8.2] — 2026-04-17
+
+### Fixed — distribution bundle was missing 3 modules
+
+`scripts/bundle.sh` hand-listed the src modules to concatenate
+into `dist/sigil.cyr`. The list hadn't been updated since 2.5.0,
+so the last three shipped bundles (2.5.0 – 2.8.1) silently
+omitted `src/ima.cyr`, `src/secureboot.cyr`, and `src/certpin.cyr`
+— the entire agnosys-wrapper layer. Consumers pulling the bundle
+got sigil's crypto + trust core but none of the TPM / IMA /
+Secure-Boot / certpin sigil_* wrappers.
+
+No runtime impact on sigil's own `cyrius build` / `cyrius test`
+paths (those use `src/lib.cyr` directly), and no reported
+downstream incident — the bundle consumers are the other AGNOS
+crates and they've been pulling via `[deps.sigil]` modules that
+end up resolving through `src/lib.cyr` on their side. But any
+consumer that copied `dist/sigil.cyr` verbatim would be missing
+the wrappers.
+
+### Changed — `scripts/bundle.sh` → `cyrius distlib`
+
+Cyrius 5.2.0 shipped `cyrius distlib` as the official library-
+distribution command, reading `[build] modules` (or `[lib] modules`)
+from `cyrius.cyml`. Removes the per-repo hand-maintained bundle
+script — the module list now lives in one place, is the same
+list the language tooling uses for dep resolution, and can't
+drift away from `src/lib.cyr` silently.
+
+- Added `[build] modules = [...]` to `cyrius.cyml` listing all
+  18 src/ modules in dependency order (same order as
+  `src/lib.cyr`'s includes). Comment in the manifest makes the
+  "keep both files in sync" invariant explicit.
+- Removed `scripts/bundle.sh`. The canonical regen path is now
+  `cyrius distlib`.
+- Regenerated `dist/sigil.cyr` — went from 5296 lines / 15
+  modules (2.8.1) to 5420 lines / 18 modules (this release).
+
+### Verified
+
+- `cyrius distlib` → `dist/sigil.cyr: 5420 lines (v2.8.2)`.
+- Bundle now contains all 18 src/ modules (was 15) — verified via
+  `grep -c '^# --- '`.
+- No remaining references to `scripts/bundle.sh` outside
+  historical CHANGELOG entries.
+- 11/11 `.tcyr` pass, 3/3 fuzz OK, smoke exit 0 (library
+  behavior unchanged — only the packaging path moved).
+
 ## [2.8.1] — 2026-04-17
 
 ### Security — HIGH
