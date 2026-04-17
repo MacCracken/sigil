@@ -2,6 +2,9 @@
 /build/
 /rust-old/target/
 
+# Cyrius deps cache (symlinked by `cyrius deps` to ~/.cyrius/deps/...)
+/lib/sakshi.cyr
+
 # Editor
 .idea/
 .vscode/

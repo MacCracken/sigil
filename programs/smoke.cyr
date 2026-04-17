@@ -1,0 +1,44 @@
+# smoke.cyr — minimal end-to-end validation of the sigil distribution.
+# Built in CI to prove the library compiles, DCE prunes unused surface,
+# and the public crypto API is consumable from a downstream project.
+#
+# Build:  cyrius build -D SIGIL_SMOKE programs/smoke.cyr build/sigil-smoke
+# Run:    ./build/sigil-smoke   (exit 0 on success)
+
+include "src/lib.cyr"
+
+fn main() {
+    alloc_init();
+    sakshi_set_level(SK_WARN);
+    sakshi_span_enter("sigil.smoke", 11);
+
+    # 1. SHA-256 over "abc" — first byte of digest is 0xba (FIPS 180-4 vector).
+    var digest = alloc(32);
+    sha256("abc", 3, digest);
+    if (load8(digest) != 0xba) { sakshi_span_exit(); return 1; }
+
+    # 2. Constant-time compare — equal buffers must report equal.
+    if (ct_eq_32(digest, digest) != 1) { sakshi_span_exit(); return 2; }
+
+    # 3. Ed25519 round-trip: generate, sign, verify.
+    var sk = alloc(64);
+    var pk = alloc(32);
+    var sig = alloc(64);
+    ed25519_generate_keypair(sk, pk);
+    ed25519_sign(sk, "sigil", 5, sig);
+    if (ed25519_verify(pk, "sigil", 5, sig) != 1) { sakshi_span_exit(); return 3; }
+
+    # 4. Error plumbing.
+    var err = sigil_err(ERR_NONE, "ok");
+    var rc = sigil_err_code(err);
+    sigil_err_free(err);
+    if (rc != ERR_NONE) { sakshi_span_exit(); return 4; }
+
+    sakshi_span_exit();
+    return 0;
+}
+
+#ifdef SIGIL_SMOKE
+var exit_code = main();
+syscall(SYS_EXIT, exit_code);
+#endif

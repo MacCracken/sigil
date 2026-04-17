@@ -5,6 +5,45 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.0] — 2026-04-16
+
+### Changed
+
+Scaffold refactor aligning sigil with the shared AGNOS application layout
+(sakshi 2.0.0, patra). No source-level changes to the trust engine: same
+245 assertions across 10 `.tcyr` files pass; same 11 benchmarks run.
+
+- **`cyrius.cyml` replaces `cyrius.toml`**. Declares `[build] entry =
+  "programs/smoke.cyr"` with `defines = ["SIGIL_SMOKE"]`, the stdlib
+  surface via `[deps] stdlib = [...]`, and sakshi via `[deps.sakshi]
+  git = ...`.
+- **`cyrius = "5.1.13"`** — pinned from 4.5.0. The vendored `lib/*.cyr`
+  stdlib files have been refreshed from `~/.cyrius/versions/5.1.13/lib/`.
+- **`programs/smoke.cyr`** — new CI/smoke entry point exercising
+  SHA-256, constant-time compare, Ed25519 keypair/sign/verify, and
+  error-object plumbing. Guarded by `#ifdef SIGIL_SMOKE`. Exits 0 on
+  success.
+- **Sakshi dep is git-pinned to `2.0.0`** (previously a vendored copy
+  of 0.9.0). Resolved via `cyrius deps` into
+  `~/.cyrius/deps/sakshi/2.0.0/dist/sakshi.cyr`; `lib/sakshi.cyr` is
+  now a managed symlink and is gitignored. Tag 2.0.0 is not yet
+  folded into the Cyrius stdlib distribution — remove this block once
+  it is.
+
+### Infrastructure
+
+- **`.gitignore`**: `/lib/sakshi.cyr` added (dep-cache symlink).
+- **Build flow**: `cyrius deps && cyrius build -D SIGIL_SMOKE
+  programs/smoke.cyr build/sigil-smoke`. `scripts/bundle.sh` unchanged
+  and still produces `dist/sigil.cyr` with the current VERSION.
+
+### Verified
+
+- `./build/sigil-smoke` → exit 0.
+- 10/10 `.tcyr` files pass (unchanged from 2.1.2).
+- `tests/bcyr/sigil.bcyr` runs all 11 benchmarks; numbers comparable
+  to pre-refactor baseline (sha256_4kb ≈ 260us, ed25519_sign ≈ 5.1ms).
+
 ## [2.1.2] — 2026-04-13
 
 ### Security

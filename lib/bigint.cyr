@@ -138,6 +138,7 @@ fn u256_add(r, a, b) {
     return c;
 }
 
+# r = a - b (mod 2^256). Returns borrow (0 or 1).
 # Subtract single limb pair, return borrow
 fn _sub_limb(r_off, r, a, b, borrow_in) {
     var al = load64(a + r_off);
