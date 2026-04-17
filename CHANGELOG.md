@@ -10,8 +10,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 Scaffold refactor aligning sigil with the shared AGNOS application layout
-(sakshi 2.0.0, patra). No source-level changes to the trust engine: same
-245 assertions across 10 `.tcyr` files pass; same 11 benchmarks run.
+(sakshi 2.0.0, patra), plus two purely computational crypto-hot-path
+optimizations. 245 assertions across 10 `.tcyr` files pass (including
+RFC 8032 Ed25519 test vector 1); 11 benchmarks run.
+
+### Performance
+
+Two non-algorithmic wins in `src/bigint_ext.cyr`:
+
+- **`fp_inv` via Bernstein addition chain** (254 squarings + 11 multiplies
+  = 265 `fp_mul` calls) replaces the generic `fp_pow(a, p-2)` chain
+  (~512 `fp_mul` calls). `fp_inv` 601 → 252us (**−58%**).
+- **`_uadd_overflow` inlined** inside the `u256_mul_full` 4×4 inner
+  loop (32 function calls eliminated per `fp_mul`). Amplifies into every
+  downstream op.
+
+Cumulative bench deltas (vs 2.1.2 baseline):
+
+| op | 2.1.2 | 2.2.0 | Δ |
+|---|---|---|---|
+| `fp_inv` | 601us | 252us | **−58%** |
+| `sc_reduce` | 36us | 29us | −19% |
+| `ge_double` | 9us | 7us | −22% |
+| `ge_scalarmult` | 3.99ms | 3.46ms | −13% |
+| `ed25519_keypair` | 4.67ms | 3.87ms | **−17%** |
+| `ed25519_sign` | ~5.0ms | ~4.0ms | **~−20%** |
+| `sha256_4kb` | 254us | 251us | ~flat |
+| `ct_eq_32b` | 88ns | 85ns | ~flat |
+
+Deferred (documented for 2.3.0):
+
+- **Fixed-base scalar-mult table** for `_ed_B` (16–64KB precomputed
+  multiples) — would roughly halve keypair/sign cost at a binary-size
+  tradeoff.
+- **Montgomery ladder / always-add** constant-time `ge_scalarmult` —
+  security fix, not a perf win. The current implementation branches on
+  the secret scalar bit (`src/ed25519.cyr` L191). Listed on the roadmap
+  (v0.2.0 carried forward).
 
 - **`cyrius.cyml` replaces `cyrius.toml`**. Declares `[build] entry =
   "programs/smoke.cyr"` with `defines = ["SIGIL_SMOKE"]`, the stdlib

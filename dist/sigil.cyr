@@ -1408,6 +1408,7 @@ var _mf_hi = 0;
 
 fn u256_mul_full(out, a, b) {
     memset(out, 0, 64);
+    var sbit = 1 << 63;
     var i = 0;
     while (i < 4) {
         _mf_carry = 0;
@@ -1418,13 +1419,15 @@ fn u256_mul_full(out, a, b) {
             var prev = load64(out + k * 8);
             _mf_hi = _m64_hi;
 
-            # s1 = prev + _m64_lo (save to global before fn call)
+            # s1 = prev + _m64_lo; _mf_c1 = overflow (inlined from _uadd_overflow)
             _mf_s1 = prev + _m64_lo;
-            _mf_c1 = _uadd_overflow(prev, _m64_lo);
+            _mf_c1 = 0;
+            if ((_mf_s1 ^ sbit) < (prev ^ sbit)) { _mf_c1 = 1; }
 
-            # s2 = s1 + carry
+            # s2 = s1 + carry; c2 = overflow (inlined)
             var s2 = _mf_s1 + _mf_carry;
-            var c2 = _uadd_overflow(_mf_s1, _mf_carry);
+            var c2 = 0;
+            if ((s2 ^ sbit) < (_mf_s1 ^ sbit)) { c2 = 1; }
 
             store64(out + k * 8, s2);
             _mf_carry = _mf_hi + _mf_c1 + c2;
@@ -1594,19 +1597,107 @@ fn fp_pow(r, base, exp) {
 }
 
 # ================================================================
-# Modular inversion: r = a^(p-2) mod p (Fermat's little theorem)
+# Modular inversion: r = a^(p-2) mod p for p = 2^255 - 19
+# Bernstein's addition chain from the curve25519 reference:
+# 254 squarings + 11 multiplies = 265 fp_mul calls
+# (vs the generic fp_pow(p-2): ~512 fp_mul calls).
 # ================================================================
 
-var _fp_inv_pm2 = 0;
+var _fpi_t0 = 0;
+var _fpi_z9 = 0;
+var _fpi_z11 = 0;
+var _fpi_z5 = 0;
+var _fpi_z10 = 0;
+var _fpi_z50 = 0;
+var _fpi_z100 = 0;
+var _fpi_a = 0;
+var _fpi_r = 0;
+var _fpi_buf = 0;
+var _fpi_n = 0;
+var _fpi_i = 0;
+var _fpi_inited = 0;
+
+fn _fpi_sq_n(buf, n) {
+    # In-place square `buf` n times. Params are saved to globals
+    # because Cyrius clobbers locals across nested fp_sq → fp_mul calls.
+    _fpi_buf = buf;
+    _fpi_n = n;
+    _fpi_i = 0;
+    while (_fpi_i < _fpi_n) {
+        fp_sq(_fpi_buf, _fpi_buf);
+        _fpi_i = _fpi_i + 1;
+    }
+    return 0;
+}
 
 fn fp_inv(r, a) {
     _init_ed_p();
-    if (_fp_inv_pm2 == 0) {
-        _fp_inv_pm2 = alloc(32);
-        u256_copy(_fp_inv_pm2, _ed_p);
-        store64(_fp_inv_pm2, load64(_fp_inv_pm2) - 2);
+    if (_fpi_inited == 0) {
+        _fpi_t0 = alloc(32);
+        _fpi_z9 = alloc(32);
+        _fpi_z11 = alloc(32);
+        _fpi_z5 = alloc(32);
+        _fpi_z10 = alloc(32);
+        _fpi_z50 = alloc(32);
+        _fpi_z100 = alloc(32);
+        _fpi_a = alloc(32);
+        _fpi_inited = 1;
     }
-    fp_pow(r, a, _fp_inv_pm2);
+    _fpi_r = r;
+    u256_copy(_fpi_a, a);
+
+    # z2 in _fpi_t0: t0 = a^2
+    fp_sq(_fpi_t0, _fpi_a);
+    # _fpi_z9 = t0^4 * a   = a^9
+    fp_sq(_fpi_z9, _fpi_t0);
+    fp_sq(_fpi_z9, _fpi_z9);
+    fp_mul(_fpi_z9, _fpi_z9, _fpi_a);
+    # _fpi_z11 = z9 * z2(=t0) = a^11
+    fp_mul(_fpi_z11, _fpi_z9, _fpi_t0);
+    # _fpi_z5 = z11^2 * z9  = a^(2^5 - 1) = a^31
+    fp_sq(_fpi_z5, _fpi_z11);
+    fp_mul(_fpi_z5, _fpi_z5, _fpi_z9);
+
+    # _fpi_z10 = z5^(2^5) * z5 = a^(2^10 - 1)
+    fp_sq(_fpi_z10, _fpi_z5);
+    _fpi_sq_n(_fpi_z10, 4);
+    fp_mul(_fpi_z10, _fpi_z10, _fpi_z5);
+
+    # t0 = z10^(2^10) * z10 = a^(2^20 - 1)
+    fp_sq(_fpi_t0, _fpi_z10);
+    _fpi_sq_n(_fpi_t0, 9);
+    fp_mul(_fpi_t0, _fpi_t0, _fpi_z10);
+
+    # t0 = t0^(2^20) * t0 = a^(2^40 - 1)
+    # Need a separate buffer for the squared copy — reuse _fpi_z9 shortly
+    # via: save current t0 into z9, then continue. But z9 is still live
+    # here (only z9 is needed no more — the last use was building z11).
+    # Re-purpose _fpi_z9 as scratch from here on.
+    u256_copy(_fpi_z9, _fpi_t0);
+    _fpi_sq_n(_fpi_t0, 20);
+    fp_mul(_fpi_t0, _fpi_t0, _fpi_z9);
+
+    # t0 = t0^(2^10) * z10 = a^(2^50 - 1)
+    _fpi_sq_n(_fpi_t0, 10);
+    fp_mul(_fpi_z50, _fpi_t0, _fpi_z10);
+
+    # t0 = z50^(2^50) * z50 = a^(2^100 - 1)
+    fp_sq(_fpi_t0, _fpi_z50);
+    _fpi_sq_n(_fpi_t0, 49);
+    fp_mul(_fpi_z100, _fpi_t0, _fpi_z50);
+
+    # t0 = z100^(2^100) * z100 = a^(2^200 - 1)
+    fp_sq(_fpi_t0, _fpi_z100);
+    _fpi_sq_n(_fpi_t0, 99);
+    fp_mul(_fpi_t0, _fpi_t0, _fpi_z100);
+
+    # t0 = t0^(2^50) * z50 = a^(2^250 - 1)
+    _fpi_sq_n(_fpi_t0, 50);
+    fp_mul(_fpi_t0, _fpi_t0, _fpi_z50);
+
+    # r = t0^(2^5) * z11 = a^(2^255 - 21) = a^(p - 2)
+    _fpi_sq_n(_fpi_t0, 5);
+    fp_mul(_fpi_r, _fpi_t0, _fpi_z11);
     return 0;
 }
 
