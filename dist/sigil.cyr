@@ -1,5 +1,5 @@
 # sigil.cyr — system-wide trust verification for AGNOS
-# Bundled distribution of sigil v2.2.1
+# Bundled distribution of sigil v2.3.0
 # Source: https://github.com/MacCracken/sigil
 # License: GPL-3.0-only
 #
@@ -1722,6 +1722,7 @@ fn fp_inv(r, a) {
 var _ed_d = 0;
 var _ed_2d = 0;
 var _ed_B = 0;       # base point (128 bytes: X,Y,Z,T)
+var _ed_B_table = 0; # fixed-base table: 64 rows × 16 pts × 128B = 128KB
 var _ed_L = 0;       # group order (32 bytes)
 var _ed_sqrtm1 = 0;
 var _ed25519_inited = 0;
@@ -1930,6 +1931,121 @@ fn ge_scalarmult(r, s, p) {
 }
 
 # ================================================================
+# Fixed-base scalar multiplication: R = [s]B  (uses _ed_B_table)
+# 4-bit windowed comb: 64 windows × 16 precomputed points per window.
+# Cost: 64 constant-time table selects + 64 ge_adds, no doublings.
+# Must be constant-time — s is secret in keypair/sign.
+# ================================================================
+
+# Table select state
+var _gts_dst = 0;
+var _gts_row = 0;
+var _gts_digit = 0;
+var _gts_k = 0;
+
+# Branchless: sets dst := row[digit] in constant time. Iterates all
+# 16 entries and cmoves the one whose index equals digit. Memory
+# access pattern does not depend on digit.
+fn _ge_table_select(dst, row, digit) {
+    _gts_dst = dst;
+    _gts_row = row;
+    _gts_digit = digit;
+    # Initialize dst to identity (entry k=0) — equivalent and simpler
+    # than reading row[0], which is also identity.
+    ge_identity(_gts_dst);
+    _gts_k = 1;
+    while (_gts_k < 16) {
+        # eq = 1 iff k == digit, else 0  (branchless).
+        # diff|(-diff) has its high bit set iff diff != 0.
+        var diff = _gts_k ^ _gts_digit;
+        var neg = 0 - diff;
+        var eq = 1 - (((diff | neg) >> 63) & 1);
+        ge_cmov(_gts_dst, _gts_row + _gts_k * 128, eq);
+        _gts_k = _gts_k + 1;
+    }
+    return 0;
+}
+
+# Base scalarmult state
+var _gsb_r = 0;
+var _gsb_s = 0;
+var _gsb_sel = 0;
+var _gsb_tmp = 0;
+var _gsb_i = 0;
+var _gsb_digit = 0;
+
+fn ge_scalarmult_base(r, s) {
+    if (_gsb_sel == 0) {
+        _gsb_sel = alloc(128);
+        _gsb_tmp = alloc(128);
+    }
+    _gsb_r = r;
+    _gsb_s = s;
+    ge_identity(_gsb_r);
+
+    _gsb_i = 0;
+    while (_gsb_i < 64) {
+        # Public-index nibble extract: byte i/2, low or high nibble.
+        var byte_idx = _gsb_i / 2;
+        var b = load8(_gsb_s + byte_idx) & 0xFF;
+        var d = b & 0xF;
+        if ((_gsb_i & 1) == 1) { d = (b >> 4) & 0xF; }
+        _gsb_digit = d;
+
+        # Constant-time select into _gsb_sel.
+        _ge_table_select(_gsb_sel, _ed_B_table + _gsb_i * 16 * 128, _gsb_digit);
+
+        # r = r + sel  (ge_add handles r==identity and sel==identity correctly;
+        # HWCD08 addition formula is complete on twisted Edwards curves).
+        ge_add(_gsb_tmp, _gsb_r, _gsb_sel);
+        ge_copy(_gsb_r, _gsb_tmp);
+        _gsb_i = _gsb_i + 1;
+    }
+    return 0;
+}
+
+# ================================================================
+# Build _ed_B_table at init — runs once, not perf-critical.
+# Layout: table[i][k] = k * (16^i) * B. 64 rows × 16 entries × 128B.
+# ================================================================
+
+var _bt_table_i = 0;
+var _bt_k = 0;
+var _bt_base_i = 0;
+var _bt_row = 0;
+
+fn _build_ed_B_table() {
+    _ed_B_table = alloc(131072);   # 64 * 16 * 128
+    _bt_base_i = alloc(128);
+
+    ge_copy(_bt_base_i, _ed_B);
+
+    _bt_table_i = 0;
+    while (_bt_table_i < 64) {
+        _bt_row = _ed_B_table + _bt_table_i * 16 * 128;
+        ge_identity(_bt_row);                              # k=0 → identity
+        ge_copy(_bt_row + 128, _bt_base_i);                # k=1 → base_i
+        _bt_k = 2;
+        while (_bt_k < 16) {
+            # row[k] = row[k-1] + base_i
+            ge_add(_bt_row + _bt_k * 128,
+                   _bt_row + (_bt_k - 1) * 128,
+                   _bt_base_i);
+            _bt_k = _bt_k + 1;
+        }
+        if (_bt_table_i < 63) {
+            # base_{i+1} = 16 * base_i → four in-place doublings
+            ge_double(_bt_base_i, _bt_base_i);
+            ge_double(_bt_base_i, _bt_base_i);
+            ge_double(_bt_base_i, _bt_base_i);
+            ge_double(_bt_base_i, _bt_base_i);
+        }
+        _bt_table_i = _bt_table_i + 1;
+    }
+    return 0;
+}
+
+# ================================================================
 # Point compression: point -> 32 bytes
 # Encode y with sign of x in high bit of last byte
 # ================================================================
@@ -2112,6 +2228,9 @@ fn ed25519_init() {
     u256_copy(ge_z(_ed_B), Bz);
     u256_copy(ge_t(_ed_B), Bt);
 
+    # Precomputed fixed-base table for signing/keypair/verify (2.3.0).
+    _build_ed_B_table();
+
     _ed25519_inited = 1;
     return 0;
 }
@@ -2241,9 +2360,9 @@ fn ed25519_keypair(seed, sk_out, pk_out) {
     # Copy scalar to dedicated heap buffer (survives nested calls)
     memcpy(_kp_scalar, _kp_hash, 32);
 
-    # A = [a]B
+    # A = [a]B  (fixed-base, constant-time table lookup)
     var A = ge_alloc();
-    ge_scalarmult(A, _kp_scalar, _ed_B);
+    ge_scalarmult_base(A, _kp_scalar);
     ge_to_bytes(pk_out, A);
 
     memcpy(sk_out, seed, 32);
@@ -2299,9 +2418,9 @@ fn ed25519_sign(sk, msg, msg_len, sig_out) {
 
     sc_reduce(_sign_r_scalar, _sign_nhash);
 
-    # R = [r]B
+    # R = [r]B  (fixed-base, constant-time table lookup)
     var R_point = ge_alloc();
-    ge_scalarmult(R_point, _sign_r_scalar, _ed_B);
+    ge_scalarmult_base(R_point, _sign_r_scalar);
     ge_to_bytes(_sign_sig_out, R_point);
 
     # h = SHA-512(R || pk || msg) mod L
@@ -2418,9 +2537,9 @@ fn ed25519_verify(pk, msg, msg_len, sig) {
     # exactly one valid signature encoding.
     if (u256_cmp(_ver_S_scalar, _ed_L) >= 0) { return 0; }
 
-    # [S]B
+    # [S]B  (fixed-base; S is public, but base table wins on speed anyway)
     var SB = ge_alloc();
-    ge_scalarmult(SB, _ver_S_scalar, _ed_B);
+    ge_scalarmult_base(SB, _ver_S_scalar);
 
     # [h]A
     var hA = ge_alloc();

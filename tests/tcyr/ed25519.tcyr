@@ -74,6 +74,49 @@ fn main() {
     var rwrong = ed25519_verify(rpk, "hello worle", 11, rsig);
     assert_eq(rwrong, 0, "wrong msg rejected");
 
+    # ============================================================
+    # ge_cmov branchless select (2.2.1 CT scalarmult primitive)
+    # dst and src are 128 bytes; cmov must flip every byte iff bit==1.
+    # ============================================================
+    test_group("ge_cmov bit=0");
+    var cm_dst = alloc(128);
+    var cm_src = alloc(128);
+    var i = 0;
+    while (i < 128) {
+        store8(cm_dst + i, 0xAA);
+        store8(cm_src + i, 0x55);
+        i = i + 1;
+    }
+    ge_cmov(cm_dst, cm_src, 0);
+    var ok0 = 1;
+    i = 0;
+    while (i < 128) {
+        if ((load8(cm_dst + i) & 0xFF) != 0xAA) { ok0 = 0; }
+        i = i + 1;
+    }
+    assert_eq(ok0, 1, "bit=0 leaves dst untouched");
+
+    test_group("ge_cmov bit=1");
+    ge_cmov(cm_dst, cm_src, 1);
+    var ok1 = 1;
+    i = 0;
+    while (i < 128) {
+        if ((load8(cm_dst + i) & 0xFF) != 0x55) { ok1 = 0; }
+        i = i + 1;
+    }
+    assert_eq(ok1, 1, "bit=1 copies src to dst");
+
+    test_group("ge_cmov bit=1 same-value");
+    # When dst already equals src, any bit must leave dst equal.
+    ge_cmov(cm_dst, cm_src, 1);
+    var oks = 1;
+    i = 0;
+    while (i < 128) {
+        if ((load8(cm_dst + i) & 0xFF) != 0x55) { oks = 0; }
+        i = i + 1;
+    }
+    assert_eq(oks, 1, "bit=1 same-value stable");
+
     return assert_summary();
 }
 

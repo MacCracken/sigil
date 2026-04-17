@@ -5,6 +5,67 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.0] — 2026-04-16
+
+### Performance
+
+Fixed-base scalar multiplication for the Ed25519 base point `_ed_B`.
+`ed25519_keypair` and `ed25519_sign` drop roughly **4–5×** with no
+loss of constant-time discipline.
+
+- **`_ed_B_table`** (128 KB): 64 windows × 16 precomputed points ×
+  128 bytes each. Built at `ed25519_init` by repeatedly doubling and
+  adding `_ed_B` — one-time init cost (~8 ms on this host), cached for
+  process lifetime. Layout: `table[i][k] = k · 16^i · B`.
+- **`ge_scalarmult_base(r, s)`**: 4-bit windowed comb. 64 iterations;
+  each iteration does one constant-time `_ge_table_select` over all
+  16 entries of row `i` and one `ge_add`. No doublings on the hot
+  path.
+- **`_ge_table_select`**: iterates all 16 entries unconditionally and
+  uses `ge_cmov` with a branchless `eq = 1 iff k == digit` test
+  (`((diff | -diff) >> 63) ^ 1`). Memory-access pattern is independent
+  of the secret nibble.
+- **Call sites rewired**: `ed25519_keypair` (L516), `ed25519_sign`
+  (L599), `ed25519_verify` (L718). `ge_scalarmult` (variable base) is
+  still used by verify for `[h]A` where `A` is the public key — that
+  path retains the 2.2.1 CT loop.
+
+| op | 2.2.1 | 2.3.0 | Δ |
+|---|---|---|---|
+| `ed25519_keypair` | 5.57 ms | 1.33 ms | **−76%** |
+| `ed25519_sign` | 5.73 ms | 1.14 ms | **−80%** |
+| `ge_scalarmult` (var-base) | 5.25 ms | 5.17 ms | ~flat |
+| `fp_inv` | 265 us | 267 us | ~flat |
+| `sha256_4kb` | 256 us | 255 us | ~flat |
+| `ct_eq_32b` | 87 ns | 89 ns | ~flat |
+
+### Test coverage
+
+- Added three `ge_cmov` regression assertions to `tests/tcyr/ed25519.tcyr`
+  (bit=0 unchanged, bit=1 copies, bit=1 same-value stable) so the CT
+  primitive is exercised directly and not only transitively via RFC
+  8032 vector 1.
+- 8 assertions pass across `ed25519.tcyr` (was 5 before).
+- All 10 `.tcyr` files pass.
+
+### Memory
+
+Process heap grows by ~128 KB after first `ed25519_*` call. This is
+a one-shot bump-allocator reservation; the binary is unchanged in
+size. Consumers that never call Ed25519 (e.g. pure SHA-256 users) do
+not pay this cost — `_build_ed_B_table` is called from
+`ed25519_init`, which is called from `ed25519_keypair`, `_sign`, and
+`_verify` only.
+
+### Trade-offs
+
+The fixed-base table is not scatter-stored across cache lines, so a
+cache-timing attacker on the same host could in principle recover
+which 128-byte block was selected per window. In a hardened
+multi-tenant scenario this would matter; for AGNOS's single-tenant
+trust-verification role it does not. Adding scatter-load protection
+is listed on the 2.4.x+ backlog (see `docs/development/roadmap.md`).
+
 ## [2.2.1] — 2026-04-16
 
 ### Security
