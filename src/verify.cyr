@@ -638,6 +638,119 @@ fn sv_diff_trust_store(sv, old_snap) {
 # Trust store persistence
 # ================================================================
 
+# ================================================================
+# sv_load_trust_store(sv, path) — inverse of sv_save_trust_store
+#
+# Reads the JSON array written by sv_save_trust_store and installs
+# every {hash, path, type, trust} record into the verifier's trust
+# store. Returns the number of artifacts loaded, or 0 on IO/parse
+# failure.
+#
+# Signatures and signer_key_id are NOT persisted by the save path —
+# the serialized form is an inventory of trusted artifacts, not a
+# re-verifiable archive. Loaded artifacts come back with signature
+# = 0, signer = 0, trust level preserved. A subsequent
+# sv_verify_artifact call will treat them as present-but-unsigned.
+#
+# `_rj_parse_string` is reused from policy.cyr — same compilation
+# unit, handles the same escape set (\" \\ \n \r \t \b \f \u00XX)
+# as json_write_escaped in trust.cyr.
+# ================================================================
+
+fn sv_load_trust_store(sv, path) {
+    var buf = alloc(65536);
+    var n = file_read_all(path, buf, 65536);
+    if (n <= 0) { return 0; }
+    var store = load64(sv + 32);
+
+    var pos = 0;
+    # Skip to first '{'
+    while (pos < n) {
+        if ((load8(buf + pos) & 0xFF) == 123) { break; }
+        pos = pos + 1;
+    }
+
+    var loaded = 0;
+    while (pos < n) {
+        if ((load8(buf + pos) & 0xFF) != 123) { break; }
+        pos = pos + 1;
+
+        var hash = 0;
+        var apath = 0;
+        var atype = ARTIFACT_AGENT_BINARY;   # default; overwritten when the JSON object provides "type"
+        var trust = TRUST_UNVERIFIED;
+
+        while (pos < n) {
+            var c = load8(buf + pos) & 0xFF;
+            if (c == 125) { pos = pos + 1; break; }
+            if (c != 34) { pos = pos + 1; }
+            else {
+                pos = _rj_parse_string(buf, pos, n);
+                var k = _rj_out_ptr;
+                if (k == 0) { break; }
+                # Skip to colon
+                while (pos < n) {
+                    if ((load8(buf + pos) & 0xFF) == 58) { pos = pos + 1; break; }
+                    pos = pos + 1;
+                }
+                # Skip whitespace
+                while (pos < n) {
+                    var ws = load8(buf + pos) & 0xFF;
+                    if (ws == 32) { pos = pos + 1; }
+                    elif (ws == 9) { pos = pos + 1; }
+                    else { break; }
+                }
+                if (pos >= n) { break; }
+                var vc = load8(buf + pos) & 0xFF;
+                if (vc == 34) {
+                    pos = _rj_parse_string(buf, pos, n);
+                    var v = _rj_out_ptr;
+                    if (streq(k, "hash") == 1) { hash = v; }
+                    elif (streq(k, "path") == 1) { apath = v; }
+                } else {
+                    var vs = pos;
+                    while (pos < n) {
+                        var vcc = load8(buf + pos) & 0xFF;
+                        if (vcc == 44) { break; }
+                        if (vcc == 125) { break; }
+                        if (vcc == 32) { break; }
+                        pos = pos + 1;
+                    }
+                    var vlen = pos - vs;
+                    var intv = 0;
+                    var ii = 0;
+                    while (ii < vlen) {
+                        var ch = load8(buf + vs + ii) & 0xFF;
+                        if (ch >= 48) { if (ch <= 57) { intv = intv * 10 + (ch - 48); } }
+                        ii = ii + 1;
+                    }
+                    if (streq(k, "type") == 1) { atype = intv; }
+                    elif (streq(k, "trust") == 1) { trust = intv; }
+                }
+            }
+        }
+
+        if (hash != 0) {
+            var art = trusted_artifact_new(apath, atype, hash);
+            artifact_set_trust_level(art, trust);
+            map_set(store, hash, art);
+            loaded = loaded + 1;
+        }
+
+        # Scan to next '{' or ']'
+        while (pos < n) {
+            var c2 = load8(buf + pos) & 0xFF;
+            if (c2 == 123) { break; }
+            if (c2 == 93) { break; }
+            pos = pos + 1;
+        }
+        if (pos < n) {
+            if ((load8(buf + pos) & 0xFF) == 93) { break; }
+        }
+    }
+    return loaded;
+}
+
 fn sv_save_trust_store(sv, path) {
     var store = load64(sv + 32);
     var keys = map_keys(store);

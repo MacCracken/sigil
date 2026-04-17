@@ -359,6 +359,43 @@ fn main() {
     assert(afd >= 0, "audit file exists");
     file_close(afd);
 
+    # ============================================================
+    # AuditLog JSONL round-trip — write events, read them back,
+    # verify the reloaded log holds the same events with their
+    # metadata intact.
+    # ============================================================
+    test_group("audit jsonl load");
+    var alog3 = audit_log_new();
+    alog_record(alog3, audit_artifact_verified("/bin/ls", ARTIFACT_SYSTEM_BINARY, TRUST_VERIFIED, 1, "hash_ls"));
+    alog_record(alog3, audit_artifact_signed("/bin/cat", ARTIFACT_SYSTEM_BINARY, "key_root", "hash_cat"));
+    alog_record(alog3, audit_revocation_added("key_bad", "hash_bad", "compromised"));
+    var lpath = "/tmp/sigil_audit_roundtrip.jsonl";
+    syscall(87, lpath);   # best-effort pre-cleanup
+    alog_append_to_file(alog3, lpath);
+
+    var alog_reload = audit_log_new();
+    var n_loaded = alog_load_from_file(alog_reload, lpath);
+    assert_eq(n_loaded, 3, "loaded 3 events");
+    assert_eq(alog_len(alog_reload), 3, "log holds 3 events");
+
+    # Deep-check the first reloaded event.
+    var r0 = vec_get(alog_events(alog_reload), 0);
+    assert_eq(ae_type(r0), AUDIT_ARTIFACT_VERIFIED, "event 0 type");
+    assert_streq(ae_path(r0), "/bin/ls", "event 0 path");
+    assert_streq(ae_content_hash(r0), "hash_ls", "event 0 hash");
+    assert_eq(ae_passed(r0), 1, "event 0 passed");
+
+    var r2 = vec_get(alog_events(alog_reload), 2);
+    assert_eq(ae_type(r2), AUDIT_REVOCATION_ADDED, "event 2 type");
+    assert_streq(ae_key_id(r2), "key_bad", "event 2 key_id");
+    syscall(87, lpath);
+
+    # Empty / missing file is not an error
+    var alog_empty = audit_log_new();
+    var n_missing = alog_load_from_file(alog_empty, "/tmp/sigil_does_not_exist_xyz.jsonl");
+    assert_eq(n_missing, 0 - 1, "missing file returns -1");
+    assert_eq(alog_len(alog_empty), 0, "missing file adds nothing");
+
     # Cleanup
     syscall(87, tmppath);    # unlink
     syscall(87, apath);      # unlink

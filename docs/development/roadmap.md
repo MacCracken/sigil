@@ -3,17 +3,6 @@
 Forward-looking work only. For completed items and version history, see
 [CHANGELOG.md](../../CHANGELOG.md).
 
-## 2.7.0 — Load paths for trust-store / audit-log
-
-- [ ] **Trust-store JSON load** — symmetrical to the existing
-      `sv_save_trust_store`. Parse the persisted JSON back into a
-      `SigilVerifier`'s trust-store map, restoring artifact metadata
-      and signatures.
-- [ ] **Audit-log JSON-lines load** — symmetrical to the existing
-      JSON-lines writer. Stream a rotated log file back into an
-      `AuditLog` for forensic replay.
-- [ ] Round-trip tests for both paths (write → load → deep-equal).
-
 ## 2.8.0 — Certificate pinning via agnosys
 
 - [ ] Wrap `certpin_verify_pin`, `certpin_compute_spki_pin`,

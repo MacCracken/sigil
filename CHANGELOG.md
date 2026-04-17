@@ -5,6 +5,59 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.7.0] — 2026-04-17
+
+### Added — JSON load paths (round-trip support)
+
+Both persistence paths in sigil used to be write-only: you could
+save a trust store or append to an audit log, but reloading either
+after a restart meant starting from scratch. This release completes
+the round-trip for both.
+
+- **`sv_load_trust_store(sv, path)`** in `src/verify.cyr`. Parses
+  the JSON array emitted by `sv_save_trust_store`, rebuilding
+  `{content_hash, path, artifact_type, trust_level}` records into
+  the verifier's trust-store map. Returns the number of artifacts
+  loaded, or 0 on IO / parse failure. Signatures and
+  `signer_key_id` are NOT restored (the save path never wrote
+  them) — loaded artifacts come back as present-but-unsigned,
+  matching the existing serialized form. A subsequent
+  `sv_verify_artifact` will report them as "not in trust store"
+  until re-signed.
+- **`alog_load_from_file(log, path)`** in `src/audit.cyr`. Reads
+  the JSON Lines stream from `alog_append_to_file` back into an
+  `AuditLog`. Each line is parsed as a flat JSON object with
+  fields `type`, `timestamp`, `path?`, `key_id?`, `content_hash?`,
+  `passed?`. Lines whose `type` is an unknown event name are
+  skipped rather than aborting — a newer writer must not take
+  down an older reader doing forensic replay. Returns the number
+  of events loaded, or `-1` on IO failure.
+- **`audit_event_type_from_name(name)`** — inverse of
+  `audit_event_name(t)`, used by the loader and exposed for
+  consumers that want to match on named events.
+- Both loaders reuse `_rj_parse_string` from `src/policy.cyr`
+  (the escape-aware reader written for `rl_from_jsonl` in 2.5.0)
+  — unified handling for `\"`, `\\`, `\n`, `\r`, `\t`, `\b`, `\f`,
+  and `\u00XX` matches what `json_write_escaped` emits.
+
+### Test coverage
+
+- **`sigil.tcyr`** adds `audit jsonl load` (5 assertions + a
+  missing-file guard): write 3 events, reload them, deep-check
+  the first and last, then verify a nonexistent file returns -1
+  without crashing. Assertion count 82 → 92.
+- **`verify.tcyr`** adds `trust-store save+load` (5 assertions):
+  save two artifacts at different trust levels, load into a fresh
+  `SigilVerifier`, assert both trust levels survive. Plus a JSON
+  escape round-trip (path containing `"` and `\`) and a
+  missing-file check. Assertion count 37 → 43.
+
+### Verified
+
+- 11/11 `.tcyr` pass. 3/3 fuzz. 12/12 benches. Smoke exit 0.
+- `./build/sigil-smoke` unchanged (loaders are opt-in — not on the
+  hot path).
+
 ## [2.6.0] — 2026-04-17
 
 ### Changed — agnosys 1.0.0

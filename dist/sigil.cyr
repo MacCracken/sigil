@@ -1,5 +1,5 @@
 # sigil.cyr — system-wide trust verification for AGNOS
-# Bundled distribution of sigil v2.6.0
+# Bundled distribution of sigil v2.7.0
 # Source: https://github.com/MacCracken/sigil
 # License: GPL-3.0-only
 #
@@ -3915,6 +3915,17 @@ fn audit_event_name(t) {
     return "unknown";
 }
 
+# Inverse of audit_event_name. Returns the AUDIT_* constant for a
+# known name, or -1 if the string does not match any known event.
+fn audit_event_type_from_name(name) {
+    if (streq(name, "artifact_verified") == 1) { return AUDIT_ARTIFACT_VERIFIED; }
+    if (streq(name, "artifact_signed") == 1) { return AUDIT_ARTIFACT_SIGNED; }
+    if (streq(name, "revocation_added") == 1) { return AUDIT_REVOCATION_ADDED; }
+    if (streq(name, "key_rotated") == 1) { return AUDIT_KEY_ROTATED; }
+    if (streq(name, "chain_validated") == 1) { return AUDIT_CHAIN_VALIDATED; }
+    return (0 - 1);
+}
+
 # ================================================================
 # AuditEvent (64 bytes)
 # ================================================================
@@ -4070,6 +4081,130 @@ fn _alog_write_str(dst, src) {
     var len = strlen(src);
     memcpy(dst, src, len);
     return len;
+}
+
+# ================================================================
+# alog_load_from_file(log, path) — inverse of alog_append_to_file.
+#
+# Reads JSONL (one event per line) from `path`, parses each line
+# as a flat JSON object, and pushes an AuditEvent into `log`. Lines
+# with an unknown `type` are skipped — forensic replay must not
+# abort on an unknown event that a newer writer produced.
+#
+# Reuses `_rj_parse_string` from policy.cyr (same compilation unit)
+# for escape-aware string decoding, matching what
+# `json_write_escaped` emitted on the writer side.
+#
+# Returns the number of events loaded, or -1 on IO failure.
+# ================================================================
+
+fn _alog_parse_one_line(log, line, llen) {
+    var etype = 0 - 1;
+    var apath = 0;
+    var kid = 0;
+    var chash = 0;
+    var passed = 0 - 1;
+    var ts = 0;
+
+    var pos = 0;
+    while (pos < llen) {
+        var c = load8(line + pos) & 0xFF;
+        if (c != 34) { pos = pos + 1; }
+        else {
+            pos = _rj_parse_string(line, pos, llen);
+            var k = _rj_out_ptr;
+            if (k == 0) { break; }
+            # Skip to colon
+            while (pos < llen) {
+                if ((load8(line + pos) & 0xFF) == 58) { pos = pos + 1; break; }
+                pos = pos + 1;
+            }
+            # Skip whitespace
+            while (pos < llen) {
+                var ws = load8(line + pos) & 0xFF;
+                if (ws == 32) { pos = pos + 1; }
+                elif (ws == 9) { pos = pos + 1; }
+                else { break; }
+            }
+            if (pos >= llen) { break; }
+            var vc = load8(line + pos) & 0xFF;
+            if (vc == 34) {
+                pos = _rj_parse_string(line, pos, llen);
+                var v = _rj_out_ptr;
+                if (streq(k, "type") == 1) { etype = audit_event_type_from_name(v); }
+                elif (streq(k, "path") == 1) { apath = v; }
+                elif (streq(k, "key_id") == 1) { kid = v; }
+                elif (streq(k, "content_hash") == 1) { chash = v; }
+            } else {
+                # Literal: true / false / number
+                var vs = pos;
+                while (pos < llen) {
+                    var vcc = load8(line + pos) & 0xFF;
+                    if (vcc == 44) { break; }
+                    if (vcc == 125) { break; }
+                    if (vcc == 32) { break; }
+                    if (vcc == 10) { break; }
+                    pos = pos + 1;
+                }
+                var vlen = pos - vs;
+                if (vlen > 0) {
+                    var fb = load8(line + vs) & 0xFF;
+                    if (fb == 116) {
+                        # "true"
+                        if (streq(k, "passed") == 1) { passed = 1; }
+                    } elif (fb == 102) {
+                        # "false"
+                        if (streq(k, "passed") == 1) { passed = 0; }
+                    } elif (fb >= 48) {
+                        if (fb <= 57) {
+                            var intv = 0;
+                            var ii = 0;
+                            while (ii < vlen) {
+                                var ch = load8(line + vs + ii) & 0xFF;
+                                if (ch >= 48) { if (ch <= 57) { intv = intv * 10 + (ch - 48); } }
+                                ii = ii + 1;
+                            }
+                            if (streq(k, "timestamp") == 1) { ts = intv; }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (etype < 0) { return 0; }   # unknown event type; skip
+
+    var e = audit_event_new(etype);
+    if (apath != 0) { ae_set_path(e, apath); }
+    if (kid != 0) { ae_set_key_id(e, kid); }
+    if (chash != 0) { ae_set_content_hash(e, chash); }
+    if (passed != (0 - 1)) { ae_set_passed(e, passed); }
+    store64(e + 56, ts);    # timestamp
+    alog_record(log, e);
+    return 1;
+}
+
+fn alog_load_from_file(log, path) {
+    var buf = alloc(65536);
+    var n = file_read_all(path, buf, 65536);
+    if (n < 0) { return (0 - 1); }
+    var loaded = 0;
+    var pos = 0;
+    while (pos < n) {
+        var start = pos;
+        while (pos < n) {
+            if ((load8(buf + pos) & 0xFF) == 10) { break; }
+            pos = pos + 1;
+        }
+        var llen = pos - start;
+        if (llen > 0) {
+            if (_alog_parse_one_line(log, buf + start, llen) == 1) {
+                loaded = loaded + 1;
+            }
+        }
+        if (pos < n) { pos = pos + 1; }   # skip '\n'
+    }
+    return loaded;
 }
 
 # Global to survive nested calls
@@ -4867,6 +5002,119 @@ fn sv_diff_trust_store(sv, old_snap) {
 # ================================================================
 # Trust store persistence
 # ================================================================
+
+# ================================================================
+# sv_load_trust_store(sv, path) — inverse of sv_save_trust_store
+#
+# Reads the JSON array written by sv_save_trust_store and installs
+# every {hash, path, type, trust} record into the verifier's trust
+# store. Returns the number of artifacts loaded, or 0 on IO/parse
+# failure.
+#
+# Signatures and signer_key_id are NOT persisted by the save path —
+# the serialized form is an inventory of trusted artifacts, not a
+# re-verifiable archive. Loaded artifacts come back with signature
+# = 0, signer = 0, trust level preserved. A subsequent
+# sv_verify_artifact call will treat them as present-but-unsigned.
+#
+# `_rj_parse_string` is reused from policy.cyr — same compilation
+# unit, handles the same escape set (\" \\ \n \r \t \b \f \u00XX)
+# as json_write_escaped in trust.cyr.
+# ================================================================
+
+fn sv_load_trust_store(sv, path) {
+    var buf = alloc(65536);
+    var n = file_read_all(path, buf, 65536);
+    if (n <= 0) { return 0; }
+    var store = load64(sv + 32);
+
+    var pos = 0;
+    # Skip to first '{'
+    while (pos < n) {
+        if ((load8(buf + pos) & 0xFF) == 123) { break; }
+        pos = pos + 1;
+    }
+
+    var loaded = 0;
+    while (pos < n) {
+        if ((load8(buf + pos) & 0xFF) != 123) { break; }
+        pos = pos + 1;
+
+        var hash = 0;
+        var apath = 0;
+        var atype = ARTIFACT_AGENT_BINARY;   # default; overwritten when the JSON object provides "type"
+        var trust = TRUST_UNVERIFIED;
+
+        while (pos < n) {
+            var c = load8(buf + pos) & 0xFF;
+            if (c == 125) { pos = pos + 1; break; }
+            if (c != 34) { pos = pos + 1; }
+            else {
+                pos = _rj_parse_string(buf, pos, n);
+                var k = _rj_out_ptr;
+                if (k == 0) { break; }
+                # Skip to colon
+                while (pos < n) {
+                    if ((load8(buf + pos) & 0xFF) == 58) { pos = pos + 1; break; }
+                    pos = pos + 1;
+                }
+                # Skip whitespace
+                while (pos < n) {
+                    var ws = load8(buf + pos) & 0xFF;
+                    if (ws == 32) { pos = pos + 1; }
+                    elif (ws == 9) { pos = pos + 1; }
+                    else { break; }
+                }
+                if (pos >= n) { break; }
+                var vc = load8(buf + pos) & 0xFF;
+                if (vc == 34) {
+                    pos = _rj_parse_string(buf, pos, n);
+                    var v = _rj_out_ptr;
+                    if (streq(k, "hash") == 1) { hash = v; }
+                    elif (streq(k, "path") == 1) { apath = v; }
+                } else {
+                    var vs = pos;
+                    while (pos < n) {
+                        var vcc = load8(buf + pos) & 0xFF;
+                        if (vcc == 44) { break; }
+                        if (vcc == 125) { break; }
+                        if (vcc == 32) { break; }
+                        pos = pos + 1;
+                    }
+                    var vlen = pos - vs;
+                    var intv = 0;
+                    var ii = 0;
+                    while (ii < vlen) {
+                        var ch = load8(buf + vs + ii) & 0xFF;
+                        if (ch >= 48) { if (ch <= 57) { intv = intv * 10 + (ch - 48); } }
+                        ii = ii + 1;
+                    }
+                    if (streq(k, "type") == 1) { atype = intv; }
+                    elif (streq(k, "trust") == 1) { trust = intv; }
+                }
+            }
+        }
+
+        if (hash != 0) {
+            var art = trusted_artifact_new(apath, atype, hash);
+            artifact_set_trust_level(art, trust);
+            map_set(store, hash, art);
+            loaded = loaded + 1;
+        }
+
+        # Scan to next '{' or ']'
+        while (pos < n) {
+            var c2 = load8(buf + pos) & 0xFF;
+            if (c2 == 123) { break; }
+            if (c2 == 93) { break; }
+            pos = pos + 1;
+        }
+        if (pos < n) {
+            if ((load8(buf + pos) & 0xFF) == 93) { break; }
+        }
+    }
+    return loaded;
+}
 
 fn sv_save_trust_store(sv, path) {
     var store = load64(sv + 32);

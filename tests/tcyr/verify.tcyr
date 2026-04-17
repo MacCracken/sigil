@@ -253,6 +253,44 @@ fn main() {
     }
     assert_eq(cleared_pass, 1, "cleared key passes allowed_type");
 
+    # ============================================================
+    # Trust-store JSON round-trip: save, load into a fresh
+    # SigilVerifier, confirm every artifact's trust level is
+    # preserved across the serialize → deserialize boundary.
+    # ============================================================
+    test_group("trust-store save+load");
+    var art_a = trusted_artifact_new("/bin/ls", ARTIFACT_SYSTEM_BINARY, "hash_ls_ts");
+    artifact_set_trust_level(art_a, TRUST_VERIFIED);
+    sv_register_trusted(sv, art_a);
+    var art_b = trusted_artifact_new("/lib/libc.so", ARTIFACT_SYSTEM_BINARY, "hash_libc");
+    artifact_set_trust_level(art_b, TRUST_SYSTEM_CORE);
+    sv_register_system_core(sv, art_b);
+
+    var ts_path = "/tmp/sigil_trust_store_test.json";
+    syscall(87, ts_path);
+    assert_eq(sv_save_trust_store(sv, ts_path), ERR_NONE, "save ok");
+
+    var sv2 = sigil_verifier_new(keyring_new("/tmp/sigil_ts_keys2"), trust_policy_new());
+    var loaded_ct = sv_load_trust_store(sv2, ts_path);
+    assert_gte(loaded_ct, 2, "loaded ≥ 2 artifacts");
+    assert_eq(sv_trust_level_for(sv2, "hash_ls_ts"), TRUST_VERIFIED, "ls trust preserved");
+    assert_eq(sv_trust_level_for(sv2, "hash_libc"), TRUST_SYSTEM_CORE, "libc trust preserved");
+
+    # Paths with JSON-special chars must survive the escape round-trip.
+    var art_esc = trusted_artifact_new("/path/with \"quote\" and \\slash", ARTIFACT_CONFIG, "hash_escape");
+    artifact_set_trust_level(art_esc, TRUST_VERIFIED);
+    sv_register_trusted(sv, art_esc);
+    sv_save_trust_store(sv, ts_path);
+    var sv3 = sigil_verifier_new(keyring_new("/tmp/sigil_ts_keys3"), trust_policy_new());
+    sv_load_trust_store(sv3, ts_path);
+    assert_eq(sv_trust_level_for(sv3, "hash_escape"), TRUST_VERIFIED, "escape path roundtrip");
+    syscall(87, ts_path);
+
+    # Missing file is not a crash: returns 0 loaded.
+    var sv_empty = sigil_verifier_new(keyring_new("/tmp/sigil_ts_keys_empty"), trust_policy_new());
+    var n_missing = sv_load_trust_store(sv_empty, "/tmp/sigil_does_not_exist_ts.json");
+    assert_eq(n_missing, 0, "missing file returns 0");
+
     # Cleanup
     syscall(87, tmppath);
     syscall(87, tmppath2);
