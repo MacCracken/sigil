@@ -31,7 +31,7 @@
 - [ ] Cyrius CI workflow (.github/workflows/)
 - [ ] `cyrius fmt --check` pass
 - [ ] `cyrius lint` pass
-- [ ] VERSION / cyrius.toml sync verified
+- [ ] VERSION / cyrius.cyml sync verified
 
 ### v0.2.0 — Hardening
 

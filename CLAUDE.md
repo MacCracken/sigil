@@ -76,7 +76,7 @@ src/
 6. Internal review — performance, memory, correctness
 7. **Security check** — any new crypto code, key material handling, or input parsing reviewed for timing side-channels, buffer safety, and zeroization
 8. Documentation — update CHANGELOG, roadmap, docs
-9. Version check — VERSION and cyrius.toml in sync
+9. Version check — VERSION and cyrius.cyml in sync
 10. Return to step 1
 
 ### Security Hardening (before release)
@@ -111,7 +111,7 @@ Run a closeout pass before tagging x.Y.0 or x.0.0. Ship as the last patch of the
 5. **Security re-scan** — grep for new `sys_system`, unchecked writes, non-constant-time compares, missing zeroization, buffer size mismatches
 6. **Downstream check** — all consumers (daimon, kavach, ark, aegis, phylax, mela, stiva, argonaut) still build and pass tests with the new version
 7. **CHANGELOG/roadmap sync** — all docs reflect current state, version numbers consistent
-8. **Version verify** — VERSION, cyrius.toml, CHANGELOG header all match
+8. **Version verify** — VERSION, cyrius.cyml, CHANGELOG header all match
 9. **Full build from clean** — `rm -rf build && cyrius deps && cyrius build` passes clean
 
 ### Task Sizing
