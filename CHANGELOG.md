@@ -5,6 +5,70 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.8.0] — 2026-04-17
+
+### Added — certificate pinning (via agnosys)
+
+Sigil now ships a thin certpin facade over agnosys 1.0.0. The
+agnosys README had listed sigil as a consumer of
+`agnosys[tpm, ima, certpin]` since 0.98; TPM / IMA / Secure-Boot
+landed in 2.5.0 and certpin closes the remaining module.
+
+Same wrapper pattern as `src/tpm.cyr` / `src/ima.cyr` /
+`src/secureboot.cyr`: agnosys owns the wire format and the
+constant-time byte compare, sigil exposes a narrow Result-free
+surface that's safe to call on the hot path.
+
+- **`src/certpin.cyr`** — new module, 4 public functions:
+  - `sigil_cert_pin_status(host, actual_pin, pin_set, at)` — raw
+    `CERTPIN_*` enum (VALID / MISMATCH / EXPIRED / NO_PIN_CONFIGURED).
+    `at = 0` skips the expiry window check.
+  - `sigil_cert_pin_check(host, actual_pin, pin_set)` — fast
+    predicate. 1 iff VALID at `clock_epoch_secs()`. Collapses the
+    no-pin and mismatch cases to 0; use the raw status function
+    when the caller needs to distinguish them for first-use-trust
+    policy.
+  - `sigil_cert_pin_status_name(status)` — static C-string
+    ("valid" / "mismatch" / "expired" / "no_pin" / "unknown") for
+    logs and audit-event details. Names are advisory and must NOT
+    be parsed back.
+  - `sigil_cert_pin_compute(cert_path)` — wraps
+    `certpin_compute_spki_pin`, unwraps the agnosys Result to a
+    C-string or 0. Shells out to `openssl` via agnosys; intended
+    for pin-set construction at config time, not per-connection
+    use.
+- **`src/lib.cyr`** now includes `src/certpin.cyr` after the
+  other agnosys wrappers and before `src/verify.cyr`.
+
+### Test coverage
+
+- **`tests/tcyr/agnosys.tcyr`** adds 14 new certpin assertions
+  (26 total, was 12). Purely in-memory pin-set fixtures — no
+  network, no files, no openssl required on the CI host:
+  - Status-enum name mappings for all 4 CERTPIN_* codes plus
+    unknown-fallback.
+  - VALID path: active entry, correct pin, deterministic `now`
+    timestamp.
+  - MISMATCH path: active entry, wrong pin.
+  - NO_PIN_CONFIGURED path: unknown host.
+  - EXPIRED path: entry with `expires=1`, `now=1 000 000`.
+  - `sigil_cert_pin_compute` on a missing file returns 0
+    without propagating an agnosys `Err`.
+
+### Verified
+
+- 11/11 `.tcyr` pass (`agnosys.tcyr`: 26 assertions, was 12).
+- 3/3 fuzz harnesses OK.
+- 12/12 benches run; no regressions.
+- `./build/sigil-smoke` exit 0.
+
+### Note
+
+This closes the originally-planned 2.x roadmap. Remaining items in
+`docs/development/roadmap.md` (PQC, hybrid signatures, parallel
+batch verify, scatter-store for the fixed-base comb) are all
+"Future" — they depend on Cyrius or AGNOS work that hasn't landed.
+
 ## [2.7.0] — 2026-04-17
 
 ### Added — JSON load paths (round-trip support)

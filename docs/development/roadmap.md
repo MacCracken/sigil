@@ -3,14 +3,6 @@
 Forward-looking work only. For completed items and version history, see
 [CHANGELOG.md](../../CHANGELOG.md).
 
-## 2.8.0 — Certificate pinning via agnosys
-
-- [ ] Wrap `certpin_verify_pin`, `certpin_compute_spki_pin`,
-      `certpin_find_entry` into a sigil-facing API.
-- [ ] Add a `sigil_cert_pin_check(host, actual_pin, pin_set)` entry
-      point. Integrates with the SigilVerifier key-pin machinery.
-- [ ] Fixture pin sets for tests (no network required).
-
 ## Future
 
 - **PQC**: ML-DSA-65 signing when Cyrius implementations mature.

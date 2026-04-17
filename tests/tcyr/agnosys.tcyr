@@ -38,6 +38,7 @@ include "src/ed25519.cyr"
 include "src/tpm.cyr"
 include "src/ima.cyr"
 include "src/secureboot.cyr"
+include "src/certpin.cyr"
 
 fn is_bool(v) {
     if (v == 0) { return 1; }
@@ -119,6 +120,76 @@ fn main() {
     var nm = sigil_sb_state_name();
     assert(nm != 0, "state name ptr non-null");
     assert_gt(strlen(nm), 0, "state name non-empty");
+
+    # ============================================================
+    # Certificate pinning — purely in-memory fixtures. Build a
+    # CertPinSet with two hosts (one active, one expired), confirm
+    # VALID / MISMATCH / NO_PIN_CONFIGURED / EXPIRED paths all
+    # surface correctly from sigil_cert_pin_status, and that the
+    # convenience predicate `sigil_cert_pin_check` collapses the
+    # VALID case to 1 and everything else to 0.
+    #
+    # Real SPKI pins are 44-char base64 (SHA-256 + base64 padding).
+    # These fixtures use synthetic 44-char strings — the test
+    # doesn't validate pin format, only the verify decision path.
+    # ============================================================
+    test_group("certpin status enum");
+    assert_streq(sigil_cert_pin_status_name(CERTPIN_VALID), "valid", "valid name");
+    assert_streq(sigil_cert_pin_status_name(CERTPIN_MISMATCH), "mismatch", "mismatch name");
+    assert_streq(sigil_cert_pin_status_name(CERTPIN_EXPIRED), "expired", "expired name");
+    assert_streq(sigil_cert_pin_status_name(CERTPIN_NO_PIN_CONFIGURED), "no_pin", "no_pin name");
+    assert_streq(sigil_cert_pin_status_name(99), "unknown", "unknown fallback");
+
+    test_group("certpin fixture");
+    # Active entry for sigil.example.test
+    var host_a = "sigil.example.test";
+    var pin_a  = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnop==";   # 44 chars
+    var pins_a = alloc(8);
+    store64(pins_a, pin_a);
+    var entry_a = certpin_entry_new(host_a, 0);    # expires=0 → never expires
+    certpin_entry_set_pins(entry_a, pins_a, 1);
+
+    # Expired entry for expired.example.test (expires at t=1, now >> 1)
+    var host_x = "expired.example.test";
+    var pin_x  = "qponmlkjihgfedcbaZYXWVUTSRQPONMLKJIHGFEDCBA==";   # 44 chars
+    var pins_x = alloc(8);
+    store64(pins_x, pin_x);
+    var entry_x = certpin_entry_new(host_x, 1);
+    certpin_entry_set_pins(entry_x, pins_x, 1);
+
+    # Assemble pin set
+    var entries = alloc(16);
+    store64(entries, entry_a);
+    store64(entries + 8, entry_x);
+    var pin_set = certpin_set_new(1);              # enforce=1
+    certpin_set_set_entries(pin_set, entries, 2);
+
+    # Status path — use a fixed "now" to make expiry deterministic
+    var now = 1000000;
+
+    test_group("certpin valid");
+    assert_eq(sigil_cert_pin_status(host_a, pin_a, pin_set, now), CERTPIN_VALID, "active host + correct pin");
+    assert_eq(sigil_cert_pin_check(host_a, pin_a, pin_set), 1, "check predicate → 1");
+
+    test_group("certpin mismatch");
+    var wrong_pin = "0000000000000000000000000000000000000000000=";   # 44 chars
+    assert_eq(sigil_cert_pin_status(host_a, wrong_pin, pin_set, now), CERTPIN_MISMATCH, "active host + wrong pin");
+    assert_eq(sigil_cert_pin_check(host_a, wrong_pin, pin_set), 0, "check predicate → 0");
+
+    test_group("certpin no_pin");
+    assert_eq(sigil_cert_pin_status("unknown.example.test", pin_a, pin_set, now), CERTPIN_NO_PIN_CONFIGURED, "unknown host");
+    assert_eq(sigil_cert_pin_check("unknown.example.test", pin_a, pin_set), 0, "unknown host → not valid");
+
+    test_group("certpin expired");
+    assert_eq(sigil_cert_pin_status(host_x, pin_x, pin_set, now), CERTPIN_EXPIRED, "expired entry");
+    assert_eq(sigil_cert_pin_check(host_x, pin_x, pin_set), 0, "expired → not valid");
+
+    # Compute wrapper — no cert available in the test sandbox; just
+    # confirm the function returns 0 on a bogus path rather than
+    # crashing or propagating a Result.
+    test_group("certpin compute");
+    var bogus_pin = sigil_cert_pin_compute("/tmp/sigil_does_not_exist_cert.pem");
+    assert_eq(bogus_pin, 0, "missing cert returns 0");
 
     return assert_summary();
 }

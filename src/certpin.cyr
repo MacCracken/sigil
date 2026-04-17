@@ -1,0 +1,61 @@
+# certpin.cyr — certificate-pin trust primitive (thin wrapper over
+# agnosys certpin_*). Same pattern as src/tpm.cyr, src/ima.cyr,
+# src/secureboot.cyr: sigil owns the policy surface, agnosys owns
+# the wire format and constant-time primitives.
+#
+# Sigil-facing API:
+#   - `sigil_cert_pin_status(host, actual_pin, pin_set, at)` —
+#     returns a raw CERTPIN_* constant. Use when callers need to
+#     distinguish mismatch from "no pin configured".
+#   - `sigil_cert_pin_check(host, actual_pin, pin_set)` —
+#     convenience predicate. 1 iff CERTPIN_VALID using now() as the
+#     timestamp. Use in the hot path (per-connection verification).
+#   - `sigil_cert_pin_status_name(status)` — static-C-string name
+#     ("valid"/"mismatch"/"expired"/"no_pin"/"unknown") for logs
+#     and audit messages.
+#   - `sigil_cert_pin_compute(cert_path)` — compute the SPKI
+#     SHA-256 pin (base64) for a PEM cert on disk. Shells out via
+#     agnosys; returns 0 on any agnosys error so callers don't have
+#     to unwrap Result types.
+
+# Convert agnosys' CERTPIN_* enum to a stable human-readable name.
+# The enum values are the trust decision; the names are advisory
+# (logs, audit events) and must NOT be parsed back into enum by
+# callers — use the enum directly.
+fn sigil_cert_pin_status_name(status) {
+    if (status == CERTPIN_VALID) { return "valid"; }
+    if (status == CERTPIN_MISMATCH) { return "mismatch"; }
+    if (status == CERTPIN_EXPIRED) { return "expired"; }
+    if (status == CERTPIN_NO_PIN_CONFIGURED) { return "no_pin"; }
+    return "unknown";
+}
+
+# Raw status: returns a CERTPIN_* constant from agnosys.
+# `at` is a unix timestamp; pass 0 to skip the expiry check
+# (useful for tests). Constant-time comparison happens inside
+# agnosys' certpin_ct_streq; sigil does not add a second compare.
+fn sigil_cert_pin_status(host, actual_pin, pin_set, at) {
+    return certpin_verify_pin(host, actual_pin, pin_set, at);
+}
+
+# Fast predicate for the hot path: 1 if pinned and matching at
+# current wall-clock time, else 0. Does NOT distinguish MISMATCH
+# from NO_PIN_CONFIGURED — use sigil_cert_pin_status when the
+# caller needs to report "no pin was set for this host" separately
+# from "pin mismatch" (e.g. for a first-use-trust policy).
+fn sigil_cert_pin_check(host, actual_pin, pin_set) {
+    var s = certpin_verify_pin(host, actual_pin, pin_set, clock_epoch_secs());
+    if (s == CERTPIN_VALID) { return 1; }
+    return 0;
+}
+
+# Compute the base64(SHA-256(SPKI)) pin for a PEM cert on disk.
+# Returns a fresh C-string on success, or 0 on any agnosys error
+# (bad path, openssl missing, cert malformed). Callers must null-
+# check. Shells out via agnosys' openssl pipeline — not on the hot
+# path; intended for pin-set construction at config time.
+fn sigil_cert_pin_compute(cert_path) {
+    var res = certpin_compute_spki_pin(cert_path);
+    if (is_err_result(res) == 1) { return 0; }
+    return result_unwrap(res);
+}
