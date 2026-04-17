@@ -1,20 +1,33 @@
 [package]
 name = "sigil"
-version = "2.8.2"
+version = "2.8.3"
 description = "Sigil — system-wide trust verification for AGNOS. Ed25519, SHA-256/512, HMAC, integrity, audit."
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/sigil"
 language = "cyrius"
-cyrius = "5.2.0"
+cyrius = "5.2.1"
 
 [build]
 entry = "programs/smoke.cyr"
 output = "build/sigil-smoke"
 defines = ["SIGIL_SMOKE"]
-# `modules` declares the dependency-sorted public src/ surface consumed
-# by `cyrius distlib`. Order matches src/lib.cyr's include list — a
-# module may reference any symbol defined earlier. Keep both files in
-# sync when adding a new src module.
+
+# `modules` declares the src/ files `cyrius distlib` concatenates
+# into `dist/sigil.cyr`. Order matches src/lib.cyr's includes —
+# each module may reference symbols defined earlier.
+#
+# The bundle must be self-contained (Cyrius 5.2.1's distlib
+# compile-checks the result). That means the four agnosys-wrapping
+# modules are DELIBERATELY EXCLUDED from the dist:
+#
+#   src/tpm.cyr, src/ima.cyr, src/secureboot.cyr, src/certpin.cyr
+#
+# Those four reference agnosys enums (`TPM_SHA256`, `SB_ENABLED`,
+# `CERTPIN_VALID`, …) and agnosys functions that are NOT bundled
+# here. Consumers who want the AGNOS kernel-interface layer should
+# include via `src/lib.cyr` against a sibling checkout, which pulls
+# agnosys as a proper dep. `dist/sigil.cyr` is the self-contained
+# crypto + trust engine core.
 modules = [
     "src/types.cyr",
     "src/error.cyr",
@@ -29,10 +42,6 @@ modules = [
     "src/integrity.cyr",
     "src/policy.cyr",
     "src/audit.cyr",
-    "src/tpm.cyr",
-    "src/ima.cyr",
-    "src/secureboot.cyr",
-    "src/certpin.cyr",
     "src/verify.cyr",
 ]
 

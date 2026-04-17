@@ -5,6 +5,67 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.8.3] — 2026-04-17
+
+### Fixed — dist bundle was referencing un-bundled agnosys symbols
+
+Cyrius 5.2.1 added a compile-check to `cyrius distlib`: after
+concatenating the declared modules, it compiles the resulting bundle
+standalone to catch undefined-symbol references. The first run
+against sigil 2.8.2 flagged the bundle as NOT self-contained.
+
+The 2.8.2 bundle (from 2.8.2's manifest) included all 18 src modules,
+four of which wrap agnosys (`tpm.cyr`, `ima.cyr`, `secureboot.cyr`,
+`certpin.cyr`) and reference enums like `TPM_SHA256`, `SB_ENABLED`,
+`CERTPIN_VALID` plus functions like `tpm_seal`, `secureboot_detect_state`
+that come from `lib/agnosys.cyr`. Those includes are stripped by
+`distlib`, so a consumer pulling only `dist/sigil.cyr` could not
+compile — the bundle silently referenced symbols a consumer had
+no way to provide unless they also pulled agnosys and included
+its bundle first in the right order.
+
+This was a real regression introduced in 2.5.0 when the agnosys
+wrappers landed (the hand-maintained `scripts/bundle.sh` happened
+not to list them, which — by accident — kept the bundle self-
+contained through 2.8.0. 2.8.2's manifest-driven `distlib` adopted
+every module including the wrappers, exposing the issue.)
+
+Cyrius' CHANGELOG 5.2.1 entry called this out and held their stdlib
+fold-in at sigil 2.1.2 pending a fix. This release is that fix.
+
+### Changed — bundle scope narrowed
+
+- **`[build] modules`** in `cyrius.cyml` now explicitly excludes
+  the four agnosys-wrapping modules. The bundle ships as the
+  self-contained core: crypto (SHA-256/512, HMAC, Ed25519),
+  constant-time compare, bigint, trust engine, integrity verifier,
+  revocation list + CRL, audit log, verification engine. 14
+  modules / 5118 lines.
+- **Consumers who want the AGNOS kernel-interface layer** (TPM
+  seal/unseal, IMA status, Secure-Boot detection, certificate
+  pinning) should include sigil via `src/lib.cyr` against a git-
+  pinned checkout — that pulls agnosys as a proper dep and gets
+  all 18 modules in the correct order. The `dist/sigil.cyr` path
+  is now documented as "core library only".
+- The manifest comment on `modules = [...]` makes the exclusion
+  explicit so a future maintainer doesn't re-add the wrappers and
+  break the bundle again.
+
+### Changed — toolchain bump
+
+- **`cyrius` pin: 5.2.0 → 5.2.1** (`cyrius.cyml` +
+  `.github/workflows/ci.yml`). Picks up the `distlib` compile-check
+  that caught this issue, plus `cyrius deps --lock` / `--verify`
+  and `cyrius publish`.
+
+### Verified
+
+- `cyrius distlib` → clean exit (no self-containment warning),
+  `dist/sigil.cyr: 5118 lines (v2.8.3)`.
+- 11/11 `.tcyr` pass, 3/3 fuzz OK, 12/12 benches run, smoke
+  exit 0 (library behaviour is unchanged — agnosys wrappers are
+  still built and tested via `src/lib.cyr`).
+
 ## [2.8.2] — 2026-04-17
 
 ### Fixed — distribution bundle was missing 3 modules
