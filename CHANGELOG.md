@@ -52,11 +52,64 @@ the round-trip for both.
   escape round-trip (path containing `"` and `\`) and a
   missing-file check. Assertion count 37 → 43.
 
+### Added — final parity closeout
+
+One last `rust-old/` sweep before removal surfaced two remaining
+missing surfaces. Both landed in this release so the rust-old
+reference can be deleted with no outstanding parity debt.
+
+- **`hash_file_with(path, algorithm)`** in `src/trust.cyr`. Mirror
+  of `hash_data_with` but for on-disk content — dispatches to
+  SHA-256 or SHA-512 by `HASH_ALG_*`. Unknown algorithm falls
+  back to SHA-256 (same policy as `hash_data_with`). Uses
+  streaming 4 KB reads, same as `hash_file`.
+- **`sv_verify_package(sv, path, expected_hash)`** in
+  `src/verify.cyr`. Package install-time verification path:
+  wraps `sv_verify_artifact(sv, path, ARTIFACT_PACKAGE)` and —
+  when `expected_hash` is non-zero — layers a constant-time
+  content-hash match. Mismatch adds a failing `"expected_hash"`
+  trust-check and fails the whole result. Pass `0` as
+  `expected_hash` to verify without a known hash.
+  - Note vs. Rust: the Rust `verify_package` had an early-exit
+    when `policy.verify_on_install` was false. That gate is
+    dropped here — `verify_on_install` has been a user-set
+    policy knob for several releases and consumers enforce it
+    themselves before calling in.
+
+### Removed — `rust-old/` reference tree
+
+6 552 lines of Rust across 13 files (audit / chain / error /
+integrity / lib / policy / tests / tpm / trust / types / verify
+plus Cargo manifests). Preserved through the 2.x series for
+cross-port audits; the last gap surfaced by this 2.7.0 sweep is
+closed above. Removal clears the repo root of Rust artifacts and
+takes `rust-old/target/` off the `.gitignore`. The
+cross-implementation benchmark baseline in
+`benchmarks-rust-v-cyrius.md` stays as archival reference — it
+is never rebuilt per release.
+
+- `CLAUDE.md` — dropped the "Rust source preserved in `rust-old/`"
+  TDD discipline line and the "Ported from: Rust v1.0.0" status
+  block now reads "removed in 2.7.0 after parity closeout".
+- `SECURITY.md` — `rust-old/` pointer replaced with the same
+  closeout reference.
+- `.gitignore` — `/rust-old/target/` entry removed.
+
+### Test coverage
+
+- **`sigil.tcyr`** adds `hash_file_with` (4 assertions: SHA-256,
+  SHA-512, unknown-algo fallback, missing-file). Assertion count
+  92 → 96.
+- **`verify.tcyr`** adds `verify_package` (3 groups × ~2 checks:
+  no expected hash → no `expected_hash` check surfaced; matching
+  hash → check passes; mismatched hash → check fails + whole
+  result fails). Assertion count 43 → 48.
+
 ### Verified
 
 - 11/11 `.tcyr` pass. 3/3 fuzz. 12/12 benches. Smoke exit 0.
-- `./build/sigil-smoke` unchanged (loaders are opt-in — not on the
-  hot path).
+- `./build/sigil-smoke` unchanged (loaders + new parity fns are
+  opt-in — not on the hot path).
 
 ## [2.6.0] — 2026-04-17
 

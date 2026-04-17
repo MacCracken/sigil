@@ -124,7 +124,6 @@ Run a closeout pass before tagging x.Y.0 or x.0.0. Ship as the last patch of the
 
 - Write tests FIRST for new modules/features, then implement until they pass
 - Benchmarks alongside, not after — regressions vs `benches/history.csv` are a release blocker
-- Rust source preserved in `rust-old/` for reference during cross-checks
 
 ## Key Design Constraints
 
@@ -187,8 +186,10 @@ Follow [Keep a Changelog](https://keepachangelog.com/). Performance claims MUST 
 
 ## Current Status
 
-- **Ported from**: Rust v1.0.0 (149 tests, 12 benchmarks)
-- **Rust source**: preserved in `rust-old/`
-- **Rust benchmarks**: preserved in `benchmarks-rust-v-cyrius.md`
-- **Version**: 2.1.1 (Cyrius, see `VERSION` for current)
-- **Phase**: Hardening — security audit workflow active
+- **Ported from**: Rust v1.0.0 (149 tests, 12 benchmarks); original
+  Rust source removed in 2.7.0 after parity closeout. See the
+  2.0.0 → 2.7.1 CHANGELOG entries for the port audit trail.
+- **Rust benchmark baseline**: `benchmarks-rust-v-cyrius.md`
+  (archived comparison, not rebuilt per release).
+- **Version**: see `VERSION` for current.
+- **Phase**: Released, security audit workflow active.

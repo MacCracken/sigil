@@ -48,5 +48,6 @@ follows the referenced standard:
   `tpm_random` in `src/tpm.cyr` and `generate_keypair` in `src/trust.cyr`
 
 Pre-port Rust crate dependencies (`ed25519-dalek`, `sha2`, `subtle`,
-`rand`) are no longer used and the Rust source is retained only for
-reference in `rust-old/`.
+`rand`) are no longer used. The original Rust source was removed
+in 2.7.0 after full parity closeout; `benchmarks-rust-v-cyrius.md`
+retains the cross-implementation performance baseline.

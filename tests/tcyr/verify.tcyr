@@ -291,6 +291,62 @@ fn main() {
     var n_missing = sv_load_trust_store(sv_empty, "/tmp/sigil_does_not_exist_ts.json");
     assert_eq(n_missing, 0, "missing file returns 0");
 
+    # ============================================================
+    # sv_verify_package — package install-time verification with
+    # optional expected_hash. Passing 0 as expected_hash means
+    # "no hash check"; providing one adds a dedicated "expected_hash"
+    # TrustCheck that fails the whole result on mismatch.
+    # ============================================================
+    test_group("verify_package no hash");
+    var pkg_path = "/tmp/sigil_pkg_test.bin";
+    var pkg_fd = file_open(pkg_path, 577, 420);
+    file_write(pkg_fd, "package payload", 15);
+    file_close(pkg_fd);
+    var pkg_hash_actual = hash_file(pkg_path);
+
+    # Without an expected hash, behavior matches sv_verify_artifact.
+    var vr_pkg = sv_verify_package(sv, pkg_path, 0);
+    assert(vr_pkg != 0, "package result non-null");
+    # No "expected_hash" check when expected_hash is 0.
+    var checks_pkg = vresult_checks(vr_pkg);
+    var has_exp_check = 0;
+    var ci_p = 0;
+    while (ci_p < vec_len(checks_pkg)) {
+        if (streq(check_name(vec_get(checks_pkg, ci_p)), "expected_hash") == 1) { has_exp_check = 1; }
+        ci_p = ci_p + 1;
+    }
+    assert_eq(has_exp_check, 0, "no expected_hash check without expected");
+
+    test_group("verify_package hash match");
+    var vr_pkg_ok = sv_verify_package(sv, pkg_path, pkg_hash_actual);
+    var checks_ok = vresult_checks(vr_pkg_ok);
+    var exp_passed = 0;
+    var ci_ok = 0;
+    while (ci_ok < vec_len(checks_ok)) {
+        var tc_ok = vec_get(checks_ok, ci_ok);
+        if (streq(check_name(tc_ok), "expected_hash") == 1) {
+            if (check_passed(tc_ok) == 1) { exp_passed = 1; }
+        }
+        ci_ok = ci_ok + 1;
+    }
+    assert_eq(exp_passed, 1, "expected_hash passes when matching");
+
+    test_group("verify_package hash mismatch");
+    var vr_pkg_bad = sv_verify_package(sv, pkg_path, "0000000000000000000000000000000000000000000000000000000000000000");
+    assert_eq(vresult_passed(vr_pkg_bad), 0, "mismatch fails result");
+    var checks_bad = vresult_checks(vr_pkg_bad);
+    var exp_failed = 0;
+    var ci_b = 0;
+    while (ci_b < vec_len(checks_bad)) {
+        var tc_b = vec_get(checks_bad, ci_b);
+        if (streq(check_name(tc_b), "expected_hash") == 1) {
+            if (check_passed(tc_b) == 0) { exp_failed = 1; }
+        }
+        ci_b = ci_b + 1;
+    }
+    assert_eq(exp_failed, 1, "expected_hash fails when mismatched");
+    syscall(87, pkg_path);
+
     # Cleanup
     syscall(87, tmppath);
     syscall(87, tmppath2);

@@ -60,6 +60,25 @@ fn main() {
     var h99 = hash_data_with("hello world", 11, 99);
     assert_streq(h99, "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9", "unknown alg falls back to sha256");
 
+    test_group("hash_file_with");
+    # Write a known-content temp file; verify both algorithm paths
+    # produce matching hashes (in-memory vs on-disk).
+    var hfw_path = "/tmp/sigil_hash_file_with.bin";
+    var hfw_fd = file_open(hfw_path, 577, 420);
+    file_write(hfw_fd, "hello world", 11);
+    file_close(hfw_fd);
+    var hfw_256 = hash_file_with(hfw_path, HASH_ALG_SHA256);
+    assert_streq(hfw_256, "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9", "hash_file_with sha256");
+    var hfw_512 = hash_file_with(hfw_path, HASH_ALG_SHA512);
+    assert_streq(hfw_512, "309ecc489c12d6eb4cc40f50c902f2b4d0ed77ee511a7c7a9bcd3ca86d4cd86f989dd35bc5ff499670da34255b45b0cfd830e81f605dcf7dc5542e93ae9cd76f", "hash_file_with sha512");
+    # Unknown algorithm: same fallback policy as hash_data_with.
+    var hfw_fb = hash_file_with(hfw_path, 99);
+    assert_streq(hfw_fb, "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9", "unknown alg → sha256");
+    # Missing file returns 0 (same contract as hash_file).
+    var hfw_missing = hash_file_with("/tmp/sigil_does_not_exist_hfw.bin", HASH_ALG_SHA256);
+    assert_eq(hfw_missing, 0, "missing file returns 0");
+    syscall(87, hfw_path);
+
     test_group("sign and verify");
     var sig = sign_data("test message", 12, &sk);
     assert(sig != 0, "signature not null");

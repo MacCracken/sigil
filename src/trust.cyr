@@ -473,6 +473,28 @@ fn hash_file(path) {
     return hex_encode(&digest, 32);
 }
 
+# File hash with algorithm selection (mirror of hash_data_with for
+# on-disk content). Returns hex C-string, or 0 on file open failure.
+# Unknown algorithm falls back to SHA-256 — trust engine must never
+# silently skip hashing.
+fn hash_file_with(path, algorithm) {
+    if (algorithm != HASH_ALG_SHA512) { return hash_file(path); }
+    var fd = file_open(path, 0, 0);
+    if (fd < 0) { return 0; }
+    var ctx = sha512_init();
+    var buf[4096];
+    var n = file_read(fd, &buf, 4096);
+    while (n > 0) {
+        sha512_update(ctx, &buf, n);
+        n = file_read(fd, &buf, 4096);
+    }
+    file_close(fd);
+    var digest[64];
+    sha512_finalize(ctx, &digest);
+    fl_free(ctx);
+    return hex_encode(&digest, 64);
+}
+
 # ================================================================
 # Signing / verification (Ed25519)
 # ================================================================

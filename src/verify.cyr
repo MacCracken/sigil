@@ -374,6 +374,43 @@ fn sv_verify_agent(sv, path) {
 }
 
 # ================================================================
+# sv_verify_package(sv, path, expected_hash)
+#
+# Package-specific verification path. Calls sv_verify_artifact with
+# ARTIFACT_PACKAGE, then — if `expected_hash` is non-zero — layers
+# a constant-time content-hash match. A hash mismatch marks the
+# whole result as failed. Mirrors the Rust `verify_package(path,
+# Option<expected_hash>)` signature (pass 0 as expected_hash for
+# "no expected hash").
+#
+# The Rust version had an early-exit when policy.verify_on_install
+# was false; that gate is no longer needed — verify_on_install has
+# been a user-set policy knob for several releases and consumers
+# (argonaut/ark) enforce it themselves before calling in.
+# ================================================================
+
+fn sv_verify_package(sv, path, expected_hash) {
+    var vr = sv_verify_artifact(sv, path, ARTIFACT_PACKAGE);
+    if (expected_hash == 0) { return vr; }
+
+    var artifact = vresult_artifact(vr);
+    var actual = artifact_content_hash(artifact);
+    var matches = 0;
+    if (actual != 0) {
+        if (ct_eq(actual, strlen(actual), expected_hash, strlen(expected_hash)) == 1) {
+            matches = 1;
+        }
+    }
+    if (matches == 1) {
+        vresult_add_check(vr, trust_check_new("expected_hash", 1, "Content hash matches expected"));
+    } else {
+        vresult_add_check(vr, trust_check_new("expected_hash", 0, "Hash mismatch"));
+        vresult_set_passed(vr, 0);
+    }
+    return vr;
+}
+
+# ================================================================
 # Revocation management
 # ================================================================
 
