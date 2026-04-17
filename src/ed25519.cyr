@@ -166,8 +166,13 @@ fn ge_double(r, p) {
 }
 
 # ================================================================
-# Scalar multiplication: R = [s]P (double-and-add)
-# s is 32 bytes little-endian scalar
+# Scalar multiplication: R = [s]P  (constant-time double-and-add)
+# s is 32 bytes little-endian scalar.
+#
+# This loop MUST NOT branch on any bit of s: s is secret when called
+# from ed25519_keypair / ed25519_sign (the clamped private scalar).
+# Every iteration unconditionally computes both (r + q) and (2q) and
+# uses a branchless select to either adopt or discard the addition.
 # ================================================================
 
 var _gsm_q = 0;
@@ -175,6 +180,22 @@ var _gsm_tmp = 0;
 var _gsm_i = 0;
 var _gsm_r = 0;
 var _gsm_s = 0;
+var _gsm_bit = 0;
+
+# Constant-time conditional move on a 128-byte extended point.
+# If bit == 1: dst := src.  If bit == 0: dst unchanged.
+# No branches on `bit`; uses mask = -bit  (0 or all-ones).
+fn ge_cmov(dst, src, bit) {
+    var mask = 0 - bit;
+    var i = 0;
+    while (i < 128) {
+        var d = load64(dst + i);
+        var sv = load64(src + i);
+        store64(dst + i, d ^ (mask & (d ^ sv)));
+        i = i + 8;
+    }
+    return 0;
+}
 
 fn ge_scalarmult(r, s, p) {
     if (_gsm_q == 0) { _gsm_q = alloc(128); _gsm_tmp = alloc(128); }
@@ -185,13 +206,17 @@ fn ge_scalarmult(r, s, p) {
 
     _gsm_i = 0;
     while (_gsm_i < 256) {
+        # Extract bit_i of s before any nested call; stash in a global
+        # because locals are clobbered across ge_add / ge_cmov.
         var byte_idx = _gsm_i / 8;
         var bit_idx = _gsm_i % 8;
-        var bit = (load8(_gsm_s + byte_idx) >> bit_idx) & 1;
-        if (bit == 1) {
-            ge_add(_gsm_tmp, _gsm_r, _gsm_q);
-            ge_copy(_gsm_r, _gsm_tmp);
-        }
+        _gsm_bit = (load8(_gsm_s + byte_idx) >> bit_idx) & 1;
+
+        # Unconditional add; unconditional select.
+        ge_add(_gsm_tmp, _gsm_r, _gsm_q);
+        ge_cmov(_gsm_r, _gsm_tmp, _gsm_bit);
+
+        # Unconditional double of q.
         ge_double(_gsm_tmp, _gsm_q);
         ge_copy(_gsm_q, _gsm_tmp);
         _gsm_i = _gsm_i + 1;

@@ -1,58 +1,49 @@
 # Sigil Roadmap
 
-## Completed
+Forward-looking work only. For completed items and version history, see
+[CHANGELOG.md](../../CHANGELOG.md).
 
-### Cyrius Port (v0.1.0)
+## 2.3.0 — Fixed-base signing performance
 
-- [x] Full port from Rust v1.0.0 to Cyrius
-- [x] Ed25519 (RFC 8032) — keypair, sign, verify, RFC test vectors pass
-- [x] SHA-256 (FIPS 180-4), SHA-512, HMAC-SHA256 (RFC 2104)
-- [x] Constant-time comparison (bitwise OR accumulation)
-- [x] All type system: TrustLevel, TrustPolicy, TrustedArtifact, VerificationResult, SigilStats
-- [x] SigilError codes and error constructors
-- [x] PublisherKeyring with rotation, chain validation, persistence
-- [x] IntegrityVerifier with snapshot export/import
-- [x] RevocationList with temporal semantics, CRL, merge
-- [x] AuditLog with JSON lines output
-- [x] SigilVerifier trust engine (verify, sign, batch, compliance, diff, boot chain)
-- [x] TPM module with runtime detection, PCR measurement
-- [x] 206 tests, 0 failures
-- [x] Rust debris cleaned (target/, Cargo files, CI, fuzz targets)
+- [ ] **Precomputed base-point table for `_ed_B`**. Fixed-base
+      scalarmult via 4-bit windowed comb: 64 additions, no
+      doublings. Target: `ed25519_keypair` / `ed25519_sign`
+      ≈ 5.7ms → ~1.0ms. Binary cost: ~16KB of precomputed point
+      data. Must remain constant-time: use `ge_cmov` across all 16
+      window entries so memory-access pattern does not depend on
+      the window value.
+- [ ] Separate `ge_scalarmult_base` fast path from the generic
+      `ge_scalarmult`; `ge_scalarmult` (variable base, used by
+      `ed25519_verify`) retains the CT loop from 2.2.1.
+- [ ] Unit tests for `ge_cmov` bit-select cases (currently covered
+      only transitively by RFC 8032 vector 1).
 
-## Backlog
+## 2.4.0 — Coverage & correctness
 
-### P(-1): Scaffold Hardening (current)
+- [ ] Ed25519 RFC 8032 test vectors 2–5 (currently only vector 1).
+- [ ] `fp_inv` regression tests — direct `fp_inv(a) * a ≡ 1 (mod p)`
+      check on a spread of inputs (the addition chain is currently
+      validated only through `ge_to_bytes`).
+- [ ] Decision on the stubbed `SigilVerifier` cache fields
+      (`sv_set_cache_enabled`, `sv_clear_cache`) — wire up or remove.
+      Flagged as breaking in 2.1.2 CHANGELOG.
+- [ ] Expanded fuzz corpus / longer fuzz runs in CI.
 
-- [x] Rust debris removal
-- [x] .gitignore updated for Cyrius
-- [x] CHANGELOG, README, roadmap updated
-- [ ] Benchmark suite (Cyrius .bcyr files)
-- [ ] Fuzz harnesses (Cyrius .fcyr files)
-- [ ] Cyrius CI workflow (.github/workflows/)
-- [ ] `cyrius fmt --check` pass
-- [ ] `cyrius lint` pass
-- [ ] VERSION / cyrius.cyml sync verified
+## 2.5.0 — AGNOS integration
 
-### v0.2.0 — Hardening
-
-- [ ] Constant-time scalar multiplication for Ed25519 signing (Montgomery ladder)
-- [ ] Ed25519 RFC 8032 test vectors 2-5
-- [ ] Benchmark baseline: all crypto ops, keyring, verification
-- [ ] Fuzz targets: JSON deserialization paths, key generation, signature verification
-- [ ] Key zeroization audit — ensure all secret key paths zeroed
-- [ ] `#derive(Serialize)` on all public types
-
-### v0.3.0 — Integration
-
-- [ ] agnosys TPM integration: replace seal/unseal stubs with real tpm2-tools calls
-- [ ] IMA measurement integration via agnosys
-- [ ] Secure boot state detection
-- [ ] Trust store JSON load (currently save-only)
-- [ ] Audit log JSON lines load
+- [ ] Replace TPM seal/unseal stubs with real `agnosys` TPM syscalls
+      when those land.
+- [ ] IMA measurement integration via `agnosys`.
+- [ ] Secure-boot state detection at startup.
+- [ ] Trust-store JSON load (currently save-only).
+- [ ] Audit-log JSON-lines load (currently write-only).
 
 ## Future
 
-- PQC: ML-DSA-65 signing when Cyrius implementations mature
-- Hybrid Ed25519 + ML-DSA-65 dual signatures
-- Certificate pinning integration via agnosys certpin
-- Parallel batch verification (when Cyrius threading matures)
+- **PQC**: ML-DSA-65 signing when Cyrius implementations mature.
+- **Hybrid Ed25519 + ML-DSA-65 dual signatures** for transitional
+  trust chains.
+- **Certificate pinning** integration via `agnosys certpin`.
+- **Parallel batch verification** when Cyrius threading matures.
+- **Lookup-resistant table access** for the fixed-base comb (scatter
+  across all rows) if cache-timing becomes a documented concern.

@@ -5,6 +5,54 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.1] — 2026-04-16
+
+### Security
+
+Closes the secret-data branch in `ge_scalarmult` (`src/ed25519.cyr`).
+The previous loop read bit `i` of the secret scalar `s` and took a
+different code path depending on its value (`if (bit == 1)` → one
+extra `ge_add`). On a shared host this yields a timing side-channel
+that can reveal the Hamming weight of `s` and, with enough samples,
+the scalar itself. Listed on the roadmap as v0.2.0 "Constant-time
+scalar multiplication" — now done.
+
+- **`ge_cmov(dst, src, bit)`**: branchless conditional move over a
+  128-byte extended point using `mask = -bit` and bitwise XOR-select.
+  No branches on `bit`; `dst` receives `src` iff `bit == 1`.
+- **`ge_scalarmult`**: every iteration unconditionally computes
+  `ge_add(tmp, r, q)` then `ge_cmov(r, tmp, bit_i)`. Doubling of `q`
+  is likewise unconditional. No branch or memory-access pattern
+  depends on any bit of `s`.
+
+### Performance
+
+The constant-time loop replaces ~128 conditional adds with 256
+unconditional adds + 256 `ge_cmov` calls. This is the expected price
+of closing the side-channel — recorded here, not treated as a
+regression:
+
+| op | 2.2.0 | 2.2.1 | Δ |
+|---|---|---|---|
+| `ge_scalarmult` | 3.46ms | 5.25ms | +51% |
+| `ed25519_keypair` | 3.87ms | 5.57ms | +44% |
+| `ed25519_sign` | ~4.0ms | 5.73ms | +43% |
+| `fp_inv` | 252us | 265us | ~flat |
+| `sha256_4kb` | 251us | 256us | ~flat |
+
+`ed25519_verify` also goes through the constant-time path; verify
+takes public data so constant-time is not required but harmless. The
+planned 2.3.0 fixed-base precomputed table for `_ed_B` will claw back
+the scalarmult cost (and then some) for keypair/sign specifically.
+
+### Verified
+
+- 10/10 `.tcyr` files pass, including RFC 8032 Ed25519 test vector 1
+  (which exercises a mix of `bit=0` / `bit=1` iterations — a buggy
+  `ge_cmov` would corrupt the public key).
+- `./build/sigil-smoke` → exit 0.
+- `tests/bcyr/sigil.bcyr`: all 11 benchmarks run.
+
 ## [2.2.0] — 2026-04-16
 
 ### Changed
