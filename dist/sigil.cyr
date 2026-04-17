@@ -72,11 +72,6 @@ fn trust_level_ge(a, b) {
     return 0;
 }
 
-fn trust_level_gt(a, b) {
-    if (trust_level_rank(a) > trust_level_rank(b)) { return 1; }
-    return 0;
-}
-
 fn trust_level_name(level) {
     if (level == TRUST_SYSTEM_CORE) { return "SystemCore"; }
     if (level == TRUST_VERIFIED) { return "Verified"; }
@@ -168,8 +163,6 @@ fn policy_set_verify_on_execute(p, v) { store64(p + 40, v); return p; }
 fn policy_set_revocation_check(p, v) { store64(p + 48, v); return p; }
 fn policy_set_hash_alg(p, v) { store64(p + 56, v); return p; }
 
-fn trust_policy_free(p) { fl_free(p); return 0; }
-
 # ================================================================
 # TrustCheck (24 bytes)
 # ================================================================
@@ -189,27 +182,9 @@ fn trust_check_new(name, passed, detail) {
 fn check_name(tc) { return load64(tc); }
 fn check_passed(tc) { return load64(tc + 8); }
 fn check_detail(tc) { return load64(tc + 16); }
-fn trust_check_free(tc) { fl_free(tc); return 0; }
 
 # ================================================================
-# Cosignature (16 bytes)
-# ================================================================
-# Layout:
-#   +0   key_id      (C-string pointer)
-#   +8   signature   (pointer to raw bytes)
-
-fn cosignature_new(key_id, sig_ptr) {
-    var cs = fl_alloc(16);
-    store64(cs, key_id);
-    store64(cs + 8, sig_ptr);
-    return cs;
-}
-
-fn cosig_key_id(cs) { return load64(cs); }
-fn cosig_signature(cs) { return load64(cs + 8); }
-
-# ================================================================
-# TrustedArtifact (96 bytes)
+# TrustedArtifact (80 bytes)
 # ================================================================
 # Layout:
 #   +0   path              (C-string pointer)
@@ -222,11 +197,9 @@ fn cosig_signature(cs) { return load64(cs + 8); }
 #   +56  trust_level       (i64)
 #   +64  verified_at       (i64, epoch seconds, 0 = never)
 #   +72  metadata          (hashmap pointer, 0 = none)
-#   +80  cosigners         (vec pointer, 0 = none)
-#   +88  cosigner_count    (i64)
 
 fn trusted_artifact_new(path, artifact_type, content_hash) {
-    var a = fl_alloc(96);
+    var a = fl_alloc(80);
     store64(a, path);
     store64(a + 8, artifact_type);
     store64(a + 16, content_hash);
@@ -237,8 +210,6 @@ fn trusted_artifact_new(path, artifact_type, content_hash) {
     store64(a + 56, TRUST_UNVERIFIED);
     store64(a + 64, 0);
     store64(a + 72, 0);
-    store64(a + 80, 0);
-    store64(a + 88, 0);
     return a;
 }
 
@@ -252,8 +223,6 @@ fn artifact_signer_key_id(a) { return load64(a + 48); }
 fn artifact_trust_level(a) { return load64(a + 56); }
 fn artifact_verified_at(a) { return load64(a + 64); }
 fn artifact_metadata(a) { return load64(a + 72); }
-fn artifact_cosigners(a) { return load64(a + 80); }
-fn artifact_cosigner_count(a) { return load64(a + 88); }
 
 fn artifact_set_signature(a, sig, sig_len) {
     store64(a + 24, sig);
@@ -265,17 +234,6 @@ fn artifact_set_signer(a, key_id) { store64(a + 48, key_id); return a; }
 fn artifact_set_trust_level(a, level) { store64(a + 56, level); return a; }
 fn artifact_set_verified_at(a, epoch) { store64(a + 64, epoch); return a; }
 fn artifact_set_metadata(a, m) { store64(a + 72, m); return a; }
-
-fn artifact_add_cosigner(a, cs) {
-    var cosigners = load64(a + 80);
-    if (cosigners == 0) {
-        cosigners = vec_new();
-        store64(a + 80, cosigners);
-    }
-    vec_push(cosigners, cs);
-    store64(a + 88, load64(a + 88) + 1);
-    return a;
-}
 
 # ================================================================
 # VerificationResult (32 bytes)
@@ -331,7 +289,6 @@ fn sigil_stats_new() {
 fn stats_total(s) { return load64(s); }
 fn stats_verified(s) { return load64(s + 8); }
 fn stats_revoked(s) { return load64(s + 16); }
-fn stats_counts(s) { return load64(s + 24); }
 
 # --- error.cyr ---
 
@@ -385,69 +342,6 @@ fn sigil_err(code, msg) {
 fn sigil_err_code(e) { return load64(e); }
 fn sigil_err_msg(e) { return load64(e + 8); }
 fn sigil_err_free(e) { fl_free(e); return 0; }
-
-# ================================================================
-# Named error constructors
-# ================================================================
-
-fn err_key_not_found(key_id) {
-    return sigil_err(ERR_KEY_NOT_FOUND, key_id);
-}
-
-fn err_sig_invalid(detail) {
-    return sigil_err(ERR_SIGNATURE_INVALID, detail);
-}
-
-fn err_revocation(subject, reason) {
-    # Store both pointers in a larger error struct
-    var e = fl_alloc(24);
-    store64(e, ERR_REVOCATION);
-    store64(e + 8, subject);
-    store64(e + 16, reason);
-    return e;
-}
-
-fn err_integrity(path, expected, actual) {
-    var e = fl_alloc(32);
-    store64(e, ERR_INTEGRITY_MISMATCH);
-    store64(e + 8, path);
-    store64(e + 16, expected);
-    store64(e + 24, actual);
-    return e;
-}
-
-fn err_invalid_input(detail) {
-    return sigil_err(ERR_INVALID_INPUT, detail);
-}
-
-fn err_io(detail) {
-    return sigil_err(ERR_IO, detail);
-}
-
-fn err_serialization(detail) {
-    return sigil_err(ERR_SERIALIZATION, detail);
-}
-
-fn err_crypto(detail) {
-    return sigil_err(ERR_CRYPTO, detail);
-}
-
-# ================================================================
-# Error name for display
-# ================================================================
-
-fn sigil_err_name(code) {
-    if (code == ERR_NONE) { return "ok"; }
-    if (code == ERR_KEY_NOT_FOUND) { return "key_not_found"; }
-    if (code == ERR_SIGNATURE_INVALID) { return "signature_invalid"; }
-    if (code == ERR_REVOCATION) { return "revocation_violation"; }
-    if (code == ERR_INTEGRITY_MISMATCH) { return "integrity_mismatch"; }
-    if (code == ERR_INVALID_INPUT) { return "invalid_input"; }
-    if (code == ERR_IO) { return "io_error"; }
-    if (code == ERR_SERIALIZATION) { return "serialization_error"; }
-    if (code == ERR_CRYPTO) { return "crypto_error"; }
-    return "unknown";
-}
 
 # --- sha256.cyr ---
 
@@ -880,6 +774,12 @@ fn sha256_hex(data, len) {
     return hex_encode(&digest, 32);
 }
 
+fn sha512_hex(data, len) {
+    var digest[64];
+    sha512(data, len, &digest);
+    return hex_encode(&digest, 64);
+}
+
 # --- ct.cyr ---
 
 # ct.cyr — constant-time comparison utilities
@@ -909,14 +809,6 @@ fn ct_eq(a, a_len, b, b_len) {
 
 fn ct_eq_32(a, b) {
     return ct_eq(a, 32, b, 32);
-}
-
-# ================================================================
-# Constant-time comparison for fixed 64-byte buffers (Ed25519 signatures)
-# ================================================================
-
-fn ct_eq_64(a, b) {
-    return ct_eq(a, 64, b, 64);
 }
 
 # --- hmac.cyr ---
@@ -987,21 +879,6 @@ fn hmac_sha256(key, key_len, msg, msg_len, out) {
     return 0;
 }
 
-# ================================================================
-# HMAC-SHA256 sign/verify convenience
-# ================================================================
-
-fn hmac_sign(key, key_len, data, data_len) {
-    var sig = alloc(32);
-    hmac_sha256(key, key_len, data, data_len, sig);
-    return sig;
-}
-
-fn hmac_verify(key, key_len, data, data_len, expected_sig) {
-    var computed[32];
-    hmac_sha256(key, key_len, data, data_len, &computed);
-    return ct_eq_32(&computed, expected_sig);
-}
 
 # --- sha512.cyr ---
 
@@ -1354,8 +1231,52 @@ fn sha512(data, len, out) {
 
 # bigint_ext.cyr — extended 256-bit arithmetic for Ed25519
 # Adds: full 512-bit multiply, modular reduction for p=2^255-19,
-# modular inversion, modular exponentiation.
+# modular inversion, modular exponentiation, LE byte codec.
 # Builds on lib/bigint.cyr
+
+# ================================================================
+# u256 <-> little-endian byte codec
+# Previously inlined at 7 sites (5 decode + 2 encode loops, ~11 lines
+# each) across ed25519.cyr. Safe to factor out: no nested function
+# calls inside the loop body, so locals survive despite Cyrius'
+# parameter-clobber rule.
+# ================================================================
+
+# Load 32 little-endian bytes from src into dst as four i64 limbs.
+fn u256_load_le(dst, src) {
+    var i = 0;
+    while (i < 4) {
+        store64(dst + i * 8,
+            (load8(src + i*8) & 0xFF)
+            | ((load8(src + i*8 + 1) & 0xFF) << 8)
+            | ((load8(src + i*8 + 2) & 0xFF) << 16)
+            | ((load8(src + i*8 + 3) & 0xFF) << 24)
+            | ((load8(src + i*8 + 4) & 0xFF) << 32)
+            | ((load8(src + i*8 + 5) & 0xFF) << 40)
+            | ((load8(src + i*8 + 6) & 0xFF) << 48)
+            | ((load8(src + i*8 + 7) & 0xFF) << 56));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Store src (four i64 limbs) as 32 little-endian bytes at dst.
+fn u256_store_le(dst, src) {
+    var i = 0;
+    while (i < 4) {
+        var v = load64(src + i * 8);
+        store8(dst + i*8, v & 0xFF);
+        store8(dst + i*8 + 1, (v >> 8) & 0xFF);
+        store8(dst + i*8 + 2, (v >> 16) & 0xFF);
+        store8(dst + i*8 + 3, (v >> 24) & 0xFF);
+        store8(dst + i*8 + 4, (v >> 32) & 0xFF);
+        store8(dst + i*8 + 5, (v >> 40) & 0xFF);
+        store8(dst + i*8 + 6, (v >> 48) & 0xFF);
+        store8(dst + i*8 + 7, (v >> 56) & 0xFF);
+        i = i + 1;
+    }
+    return 0;
+}
 
 # ================================================================
 # 64×64 → 128-bit multiply (result in globals)
@@ -1389,16 +1310,6 @@ fn _mul64_full(a, b) {
 # Full 256×256 → 512-bit multiply
 # out: 64 bytes (8 limbs)
 # ================================================================
-
-# Unsigned add with carry detection: returns 1 if a+b overflows 64 bits
-fn _uadd_overflow(a, b) {
-    var sum = a + b;
-    # Unsigned overflow: sum < a (when compared as unsigned)
-    var sa = a ^ (1 << 63);
-    var ss = sum ^ (1 << 63);
-    if (ss < sa) { return 1; }
-    return 0;
-}
 
 # Globals for mul_full inner loop (avoid local clobber across fn calls)
 var _mf_s1 = 0;
@@ -2065,19 +1976,7 @@ fn ge_to_bytes(out, p) {
     fp_mul(_gcomp_y, ge_y(p), _gcomp_recip);
 
     # Encode y as 32 bytes little-endian
-    var i = 0;
-    while (i < 4) {
-        var v = u256_limb(_gcomp_y, i);
-        store8(out + i*8, v & 0xFF);
-        store8(out + i*8 + 1, (v >> 8) & 0xFF);
-        store8(out + i*8 + 2, (v >> 16) & 0xFF);
-        store8(out + i*8 + 3, (v >> 24) & 0xFF);
-        store8(out + i*8 + 4, (v >> 32) & 0xFF);
-        store8(out + i*8 + 5, (v >> 40) & 0xFF);
-        store8(out + i*8 + 6, (v >> 48) & 0xFF);
-        store8(out + i*8 + 7, (v >> 56) & 0xFF);
-        i = i + 1;
-    }
+    u256_store_le(out, _gcomp_y);
 
     # Set high bit to sign of x (low bit of x)
     var x_sign = u256_limb(_gcomp_x, 0) & 1;
@@ -2128,19 +2027,7 @@ fn ge_from_bytes(p, s) {
     store8(_gdc_s_copy + 31, load8(_gdc_s_copy + 31) & 0x7F);
 
     # Load y as u256 from little-endian bytes
-    var li = 0;
-    while (li < 4) {
-        var v = (load8(_gdc_s_copy + li*8) & 0xFF)
-        | ((load8(_gdc_s_copy + li*8+1) & 0xFF) << 8)
-        | ((load8(_gdc_s_copy + li*8+2) & 0xFF) << 16)
-        | ((load8(_gdc_s_copy + li*8+3) & 0xFF) << 24)
-        | ((load8(_gdc_s_copy + li*8+4) & 0xFF) << 32)
-        | ((load8(_gdc_s_copy + li*8+5) & 0xFF) << 40)
-        | ((load8(_gdc_s_copy + li*8+6) & 0xFF) << 48)
-        | ((load8(_gdc_s_copy + li*8+7) & 0xFF) << 56);
-        u256_set_limb(_gdc_y, li, v);
-        li = li + 1;
-    }
+    u256_load_le(_gdc_y, _gdc_s_copy);
 
     # u = y^2 - 1
     fp_sq(_gdc_y2, _gdc_y);
@@ -2256,33 +2143,9 @@ fn sc_reduce(out, s64) {
         _scr_inited = 1;
     }
 
-    # Load 64-byte input as two u256 (little-endian)
-    var li = 0;
-    while (li < 4) {
-        var v = (load8(s64 + li*8) & 0xFF)
-        | ((load8(s64 + li*8+1) & 0xFF) << 8)
-        | ((load8(s64 + li*8+2) & 0xFF) << 16)
-        | ((load8(s64 + li*8+3) & 0xFF) << 24)
-        | ((load8(s64 + li*8+4) & 0xFF) << 32)
-        | ((load8(s64 + li*8+5) & 0xFF) << 40)
-        | ((load8(s64 + li*8+6) & 0xFF) << 48)
-        | ((load8(s64 + li*8+7) & 0xFF) << 56);
-        u256_set_limb(_scr_lo, li, v);
-        li = li + 1;
-    }
-    li = 0;
-    while (li < 4) {
-        var v = (load8(s64 + 32 + li*8) & 0xFF)
-        | ((load8(s64 + 32 + li*8+1) & 0xFF) << 8)
-        | ((load8(s64 + 32 + li*8+2) & 0xFF) << 16)
-        | ((load8(s64 + 32 + li*8+3) & 0xFF) << 24)
-        | ((load8(s64 + 32 + li*8+4) & 0xFF) << 32)
-        | ((load8(s64 + 32 + li*8+5) & 0xFF) << 40)
-        | ((load8(s64 + 32 + li*8+6) & 0xFF) << 48)
-        | ((load8(s64 + 32 + li*8+7) & 0xFF) << 56);
-        u256_set_limb(_scr_hi, li, v);
-        li = li + 1;
-    }
+    # Load 64-byte input as two u256 (little-endian).
+    u256_load_le(_scr_lo, s64);
+    u256_load_le(_scr_hi, s64 + 32);
 
     # Iteratively reduce: lo = lo + hi*R, split result, repeat until hi == 0
     while (u256_is_zero(_scr_hi) == 0) {
@@ -2434,38 +2297,14 @@ fn ed25519_sign(sk, msg, msg_len, sig_out) {
     sc_reduce(_sign_h_scalar, _sign_hram);
 
     # Load a from az[0..32] as u256
-    var li = 0;
-    while (li < 4) {
-        var v = (load8(_sign_az + li*8) & 0xFF)
-        | ((load8(_sign_az + li*8+1) & 0xFF) << 8)
-        | ((load8(_sign_az + li*8+2) & 0xFF) << 16)
-        | ((load8(_sign_az + li*8+3) & 0xFF) << 24)
-        | ((load8(_sign_az + li*8+4) & 0xFF) << 32)
-        | ((load8(_sign_az + li*8+5) & 0xFF) << 40)
-        | ((load8(_sign_az + li*8+6) & 0xFF) << 48)
-        | ((load8(_sign_az + li*8+7) & 0xFF) << 56);
-        u256_set_limb(_sign_a_scalar, li, v);
-        li = li + 1;
-    }
+    u256_load_le(_sign_a_scalar, _sign_az);
 
     # S = (r + h*a) mod L
     var S_result = alloc(32);
     sc_muladd(S_result, _sign_h_scalar, _sign_a_scalar, _sign_r_scalar);
 
     # Write S as little-endian bytes to sig_out+32
-    li = 0;
-    while (li < 4) {
-        var v = u256_limb(S_result, li);
-        store8(_sign_sig_out + 32 + li*8, v & 0xFF);
-        store8(_sign_sig_out + 32 + li*8 + 1, (v >> 8) & 0xFF);
-        store8(_sign_sig_out + 32 + li*8 + 2, (v >> 16) & 0xFF);
-        store8(_sign_sig_out + 32 + li*8 + 3, (v >> 24) & 0xFF);
-        store8(_sign_sig_out + 32 + li*8 + 4, (v >> 32) & 0xFF);
-        store8(_sign_sig_out + 32 + li*8 + 5, (v >> 40) & 0xFF);
-        store8(_sign_sig_out + 32 + li*8 + 6, (v >> 48) & 0xFF);
-        store8(_sign_sig_out + 32 + li*8 + 7, (v >> 56) & 0xFF);
-        li = li + 1;
-    }
+    u256_store_le(_sign_sig_out + 32, S_result);
 
     # Zeroize all secret/derived material. _sign_az holds H(sk)[0..64]
     # (the clamped scalar a and nonce seed). _sign_r_scalar is the
@@ -2518,19 +2357,7 @@ fn ed25519_verify(pk, msg, msg_len, sig) {
     sc_reduce(_ver_h_scalar, _ver_hram);
 
     # Load S from sig[32..64] as scalar
-    var li = 0;
-    while (li < 4) {
-        var v = (load8(_ver_sig + 32 + li*8) & 0xFF)
-        | ((load8(_ver_sig + 32 + li*8+1) & 0xFF) << 8)
-        | ((load8(_ver_sig + 32 + li*8+2) & 0xFF) << 16)
-        | ((load8(_ver_sig + 32 + li*8+3) & 0xFF) << 24)
-        | ((load8(_ver_sig + 32 + li*8+4) & 0xFF) << 32)
-        | ((load8(_ver_sig + 32 + li*8+5) & 0xFF) << 40)
-        | ((load8(_ver_sig + 32 + li*8+6) & 0xFF) << 48)
-        | ((load8(_ver_sig + 32 + li*8+7) & 0xFF) << 56);
-        u256_set_limb(_ver_S_scalar, li, v);
-        li = li + 1;
-    }
+    u256_load_le(_ver_S_scalar, _ver_sig + 32);
 
     # RFC 8032 §5.1.7 / §8.4: reject non-canonical S (S must be < L).
     # Prevents signature malleability — the same (pk, msg) must have
@@ -2594,7 +2421,7 @@ fn key_role_name(role) {
 }
 
 # ================================================================
-# KeyVersion (88 bytes)
+# KeyVersion (96 bytes)
 # ================================================================
 # Layout:
 #   +0   key_id          (C-string ptr)
@@ -2608,9 +2435,10 @@ fn key_role_name(role) {
 #   +64  pub_name        (C-string ptr, 0 = none)
 #   +72  pub_contact     (C-string ptr, 0 = none)
 #   +80  secret_key      (ptr to 32 raw bytes, 0 = none, for HMAC signing)
+#   +88  allowed_types   (vec of ARTIFACT_* i64s, 0 = all types allowed)
 
 fn key_version_new(key_id, public_key_hex) {
-    var kv = fl_alloc(88);
+    var kv = fl_alloc(96);
     store64(kv, key_id);
     store64(kv + 8, clock_epoch_secs());
     store64(kv + 16, 0);
@@ -2622,6 +2450,7 @@ fn key_version_new(key_id, public_key_hex) {
     store64(kv + 64, 0);
     store64(kv + 72, 0);
     store64(kv + 80, 0);
+    store64(kv + 88, 0);
     return kv;
 }
 
@@ -2642,6 +2471,37 @@ fn kv_set_issued_by(kv, v) { store64(kv + 40, v); return kv; }
 fn kv_set_pub_name(kv, v) { store64(kv + 64, v); return kv; }
 fn kv_set_pub_contact(kv, v) { store64(kv + 72, v); return kv; }
 fn kv_set_secret_key(kv, sk) { store64(kv + 80, sk); return kv; }
+
+# Allowed-artifact-type restriction. An unset (0) list means "this key
+# is authorized for every ArtifactType" — the Rust `KeyMetadata`
+# default. A non-empty list restricts the key to signing only those
+# artifact types; any other type fails verification with a dedicated
+# "allowed_type" check, independent of the signature itself.
+fn kv_allowed_types(kv) { return load64(kv + 88); }
+
+fn kv_add_allowed_type(kv, artifact_type) {
+    var v = load64(kv + 88);
+    if (v == 0) { v = vec_new(); store64(kv + 88, v); }
+    vec_push(v, artifact_type);
+    return kv;
+}
+
+fn kv_clear_allowed_types(kv) { store64(kv + 88, 0); return kv; }
+
+# Is this key authorized to sign artifacts of `artifact_type`?
+# Unrestricted key (no allowed_types list or empty list) → 1.
+fn kv_is_type_allowed(kv, artifact_type) {
+    var v = load64(kv + 88);
+    if (v == 0) { return 1; }
+    var n = vec_len(v);
+    if (n == 0) { return 1; }
+    var i = 0;
+    while (i < n) {
+        if (vec_get(v, i) == artifact_type) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
 
 fn kv_is_valid_at(kv, when) {
     if (when < load64(kv + 8)) { return 0; }
@@ -2989,6 +2849,15 @@ fn hash_data(data, len) {
     return sha256_hex(data, len);
 }
 
+# Dispatch hashing by algorithm (mirrors Rust `hash_data_with`).
+# HASH_ALG_SHA256 (default, 32-byte digest) or HASH_ALG_SHA512
+# (64-byte digest). Unknown algorithm defaults to SHA-256 rather
+# than returning 0 — a trust engine must never silently skip hashing.
+fn hash_data_with(data, len, algorithm) {
+    if (algorithm == HASH_ALG_SHA512) { return sha512_hex(data, len); }
+    return sha256_hex(data, len);
+}
+
 fn hash_file(path) {
     var fd = file_open(path, 0, 0);
     if (fd < 0) { return 0; }
@@ -3234,11 +3103,6 @@ fn iv_set_policy(v, policy) {
     store64(v, policy);
     store64(v + 8, 0);
     return v;
-}
-
-# Compute hash of file contents
-fn compute_file_hash(path) {
-    return hash_file(path);
 }
 
 # Verify a single file against policy
@@ -3645,6 +3509,453 @@ fn crl_apply_to(c, rl) {
     return added;
 }
 
+# ================================================================
+# JSON Lines serialization (RevocationEntry, RevocationList, Crl)
+#
+# Deliberate format choice: one JSON object per line, newline-
+# separated. Cyrius' lib/json.cyr parses a single object at a time
+# and has no array support, so JSONL is the cleanest round-trip
+# format and matches `alog_append_to_file`.  Rust's `to_json()`
+# produced a JSON array; JSONL is trivially convertible with
+# `jq -s`.
+#
+# Null fields use JSON `null` (no quotes). Parsing treats `null`,
+# empty, and missing fields as 0 (C-string null ptr).
+# ================================================================
+
+# Internal: append JSON-escaped version of a C-string to a
+# str_builder. Escapes `"`, `\`, and control chars 0x00-0x1F
+# per RFC 8259. Without this, a reason like `key "foo" compromised`
+# would produce invalid JSON that the parser choked on.
+fn _json_escape_cstr(sb, s) {
+    var n = strlen(s);
+    var i = 0;
+    while (i < n) {
+        var c = load8(s + i) & 0xFF;
+        if (c == 34) { str_builder_add_cstr(sb, "\\\""); }
+        elif (c == 92) { str_builder_add_cstr(sb, "\\\\"); }
+        elif (c == 10) { str_builder_add_cstr(sb, "\\n"); }
+        elif (c == 13) { str_builder_add_cstr(sb, "\\r"); }
+        elif (c == 9)  { str_builder_add_cstr(sb, "\\t"); }
+        elif (c == 8)  { str_builder_add_cstr(sb, "\\b"); }
+        elif (c == 12) { str_builder_add_cstr(sb, "\\f"); }
+        elif (c < 32) {
+            # \u00XX for any remaining control char
+            str_builder_add_cstr(sb, "\\u00");
+            var hi = (c >> 4) & 0xF;
+            var lo = c & 0xF;
+            if (hi < 10) { str_builder_add_byte(sb, 48 + hi); }
+            else         { str_builder_add_byte(sb, 87 + hi); }
+            if (lo < 10) { str_builder_add_byte(sb, 48 + lo); }
+            else         { str_builder_add_byte(sb, 87 + lo); }
+        } else {
+            str_builder_add_byte(sb, c);
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Internal: emit one entry as a JSONL line into a str_builder.
+fn _rev_entry_to_jsonl(sb, e) {
+    str_builder_add_cstr(sb, "{\"key_id\":");
+    if (rev_key_id(e) != 0) {
+        str_builder_add_cstr(sb, "\"");
+        _json_escape_cstr(sb, rev_key_id(e));
+        str_builder_add_cstr(sb, "\"");
+    } else {
+        str_builder_add_cstr(sb, "null");
+    }
+    str_builder_add_cstr(sb, ",\"content_hash\":");
+    if (rev_content_hash(e) != 0) {
+        str_builder_add_cstr(sb, "\"");
+        _json_escape_cstr(sb, rev_content_hash(e));
+        str_builder_add_cstr(sb, "\"");
+    } else {
+        str_builder_add_cstr(sb, "null");
+    }
+    str_builder_add_cstr(sb, ",\"reason\":\"");
+    _json_escape_cstr(sb, rev_reason(e));
+    str_builder_add_cstr(sb, "\",\"revoked_at\":");
+    str_builder_add_int(sb, rev_at(e));
+    str_builder_add_cstr(sb, ",\"revoked_by\":\"");
+    _json_escape_cstr(sb, rev_by(e));
+    str_builder_add_cstr(sb, "\",\"revoked_after\":");
+    str_builder_add_int(sb, rev_after(e));
+    str_builder_add_cstr(sb, "}\n");
+    return 0;
+}
+
+# Serialize a RevocationList to a JSONL C-string. Caller owns the
+# returned pointer (alloc'd). Returns 0 on OOM (not expected).
+fn rl_to_jsonl(rl) {
+    var sb = str_builder_new();
+    var entries = load64(rl);
+    var elen = vec_len(entries);
+    var i = 0;
+    while (i < elen) {
+        _rev_entry_to_jsonl(sb, vec_get(entries, i));
+        i = i + 1;
+    }
+    # Return C-string: copy builder's underlying buf + terminator.
+    var total = load64(sb + 8);
+    var out = alloc(total + 1);
+    memcpy(out, load64(sb), total);
+    store8(out + total, 0);
+    return out;
+}
+
+# Internal: parse the quoted value at data[pos..] where pos is just
+# past the opening quote. Returns end offset (just past closing
+# quote). Writes a fresh C-string copy of the contents to *out_ptr.
+# Sets *out_ptr to 0 and returns pos unchanged if not a quoted str.
+var _rj_out_ptr = 0;
+
+fn _rj_parse_string(data, pos, end) {
+    _rj_out_ptr = 0;
+    if (pos >= end) { return pos; }
+    if ((load8(data + pos) & 0xFF) != 34) { return pos; }
+    pos = pos + 1;
+    # First pass: find closing quote, handling escapes (\" and \\)
+    # so an embedded quote does not end the string prematurely.
+    var start = pos;
+    while (pos < end) {
+        var c = load8(data + pos) & 0xFF;
+        if (c == 92) {
+            # Escape sequence — skip the next char (it's part of the value)
+            pos = pos + 2;
+        } elif (c == 34) {
+            break;
+        } else {
+            pos = pos + 1;
+        }
+    }
+    # Second pass: copy content, unescaping \x → x for \" \\ \n \r \t \b \f.
+    # \uXXXX is rejected as non-ASCII (caller's writer only emits control
+    # chars as \uNNNN for bytes < 32; we decode those back to the raw byte).
+    var raw_len = pos - start;
+    var out = alloc(raw_len + 1);
+    var w = 0;
+    var r = 0;
+    while (r < raw_len) {
+        var c = load8(data + start + r) & 0xFF;
+        if (c == 92) {
+            r = r + 1;
+            if (r >= raw_len) { break; }
+            var ec = load8(data + start + r) & 0xFF;
+            if (ec == 110) { store8(out + w, 10); }     # \n
+            elif (ec == 114) { store8(out + w, 13); }   # \r
+            elif (ec == 116) { store8(out + w, 9); }    # \t
+            elif (ec == 98)  { store8(out + w, 8); }    # \b
+            elif (ec == 102) { store8(out + w, 12); }   # \f
+            elif (ec == 117) {
+                # \uXXXX — read 4 hex digits, emit as byte if ≤ 0xFF
+                if (r + 4 < raw_len) {
+                    var v = 0;
+                    var k = 1;
+                    while (k <= 4) {
+                        var h = load8(data + start + r + k) & 0xFF;
+                        var d = 0;
+                        if (h >= 48) { if (h <= 57) { d = h - 48; } }
+                        if (h >= 97) { if (h <= 102) { d = h - 87; } }
+                        if (h >= 65) { if (h <= 70)  { d = h - 55; } }
+                        v = (v << 4) | d;
+                        k = k + 1;
+                    }
+                    store8(out + w, v & 0xFF);
+                    r = r + 4;
+                }
+            } else {
+                # \" \\ / and any other → pass through the second char.
+                store8(out + w, ec);
+            }
+            r = r + 1;
+            w = w + 1;
+        } else {
+            store8(out + w, c);
+            r = r + 1;
+            w = w + 1;
+        }
+    }
+    store8(out + w, 0);
+    _rj_out_ptr = out;
+    if (pos < end) { pos = pos + 1; }   # skip closing quote
+    return pos;
+}
+
+# Parse a single JSONL entry line into a fresh RevocationEntry.
+# Returns entry ptr, or 0 on malformed input.
+fn _rev_entry_from_jsonl(line, llen) {
+    # Six fields: key_id, content_hash, reason, revoked_at,
+    # revoked_by, revoked_after.  Walk the line in order, matching
+    # on the known key names. Tolerant to reordering that survives a
+    # round-trip from our own writer.
+    var key_id = 0;
+    var chash = 0;
+    var reason = 0;
+    var revoked_by = 0;
+    var revoked_at = 0;
+    var revoked_after = 0;
+
+    var pos = 0;
+    while (pos < llen) {
+        var c = load8(line + pos) & 0xFF;
+        if (c != 34) { pos = pos + 1; }   # scan for opening quote
+        else {
+            pos = _rj_parse_string(line, pos, llen);
+            var k = _rj_out_ptr;
+            if (k == 0) { return 0; }
+            # Skip to colon
+            while (pos < llen) {
+                if ((load8(line + pos) & 0xFF) == 58) { pos = pos + 1; break; }
+                pos = pos + 1;
+            }
+            # Skip whitespace after colon
+            while (pos < llen) {
+                var cc = load8(line + pos) & 0xFF;
+                if (cc == 32) { pos = pos + 1; }
+                elif (cc == 9) { pos = pos + 1; }
+                else { break; }
+            }
+            if (pos >= llen) { return 0; }
+            var vc = load8(line + pos) & 0xFF;
+            if (vc == 34) {
+                # Quoted string value
+                pos = _rj_parse_string(line, pos, llen);
+                var v = _rj_out_ptr;
+                if (streq(k, "key_id") == 1) { key_id = v; }
+                elif (streq(k, "content_hash") == 1) { chash = v; }
+                elif (streq(k, "reason") == 1) { reason = v; }
+                elif (streq(k, "revoked_by") == 1) { revoked_by = v; }
+            } else {
+                # Non-string value: null or integer.
+                var vs = pos;
+                while (pos < llen) {
+                    var vcc = load8(line + pos) & 0xFF;
+                    if (vcc == 44) { break; }  # ','
+                    if (vcc == 125) { break; } # '}'
+                    if (vcc == 32) { break; }
+                    if (vcc == 10) { break; }
+                    pos = pos + 1;
+                }
+                var vlen = pos - vs;
+                if (vlen > 0) {
+                    # Integer fields
+                    var intv = 0;
+                    # Reject "null" / "true" / "false" by checking first byte.
+                    var fb = load8(line + vs) & 0xFF;
+                    if (fb >= 48) {
+                        if (fb <= 57) {
+                            # digit — parse as int
+                            var ii = 0;
+                            while (ii < vlen) {
+                                intv = intv * 10 + ((load8(line + vs + ii) & 0xFF) - 48);
+                                ii = ii + 1;
+                            }
+                        }
+                    }
+                    if (streq(k, "revoked_at") == 1) { revoked_at = intv; }
+                    elif (streq(k, "revoked_after") == 1) { revoked_after = intv; }
+                }
+            }
+        }
+    }
+
+    if (reason == 0) { reason = ""; }
+    if (revoked_by == 0) { revoked_by = ""; }
+    var e = revocation_entry_new(key_id, chash, reason, revoked_by);
+    store64(e + 24, revoked_at);
+    store64(e + 40, revoked_after);
+    return e;
+}
+
+# Load a RevocationList from JSONL content. Returns a new list or 0.
+# Invalid entries in the stream are skipped rather than aborting —
+# callers building a fresh list from a third-party CRL should not
+# be taken down by a single malformed line, but each rejected line
+# bumps the returned error count.  Well-formed output from our own
+# writer always round-trips cleanly.
+var _rl_load_bad = 0;
+
+fn rl_load_bad_count() { return _rl_load_bad; }
+
+fn rl_from_jsonl(content, content_len) {
+    _rl_load_bad = 0;
+    var rl = revocation_list_new();
+    var pos = 0;
+    while (pos < content_len) {
+        # Find end of line
+        var start = pos;
+        while (pos < content_len) {
+            if ((load8(content + pos) & 0xFF) == 10) { break; }
+            pos = pos + 1;
+        }
+        var llen = pos - start;
+        if (llen > 0) {
+            var e = _rev_entry_from_jsonl(content + start, llen);
+            if (e == 0) { _rl_load_bad = _rl_load_bad + 1; }
+            else {
+                if (rl_add(rl, e) != ERR_NONE) { _rl_load_bad = _rl_load_bad + 1; }
+            }
+        }
+        if (pos < content_len) { pos = pos + 1; }   # skip '\n'
+    }
+    return rl;
+}
+
+# File wrappers — idiomatic "save/load via path" shortcuts.
+fn rl_save(rl, path) {
+    var jsonl = rl_to_jsonl(rl);
+    var n = file_write_all(path, jsonl, strlen(jsonl));
+    if (n < 0) { return ERR_IO; }
+    return ERR_NONE;
+}
+
+fn rl_load(path) {
+    var buf = alloc(65536);
+    var n = file_read_all(path, buf, 65536);
+    if (n < 0) { return 0; }
+    return rl_from_jsonl(buf, n);
+}
+
+# ================================================================
+# Crl JSON Lines — first line is the header, subsequent lines are
+# entries in the same format as rl_to_jsonl.
+# ================================================================
+
+fn crl_to_jsonl(c) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"version\":");
+    str_builder_add_int(sb, crl_version(c));
+    str_builder_add_cstr(sb, ",\"issuer\":\"");
+    _json_escape_cstr(sb, crl_issuer(c));
+    str_builder_add_cstr(sb, "\",\"issued_at\":");
+    str_builder_add_int(sb, crl_issued_at(c));
+    str_builder_add_cstr(sb, ",\"next_update\":");
+    str_builder_add_int(sb, crl_next_update(c));
+    str_builder_add_cstr(sb, "}\n");
+    var entries = crl_entries(c);
+    var elen = vec_len(entries);
+    var i = 0;
+    while (i < elen) {
+        _rev_entry_to_jsonl(sb, vec_get(entries, i));
+        i = i + 1;
+    }
+    var total = load64(sb + 8);
+    var out = alloc(total + 1);
+    memcpy(out, load64(sb), total);
+    store8(out + total, 0);
+    return out;
+}
+
+# Parse the CRL header line. Returns new Crl struct with the entries
+# vec initialized empty. Returns 0 on failure.
+fn _crl_parse_header(line, llen) {
+    var version = 0;
+    var issuer = 0;
+    var issued_at = 0;
+    var next_update = 0;
+
+    var pos = 0;
+    while (pos < llen) {
+        var c = load8(line + pos) & 0xFF;
+        if (c != 34) { pos = pos + 1; }
+        else {
+            pos = _rj_parse_string(line, pos, llen);
+            var k = _rj_out_ptr;
+            if (k == 0) { return 0; }
+            while (pos < llen) {
+                if ((load8(line + pos) & 0xFF) == 58) { pos = pos + 1; break; }
+                pos = pos + 1;
+            }
+            while (pos < llen) {
+                var cc = load8(line + pos) & 0xFF;
+                if (cc == 32) { pos = pos + 1; }
+                elif (cc == 9) { pos = pos + 1; }
+                else { break; }
+            }
+            if (pos >= llen) { return 0; }
+            var vc = load8(line + pos) & 0xFF;
+            if (vc == 34) {
+                pos = _rj_parse_string(line, pos, llen);
+                if (streq(k, "issuer") == 1) { issuer = _rj_out_ptr; }
+            } else {
+                var vs = pos;
+                while (pos < llen) {
+                    var vcc = load8(line + pos) & 0xFF;
+                    if (vcc == 44) { break; }
+                    if (vcc == 125) { break; }
+                    pos = pos + 1;
+                }
+                var vlen = pos - vs;
+                var intv = 0;
+                if (vlen > 0) {
+                    var fb = load8(line + vs) & 0xFF;
+                    if (fb >= 48) { if (fb <= 57) {
+                        var ii = 0;
+                        while (ii < vlen) {
+                            intv = intv * 10 + ((load8(line + vs + ii) & 0xFF) - 48);
+                            ii = ii + 1;
+                        }
+                    } }
+                }
+                if (streq(k, "version") == 1) { version = intv; }
+                elif (streq(k, "issued_at") == 1) { issued_at = intv; }
+                elif (streq(k, "next_update") == 1) { next_update = intv; }
+            }
+        }
+    }
+    if (issuer == 0) { return 0; }
+    var c = crl_new(version, issuer);
+    store64(c + 16, issued_at);
+    store64(c + 24, next_update);
+    return c;
+}
+
+# Parse CRL from JSONL content. First line = header, subsequent
+# lines = revocation entries.
+fn crl_from_jsonl(content, content_len) {
+    # Extract first line
+    var hend = 0;
+    while (hend < content_len) {
+        if ((load8(content + hend) & 0xFF) == 10) { break; }
+        hend = hend + 1;
+    }
+    if (hend == 0) { return 0; }
+    var c = _crl_parse_header(content, hend);
+    if (c == 0) { return 0; }
+    # Entries start after the header newline
+    var pos = hend + 1;
+    while (pos < content_len) {
+        var start = pos;
+        while (pos < content_len) {
+            if ((load8(content + pos) & 0xFF) == 10) { break; }
+            pos = pos + 1;
+        }
+        var llen = pos - start;
+        if (llen > 0) {
+            var e = _rev_entry_from_jsonl(content + start, llen);
+            if (e != 0) { crl_add_entry(c, e); }
+        }
+        if (pos < content_len) { pos = pos + 1; }
+    }
+    return c;
+}
+
+fn crl_save(c, path) {
+    var jsonl = crl_to_jsonl(c);
+    var n = file_write_all(path, jsonl, strlen(jsonl));
+    if (n < 0) { return ERR_IO; }
+    return ERR_NONE;
+}
+
+fn crl_load(path) {
+    var buf = alloc(65536);
+    var n = file_read_all(path, buf, 65536);
+    if (n < 0) { return 0; }
+    return crl_from_jsonl(buf, n);
+}
+
 # --- audit.cyr ---
 
 # audit.cyr — structured audit event logging
@@ -3919,55 +4230,6 @@ fn attest_set_quote_sig(r, v) { store64(r + 16, v); return r; }
 
 fn tpm_available() {
     return tpm_detect();
-}
-
-# ================================================================
-# Measure a system component: hash file (actual_digest := expected
-# for now; real PCR read lands when verify_pcr_measurements gets its
-# agnosys wiring).
-# ================================================================
-
-fn measure_system_component(path, pcr_index_val) {
-    var h = hash_file(path);
-    if (h == 0) { return 0; }
-    var m = pcr_measurement_new(pcr_index_val, h);
-    pcr_set_actual(m, h);
-    return m;
-}
-
-# ================================================================
-# Verify PCR measurements against expected baselines.
-#
-# Compares actual_digest (set by a prior measure_system_component or
-# agnosys PCR read) against expected_digest in constant time. A
-# missing actual (0) is treated as a failure — callers must populate
-# actuals before calling.
-# ================================================================
-
-fn verify_pcr_measurements(expected_measurements) {
-    var mlen = vec_len(expected_measurements);
-    var all_pass = 1;
-    var result = attestation_result_new(0);
-    var result_measurements = attest_measurements(result);
-
-    var i = 0;
-    while (i < mlen) {
-        var m = vec_get(expected_measurements, i);
-        var expected = pcr_expected(m);
-        var actual = pcr_actual(m);
-        if (actual != 0) {
-            if (ct_eq(actual, strlen(actual), expected, strlen(expected)) == 0) {
-                all_pass = 0;
-            }
-        } else {
-            all_pass = 0;
-        }
-        vec_push(result_measurements, m);
-        i = i + 1;
-    }
-
-    store64(result, all_pass);
-    return result;
 }
 
 # ================================================================
@@ -4330,6 +4592,26 @@ fn sv_verify_artifact(sv, path, artifact_type) {
         }
     }
 
+    # Check: allowed-artifact-type (Rust KeyMetadata.allowed_artifact_types).
+    # If the signer key has an explicit allow-list, the artifact_type must
+    # appear in it. Unrestricted keys (empty/null list) pass through.
+    # Rejected here → trust_level UNVERIFIED regardless of signature.
+    if (stored != 0) {
+        var signer_atype = artifact_signer_key_id(stored);
+        if (signer_atype != 0) {
+            var kra = load64(sv);
+            var kva = keyring_get_current(kra, signer_atype);
+            if (kva != 0) {
+                if (kv_is_type_allowed(kva, artifact_type) == 1) {
+                    vresult_add_check(vr, trust_check_new("allowed_type", 1, "Key authorized for artifact type"));
+                } else {
+                    vresult_add_check(vr, trust_check_new("allowed_type", 0, "Key not authorized for artifact type"));
+                    trust_level = TRUST_UNVERIFIED;
+                }
+            }
+        }
+    }
+
     # Check: policy compliance
     var min_trust = policy_min_trust(policy);
     var enforcement = policy_enforcement(policy);
@@ -4507,6 +4789,22 @@ fn sv_compliance_report(sv) {
 # Trust store snapshot and diff
 # ================================================================
 
+# Snapshot entry (16 bytes): trust-level + path frozen at snapshot time.
+# Previously the snapshot mapped chash → artifact_ptr, but since the
+# same pointer was still mutable in the live store, a trust-level
+# change was invisible to a subsequent diff. Snapshotting a level
+# plus path byvalue gives a real before/after view.
+
+fn _snap_entry_new(trust_level, path) {
+    var se = fl_alloc(16);
+    store64(se, trust_level);
+    store64(se + 8, path);
+    return se;
+}
+
+fn snap_entry_trust_level(se) { return load64(se); }
+fn snap_entry_path(se) { return load64(se + 8); }
+
 fn sv_snapshot_trust_store(sv) {
     var store = load64(sv + 32);
     var keys = map_keys(store);
@@ -4516,18 +4814,50 @@ fn sv_snapshot_trust_store(sv) {
     while (i < klen) {
         var chash = vec_get(keys, i);
         var artifact = map_get(store, chash);
-        map_set(snap, chash, artifact);
+        map_set(snap, chash, _snap_entry_new(
+            artifact_trust_level(artifact),
+            artifact_path(artifact)
+        ));
         i = i + 1;
     }
     return snap;
 }
 
-# TrustStoreDiff (24 bytes): added, removed, changed (all vecs)
+# ================================================================
+# ArtifactChange (32 bytes) — Rust-style diff record
+# ================================================================
+# Layout:
+#   +0   content_hash  (C-string ptr)
+#   +8   path          (C-string ptr)
+#   +16  old_trust_level (i64; -1 = none / this is a newly added artifact)
+#   +24  new_trust_level (i64; -1 = none / this artifact was removed)
+#
+# For a "changed" record, both old and new are set and differ.
+# For "added", old = -1. For "removed", new = -1.
+
+fn artifact_change_new(content_hash, path, old_tl, new_tl) {
+    var ac = fl_alloc(32);
+    store64(ac, content_hash);
+    store64(ac + 8, path);
+    store64(ac + 16, old_tl);
+    store64(ac + 24, new_tl);
+    return ac;
+}
+
+fn ac_content_hash(ac) { return load64(ac); }
+fn ac_path(ac) { return load64(ac + 8); }
+fn ac_old_trust_level(ac) { return load64(ac + 16); }
+fn ac_new_trust_level(ac) { return load64(ac + 24); }
+
+# TrustStoreDiff (24 bytes): added, removed, changed (all vecs of ArtifactChange ptrs).
+# BREAKING vs 2.4.x: vecs previously held raw TrustedArtifact pointers;
+# they now hold ArtifactChange records so callers can see both sides
+# of a trust-level transition, not just the current side.
 fn trust_store_diff_new() {
     var d = fl_alloc(24);
-    store64(d, vec_new());     # added
-    store64(d + 8, vec_new()); # removed
-    store64(d + 16, vec_new()); # changed
+    store64(d, vec_new());     # added   (ArtifactChange where old_tl = -1)
+    store64(d + 8, vec_new()); # removed (ArtifactChange where new_tl = -1)
+    store64(d + 16, vec_new()); # changed (both sides set, old != new)
     return d;
 }
 
@@ -4554,13 +4884,27 @@ fn sv_diff_trust_store(sv, old_snap) {
     var i = 0;
     while (i < cklen) {
         var chash = vec_get(current_keys, i);
-        var old_art = map_get(old_snap, chash);
-        if (old_art == 0) {
-            vec_push(load64(diff), map_get(store, chash));
+        var old_snap_entry = map_get(old_snap, chash);
+        var new_art = map_get(store, chash);
+        if (old_snap_entry == 0) {
+            var ac = artifact_change_new(
+                chash,
+                artifact_path(new_art),
+                0 - 1,
+                artifact_trust_level(new_art)
+            );
+            vec_push(load64(diff), ac);
         } else {
-            var new_art = map_get(store, chash);
-            if (artifact_trust_level(new_art) != artifact_trust_level(old_art)) {
-                vec_push(load64(diff + 16), new_art);
+            var old_tl = snap_entry_trust_level(old_snap_entry);
+            var new_tl = artifact_trust_level(new_art);
+            if (old_tl != new_tl) {
+                var ac = artifact_change_new(
+                    chash,
+                    artifact_path(new_art),
+                    old_tl,
+                    new_tl
+                );
+                vec_push(load64(diff + 16), ac);
             }
         }
         i = i + 1;
@@ -4572,7 +4916,14 @@ fn sv_diff_trust_store(sv, old_snap) {
     while (i < oklen) {
         var chash = vec_get(old_keys, i);
         if (map_get(store, chash) == 0) {
-            vec_push(load64(diff + 8), map_get(old_snap, chash));
+            var old_snap_entry = map_get(old_snap, chash);
+            var ac = artifact_change_new(
+                chash,
+                snap_entry_path(old_snap_entry),
+                snap_entry_trust_level(old_snap_entry),
+                0 - 1
+            );
+            vec_push(load64(diff + 8), ac);
         }
         i = i + 1;
     }

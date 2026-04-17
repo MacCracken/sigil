@@ -84,6 +84,146 @@ Numbers (single-run on the same host as 2.4.2):
   `sealed.pub`, `sealed.priv`). The previous stub was 3-arg.
   Consumer repos must update call sites. No public consumer is
   currently calling this (stub era), so impact should be nil.
+- **`TrustStoreDiff` vecs now carry `ArtifactChange` records**
+  instead of raw `TrustedArtifact` pointers (see "Added — Rust
+  parity" below). Consumers iterating `tsdiff_added/removed/
+  changed` must switch to `ac_content_hash` / `ac_path` /
+  `ac_old_trust_level` / `ac_new_trust_level` accessors. No
+  downstream repo uses these yet — verified by audit.
+- **`sv_snapshot_trust_store` returns a map of `SnapshotEntry`
+  records** (trust-level + path captured by value) rather than a
+  map of live artifact pointers. Previous snapshots silently
+  aliased the live store, so trust-level changes on an artifact
+  pointer were invisible to a subsequent `sv_diff_trust_store`.
+  New layout makes diffs meaningful.
+
+### Added — Rust parity (fold-ins of audit-flagged gaps)
+
+Pulled forward before 2.5.0 tag cut. A `rust-old/` sweep revealed
+six Rust surfaces that had not been ported. Three are security-
+relevant and are now landed here; three are ergonomic and also
+landed since they're small.
+
+- **`Crl::to_json` / `from_json` → `crl_to_jsonl` /
+  `crl_from_jsonl`** (`src/policy.cyr`). JSON Lines format: first
+  line is the header object, subsequent lines are entries in the
+  same format as `rl_to_jsonl`. Includes `crl_save(path)` and
+  `crl_load(path)` convenience wrappers. Deliberate JSONL (not JSON
+  array) because `lib/json.cyr` parses one object at a time — JSONL
+  matches the existing `alog_append_to_file` convention, converts
+  to/from standard JSON via `jq -s`.
+- **`RevocationList::to_json` / `from_json` → `rl_to_jsonl` /
+  `rl_from_jsonl`** (`src/policy.cyr`). Rebuilds the
+  `revoked_keys` / `revoked_hashes` indexes on load. Malformed
+  lines are skipped and counted via `rl_load_bad_count()` rather
+  than aborting an import — a single bad line must not take down
+  a CRL refresh. `rl_save(path)` / `rl_load(path)` wrappers
+  included. **MEDIUM severity fix**: without this, a revocation
+  list could not survive a process restart or travel between
+  hosts, defeating the "revoke key/artifact" trust control.
+- **`KeyMetadata.allowed_artifact_types`** (`src/trust.cyr`,
+  `src/verify.cyr`). New field on `KeyVersion` (grows 88 → 96
+  bytes) with `kv_add_allowed_type` / `kv_clear_allowed_types` /
+  `kv_is_type_allowed`. Surfaced in `sv_verify_artifact` as a
+  dedicated `"allowed_type"` trust-check independent of signature
+  validity. Unset list = unrestricted (Rust `Default` behavior).
+  **MEDIUM severity fix**: constrains the blast radius of a
+  compromised publisher key — a key scoped to `ARTIFACT_PACKAGE`
+  cannot be abused to sign a kernel image.
+- **`ArtifactChange` records in `TrustStoreDiff`**
+  (`src/verify.cyr`). `tsdiff_added/removed/changed` now hold
+  32-byte `ArtifactChange` records with both `old_trust_level`
+  and `new_trust_level` (`-1` for "n/a" — added artifacts have
+  `old = -1`, removed artifacts have `new = -1`). Required
+  companion change: snapshots now capture trust levels by value
+  (see Breaking above) so diffs can actually compare them.
+- **`MeasurementStatus` display names** (`src/integrity.cyr`).
+  The enum + per-entry status field already existed from the
+  original port; this release just adds coverage for the
+  `Pending` / `FileNotFound` / `Error` name strings and a direct
+  `FILE_NOT_FOUND` path test against a missing file.
+- **`hash_data_with(data, len, algorithm)`** (`src/trust.cyr`,
+  `src/hex.cyr`). Dispatches to `sha256_hex` or `sha512_hex` by
+  `HASH_ALG_*`; unknown algorithm falls back to SHA-256 rather
+  than returning 0 (a trust engine must never silently skip
+  hashing). Added `sha512_hex` helper in `hex.cyr`. The SHA-512
+  path is rarely used today but the `HashAlgorithm` enum always
+  offered it as a policy option.
+
+### Removed — dead-code sweep
+
+`rust-old/` parity landed the full public API; a `cyrius build`-DCE
+audit plus a source-level cross-reference then showed 26 functions
+with zero callers anywhere in `src/`, `tests/`, `programs/`, `fuzz/`,
+or `benches/`. All removed in this release. Downstream consumer
+repos (`daimon`, `kavach`, `ark`, `aegis`, `phylax`, `mela`) checked
+clean for every one of these names.
+
+- **Orphaned internal helpers (4)**: `_uadd_overflow` (inlined into
+  `u256_mul_full` in 2.2.0 but the body was left behind);
+  `compute_file_hash` (shim over `hash_file`); `measure_system_component`
+  and `verify_pcr_measurements` in `src/tpm.cyr` (orphaned by the
+  2.5.0 rewrite over agnosys).
+- **Unused error constructors (9)**: `err_crypto`, `err_integrity`,
+  `err_invalid_input`, `err_io`, `err_key_not_found`, `err_revocation`,
+  `err_serialization`, `err_sig_invalid`, and `sigil_err_name`.
+  Callers always used `sigil_err(code, msg)` directly.
+- **Cosignature feature (6)**: `cosignature_new`, `cosig_key_id`,
+  `cosig_signature`, `artifact_add_cosigner`, `artifact_cosigners`,
+  `artifact_cosigner_count`. The Rust port left the hooks in place
+  but nothing ever signed or verified with multiple keys.
+  `TrustedArtifact` shrinks from 96 → 80 bytes (drops `+80
+  cosigners` and `+88 cosigner_count`).
+- **Free-helper stubs (2)**: `trust_policy_free`, `trust_check_free`.
+  The bump allocator doesn't support individual free, so these
+  were lying.
+- **HMAC convenience wrappers (2)**: `hmac_sign`, `hmac_verify`.
+  `hmac_sha256` stays (still used by `tests/tcyr/crypto.tcyr` and
+  `security.tcyr` as its own test surface).
+- **Misc (3)**: `ct_eq_64` (no 64-byte constant-time compare site;
+  signatures already compared as 32-byte halves or by full verify);
+  `trust_level_gt` (only `trust_level_ge` was used); `stats_counts`.
+
+### Changed — duplication cleanup
+
+- **`u256_load_le` / `u256_store_le`** added to `src/bigint_ext.cyr`.
+  Seven inline copies of the little-endian byte ↔ u256 loop
+  removed from `src/ed25519.cyr` (~80 lines out).
+  Sites: `ge_from_bytes`, `ge_to_bytes`, `sc_reduce` (×2 — lo+hi),
+  `ed25519_sign` (×2 — load `a`, store `S`), `ed25519_verify`
+  (load `S`). RFC 8032 vectors still pass.
+
+### Fixed — JSON escape in 2.5.0 serialization
+
+- **`_json_escape_cstr` helper** in `src/policy.cyr`. Earlier in
+  2.5.0 I landed `rl_to_jsonl` / `crl_to_jsonl` writing string
+  fields (`reason`, `revoked_by`, `issuer`, `key_id`,
+  `content_hash`) raw — an embedded `"` or `\` produced invalid
+  JSON that the parser silently truncated. Fixed before the
+  release ships. Writer escapes `"`, `\`, `\n`, `\r`, `\t`, `\b`,
+  `\f`, and control chars below 0x20 as `\u00XX`. Parser decodes
+  the same set, including `\uNNNN`. Added a round-trip test
+  exercising embedded quotes + backslash + newline.
+
+### Test coverage
+
+- **`tests/tcyr/sigil.tcyr`**: 55 → 78 assertions → 82 assertions
+  (added JSONL escape round-trip). Added
+  `hash_data_with` vectors (incl. SHA-512 FIPS 180-4
+  "hello world" vector), RL/CRL JSONL round-trips (in-memory +
+  file), `MeasurementStatus` name coverage, and the
+  `FILE_NOT_FOUND` status path.
+- **`tests/tcyr/verify.tcyr`**: 20 → 37 assertions. Added
+  `allowed_type` unrestricted / restricted paths (with the full
+  `sv_verify_artifact` pipeline) and `ArtifactChange` diff records
+  for both added and changed artifacts.
+- **Total new assertions in 2.5.0**: ~45 across six files
+  (Rust-parity fold-ins + JSON escape round-trip).
+- **Source stats**: 395 → 372 functions in `src/` (net -23 after
+  adding `u256_load_le`, `u256_store_le`, `_json_escape_cstr`);
+  dead source removed is ~120 lines, dedup saves another ~80.
+- Smoke exits 0, fuzz 3/3 OK, bench 12/12 run, benchmark numbers
+  stable (no perf impact from the cleanup).
 
 ## [2.4.2] — 2026-04-16
 

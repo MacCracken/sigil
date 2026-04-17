@@ -360,19 +360,7 @@ fn ge_to_bytes(out, p) {
     fp_mul(_gcomp_y, ge_y(p), _gcomp_recip);
 
     # Encode y as 32 bytes little-endian
-    var i = 0;
-    while (i < 4) {
-        var v = u256_limb(_gcomp_y, i);
-        store8(out + i*8, v & 0xFF);
-        store8(out + i*8 + 1, (v >> 8) & 0xFF);
-        store8(out + i*8 + 2, (v >> 16) & 0xFF);
-        store8(out + i*8 + 3, (v >> 24) & 0xFF);
-        store8(out + i*8 + 4, (v >> 32) & 0xFF);
-        store8(out + i*8 + 5, (v >> 40) & 0xFF);
-        store8(out + i*8 + 6, (v >> 48) & 0xFF);
-        store8(out + i*8 + 7, (v >> 56) & 0xFF);
-        i = i + 1;
-    }
+    u256_store_le(out, _gcomp_y);
 
     # Set high bit to sign of x (low bit of x)
     var x_sign = u256_limb(_gcomp_x, 0) & 1;
@@ -423,19 +411,7 @@ fn ge_from_bytes(p, s) {
     store8(_gdc_s_copy + 31, load8(_gdc_s_copy + 31) & 0x7F);
 
     # Load y as u256 from little-endian bytes
-    var li = 0;
-    while (li < 4) {
-        var v = (load8(_gdc_s_copy + li*8) & 0xFF)
-        | ((load8(_gdc_s_copy + li*8+1) & 0xFF) << 8)
-        | ((load8(_gdc_s_copy + li*8+2) & 0xFF) << 16)
-        | ((load8(_gdc_s_copy + li*8+3) & 0xFF) << 24)
-        | ((load8(_gdc_s_copy + li*8+4) & 0xFF) << 32)
-        | ((load8(_gdc_s_copy + li*8+5) & 0xFF) << 40)
-        | ((load8(_gdc_s_copy + li*8+6) & 0xFF) << 48)
-        | ((load8(_gdc_s_copy + li*8+7) & 0xFF) << 56);
-        u256_set_limb(_gdc_y, li, v);
-        li = li + 1;
-    }
+    u256_load_le(_gdc_y, _gdc_s_copy);
 
     # u = y^2 - 1
     fp_sq(_gdc_y2, _gdc_y);
@@ -551,33 +527,9 @@ fn sc_reduce(out, s64) {
         _scr_inited = 1;
     }
 
-    # Load 64-byte input as two u256 (little-endian)
-    var li = 0;
-    while (li < 4) {
-        var v = (load8(s64 + li*8) & 0xFF)
-        | ((load8(s64 + li*8+1) & 0xFF) << 8)
-        | ((load8(s64 + li*8+2) & 0xFF) << 16)
-        | ((load8(s64 + li*8+3) & 0xFF) << 24)
-        | ((load8(s64 + li*8+4) & 0xFF) << 32)
-        | ((load8(s64 + li*8+5) & 0xFF) << 40)
-        | ((load8(s64 + li*8+6) & 0xFF) << 48)
-        | ((load8(s64 + li*8+7) & 0xFF) << 56);
-        u256_set_limb(_scr_lo, li, v);
-        li = li + 1;
-    }
-    li = 0;
-    while (li < 4) {
-        var v = (load8(s64 + 32 + li*8) & 0xFF)
-        | ((load8(s64 + 32 + li*8+1) & 0xFF) << 8)
-        | ((load8(s64 + 32 + li*8+2) & 0xFF) << 16)
-        | ((load8(s64 + 32 + li*8+3) & 0xFF) << 24)
-        | ((load8(s64 + 32 + li*8+4) & 0xFF) << 32)
-        | ((load8(s64 + 32 + li*8+5) & 0xFF) << 40)
-        | ((load8(s64 + 32 + li*8+6) & 0xFF) << 48)
-        | ((load8(s64 + 32 + li*8+7) & 0xFF) << 56);
-        u256_set_limb(_scr_hi, li, v);
-        li = li + 1;
-    }
+    # Load 64-byte input as two u256 (little-endian).
+    u256_load_le(_scr_lo, s64);
+    u256_load_le(_scr_hi, s64 + 32);
 
     # Iteratively reduce: lo = lo + hi*R, split result, repeat until hi == 0
     while (u256_is_zero(_scr_hi) == 0) {
@@ -729,38 +681,14 @@ fn ed25519_sign(sk, msg, msg_len, sig_out) {
     sc_reduce(_sign_h_scalar, _sign_hram);
 
     # Load a from az[0..32] as u256
-    var li = 0;
-    while (li < 4) {
-        var v = (load8(_sign_az + li*8) & 0xFF)
-        | ((load8(_sign_az + li*8+1) & 0xFF) << 8)
-        | ((load8(_sign_az + li*8+2) & 0xFF) << 16)
-        | ((load8(_sign_az + li*8+3) & 0xFF) << 24)
-        | ((load8(_sign_az + li*8+4) & 0xFF) << 32)
-        | ((load8(_sign_az + li*8+5) & 0xFF) << 40)
-        | ((load8(_sign_az + li*8+6) & 0xFF) << 48)
-        | ((load8(_sign_az + li*8+7) & 0xFF) << 56);
-        u256_set_limb(_sign_a_scalar, li, v);
-        li = li + 1;
-    }
+    u256_load_le(_sign_a_scalar, _sign_az);
 
     # S = (r + h*a) mod L
     var S_result = alloc(32);
     sc_muladd(S_result, _sign_h_scalar, _sign_a_scalar, _sign_r_scalar);
 
     # Write S as little-endian bytes to sig_out+32
-    li = 0;
-    while (li < 4) {
-        var v = u256_limb(S_result, li);
-        store8(_sign_sig_out + 32 + li*8, v & 0xFF);
-        store8(_sign_sig_out + 32 + li*8 + 1, (v >> 8) & 0xFF);
-        store8(_sign_sig_out + 32 + li*8 + 2, (v >> 16) & 0xFF);
-        store8(_sign_sig_out + 32 + li*8 + 3, (v >> 24) & 0xFF);
-        store8(_sign_sig_out + 32 + li*8 + 4, (v >> 32) & 0xFF);
-        store8(_sign_sig_out + 32 + li*8 + 5, (v >> 40) & 0xFF);
-        store8(_sign_sig_out + 32 + li*8 + 6, (v >> 48) & 0xFF);
-        store8(_sign_sig_out + 32 + li*8 + 7, (v >> 56) & 0xFF);
-        li = li + 1;
-    }
+    u256_store_le(_sign_sig_out + 32, S_result);
 
     # Zeroize all secret/derived material. _sign_az holds H(sk)[0..64]
     # (the clamped scalar a and nonce seed). _sign_r_scalar is the
@@ -813,19 +741,7 @@ fn ed25519_verify(pk, msg, msg_len, sig) {
     sc_reduce(_ver_h_scalar, _ver_hram);
 
     # Load S from sig[32..64] as scalar
-    var li = 0;
-    while (li < 4) {
-        var v = (load8(_ver_sig + 32 + li*8) & 0xFF)
-        | ((load8(_ver_sig + 32 + li*8+1) & 0xFF) << 8)
-        | ((load8(_ver_sig + 32 + li*8+2) & 0xFF) << 16)
-        | ((load8(_ver_sig + 32 + li*8+3) & 0xFF) << 24)
-        | ((load8(_ver_sig + 32 + li*8+4) & 0xFF) << 32)
-        | ((load8(_ver_sig + 32 + li*8+5) & 0xFF) << 40)
-        | ((load8(_ver_sig + 32 + li*8+6) & 0xFF) << 48)
-        | ((load8(_ver_sig + 32 + li*8+7) & 0xFF) << 56);
-        u256_set_limb(_ver_S_scalar, li, v);
-        li = li + 1;
-    }
+    u256_load_le(_ver_S_scalar, _ver_sig + 32);
 
     # RFC 8032 §5.1.7 / §8.4: reject non-canonical S (S must be < L).
     # Prevents signature malleability — the same (pk, msg) must have

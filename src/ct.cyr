@@ -26,11 +26,3 @@ fn ct_eq(a, a_len, b, b_len) {
 fn ct_eq_32(a, b) {
     return ct_eq(a, 32, b, 32);
 }
-
-# ================================================================
-# Constant-time comparison for fixed 64-byte buffers (Ed25519 signatures)
-# ================================================================
-
-fn ct_eq_64(a, b) {
-    return ct_eq(a, 64, b, 64);
-}

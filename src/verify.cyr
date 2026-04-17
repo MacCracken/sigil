@@ -297,6 +297,26 @@ fn sv_verify_artifact(sv, path, artifact_type) {
         }
     }
 
+    # Check: allowed-artifact-type (Rust KeyMetadata.allowed_artifact_types).
+    # If the signer key has an explicit allow-list, the artifact_type must
+    # appear in it. Unrestricted keys (empty/null list) pass through.
+    # Rejected here → trust_level UNVERIFIED regardless of signature.
+    if (stored != 0) {
+        var signer_atype = artifact_signer_key_id(stored);
+        if (signer_atype != 0) {
+            var kra = load64(sv);
+            var kva = keyring_get_current(kra, signer_atype);
+            if (kva != 0) {
+                if (kv_is_type_allowed(kva, artifact_type) == 1) {
+                    vresult_add_check(vr, trust_check_new("allowed_type", 1, "Key authorized for artifact type"));
+                } else {
+                    vresult_add_check(vr, trust_check_new("allowed_type", 0, "Key not authorized for artifact type"));
+                    trust_level = TRUST_UNVERIFIED;
+                }
+            }
+        }
+    }
+
     # Check: policy compliance
     var min_trust = policy_min_trust(policy);
     var enforcement = policy_enforcement(policy);
@@ -474,6 +494,22 @@ fn sv_compliance_report(sv) {
 # Trust store snapshot and diff
 # ================================================================
 
+# Snapshot entry (16 bytes): trust-level + path frozen at snapshot time.
+# Previously the snapshot mapped chash → artifact_ptr, but since the
+# same pointer was still mutable in the live store, a trust-level
+# change was invisible to a subsequent diff. Snapshotting a level
+# plus path byvalue gives a real before/after view.
+
+fn _snap_entry_new(trust_level, path) {
+    var se = fl_alloc(16);
+    store64(se, trust_level);
+    store64(se + 8, path);
+    return se;
+}
+
+fn snap_entry_trust_level(se) { return load64(se); }
+fn snap_entry_path(se) { return load64(se + 8); }
+
 fn sv_snapshot_trust_store(sv) {
     var store = load64(sv + 32);
     var keys = map_keys(store);
@@ -483,18 +519,50 @@ fn sv_snapshot_trust_store(sv) {
     while (i < klen) {
         var chash = vec_get(keys, i);
         var artifact = map_get(store, chash);
-        map_set(snap, chash, artifact);
+        map_set(snap, chash, _snap_entry_new(
+            artifact_trust_level(artifact),
+            artifact_path(artifact)
+        ));
         i = i + 1;
     }
     return snap;
 }
 
-# TrustStoreDiff (24 bytes): added, removed, changed (all vecs)
+# ================================================================
+# ArtifactChange (32 bytes) — Rust-style diff record
+# ================================================================
+# Layout:
+#   +0   content_hash  (C-string ptr)
+#   +8   path          (C-string ptr)
+#   +16  old_trust_level (i64; -1 = none / this is a newly added artifact)
+#   +24  new_trust_level (i64; -1 = none / this artifact was removed)
+#
+# For a "changed" record, both old and new are set and differ.
+# For "added", old = -1. For "removed", new = -1.
+
+fn artifact_change_new(content_hash, path, old_tl, new_tl) {
+    var ac = fl_alloc(32);
+    store64(ac, content_hash);
+    store64(ac + 8, path);
+    store64(ac + 16, old_tl);
+    store64(ac + 24, new_tl);
+    return ac;
+}
+
+fn ac_content_hash(ac) { return load64(ac); }
+fn ac_path(ac) { return load64(ac + 8); }
+fn ac_old_trust_level(ac) { return load64(ac + 16); }
+fn ac_new_trust_level(ac) { return load64(ac + 24); }
+
+# TrustStoreDiff (24 bytes): added, removed, changed (all vecs of ArtifactChange ptrs).
+# BREAKING vs 2.4.x: vecs previously held raw TrustedArtifact pointers;
+# they now hold ArtifactChange records so callers can see both sides
+# of a trust-level transition, not just the current side.
 fn trust_store_diff_new() {
     var d = fl_alloc(24);
-    store64(d, vec_new());     # added
-    store64(d + 8, vec_new()); # removed
-    store64(d + 16, vec_new()); # changed
+    store64(d, vec_new());     # added   (ArtifactChange where old_tl = -1)
+    store64(d + 8, vec_new()); # removed (ArtifactChange where new_tl = -1)
+    store64(d + 16, vec_new()); # changed (both sides set, old != new)
     return d;
 }
 
@@ -521,13 +589,27 @@ fn sv_diff_trust_store(sv, old_snap) {
     var i = 0;
     while (i < cklen) {
         var chash = vec_get(current_keys, i);
-        var old_art = map_get(old_snap, chash);
-        if (old_art == 0) {
-            vec_push(load64(diff), map_get(store, chash));
+        var old_snap_entry = map_get(old_snap, chash);
+        var new_art = map_get(store, chash);
+        if (old_snap_entry == 0) {
+            var ac = artifact_change_new(
+                chash,
+                artifact_path(new_art),
+                0 - 1,
+                artifact_trust_level(new_art)
+            );
+            vec_push(load64(diff), ac);
         } else {
-            var new_art = map_get(store, chash);
-            if (artifact_trust_level(new_art) != artifact_trust_level(old_art)) {
-                vec_push(load64(diff + 16), new_art);
+            var old_tl = snap_entry_trust_level(old_snap_entry);
+            var new_tl = artifact_trust_level(new_art);
+            if (old_tl != new_tl) {
+                var ac = artifact_change_new(
+                    chash,
+                    artifact_path(new_art),
+                    old_tl,
+                    new_tl
+                );
+                vec_push(load64(diff + 16), ac);
             }
         }
         i = i + 1;
@@ -539,7 +621,14 @@ fn sv_diff_trust_store(sv, old_snap) {
     while (i < oklen) {
         var chash = vec_get(old_keys, i);
         if (map_get(store, chash) == 0) {
-            vec_push(load64(diff + 8), map_get(old_snap, chash));
+            var old_snap_entry = map_get(old_snap, chash);
+            var ac = artifact_change_new(
+                chash,
+                snap_entry_path(old_snap_entry),
+                snap_entry_trust_level(old_snap_entry),
+                0 - 1
+            );
+            vec_push(load64(diff + 8), ac);
         }
         i = i + 1;
     }

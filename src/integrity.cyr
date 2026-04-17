@@ -161,11 +161,6 @@ fn iv_set_policy(v, policy) {
     return v;
 }
 
-# Compute hash of file contents
-fn compute_file_hash(path) {
-    return hash_file(path);
-}
-
 # Verify a single file against policy
 fn iv_verify_file(v, path) {
     var policy = load64(v);

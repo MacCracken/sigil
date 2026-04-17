@@ -61,11 +61,6 @@ fn trust_level_ge(a, b) {
     return 0;
 }
 
-fn trust_level_gt(a, b) {
-    if (trust_level_rank(a) > trust_level_rank(b)) { return 1; }
-    return 0;
-}
-
 fn trust_level_name(level) {
     if (level == TRUST_SYSTEM_CORE) { return "SystemCore"; }
     if (level == TRUST_VERIFIED) { return "Verified"; }
@@ -157,8 +152,6 @@ fn policy_set_verify_on_execute(p, v) { store64(p + 40, v); return p; }
 fn policy_set_revocation_check(p, v) { store64(p + 48, v); return p; }
 fn policy_set_hash_alg(p, v) { store64(p + 56, v); return p; }
 
-fn trust_policy_free(p) { fl_free(p); return 0; }
-
 # ================================================================
 # TrustCheck (24 bytes)
 # ================================================================
@@ -178,27 +171,9 @@ fn trust_check_new(name, passed, detail) {
 fn check_name(tc) { return load64(tc); }
 fn check_passed(tc) { return load64(tc + 8); }
 fn check_detail(tc) { return load64(tc + 16); }
-fn trust_check_free(tc) { fl_free(tc); return 0; }
 
 # ================================================================
-# Cosignature (16 bytes)
-# ================================================================
-# Layout:
-#   +0   key_id      (C-string pointer)
-#   +8   signature   (pointer to raw bytes)
-
-fn cosignature_new(key_id, sig_ptr) {
-    var cs = fl_alloc(16);
-    store64(cs, key_id);
-    store64(cs + 8, sig_ptr);
-    return cs;
-}
-
-fn cosig_key_id(cs) { return load64(cs); }
-fn cosig_signature(cs) { return load64(cs + 8); }
-
-# ================================================================
-# TrustedArtifact (96 bytes)
+# TrustedArtifact (80 bytes)
 # ================================================================
 # Layout:
 #   +0   path              (C-string pointer)
@@ -211,11 +186,9 @@ fn cosig_signature(cs) { return load64(cs + 8); }
 #   +56  trust_level       (i64)
 #   +64  verified_at       (i64, epoch seconds, 0 = never)
 #   +72  metadata          (hashmap pointer, 0 = none)
-#   +80  cosigners         (vec pointer, 0 = none)
-#   +88  cosigner_count    (i64)
 
 fn trusted_artifact_new(path, artifact_type, content_hash) {
-    var a = fl_alloc(96);
+    var a = fl_alloc(80);
     store64(a, path);
     store64(a + 8, artifact_type);
     store64(a + 16, content_hash);
@@ -226,8 +199,6 @@ fn trusted_artifact_new(path, artifact_type, content_hash) {
     store64(a + 56, TRUST_UNVERIFIED);
     store64(a + 64, 0);
     store64(a + 72, 0);
-    store64(a + 80, 0);
-    store64(a + 88, 0);
     return a;
 }
 
@@ -241,8 +212,6 @@ fn artifact_signer_key_id(a) { return load64(a + 48); }
 fn artifact_trust_level(a) { return load64(a + 56); }
 fn artifact_verified_at(a) { return load64(a + 64); }
 fn artifact_metadata(a) { return load64(a + 72); }
-fn artifact_cosigners(a) { return load64(a + 80); }
-fn artifact_cosigner_count(a) { return load64(a + 88); }
 
 fn artifact_set_signature(a, sig, sig_len) {
     store64(a + 24, sig);
@@ -254,17 +223,6 @@ fn artifact_set_signer(a, key_id) { store64(a + 48, key_id); return a; }
 fn artifact_set_trust_level(a, level) { store64(a + 56, level); return a; }
 fn artifact_set_verified_at(a, epoch) { store64(a + 64, epoch); return a; }
 fn artifact_set_metadata(a, m) { store64(a + 72, m); return a; }
-
-fn artifact_add_cosigner(a, cs) {
-    var cosigners = load64(a + 80);
-    if (cosigners == 0) {
-        cosigners = vec_new();
-        store64(a + 80, cosigners);
-    }
-    vec_push(cosigners, cs);
-    store64(a + 88, load64(a + 88) + 1);
-    return a;
-}
 
 # ================================================================
 # VerificationResult (32 bytes)
@@ -320,4 +278,3 @@ fn sigil_stats_new() {
 fn stats_total(s) { return load64(s); }
 fn stats_verified(s) { return load64(s + 8); }
 fn stats_revoked(s) { return load64(s + 16); }
-fn stats_counts(s) { return load64(s + 24); }

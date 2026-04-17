@@ -170,6 +170,89 @@ fn main() {
     var vr5 = sv_verify_agent(sv, tmppath2);
     assert_eq(vresult_passed(vr5), 0, "unsigned agent rejected");
 
+    # ============================================================
+    # allowed_artifact_types restriction (Rust KeyMetadata port)
+    # An unrestricted key passes; a restricted key fails verification
+    # for artifact types outside its allow-list. The check is a
+    # separate "allowed_type" TrustCheck and does not depend on the
+    # signature itself being invalid.
+    # ============================================================
+    test_group("allowed_type unrestricted");
+    # Default: kv has no allowed_types list — all types pass.
+    assert_eq(kv_is_type_allowed(kv, ARTIFACT_SYSTEM_BINARY), 1, "unrestricted allows system binary");
+    assert_eq(kv_is_type_allowed(kv, ARTIFACT_AGENT_BINARY), 1, "unrestricted allows agent binary");
+    assert_eq(kv_is_type_allowed(kv, ARTIFACT_PACKAGE), 1, "unrestricted allows package");
+
+    test_group("allowed_type restricted");
+    # Restrict to SYSTEM_BINARY + BOOT_COMPONENT only.
+    kv_add_allowed_type(kv, ARTIFACT_SYSTEM_BINARY);
+    kv_add_allowed_type(kv, ARTIFACT_BOOT_COMPONENT);
+    assert_eq(kv_is_type_allowed(kv, ARTIFACT_SYSTEM_BINARY), 1, "system binary allowed");
+    assert_eq(kv_is_type_allowed(kv, ARTIFACT_BOOT_COMPONENT), 1, "boot component allowed");
+    assert_eq(kv_is_type_allowed(kv, ARTIFACT_AGENT_BINARY), 0, "agent binary rejected");
+    assert_eq(kv_is_type_allowed(kv, ARTIFACT_PACKAGE), 0, "package rejected");
+
+    # Verify path: an agent-binary artifact signed by a key restricted
+    # to system-binaries should surface the "allowed_type" check as
+    # failing, and trust_level should drop from VERIFIED.
+    var vr_restricted = sv_verify_artifact(sv, tmppath, ARTIFACT_AGENT_BINARY);
+    var checks_r = vresult_checks(vr_restricted);
+    var type_check_found = 0;
+    var type_check_passed = 1;
+    var ci2 = 0;
+    while (ci2 < vec_len(checks_r)) {
+        var tc2 = vec_get(checks_r, ci2);
+        if (streq(check_name(tc2), "allowed_type") == 1) {
+            type_check_found = 1;
+            type_check_passed = check_passed(tc2);
+        }
+        ci2 = ci2 + 1;
+    }
+    assert_eq(type_check_found, 1, "allowed_type check surfaced");
+    assert_eq(type_check_passed, 0, "restricted key fails for disallowed type");
+
+    # ============================================================
+    # TrustStoreDiff — ArtifactChange records should carry both
+    # sides of a trust-level transition.
+    # ============================================================
+    test_group("diff added");
+    var snap0 = sv_snapshot_trust_store(sv);
+    var extra = trusted_artifact_new("/tmp/new_artifact", ARTIFACT_PACKAGE, "new_hash_123");
+    artifact_set_trust_level(extra, TRUST_VERIFIED);
+    sv_register_trusted(sv, extra);
+    var d_add = sv_diff_trust_store(sv, snap0);
+    assert_eq(vec_len(tsdiff_added(d_add)), 1, "1 added");
+    var ac_add = vec_get(tsdiff_added(d_add), 0);
+    assert_streq(ac_content_hash(ac_add), "new_hash_123", "added hash");
+    assert_eq(ac_old_trust_level(ac_add), 0 - 1, "added: old tl = -1");
+    assert_eq(ac_new_trust_level(ac_add), TRUST_VERIFIED, "added: new tl = VERIFIED");
+
+    test_group("diff changed");
+    var snap1 = sv_snapshot_trust_store(sv);
+    # Swap trust level of the "new_hash_123" artifact.
+    artifact_set_trust_level(extra, TRUST_SYSTEM_CORE);
+    sv_register_system_core(sv, extra);
+    var d_chg = sv_diff_trust_store(sv, snap1);
+    assert_eq(vec_len(tsdiff_changed(d_chg)), 1, "1 changed");
+    var ac_chg = vec_get(tsdiff_changed(d_chg), 0);
+    assert_eq(ac_old_trust_level(ac_chg), TRUST_VERIFIED, "changed: old = VERIFIED");
+    assert_eq(ac_new_trust_level(ac_chg), TRUST_SYSTEM_CORE, "changed: new = SYSTEM_CORE");
+
+    # Clear the restriction; artifact verification recovers.
+    kv_clear_allowed_types(kv);
+    var vr_cleared = sv_verify_artifact(sv, tmppath, ARTIFACT_AGENT_BINARY);
+    var checks_c = vresult_checks(vr_cleared);
+    var cleared_pass = 0;
+    var ci3 = 0;
+    while (ci3 < vec_len(checks_c)) {
+        var tc3 = vec_get(checks_c, ci3);
+        if (streq(check_name(tc3), "allowed_type") == 1) {
+            if (check_passed(tc3) == 1) { cleared_pass = 1; }
+        }
+        ci3 = ci3 + 1;
+    }
+    assert_eq(cleared_pass, 1, "cleared key passes allowed_type");
+
     # Cleanup
     syscall(87, tmppath);
     syscall(87, tmppath2);

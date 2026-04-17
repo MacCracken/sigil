@@ -49,6 +49,17 @@ fn main() {
     var h = hash_data("hello world", 11);
     assert_streq(h, "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9", "sha256 hello world");
 
+    test_group("hash_data_with");
+    # HASH_ALG_SHA256 dispatches to the same path as hash_data.
+    var h256 = hash_data_with("hello world", 11, HASH_ALG_SHA256);
+    assert_streq(h256, "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9", "hash_data_with sha256");
+    # SHA-512 vector: FIPS 180-4 "hello world" → 309ecc48...f989.
+    var h512 = hash_data_with("hello world", 11, HASH_ALG_SHA512);
+    assert_streq(h512, "309ecc489c12d6eb4cc40f50c902f2b4d0ed77ee511a7c7a9bcd3ca86d4cd86f989dd35bc5ff499670da34255b45b0cfd830e81f605dcf7dc5542e93ae9cd76f", "hash_data_with sha512");
+    # Unknown algorithm falls back to SHA-256 (we never silently skip hashing).
+    var h99 = hash_data_with("hello world", 11, 99);
+    assert_streq(h99, "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9", "unknown alg falls back to sha256");
+
     test_group("sign and verify");
     var sig = sign_data("test message", 12, &sk);
     assert(sig != 0, "signature not null");
@@ -154,6 +165,26 @@ fn main() {
     assert_eq(ireport_verified(report), 1, "verified = 1");
     assert_eq(ireport_is_clean(report), 1, "report is clean");
 
+    # MeasurementStatus display names (Rust: impl Display for MeasurementStatus).
+    # Pending / FileNotFound / Error paths aren't triggered above, so verify
+    # their names directly.
+    test_group("mstatus names");
+    assert_streq(mstatus_name(MSTATUS_PENDING), "Pending", "pending name");
+    assert_streq(mstatus_name(MSTATUS_VERIFIED), "Verified", "verified name");
+    assert_streq(mstatus_name(MSTATUS_MISMATCH), "Mismatch", "mismatch name");
+    assert_streq(mstatus_name(MSTATUS_FILE_NOT_FOUND), "FileNotFound", "file not found name");
+    assert_streq(mstatus_name(MSTATUS_ERROR), "Error", "error name");
+
+    # FileNotFound path via iv_verify_all on a missing file.
+    test_group("mstatus file_not_found");
+    var ipol3 = integrity_policy_new();
+    ipolicy_add(ipol3, "/tmp/nonexistent_sigil_test_xyz", "dead");
+    var iv3 = integrity_verifier_new(ipol3);
+    var rep3 = iv_verify_all(iv3);
+    assert_eq(vec_len(ireport_errors(rep3)), 1, "1 missing file");
+    var missing_m = vec_get(ireport_errors(rep3), 0);
+    assert_eq(meas_status(missing_m), MSTATUS_FILE_NOT_FOUND, "status = FILE_NOT_FOUND");
+
     # ============================================================
     # Policy: revocation list
     # ============================================================
@@ -203,6 +234,76 @@ fn main() {
     var applied = crl_apply_to(crl, rl2);
     assert_eq(applied, 1, "applied 1 entry");
     assert_eq(rl_is_key_revoked(rl2, "crl_revoked_key"), 1, "crl key revoked");
+
+    # ============================================================
+    # Policy: RevocationList JSON round-trip
+    # ============================================================
+    test_group("RL jsonl roundtrip");
+    var rl_src = revocation_list_new();
+    rl_add(rl_src, revocation_entry_new("rot_key", 0, "rotated", "admin"));
+    rl_add(rl_src, revocation_entry_new(0, "bad_hash_abc", "tampered", "oncall"));
+    var rl_with_after = revocation_entry_new("temp_key", 0, "short-lived", "admin");
+    rev_set_after(rl_with_after, 100000);
+    rl_add(rl_src, rl_with_after);
+
+    var jsonl = rl_to_jsonl(rl_src);
+    assert(strlen(jsonl) > 0, "jsonl non-empty");
+    var rl_loaded = rl_from_jsonl(jsonl, strlen(jsonl));
+    assert_eq(rl_load_bad_count(), 0, "no malformed lines");
+    assert_eq(rl_len(rl_loaded), 3, "loaded 3 entries");
+    assert_eq(rl_is_key_revoked(rl_loaded, "rot_key"), 1, "rot_key revoked post-load");
+    assert_eq(rl_is_artifact_revoked(rl_loaded, "bad_hash_abc"), 1, "hash revoked post-load");
+    assert_eq(rl_is_key_revoked(rl_loaded, "unknown_key"), 0, "unknown key not revoked");
+
+    # File round-trip
+    var rl_path = "/tmp/sigil_rl_test.jsonl";
+    assert_eq(rl_save(rl_src, rl_path), ERR_NONE, "rl_save ok");
+    var rl_via_file = rl_load(rl_path);
+    assert_eq(rl_len(rl_via_file), 3, "file round-trip: 3 entries");
+    syscall(87, rl_path);   # unlink
+
+    # JSON-escape round-trip: reasons/ids containing " and \
+    # must survive serialization intact. Pre-escape these were
+    # emitting invalid JSON and the parser silently truncated.
+    test_group("RL jsonl escape");
+    var rl_esc = revocation_list_new();
+    var re_esc = revocation_entry_new(
+        "key_with_\"quote\"",
+        "hash_with_\\backslash",
+        "reason with \"quotes\" and \\ and \n newline",
+        "admin_name"
+    );
+    rl_add(rl_esc, re_esc);
+    var esc_jsonl = rl_to_jsonl(rl_esc);
+    var rl_esc_loaded = rl_from_jsonl(esc_jsonl, strlen(esc_jsonl));
+    assert_eq(rl_load_bad_count(), 0, "escape roundtrip: no malformed lines");
+    assert_eq(rl_len(rl_esc_loaded), 1, "1 entry after escape roundtrip");
+    assert_eq(rl_is_key_revoked(rl_esc_loaded, "key_with_\"quote\""), 1, "key with quote recovered");
+    assert_eq(rl_is_artifact_revoked(rl_esc_loaded, "hash_with_\\backslash"), 1, "hash with backslash recovered");
+
+    # ============================================================
+    # Policy: CRL JSON round-trip
+    # ============================================================
+    test_group("CRL jsonl roundtrip");
+    var crl_src = crl_new(7, "root_of_trust");
+    crl_set_next_update(crl_src, 9999999999);
+    crl_add_entry(crl_src, revocation_entry_new("kid_1", 0, "r1", "root"));
+    crl_add_entry(crl_src, revocation_entry_new(0, "hash_xy", "r2", "root"));
+
+    var crl_jsonl = crl_to_jsonl(crl_src);
+    var crl_loaded = crl_from_jsonl(crl_jsonl, strlen(crl_jsonl));
+    assert(crl_loaded != 0, "crl_from_jsonl non-null");
+    assert_eq(crl_version(crl_loaded), 7, "version preserved");
+    assert_streq(crl_issuer(crl_loaded), "root_of_trust", "issuer preserved");
+    assert_eq(crl_next_update(crl_loaded), 9999999999, "next_update preserved");
+    assert_eq(vec_len(crl_entries(crl_loaded)), 2, "2 entries preserved");
+
+    var crl_path = "/tmp/sigil_crl_test.jsonl";
+    assert_eq(crl_save(crl_src, crl_path), ERR_NONE, "crl_save ok");
+    var crl_via_file = crl_load(crl_path);
+    assert_eq(crl_version(crl_via_file), 7, "crl version via file");
+    assert_eq(vec_len(crl_entries(crl_via_file)), 2, "crl entries via file");
+    syscall(87, crl_path);
 
     # ============================================================
     # Policy: merge

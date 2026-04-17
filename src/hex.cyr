@@ -79,3 +79,9 @@ fn sha256_hex(data, len) {
     sha256(data, len, &digest);
     return hex_encode(&digest, 32);
 }
+
+fn sha512_hex(data, len) {
+    var digest[64];
+    sha512(data, len, &digest);
+    return hex_encode(&digest, 64);
+}

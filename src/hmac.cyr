@@ -64,18 +64,3 @@ fn hmac_sha256(key, key_len, msg, msg_len, out) {
     return 0;
 }
 
-# ================================================================
-# HMAC-SHA256 sign/verify convenience
-# ================================================================
-
-fn hmac_sign(key, key_len, data, data_len) {
-    var sig = alloc(32);
-    hmac_sha256(key, key_len, data, data_len, sig);
-    return sig;
-}
-
-fn hmac_verify(key, key_len, data, data_len, expected_sig) {
-    var computed[32];
-    hmac_sha256(key, key_len, data, data_len, &computed);
-    return ct_eq_32(&computed, expected_sig);
-}

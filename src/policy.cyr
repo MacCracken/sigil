@@ -203,3 +203,450 @@ fn crl_apply_to(c, rl) {
     }
     return added;
 }
+
+# ================================================================
+# JSON Lines serialization (RevocationEntry, RevocationList, Crl)
+#
+# Deliberate format choice: one JSON object per line, newline-
+# separated. Cyrius' lib/json.cyr parses a single object at a time
+# and has no array support, so JSONL is the cleanest round-trip
+# format and matches `alog_append_to_file`.  Rust's `to_json()`
+# produced a JSON array; JSONL is trivially convertible with
+# `jq -s`.
+#
+# Null fields use JSON `null` (no quotes). Parsing treats `null`,
+# empty, and missing fields as 0 (C-string null ptr).
+# ================================================================
+
+# Internal: append JSON-escaped version of a C-string to a
+# str_builder. Escapes `"`, `\`, and control chars 0x00-0x1F
+# per RFC 8259. Without this, a reason like `key "foo" compromised`
+# would produce invalid JSON that the parser choked on.
+fn _json_escape_cstr(sb, s) {
+    var n = strlen(s);
+    var i = 0;
+    while (i < n) {
+        var c = load8(s + i) & 0xFF;
+        if (c == 34) { str_builder_add_cstr(sb, "\\\""); }
+        elif (c == 92) { str_builder_add_cstr(sb, "\\\\"); }
+        elif (c == 10) { str_builder_add_cstr(sb, "\\n"); }
+        elif (c == 13) { str_builder_add_cstr(sb, "\\r"); }
+        elif (c == 9)  { str_builder_add_cstr(sb, "\\t"); }
+        elif (c == 8)  { str_builder_add_cstr(sb, "\\b"); }
+        elif (c == 12) { str_builder_add_cstr(sb, "\\f"); }
+        elif (c < 32) {
+            # \u00XX for any remaining control char
+            str_builder_add_cstr(sb, "\\u00");
+            var hi = (c >> 4) & 0xF;
+            var lo = c & 0xF;
+            if (hi < 10) { str_builder_add_byte(sb, 48 + hi); }
+            else         { str_builder_add_byte(sb, 87 + hi); }
+            if (lo < 10) { str_builder_add_byte(sb, 48 + lo); }
+            else         { str_builder_add_byte(sb, 87 + lo); }
+        } else {
+            str_builder_add_byte(sb, c);
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Internal: emit one entry as a JSONL line into a str_builder.
+fn _rev_entry_to_jsonl(sb, e) {
+    str_builder_add_cstr(sb, "{\"key_id\":");
+    if (rev_key_id(e) != 0) {
+        str_builder_add_cstr(sb, "\"");
+        _json_escape_cstr(sb, rev_key_id(e));
+        str_builder_add_cstr(sb, "\"");
+    } else {
+        str_builder_add_cstr(sb, "null");
+    }
+    str_builder_add_cstr(sb, ",\"content_hash\":");
+    if (rev_content_hash(e) != 0) {
+        str_builder_add_cstr(sb, "\"");
+        _json_escape_cstr(sb, rev_content_hash(e));
+        str_builder_add_cstr(sb, "\"");
+    } else {
+        str_builder_add_cstr(sb, "null");
+    }
+    str_builder_add_cstr(sb, ",\"reason\":\"");
+    _json_escape_cstr(sb, rev_reason(e));
+    str_builder_add_cstr(sb, "\",\"revoked_at\":");
+    str_builder_add_int(sb, rev_at(e));
+    str_builder_add_cstr(sb, ",\"revoked_by\":\"");
+    _json_escape_cstr(sb, rev_by(e));
+    str_builder_add_cstr(sb, "\",\"revoked_after\":");
+    str_builder_add_int(sb, rev_after(e));
+    str_builder_add_cstr(sb, "}\n");
+    return 0;
+}
+
+# Serialize a RevocationList to a JSONL C-string. Caller owns the
+# returned pointer (alloc'd). Returns 0 on OOM (not expected).
+fn rl_to_jsonl(rl) {
+    var sb = str_builder_new();
+    var entries = load64(rl);
+    var elen = vec_len(entries);
+    var i = 0;
+    while (i < elen) {
+        _rev_entry_to_jsonl(sb, vec_get(entries, i));
+        i = i + 1;
+    }
+    # Return C-string: copy builder's underlying buf + terminator.
+    var total = load64(sb + 8);
+    var out = alloc(total + 1);
+    memcpy(out, load64(sb), total);
+    store8(out + total, 0);
+    return out;
+}
+
+# Internal: parse the quoted value at data[pos..] where pos is just
+# past the opening quote. Returns end offset (just past closing
+# quote). Writes a fresh C-string copy of the contents to *out_ptr.
+# Sets *out_ptr to 0 and returns pos unchanged if not a quoted str.
+var _rj_out_ptr = 0;
+
+fn _rj_parse_string(data, pos, end) {
+    _rj_out_ptr = 0;
+    if (pos >= end) { return pos; }
+    if ((load8(data + pos) & 0xFF) != 34) { return pos; }
+    pos = pos + 1;
+    # First pass: find closing quote, handling escapes (\" and \\)
+    # so an embedded quote does not end the string prematurely.
+    var start = pos;
+    while (pos < end) {
+        var c = load8(data + pos) & 0xFF;
+        if (c == 92) {
+            # Escape sequence — skip the next char (it's part of the value)
+            pos = pos + 2;
+        } elif (c == 34) {
+            break;
+        } else {
+            pos = pos + 1;
+        }
+    }
+    # Second pass: copy content, unescaping \x → x for \" \\ \n \r \t \b \f.
+    # \uXXXX is rejected as non-ASCII (caller's writer only emits control
+    # chars as \uNNNN for bytes < 32; we decode those back to the raw byte).
+    var raw_len = pos - start;
+    var out = alloc(raw_len + 1);
+    var w = 0;
+    var r = 0;
+    while (r < raw_len) {
+        var c = load8(data + start + r) & 0xFF;
+        if (c == 92) {
+            r = r + 1;
+            if (r >= raw_len) { break; }
+            var ec = load8(data + start + r) & 0xFF;
+            if (ec == 110) { store8(out + w, 10); }     # \n
+            elif (ec == 114) { store8(out + w, 13); }   # \r
+            elif (ec == 116) { store8(out + w, 9); }    # \t
+            elif (ec == 98)  { store8(out + w, 8); }    # \b
+            elif (ec == 102) { store8(out + w, 12); }   # \f
+            elif (ec == 117) {
+                # \uXXXX — read 4 hex digits, emit as byte if ≤ 0xFF
+                if (r + 4 < raw_len) {
+                    var v = 0;
+                    var k = 1;
+                    while (k <= 4) {
+                        var h = load8(data + start + r + k) & 0xFF;
+                        var d = 0;
+                        if (h >= 48) { if (h <= 57) { d = h - 48; } }
+                        if (h >= 97) { if (h <= 102) { d = h - 87; } }
+                        if (h >= 65) { if (h <= 70)  { d = h - 55; } }
+                        v = (v << 4) | d;
+                        k = k + 1;
+                    }
+                    store8(out + w, v & 0xFF);
+                    r = r + 4;
+                }
+            } else {
+                # \" \\ / and any other → pass through the second char.
+                store8(out + w, ec);
+            }
+            r = r + 1;
+            w = w + 1;
+        } else {
+            store8(out + w, c);
+            r = r + 1;
+            w = w + 1;
+        }
+    }
+    store8(out + w, 0);
+    _rj_out_ptr = out;
+    if (pos < end) { pos = pos + 1; }   # skip closing quote
+    return pos;
+}
+
+# Parse a single JSONL entry line into a fresh RevocationEntry.
+# Returns entry ptr, or 0 on malformed input.
+fn _rev_entry_from_jsonl(line, llen) {
+    # Six fields: key_id, content_hash, reason, revoked_at,
+    # revoked_by, revoked_after.  Walk the line in order, matching
+    # on the known key names. Tolerant to reordering that survives a
+    # round-trip from our own writer.
+    var key_id = 0;
+    var chash = 0;
+    var reason = 0;
+    var revoked_by = 0;
+    var revoked_at = 0;
+    var revoked_after = 0;
+
+    var pos = 0;
+    while (pos < llen) {
+        var c = load8(line + pos) & 0xFF;
+        if (c != 34) { pos = pos + 1; }   # scan for opening quote
+        else {
+            pos = _rj_parse_string(line, pos, llen);
+            var k = _rj_out_ptr;
+            if (k == 0) { return 0; }
+            # Skip to colon
+            while (pos < llen) {
+                if ((load8(line + pos) & 0xFF) == 58) { pos = pos + 1; break; }
+                pos = pos + 1;
+            }
+            # Skip whitespace after colon
+            while (pos < llen) {
+                var cc = load8(line + pos) & 0xFF;
+                if (cc == 32) { pos = pos + 1; }
+                elif (cc == 9) { pos = pos + 1; }
+                else { break; }
+            }
+            if (pos >= llen) { return 0; }
+            var vc = load8(line + pos) & 0xFF;
+            if (vc == 34) {
+                # Quoted string value
+                pos = _rj_parse_string(line, pos, llen);
+                var v = _rj_out_ptr;
+                if (streq(k, "key_id") == 1) { key_id = v; }
+                elif (streq(k, "content_hash") == 1) { chash = v; }
+                elif (streq(k, "reason") == 1) { reason = v; }
+                elif (streq(k, "revoked_by") == 1) { revoked_by = v; }
+            } else {
+                # Non-string value: null or integer.
+                var vs = pos;
+                while (pos < llen) {
+                    var vcc = load8(line + pos) & 0xFF;
+                    if (vcc == 44) { break; }  # ','
+                    if (vcc == 125) { break; } # '}'
+                    if (vcc == 32) { break; }
+                    if (vcc == 10) { break; }
+                    pos = pos + 1;
+                }
+                var vlen = pos - vs;
+                if (vlen > 0) {
+                    # Integer fields
+                    var intv = 0;
+                    # Reject "null" / "true" / "false" by checking first byte.
+                    var fb = load8(line + vs) & 0xFF;
+                    if (fb >= 48) {
+                        if (fb <= 57) {
+                            # digit — parse as int
+                            var ii = 0;
+                            while (ii < vlen) {
+                                intv = intv * 10 + ((load8(line + vs + ii) & 0xFF) - 48);
+                                ii = ii + 1;
+                            }
+                        }
+                    }
+                    if (streq(k, "revoked_at") == 1) { revoked_at = intv; }
+                    elif (streq(k, "revoked_after") == 1) { revoked_after = intv; }
+                }
+            }
+        }
+    }
+
+    if (reason == 0) { reason = ""; }
+    if (revoked_by == 0) { revoked_by = ""; }
+    var e = revocation_entry_new(key_id, chash, reason, revoked_by);
+    store64(e + 24, revoked_at);
+    store64(e + 40, revoked_after);
+    return e;
+}
+
+# Load a RevocationList from JSONL content. Returns a new list or 0.
+# Invalid entries in the stream are skipped rather than aborting —
+# callers building a fresh list from a third-party CRL should not
+# be taken down by a single malformed line, but each rejected line
+# bumps the returned error count.  Well-formed output from our own
+# writer always round-trips cleanly.
+var _rl_load_bad = 0;
+
+fn rl_load_bad_count() { return _rl_load_bad; }
+
+fn rl_from_jsonl(content, content_len) {
+    _rl_load_bad = 0;
+    var rl = revocation_list_new();
+    var pos = 0;
+    while (pos < content_len) {
+        # Find end of line
+        var start = pos;
+        while (pos < content_len) {
+            if ((load8(content + pos) & 0xFF) == 10) { break; }
+            pos = pos + 1;
+        }
+        var llen = pos - start;
+        if (llen > 0) {
+            var e = _rev_entry_from_jsonl(content + start, llen);
+            if (e == 0) { _rl_load_bad = _rl_load_bad + 1; }
+            else {
+                if (rl_add(rl, e) != ERR_NONE) { _rl_load_bad = _rl_load_bad + 1; }
+            }
+        }
+        if (pos < content_len) { pos = pos + 1; }   # skip '\n'
+    }
+    return rl;
+}
+
+# File wrappers — idiomatic "save/load via path" shortcuts.
+fn rl_save(rl, path) {
+    var jsonl = rl_to_jsonl(rl);
+    var n = file_write_all(path, jsonl, strlen(jsonl));
+    if (n < 0) { return ERR_IO; }
+    return ERR_NONE;
+}
+
+fn rl_load(path) {
+    var buf = alloc(65536);
+    var n = file_read_all(path, buf, 65536);
+    if (n < 0) { return 0; }
+    return rl_from_jsonl(buf, n);
+}
+
+# ================================================================
+# Crl JSON Lines — first line is the header, subsequent lines are
+# entries in the same format as rl_to_jsonl.
+# ================================================================
+
+fn crl_to_jsonl(c) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"version\":");
+    str_builder_add_int(sb, crl_version(c));
+    str_builder_add_cstr(sb, ",\"issuer\":\"");
+    _json_escape_cstr(sb, crl_issuer(c));
+    str_builder_add_cstr(sb, "\",\"issued_at\":");
+    str_builder_add_int(sb, crl_issued_at(c));
+    str_builder_add_cstr(sb, ",\"next_update\":");
+    str_builder_add_int(sb, crl_next_update(c));
+    str_builder_add_cstr(sb, "}\n");
+    var entries = crl_entries(c);
+    var elen = vec_len(entries);
+    var i = 0;
+    while (i < elen) {
+        _rev_entry_to_jsonl(sb, vec_get(entries, i));
+        i = i + 1;
+    }
+    var total = load64(sb + 8);
+    var out = alloc(total + 1);
+    memcpy(out, load64(sb), total);
+    store8(out + total, 0);
+    return out;
+}
+
+# Parse the CRL header line. Returns new Crl struct with the entries
+# vec initialized empty. Returns 0 on failure.
+fn _crl_parse_header(line, llen) {
+    var version = 0;
+    var issuer = 0;
+    var issued_at = 0;
+    var next_update = 0;
+
+    var pos = 0;
+    while (pos < llen) {
+        var c = load8(line + pos) & 0xFF;
+        if (c != 34) { pos = pos + 1; }
+        else {
+            pos = _rj_parse_string(line, pos, llen);
+            var k = _rj_out_ptr;
+            if (k == 0) { return 0; }
+            while (pos < llen) {
+                if ((load8(line + pos) & 0xFF) == 58) { pos = pos + 1; break; }
+                pos = pos + 1;
+            }
+            while (pos < llen) {
+                var cc = load8(line + pos) & 0xFF;
+                if (cc == 32) { pos = pos + 1; }
+                elif (cc == 9) { pos = pos + 1; }
+                else { break; }
+            }
+            if (pos >= llen) { return 0; }
+            var vc = load8(line + pos) & 0xFF;
+            if (vc == 34) {
+                pos = _rj_parse_string(line, pos, llen);
+                if (streq(k, "issuer") == 1) { issuer = _rj_out_ptr; }
+            } else {
+                var vs = pos;
+                while (pos < llen) {
+                    var vcc = load8(line + pos) & 0xFF;
+                    if (vcc == 44) { break; }
+                    if (vcc == 125) { break; }
+                    pos = pos + 1;
+                }
+                var vlen = pos - vs;
+                var intv = 0;
+                if (vlen > 0) {
+                    var fb = load8(line + vs) & 0xFF;
+                    if (fb >= 48) { if (fb <= 57) {
+                        var ii = 0;
+                        while (ii < vlen) {
+                            intv = intv * 10 + ((load8(line + vs + ii) & 0xFF) - 48);
+                            ii = ii + 1;
+                        }
+                    } }
+                }
+                if (streq(k, "version") == 1) { version = intv; }
+                elif (streq(k, "issued_at") == 1) { issued_at = intv; }
+                elif (streq(k, "next_update") == 1) { next_update = intv; }
+            }
+        }
+    }
+    if (issuer == 0) { return 0; }
+    var c = crl_new(version, issuer);
+    store64(c + 16, issued_at);
+    store64(c + 24, next_update);
+    return c;
+}
+
+# Parse CRL from JSONL content. First line = header, subsequent
+# lines = revocation entries.
+fn crl_from_jsonl(content, content_len) {
+    # Extract first line
+    var hend = 0;
+    while (hend < content_len) {
+        if ((load8(content + hend) & 0xFF) == 10) { break; }
+        hend = hend + 1;
+    }
+    if (hend == 0) { return 0; }
+    var c = _crl_parse_header(content, hend);
+    if (c == 0) { return 0; }
+    # Entries start after the header newline
+    var pos = hend + 1;
+    while (pos < content_len) {
+        var start = pos;
+        while (pos < content_len) {
+            if ((load8(content + pos) & 0xFF) == 10) { break; }
+            pos = pos + 1;
+        }
+        var llen = pos - start;
+        if (llen > 0) {
+            var e = _rev_entry_from_jsonl(content + start, llen);
+            if (e != 0) { crl_add_entry(c, e); }
+        }
+        if (pos < content_len) { pos = pos + 1; }
+    }
+    return c;
+}
+
+fn crl_save(c, path) {
+    var jsonl = crl_to_jsonl(c);
+    var n = file_write_all(path, jsonl, strlen(jsonl));
+    if (n < 0) { return ERR_IO; }
+    return ERR_NONE;
+}
+
+fn crl_load(path) {
+    var buf = alloc(65536);
+    var n = file_read_all(path, buf, 65536);
+    if (n < 0) { return 0; }
+    return crl_from_jsonl(buf, n);
+}

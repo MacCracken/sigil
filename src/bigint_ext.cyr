@@ -1,7 +1,51 @@
 # bigint_ext.cyr — extended 256-bit arithmetic for Ed25519
 # Adds: full 512-bit multiply, modular reduction for p=2^255-19,
-# modular inversion, modular exponentiation.
+# modular inversion, modular exponentiation, LE byte codec.
 # Builds on lib/bigint.cyr
+
+# ================================================================
+# u256 <-> little-endian byte codec
+# Previously inlined at 7 sites (5 decode + 2 encode loops, ~11 lines
+# each) across ed25519.cyr. Safe to factor out: no nested function
+# calls inside the loop body, so locals survive despite Cyrius'
+# parameter-clobber rule.
+# ================================================================
+
+# Load 32 little-endian bytes from src into dst as four i64 limbs.
+fn u256_load_le(dst, src) {
+    var i = 0;
+    while (i < 4) {
+        store64(dst + i * 8,
+            (load8(src + i*8) & 0xFF)
+            | ((load8(src + i*8 + 1) & 0xFF) << 8)
+            | ((load8(src + i*8 + 2) & 0xFF) << 16)
+            | ((load8(src + i*8 + 3) & 0xFF) << 24)
+            | ((load8(src + i*8 + 4) & 0xFF) << 32)
+            | ((load8(src + i*8 + 5) & 0xFF) << 40)
+            | ((load8(src + i*8 + 6) & 0xFF) << 48)
+            | ((load8(src + i*8 + 7) & 0xFF) << 56));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Store src (four i64 limbs) as 32 little-endian bytes at dst.
+fn u256_store_le(dst, src) {
+    var i = 0;
+    while (i < 4) {
+        var v = load64(src + i * 8);
+        store8(dst + i*8, v & 0xFF);
+        store8(dst + i*8 + 1, (v >> 8) & 0xFF);
+        store8(dst + i*8 + 2, (v >> 16) & 0xFF);
+        store8(dst + i*8 + 3, (v >> 24) & 0xFF);
+        store8(dst + i*8 + 4, (v >> 32) & 0xFF);
+        store8(dst + i*8 + 5, (v >> 40) & 0xFF);
+        store8(dst + i*8 + 6, (v >> 48) & 0xFF);
+        store8(dst + i*8 + 7, (v >> 56) & 0xFF);
+        i = i + 1;
+    }
+    return 0;
+}
 
 # ================================================================
 # 64×64 → 128-bit multiply (result in globals)
@@ -35,16 +79,6 @@ fn _mul64_full(a, b) {
 # Full 256×256 → 512-bit multiply
 # out: 64 bytes (8 limbs)
 # ================================================================
-
-# Unsigned add with carry detection: returns 1 if a+b overflows 64 bits
-fn _uadd_overflow(a, b) {
-    var sum = a + b;
-    # Unsigned overflow: sum < a (when compared as unsigned)
-    var sa = a ^ (1 << 63);
-    var ss = sum ^ (1 << 63);
-    if (ss < sa) { return 1; }
-    return 0;
-}
 
 # Globals for mul_full inner loop (avoid local clobber across fn calls)
 var _mf_s1 = 0;
