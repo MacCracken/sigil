@@ -188,7 +188,7 @@ Follow [Keep a Changelog](https://keepachangelog.com/). Performance claims MUST 
 
 - **Ported from**: Rust v1.0.0 (149 tests, 12 benchmarks); original
   Rust source removed in 2.7.0 after parity closeout. See the
-  2.0.0 → 2.7.1 CHANGELOG entries for the port audit trail.
+  2.0.0 → current CHANGELOG entries for the port audit trail.
 - **Rust benchmark baseline**: `benchmarks-rust-v-cyrius.md`
   (archived comparison, not rebuilt per release).
 - **Version**: see `VERSION` for current.

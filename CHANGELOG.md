@@ -5,6 +5,79 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.8.1] — 2026-04-17
+
+### Security — HIGH
+
+- **`ed25519_generate_keypair` silent entropy failure.** The
+  pre-2.8.1 implementation had two unchecked paths in the
+  `/dev/urandom` read:
+  - `file_open("/dev/urandom", 0, 0)` — no check of the returned
+    `fd`. On failure (`fd = -1`), the subsequent `file_read(-1, …)`
+    returned an error code, and `seed[32]` stayed with whatever
+    bytes were on the stack at that frame's location.
+  - `file_read(fd, &seed, 32)` — single unchecked call. A short
+    read (e.g. 16 bytes actually delivered) left the upper half
+    of the seed uninitialised.
+  Either path would silently derive an Ed25519 key from
+  partial / stale entropy. `trust.cyr`'s own `generate_keypair`
+  already had the correct short-read loop (2.1.x); this one had
+  been missed because it was reached only through
+  `programs/smoke.cyr` and `tests/tcyr/ed25519.tcyr`'s
+  "random keypair" block, which always ran on a host with a
+  functional `/dev/urandom`.
+
+  **Fix**: mirror the loop pattern from `trust.cyr:generate_keypair`.
+  Bail on open failure (zero sk_out/pk_out, return 0). Accumulate
+  reads in a `got < 32` loop. On any short or failing read, close
+  the fd, zeroise the seed and outputs, return 0. Success returns
+  1 (new return-value contract; prior caller convention of
+  "always 0" is upheld for null-output scenarios by explicit
+  zeroisation so the failure is deterministic rather than silent).
+
+  **Impact assessment**: no evidence this bit any shipped key —
+  `ed25519_generate_keypair` is the only path affected, and every
+  CI host plus the reference dev machine has a live `/dev/urandom`.
+  Keys issued in practice came through a successful 32-byte read.
+  The fix removes the trap without requiring key rotation on
+  existing deployments.
+
+  **Regression guard**: `tests/tcyr/ed25519.tcyr` now asserts the
+  success return value is `1`. A refactor that silently drops the
+  contract fails the gate.
+
+### Changed
+
+- **Roadmap restructured as "road to 3.0".** The 2.x milestones
+  are done; `docs/development/roadmap.md` now explicitly splits
+  v3.0 scope into (a) items blocked on Cyrius 5.2.x / 5.3.x
+  (SHAKE for ML-DSA-65, `ct_select`, `secret var`), (b) items
+  blocked on Cyrius 5.3.x threading (parallel batch verify), and
+  (c) sigil-internal cleanups that batch into a single 3.0
+  breaking bump. Cross-reference: the mirror items in
+  `cyrius/docs/development/roadmap.md` under `v5.2.x / v5.3.x —
+  Sigil 3.0 enablers`.
+
+### Documentation
+
+- `SECURITY.md` supported-versions table refreshed (was stuck at
+  2.0.x/2.1.x, now 2.6.x – 2.8.x).
+- `CLAUDE.md` status block: stale "2.0.0 → 2.7.1" range replaced
+  with "2.0.0 → current".
+
+### Verified
+
+- 11/11 `.tcyr` pass (20 asserts in `ed25519.tcyr`, was 19 —
+  adds the return-value contract).
+- 3/3 fuzz harnesses OK.
+- 12/12 benches run; numbers stable (ed25519_keypair ~990 µs,
+  sign ~1.1 ms, verify ~6.9 ms — within noise of 2.8.0).
+- Clean-build sweep from `rm -rf build`.
+- Security grep (`sys_system`, `memcmp`, `strcpy`, `strcat`,
+  unchecked short-read in crypto paths, path traversal, TODO/
+  FIXME/XXX) → clean after the entropy fix. Only matches were
+  doc comments referencing `\uXXXX`.
+
 ## [2.8.0] — 2026-04-17
 
 ### Added — certificate pinning (via agnosys)

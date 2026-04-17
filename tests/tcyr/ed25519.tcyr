@@ -129,7 +129,10 @@ fn main() {
     test_group("ed25519 roundtrip");
     var rsk = alloc(64);
     var rpk = alloc(32);
-    ed25519_generate_keypair(rsk, rpk);
+    # Return value contract added in 2.8.1: 1 on success, 0 on
+    # entropy failure (open /dev/urandom / short read). CI hosts
+    # always have /dev/urandom, so this must be 1.
+    assert_eq(ed25519_generate_keypair(rsk, rpk), 1, "generate_keypair returns 1 on success");
 
     var rsig = alloc(64);
     ed25519_sign(rsk, "hello world", 11, rsig);
