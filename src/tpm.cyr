@@ -29,31 +29,32 @@ fn pcr_measurement_new(index, expected_digest) {
     return m;
 }
 
-fn pcr_index(m) { return load64(m); }
+# pcr_index getter removed in 2.6.0 (no read path). `index` is still
+# written at construction because AttestationResult iteration may
+# eventually consume it — the field stays, only the accessor is dead.
 fn pcr_expected(m) { return load64(m + 8); }
 fn pcr_actual(m) { return load64(m + 16); }
 fn pcr_set_actual(m, v) { store64(m + 16, v); return m; }
 
 # ================================================================
-# AttestationResult (24 bytes)
+# AttestationResult (16 bytes)
 # ================================================================
 # Layout:
 #   +0   passed          (i64, 0 or 1)
 #   +8   measurements    (vec of PcrMeasurement)
-#   +16  quote_signature (ptr, 0 = none)
+#
+# Dropped in 2.6.0: quote_signature field + accessors. Quote
+# signatures are not produced by this module (would come from a
+# future tpm_quote wrapper) and were never consumed.
 
 fn attestation_result_new(passed) {
-    var r = fl_alloc(24);
+    var r = fl_alloc(16);
     store64(r, passed);
     store64(r + 8, vec_new());
-    store64(r + 16, 0);
     return r;
 }
 
-fn attest_passed(r) { return load64(r); }
 fn attest_measurements(r) { return load64(r + 8); }
-fn attest_quote_sig(r) { return load64(r + 16); }
-fn attest_set_quote_sig(r, v) { store64(r + 16, v); return r; }
 
 # ================================================================
 # TPM availability — delegates to agnosys tpm_detect().

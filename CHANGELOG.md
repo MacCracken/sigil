@@ -5,6 +5,80 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.6.0] — 2026-04-17
+
+### Changed — agnosys 1.0.0
+
+- **`[deps.agnosys]` bumped `0.98.0` → `1.0.0`**. Agnosys 1.0 froze
+  its public API and landed 139 module-prefix renames pre-freeze
+  (see agnosys `CHANGELOG`). The renames affected `certinfo_*`,
+  `security_*`, `journal_*`, `verity_*`, `boot_*`, `fw_*`, `nft_*`,
+  and `checked_syscall`. **Sigil is unaffected**: the modules we
+  wrap (`tpm_*`, `ima_*`, `secureboot_*`) were listed in agnosys'
+  "already clean" set, and we don't wrap `certpin` yet (queued for
+  2.7.0+). All 11 `.tcyr` files still pass against the new tag, no
+  sigil source changed for this bump.
+
+### Breaking — Tier 2 dead-field cleanup
+
+Completes the dead-code sweep started in 2.5.0. These fields had
+no read path (setter/getter defined, no caller) but their backing
+storage was still allocated on every instance. A downstream audit
+across 8 AGNOS consumer repos found zero real callers for any of
+the removed names (argonaut's vendored `lib/sigil.cyr` copies the
+bundle — those definitions regenerate with the new layout).
+
+- **`TrustedArtifact`: 80 → 48 bytes.** Dropped:
+  - `signature_len` field + getter — Ed25519 signatures are always
+    exactly 64 bytes; the param was hard-coded `64` at the one
+    call site.
+  - `signature_algorithm` field + `artifact_sig_alg` /
+    `artifact_set_sig_alg` — always `SIG_ALG_ED25519`. Re-introduce
+    when hybrid/PQC dual signatures land.
+  - `verified_at` field + `artifact_verified_at` /
+    `artifact_set_verified_at` — written by `sv_sign_artifact`,
+    never read.
+  - `metadata` field + `artifact_metadata` / `artifact_set_metadata`
+    — never populated.
+  - **API change**: `artifact_set_signature(a, sig, sig_len)` →
+    `artifact_set_signature(a, sig)`. One caller (internal).
+- **`IntegrityMeasurement`: 48 → 24 bytes.** Dropped `actual_hash`,
+  `measured_at`, `error_msg` fields + `meas_actual` / `meas_at` /
+  `meas_error` getters. `iv_verify_all` no longer writes them.
+  Measurement state is now just `(path, expected, status)`.
+- **`IntegrityReport`: 40 → 32 bytes.** Dropped `checked_at` field
+  + `ireport_checked_at`. Callers can stamp their own `clock_epoch_secs()`
+  at report time if needed.
+- **`IntegritySnapshot`: 16 → 8 bytes.** Dropped `exported_at` field
+  + `isnap_exported_at`. Same rationale.
+- **`AttestationResult`: 24 → 16 bytes.** Dropped `quote_signature`
+  field + `attest_quote_sig` / `attest_set_quote_sig`. No `tpm_quote`
+  wrapper exists yet; re-introduce with one.
+- **Integrity policy / verification-result / etc. (getters only,
+  no struct change)**: removed `ipolicy_count` (use `vec_len(load64(p))`
+  — there was no semantic difference), `ipolicy_measurements`,
+  `attest_passed`, `vresult_verified_at`, `pcr_index`,
+  `key_id_from_public_hex` (duplicate of `generate_keypair` key-id
+  logic).
+- **`ireport_summary`** function removed — 35-line formatter nobody
+  was calling. Consumers can build the summary string from
+  `ireport_total` / `ireport_verified` / vec lengths in three lines.
+
+### Verified
+
+- 11/11 `.tcyr` files pass (unchanged from 2.5.0 — no semantic changes).
+- 3/3 fuzz harnesses OK under 30 s CI budget.
+- 12/12 benches run; numbers stable.
+- `./build/sigil-smoke` exit 0 against agnosys 1.0.0.
+
+### Source stats (vs 2.5.0)
+
+- Functions in `src/`: 372 → **352** (-20 dead getters/setters/fns).
+- Struct-layout savings per `SigilVerifier` instance: ~104 bytes
+  less heap per stored artifact (`TrustedArtifact` -32 B, and each
+  `IntegrityMeasurement` -24 B). Not huge in absolute terms, but
+  the API surface is now honest about what sigil actually persists.
+
 ## [2.5.0] — 2026-04-16
 
 ### Added — AGNOS kernel integration

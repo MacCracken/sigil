@@ -1,5 +1,5 @@
 # sigil.cyr — system-wide trust verification for AGNOS
-# Bundled distribution of sigil v2.5.0
+# Bundled distribution of sigil v2.6.0
 # Source: https://github.com/MacCracken/sigil
 # License: GPL-3.0-only
 #
@@ -184,32 +184,31 @@ fn check_passed(tc) { return load64(tc + 8); }
 fn check_detail(tc) { return load64(tc + 16); }
 
 # ================================================================
-# TrustedArtifact (80 bytes)
+# TrustedArtifact (48 bytes)
 # ================================================================
 # Layout:
 #   +0   path              (C-string pointer)
 #   +8   artifact_type     (i64)
 #   +16  content_hash      (C-string pointer, hex)
 #   +24  signature         (pointer to raw bytes, 0 = none)
-#   +32  signature_len     (i64)
-#   +40  signature_algorithm (i64)
-#   +48  signer_key_id     (C-string pointer, 0 = none)
-#   +56  trust_level       (i64)
-#   +64  verified_at       (i64, epoch seconds, 0 = never)
-#   +72  metadata          (hashmap pointer, 0 = none)
+#   +32  signer_key_id     (C-string pointer, 0 = none)
+#   +40  trust_level       (i64)
+#
+# Dropped in 2.6.0 (write-only or no-read-path dead fields):
+#   signature_len — Ed25519 signatures are always 64 bytes.
+#   signature_algorithm — always SIG_ALG_ED25519; sigil does not
+#     support algorithm negotiation. Add back when hybrid/PQC lands.
+#   verified_at — written by sv_sign_artifact, never read.
+#   metadata — never populated.
 
 fn trusted_artifact_new(path, artifact_type, content_hash) {
-    var a = fl_alloc(80);
+    var a = fl_alloc(48);
     store64(a, path);
     store64(a + 8, artifact_type);
     store64(a + 16, content_hash);
     store64(a + 24, 0);
     store64(a + 32, 0);
-    store64(a + 40, SIG_ALG_ED25519);
-    store64(a + 48, 0);
-    store64(a + 56, TRUST_UNVERIFIED);
-    store64(a + 64, 0);
-    store64(a + 72, 0);
+    store64(a + 40, TRUST_UNVERIFIED);
     return a;
 }
 
@@ -217,23 +216,14 @@ fn artifact_path(a) { return load64(a); }
 fn artifact_type(a) { return load64(a + 8); }
 fn artifact_content_hash(a) { return load64(a + 16); }
 fn artifact_signature(a) { return load64(a + 24); }
-fn artifact_signature_len(a) { return load64(a + 32); }
-fn artifact_sig_alg(a) { return load64(a + 40); }
-fn artifact_signer_key_id(a) { return load64(a + 48); }
-fn artifact_trust_level(a) { return load64(a + 56); }
-fn artifact_verified_at(a) { return load64(a + 64); }
-fn artifact_metadata(a) { return load64(a + 72); }
+fn artifact_signer_key_id(a) { return load64(a + 32); }
+fn artifact_trust_level(a) { return load64(a + 40); }
 
-fn artifact_set_signature(a, sig, sig_len) {
-    store64(a + 24, sig);
-    store64(a + 32, sig_len);
-    return a;
-}
-fn artifact_set_sig_alg(a, alg) { store64(a + 40, alg); return a; }
-fn artifact_set_signer(a, key_id) { store64(a + 48, key_id); return a; }
-fn artifact_set_trust_level(a, level) { store64(a + 56, level); return a; }
-fn artifact_set_verified_at(a, epoch) { store64(a + 64, epoch); return a; }
-fn artifact_set_metadata(a, m) { store64(a + 72, m); return a; }
+# Ed25519 signatures are always 64 bytes; `sig_len` parameter from
+# the pre-2.6.0 signature was always 64 at every call site. Dropped.
+fn artifact_set_signature(a, sig) { store64(a + 24, sig); return a; }
+fn artifact_set_signer(a, key_id) { store64(a + 32, key_id); return a; }
+fn artifact_set_trust_level(a, level) { store64(a + 40, level); return a; }
 
 # ================================================================
 # VerificationResult (32 bytes)
@@ -256,7 +246,9 @@ fn verification_result_new(artifact, passed, verified_at) {
 fn vresult_artifact(vr) { return load64(vr); }
 fn vresult_passed(vr) { return load64(vr + 8); }
 fn vresult_checks(vr) { return load64(vr + 16); }
-fn vresult_verified_at(vr) { return load64(vr + 24); }
+# vresult_verified_at getter removed in 2.6.0. The field stays in
+# the struct (constructor takes it) for API symmetry, but no caller
+# reads it. Re-introduce when reporting code actually uses it.
 
 fn vresult_add_check(vr, tc) {
     vec_push(load64(vr + 16), tc);
@@ -2924,12 +2916,6 @@ fn generate_keypair(sk_out, pk_out) {
     return kid;
 }
 
-fn key_id_from_public_hex(pk_hex) {
-    var kid = alloc(17);
-    memcpy(kid, pk_hex, 16);
-    store8(kid + 16, 0);
-    return kid;
-}
 
 # ================================================================
 # Key zeroization
@@ -2966,33 +2952,29 @@ fn mstatus_name(s) {
 }
 
 # ================================================================
-# IntegrityMeasurement (48 bytes)
+# IntegrityMeasurement (24 bytes)
 # ================================================================
 # Layout:
 #   +0   path          (C-string ptr)
 #   +8   expected_hash (C-string ptr)
-#   +16  actual_hash   (C-string ptr, 0 = not yet measured)
-#   +24  measured_at   (epoch seconds)
-#   +32  status        (i64 MSTATUS_*)
-#   +40  error_msg     (C-string ptr, 0 = none)
+#   +16  status        (i64 MSTATUS_*)
+#
+# Dropped in 2.6.0: actual_hash, measured_at, error_msg — all write-
+# only. The per-verification computed hash is held in the local `h`
+# variable during iv_verify_all and never re-read after the status
+# decision.
 
 fn measurement_new(path, expected_hash) {
-    var m = fl_alloc(48);
+    var m = fl_alloc(24);
     store64(m, path);
     store64(m + 8, expected_hash);
-    store64(m + 16, 0);
-    store64(m + 24, clock_epoch_secs());
-    store64(m + 32, MSTATUS_PENDING);
-    store64(m + 40, 0);
+    store64(m + 16, MSTATUS_PENDING);
     return m;
 }
 
 fn meas_path(m) { return load64(m); }
 fn meas_expected(m) { return load64(m + 8); }
-fn meas_actual(m) { return load64(m + 16); }
-fn meas_at(m) { return load64(m + 24); }
-fn meas_status(m) { return load64(m + 32); }
-fn meas_error(m) { return load64(m + 40); }
+fn meas_status(m) { return load64(m + 16); }
 
 # ================================================================
 # IntegrityPolicy (24 bytes)
@@ -3010,7 +2992,6 @@ fn integrity_policy_new() {
     return p;
 }
 
-fn ipolicy_measurements(p) { return load64(p); }
 fn ipolicy_check_interval(p) { return load64(p + 8); }
 fn ipolicy_enforce(p) { return load64(p + 16); }
 
@@ -3038,27 +3019,24 @@ fn ipolicy_remove(p, path) {
     return 0;
 }
 
-fn ipolicy_count(p) {
-    return vec_len(load64(p));
-}
-
 # ================================================================
-# IntegrityReport (40 bytes)
+# IntegrityReport (32 bytes)
 # ================================================================
 # Layout:
 #   +0   total       (i64)
 #   +8   verified    (i64)
 #   +16  mismatches  (vec)
 #   +24  errors      (vec)
-#   +32  checked_at  (epoch seconds)
+#
+# Dropped in 2.6.0: checked_at — no read path. Callers can
+# clock_epoch_secs() themselves at report time.
 
 fn integrity_report_new() {
-    var r = fl_alloc(40);
+    var r = fl_alloc(32);
     store64(r, 0);
     store64(r + 8, 0);
     store64(r + 16, vec_new());
     store64(r + 24, vec_new());
-    store64(r + 32, clock_epoch_secs());
     return r;
 }
 
@@ -3066,7 +3044,6 @@ fn ireport_total(r) { return load64(r); }
 fn ireport_verified(r) { return load64(r + 8); }
 fn ireport_mismatches(r) { return load64(r + 16); }
 fn ireport_errors(r) { return load64(r + 24); }
-fn ireport_checked_at(r) { return load64(r + 32); }
 
 fn ireport_is_clean(r) {
     if (vec_len(load64(r + 16)) == 0) {
@@ -3141,26 +3118,20 @@ fn iv_verify_all(v) {
         var m = vec_get(measurements, i);
         var path = load64(m);
         var h = hash_file(path);
-        var now = clock_epoch_secs();
 
         if (h == 0) {
-            # File not found or error
+            # File not found or error.
             var rm = measurement_new(path, load64(m + 8));
-            store64(rm + 24, now);
-            store64(rm + 32, MSTATUS_FILE_NOT_FOUND);
+            store64(rm + 16, MSTATUS_FILE_NOT_FOUND);
             vec_push(load64(report + 24), rm);
         } else {
             var expected = load64(m + 8);
             if (ct_eq(h, strlen(h), expected, strlen(expected)) == 1) {
                 verified = verified + 1;
-                store64(m + 16, h);
-                store64(m + 24, now);
-                store64(m + 32, MSTATUS_VERIFIED);
+                store64(m + 16, MSTATUS_VERIFIED);
             } else {
                 var rm = measurement_new(path, expected);
-                store64(rm + 16, h);
-                store64(rm + 24, now);
-                store64(rm + 32, MSTATUS_MISMATCH);
+                store64(rm + 16, MSTATUS_MISMATCH);
                 vec_push(load64(report + 16), rm);
             }
         }
@@ -3199,19 +3170,18 @@ fn iv_tampered_files(v) {
 # ================================================================
 # IntegritySnapshot — serializable baseline
 # ================================================================
-# Layout (16 bytes):
+# Layout (8 bytes):
 #   +0  entries      (vec of {path, hash} pairs)
-#   +8  exported_at  (epoch seconds)
+#
+# Dropped in 2.6.0: exported_at — no read path.
 
 fn integrity_snapshot_new() {
-    var s = fl_alloc(16);
+    var s = fl_alloc(8);
     store64(s, vec_new());
-    store64(s + 8, clock_epoch_secs());
     return s;
 }
 
 fn isnap_entries(s) { return load64(s); }
-fn isnap_exported_at(s) { return load64(s + 8); }
 
 # BaselineEntry (16 bytes): path + expected_hash
 fn baseline_entry_new(path, expected_hash) {
@@ -3264,42 +3234,6 @@ fn iv_import_baseline(v, snap) {
     return elen;
 }
 
-# Report summary string
-fn ireport_summary(r) {
-    # Returns: "Integrity: N/M verified, X mismatches, Y errors"
-    # Worst case: 4 × 19-digit i64 + fixed text ≈ 120 bytes.
-    # Size 192 gives defense-in-depth headroom for any future text changes.
-    var buf = alloc(192);
-    var pos = 0;
-    memcpy(buf, "Integrity: ", 11);
-    pos = 11;
-    var vs = fmt_int(ireport_verified(r));
-    var vsl = strlen(vs);
-    memcpy(buf + pos, vs, vsl);
-    pos = pos + vsl;
-    store8(buf + pos, 47); # /
-    pos = pos + 1;
-    var ts = fmt_int(ireport_total(r));
-    var tsl = strlen(ts);
-    memcpy(buf + pos, ts, tsl);
-    pos = pos + tsl;
-    memcpy(buf + pos, " verified, ", 11);
-    pos = pos + 11;
-    var ms = fmt_int(vec_len(ireport_mismatches(r)));
-    var msl = strlen(ms);
-    memcpy(buf + pos, ms, msl);
-    pos = pos + msl;
-    memcpy(buf + pos, " mismatches, ", 13);
-    pos = pos + 13;
-    var es = fmt_int(vec_len(ireport_errors(r)));
-    var esl = strlen(es);
-    memcpy(buf + pos, es, esl);
-    pos = pos + esl;
-    memcpy(buf + pos, " errors", 7);
-    pos = pos + 7;
-    store8(buf + pos, 0);
-    return buf;
-}
 
 # --- policy.cyr ---
 
@@ -4197,31 +4131,32 @@ fn pcr_measurement_new(index, expected_digest) {
     return m;
 }
 
-fn pcr_index(m) { return load64(m); }
+# pcr_index getter removed in 2.6.0 (no read path). `index` is still
+# written at construction because AttestationResult iteration may
+# eventually consume it — the field stays, only the accessor is dead.
 fn pcr_expected(m) { return load64(m + 8); }
 fn pcr_actual(m) { return load64(m + 16); }
 fn pcr_set_actual(m, v) { store64(m + 16, v); return m; }
 
 # ================================================================
-# AttestationResult (24 bytes)
+# AttestationResult (16 bytes)
 # ================================================================
 # Layout:
 #   +0   passed          (i64, 0 or 1)
 #   +8   measurements    (vec of PcrMeasurement)
-#   +16  quote_signature (ptr, 0 = none)
+#
+# Dropped in 2.6.0: quote_signature field + accessors. Quote
+# signatures are not produced by this module (would come from a
+# future tpm_quote wrapper) and were never consumed.
 
 fn attestation_result_new(passed) {
-    var r = fl_alloc(24);
+    var r = fl_alloc(16);
     store64(r, passed);
     store64(r + 8, vec_new());
-    store64(r + 16, 0);
     return r;
 }
 
-fn attest_passed(r) { return load64(r); }
 fn attest_measurements(r) { return load64(r + 8); }
-fn attest_quote_sig(r) { return load64(r + 16); }
-fn attest_set_quote_sig(r, v) { store64(r + 16, v); return r; }
 
 # ================================================================
 # TPM availability — delegates to agnosys tpm_detect().
@@ -4465,10 +4400,9 @@ fn sv_sign_artifact(sv, path, secret_key, key_id, artifact_type) {
 
     var sig = sign_data(chash, strlen(chash), secret_key);
     var artifact = trusted_artifact_new(path, artifact_type, chash);
-    artifact_set_signature(artifact, sig, 64);
+    artifact_set_signature(artifact, sig);
     artifact_set_signer(artifact, key_id);
     artifact_set_trust_level(artifact, TRUST_VERIFIED);
-    artifact_set_verified_at(artifact, clock_epoch_secs());
 
     map_set(load64(sv + 32), chash, artifact);
 

@@ -522,12 +522,6 @@ fn generate_keypair(sk_out, pk_out) {
     return kid;
 }
 
-fn key_id_from_public_hex(pk_hex) {
-    var kid = alloc(17);
-    memcpy(kid, pk_hex, 16);
-    store8(kid + 16, 0);
-    return kid;
-}
 
 # ================================================================
 # Key zeroization

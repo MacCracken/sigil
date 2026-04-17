@@ -1,6 +1,6 @@
 [package]
 name = "sigil"
-version = "2.5.0"
+version = "2.6.0"
 description = "Sigil — system-wide trust verification for AGNOS. Ed25519, SHA-256/512, HMAC, integrity, audit."
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/sigil"
@@ -28,5 +28,5 @@ modules = ["dist/sakshi.cyr"]
 # the consumer (sigil) is responsible for the stdlib surface above.
 [deps.agnosys]
 git = "https://github.com/MacCracken/agnosys.git"
-tag = "0.98.0"
+tag = "1.0.0"
 modules = ["dist/agnosys.cyr"]

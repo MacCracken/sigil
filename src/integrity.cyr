@@ -22,33 +22,29 @@ fn mstatus_name(s) {
 }
 
 # ================================================================
-# IntegrityMeasurement (48 bytes)
+# IntegrityMeasurement (24 bytes)
 # ================================================================
 # Layout:
 #   +0   path          (C-string ptr)
 #   +8   expected_hash (C-string ptr)
-#   +16  actual_hash   (C-string ptr, 0 = not yet measured)
-#   +24  measured_at   (epoch seconds)
-#   +32  status        (i64 MSTATUS_*)
-#   +40  error_msg     (C-string ptr, 0 = none)
+#   +16  status        (i64 MSTATUS_*)
+#
+# Dropped in 2.6.0: actual_hash, measured_at, error_msg — all write-
+# only. The per-verification computed hash is held in the local `h`
+# variable during iv_verify_all and never re-read after the status
+# decision.
 
 fn measurement_new(path, expected_hash) {
-    var m = fl_alloc(48);
+    var m = fl_alloc(24);
     store64(m, path);
     store64(m + 8, expected_hash);
-    store64(m + 16, 0);
-    store64(m + 24, clock_epoch_secs());
-    store64(m + 32, MSTATUS_PENDING);
-    store64(m + 40, 0);
+    store64(m + 16, MSTATUS_PENDING);
     return m;
 }
 
 fn meas_path(m) { return load64(m); }
 fn meas_expected(m) { return load64(m + 8); }
-fn meas_actual(m) { return load64(m + 16); }
-fn meas_at(m) { return load64(m + 24); }
-fn meas_status(m) { return load64(m + 32); }
-fn meas_error(m) { return load64(m + 40); }
+fn meas_status(m) { return load64(m + 16); }
 
 # ================================================================
 # IntegrityPolicy (24 bytes)
@@ -66,7 +62,6 @@ fn integrity_policy_new() {
     return p;
 }
 
-fn ipolicy_measurements(p) { return load64(p); }
 fn ipolicy_check_interval(p) { return load64(p + 8); }
 fn ipolicy_enforce(p) { return load64(p + 16); }
 
@@ -94,27 +89,24 @@ fn ipolicy_remove(p, path) {
     return 0;
 }
 
-fn ipolicy_count(p) {
-    return vec_len(load64(p));
-}
-
 # ================================================================
-# IntegrityReport (40 bytes)
+# IntegrityReport (32 bytes)
 # ================================================================
 # Layout:
 #   +0   total       (i64)
 #   +8   verified    (i64)
 #   +16  mismatches  (vec)
 #   +24  errors      (vec)
-#   +32  checked_at  (epoch seconds)
+#
+# Dropped in 2.6.0: checked_at — no read path. Callers can
+# clock_epoch_secs() themselves at report time.
 
 fn integrity_report_new() {
-    var r = fl_alloc(40);
+    var r = fl_alloc(32);
     store64(r, 0);
     store64(r + 8, 0);
     store64(r + 16, vec_new());
     store64(r + 24, vec_new());
-    store64(r + 32, clock_epoch_secs());
     return r;
 }
 
@@ -122,7 +114,6 @@ fn ireport_total(r) { return load64(r); }
 fn ireport_verified(r) { return load64(r + 8); }
 fn ireport_mismatches(r) { return load64(r + 16); }
 fn ireport_errors(r) { return load64(r + 24); }
-fn ireport_checked_at(r) { return load64(r + 32); }
 
 fn ireport_is_clean(r) {
     if (vec_len(load64(r + 16)) == 0) {
@@ -197,26 +188,20 @@ fn iv_verify_all(v) {
         var m = vec_get(measurements, i);
         var path = load64(m);
         var h = hash_file(path);
-        var now = clock_epoch_secs();
 
         if (h == 0) {
-            # File not found or error
+            # File not found or error.
             var rm = measurement_new(path, load64(m + 8));
-            store64(rm + 24, now);
-            store64(rm + 32, MSTATUS_FILE_NOT_FOUND);
+            store64(rm + 16, MSTATUS_FILE_NOT_FOUND);
             vec_push(load64(report + 24), rm);
         } else {
             var expected = load64(m + 8);
             if (ct_eq(h, strlen(h), expected, strlen(expected)) == 1) {
                 verified = verified + 1;
-                store64(m + 16, h);
-                store64(m + 24, now);
-                store64(m + 32, MSTATUS_VERIFIED);
+                store64(m + 16, MSTATUS_VERIFIED);
             } else {
                 var rm = measurement_new(path, expected);
-                store64(rm + 16, h);
-                store64(rm + 24, now);
-                store64(rm + 32, MSTATUS_MISMATCH);
+                store64(rm + 16, MSTATUS_MISMATCH);
                 vec_push(load64(report + 16), rm);
             }
         }
@@ -255,19 +240,18 @@ fn iv_tampered_files(v) {
 # ================================================================
 # IntegritySnapshot — serializable baseline
 # ================================================================
-# Layout (16 bytes):
+# Layout (8 bytes):
 #   +0  entries      (vec of {path, hash} pairs)
-#   +8  exported_at  (epoch seconds)
+#
+# Dropped in 2.6.0: exported_at — no read path.
 
 fn integrity_snapshot_new() {
-    var s = fl_alloc(16);
+    var s = fl_alloc(8);
     store64(s, vec_new());
-    store64(s + 8, clock_epoch_secs());
     return s;
 }
 
 fn isnap_entries(s) { return load64(s); }
-fn isnap_exported_at(s) { return load64(s + 8); }
 
 # BaselineEntry (16 bytes): path + expected_hash
 fn baseline_entry_new(path, expected_hash) {
@@ -320,39 +304,3 @@ fn iv_import_baseline(v, snap) {
     return elen;
 }
 
-# Report summary string
-fn ireport_summary(r) {
-    # Returns: "Integrity: N/M verified, X mismatches, Y errors"
-    # Worst case: 4 × 19-digit i64 + fixed text ≈ 120 bytes.
-    # Size 192 gives defense-in-depth headroom for any future text changes.
-    var buf = alloc(192);
-    var pos = 0;
-    memcpy(buf, "Integrity: ", 11);
-    pos = 11;
-    var vs = fmt_int(ireport_verified(r));
-    var vsl = strlen(vs);
-    memcpy(buf + pos, vs, vsl);
-    pos = pos + vsl;
-    store8(buf + pos, 47); # /
-    pos = pos + 1;
-    var ts = fmt_int(ireport_total(r));
-    var tsl = strlen(ts);
-    memcpy(buf + pos, ts, tsl);
-    pos = pos + tsl;
-    memcpy(buf + pos, " verified, ", 11);
-    pos = pos + 11;
-    var ms = fmt_int(vec_len(ireport_mismatches(r)));
-    var msl = strlen(ms);
-    memcpy(buf + pos, ms, msl);
-    pos = pos + msl;
-    memcpy(buf + pos, " mismatches, ", 13);
-    pos = pos + 13;
-    var es = fmt_int(vec_len(ireport_errors(r)));
-    var esl = strlen(es);
-    memcpy(buf + pos, es, esl);
-    pos = pos + esl;
-    memcpy(buf + pos, " errors", 7);
-    pos = pos + 7;
-    store8(buf + pos, 0);
-    return buf;
-}
