@@ -12,59 +12,52 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  CYRIUS_VERSION: "3.3.4"
+  CYRIUS_VERSION: "5.1.13"
 
 jobs:
   # ── Build ──
   build:
-    name: Build
+    name: Build smoke
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install Cyrius
+      - name: Install Cyrius ${{ env.CYRIUS_VERSION }}
         run: |
-          git clone --depth 1 --branch "${CYRIUS_VERSION}" https://github.com/MacCracken/cyrius.git /tmp/cyrius
-          sudo cp /tmp/cyrius/build/cc3 /usr/local/bin/cc3
-          sudo chmod +x /usr/local/bin/cc3
-          cc3 --version
-      - name: Compile all source
+          curl -sSf https://raw.githubusercontent.com/MacCracken/cyrius/main/scripts/install.sh | \
+            CYRIUS_VERSION="${CYRIUS_VERSION}" sh
+          echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
+      - name: Resolve deps
+        run: cyrius deps
+      - name: Build smoke
         run: |
-          cat src/lib.cyr | cc3 > build/sigil && chmod +x build/sigil
-          echo "sigil: $(wc -c < build/sigil) bytes"
-      - name: Upload compiler
-        uses: actions/upload-artifact@v4
-        with:
-          name: cc3
-          path: /usr/local/bin/cc3
-          retention-days: 1
+          mkdir -p build
+          cyrius build -D SIGIL_SMOKE programs/smoke.cyr build/sigil-smoke
+          ls -la build/sigil-smoke
+      - name: Run smoke
+        run: ./build/sigil-smoke
 
   # ── Tests ──
   test:
-    name: Test Suite
-    needs: [build]
+    name: Test suite
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install Cyrius
+      - name: Install Cyrius ${{ env.CYRIUS_VERSION }}
         run: |
-          git clone --depth 1 --branch "${CYRIUS_VERSION}" https://github.com/MacCracken/cyrius.git /tmp/cyrius
-          sudo cp /tmp/cyrius/build/cc3 /usr/local/bin/cc3
-          sudo chmod +x /usr/local/bin/cc3
-      - name: Test suite (.tcyr)
+          curl -sSf https://raw.githubusercontent.com/MacCracken/cyrius/main/scripts/install.sh | \
+            CYRIUS_VERSION="${CYRIUS_VERSION}" sh
+          echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
+      - name: Resolve deps
+        run: cyrius deps
+      - name: Run .tcyr suite
         run: |
           pass=0; fail=0
           for t in tests/tcyr/*.tcyr; do
             name=$(basename "$t" .tcyr)
-            tmpbin="/tmp/ci_t_$$"
-            cat "$t" | cc3 > "$tmpbin" 2>/dev/null && chmod +x "$tmpbin"
-            if [ $? -ne 0 ]; then echo "FAIL (compile): $name"; fail=$((fail+1)); continue; fi
-            output=$("$tmpbin" 2>&1); ec=$?
-            rm -f "$tmpbin"
-            f=$(echo "$output" | grep -o '[0-9]* failed' | tail -1 | grep -o '^[0-9]*')
-            if [ "$ec" -ne 0 ] || { [ -n "$f" ] && [ "$f" -gt 0 ]; }; then
-              echo "FAIL: $name"; fail=$((fail+1))
-            else
+            if cyrius test "$t" >/dev/null 2>&1; then
               echo "PASS: $name"; pass=$((pass+1))
+            else
+              echo "FAIL: $name"; fail=$((fail+1))
             fi
           done
           echo "$pass passed, $fail failed"
@@ -73,40 +66,41 @@ jobs:
   # ── Benchmarks ──
   benchmarks:
     name: Benchmarks
-    needs: [build]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install Cyrius
+      - name: Install Cyrius ${{ env.CYRIUS_VERSION }}
         run: |
-          git clone --depth 1 --branch "${CYRIUS_VERSION}" https://github.com/MacCracken/cyrius.git /tmp/cyrius
-          sudo cp /tmp/cyrius/build/cc3 /usr/local/bin/cc3
-          sudo chmod +x /usr/local/bin/cc3
-      - name: Benchmark suite
-        run: |
-          cat tests/bcyr/sigil.bcyr | cc3 > /tmp/bench_sigil && chmod +x /tmp/bench_sigil
-          /tmp/bench_sigil
+          curl -sSf https://raw.githubusercontent.com/MacCracken/cyrius/main/scripts/install.sh | \
+            CYRIUS_VERSION="${CYRIUS_VERSION}" sh
+          echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
+      - name: Resolve deps
+        run: cyrius deps
+      - name: Run .bcyr suite
+        run: CYRIUS_DCE=1 cyrius bench tests/bcyr/sigil.bcyr 2>/dev/null
 
   # ── Fuzz ──
   fuzz:
     name: Fuzz (quick)
-    needs: [build]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install Cyrius
+      - name: Install Cyrius ${{ env.CYRIUS_VERSION }}
         run: |
-          git clone --depth 1 --branch "${CYRIUS_VERSION}" https://github.com/MacCracken/cyrius.git /tmp/cyrius
-          sudo cp /tmp/cyrius/build/cc3 /usr/local/bin/cc3
-          sudo chmod +x /usr/local/bin/cc3
-      - name: Fuzz harnesses (10s each)
+          curl -sSf https://raw.githubusercontent.com/MacCracken/cyrius/main/scripts/install.sh | \
+            CYRIUS_VERSION="${CYRIUS_VERSION}" sh
+          echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
+      - name: Resolve deps
+        run: cyrius deps
+      - name: Run fuzz harnesses (30s budget each)
         run: |
+          mkdir -p build
           pass=0; fail=0
           for f in fuzz/*.fcyr; do
             name=$(basename "$f" .fcyr)
             printf "  %-25s " "$name"
-            if cat "$f" | cc3 > "/tmp/${name}" 2>/dev/null && chmod +x "/tmp/${name}"; then
-              timeout 10 "/tmp/${name}" >/dev/null 2>&1 || true
+            if cyrius build "$f" "build/$name" >/dev/null 2>&1; then
+              timeout 30 "build/$name" >/dev/null 2>&1 || true
               rc=$?
               if [ "$rc" -eq 0 ] || [ "$rc" -eq 124 ]; then
                 echo "OK"; pass=$((pass+1))
@@ -118,22 +112,24 @@ jobs:
             fi
           done
           echo "$pass passed, $fail failed"
+          test $fail -eq 0
 
   # ── Security ──
   security:
-    name: Security Scan
+    name: Security scan
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Scan for dangerous patterns
         run: |
           fail=0
-          # Check for raw execve outside controlled modules
-          if grep -r 'syscall(59' src/ lib/ 2>/dev/null | grep -v process.cyr; then
+          # Raw execve outside the controlled process module (if any)
+          if grep -rn 'syscall(59' src/ lib/ 2>/dev/null | grep -v process.cyr; then
             echo "WARN: raw execve in source"
           fi
-          # Check for hardcoded keys/secrets
-          if grep -rEi 'private.key|secret.*=.*[0-9a-f]{32}' src/ 2>/dev/null | grep -v test | grep -v example; then
+          # Hardcoded keys/secrets: match assignment + long hex literal
+          if grep -rEn '(private_key|secret_key|SECRET).*=.*"[0-9a-fA-F]{32,}"' src/ 2>/dev/null \
+               | grep -v test | grep -v example | grep -v rfc8032; then
             echo "WARN: possible hardcoded secret"; fail=1
           fi
           echo "security scan complete"

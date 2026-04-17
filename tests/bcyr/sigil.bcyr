@@ -195,6 +195,22 @@ fn main() {
     vec_push(benches, b9);
 
     # ============================================================
+    # Ed25519 verify — [S]B uses fixed-base table, [h]A uses
+    # variable-base constant-time scalarmult, so this bench covers
+    # both the fast path and the CT path.
+    # ============================================================
+    var b_verify = bench_new("ed25519_verify");
+    ed25519_sign(sk, "benchmark message", 17, sig);
+    ri = 0;
+    while (ri < rounds) {
+        bench_batch_start(b_verify);
+        ed25519_verify(pk, "benchmark message", 17, sig);
+        bench_batch_stop(b_verify, 1);
+        ri = ri + 1;
+    }
+    vec_push(benches, b_verify);
+
+    # ============================================================
     # Constant-time compare (32 bytes)
     # ============================================================
     var b10 = bench_new("ct_eq_32b");

@@ -1,5 +1,5 @@
 # sigil.cyr — system-wide trust verification for AGNOS
-# Bundled distribution of sigil v2.3.0
+# Bundled distribution of sigil v2.4.1
 # Source: https://github.com/MacCracken/sigil
 # License: GPL-3.0-only
 #
@@ -4070,7 +4070,7 @@ fn creport_violation_count(cr) {
 }
 
 # ================================================================
-# SigilVerifier (72 bytes)
+# SigilVerifier (56 bytes)
 # ================================================================
 # Layout:
 #   +0   keyring       (PublisherKeyring ptr)
@@ -4079,21 +4079,17 @@ fn creport_violation_count(cr) {
 #   +24  integrity     (IntegrityVerifier ptr)
 #   +32  trust_store   (hashmap: content_hash -> TrustedArtifact)
 #   +40  key_pins      (vec of KeyPin)
-#   +48  cache_enabled (i64)
-#   +56  audit_log     (AuditLog ptr)
-#   +64  cache         (hashmap: path -> cached result hash, 0=disabled)
+#   +48  audit_log     (AuditLog ptr)
 
 fn sigil_verifier_new(keyring, policy) {
-    var sv = fl_alloc(72);
+    var sv = fl_alloc(56);
     store64(sv, keyring);
     store64(sv + 8, policy);
     store64(sv + 16, revocation_list_new());
     store64(sv + 24, integrity_verifier_new(integrity_policy_new()));
     store64(sv + 32, map_new());
     store64(sv + 40, vec_new());
-    store64(sv + 48, 0);
-    store64(sv + 56, audit_log_new());
-    store64(sv + 64, 0);
+    store64(sv + 48, audit_log_new());
     return sv;
 }
 
@@ -4103,20 +4099,7 @@ fn sv_revocations(sv) { return load64(sv + 16); }
 fn sv_integrity(sv) { return load64(sv + 24); }
 fn sv_trust_store(sv) { return load64(sv + 32); }
 fn sv_key_pins(sv) { return load64(sv + 40); }
-fn sv_audit_log(sv) { return load64(sv + 56); }
-
-# Cache is currently a stub: these setters write to fields at +48 and
-# +64 but no read path consults them. Kept for API stability through
-# the 2.x line; candidate for removal or wiring up in 2.2.0.
-fn sv_set_cache_enabled(sv, enabled) {
-    store64(sv + 48, enabled);
-    return sv;
-}
-
-fn sv_clear_cache(sv) {
-    store64(sv + 64, 0);
-    return sv;
-}
+fn sv_audit_log(sv) { return load64(sv + 48); }
 
 # ================================================================
 # Key pin management
@@ -4213,7 +4196,7 @@ fn sv_sign_artifact(sv, path, secret_key, key_id, artifact_type) {
 
     # Audit
     var ae = audit_artifact_signed(path, artifact_type, key_id, chash);
-    alog_record(load64(sv + 56), ae);
+    alog_record(load64(sv + 48), ae);
 
     return artifact;
 }
@@ -4354,7 +4337,7 @@ fn sv_verify_artifact(sv, path, artifact_type) {
     # Audit
     var passed = vresult_passed(vr);
     var ae = audit_artifact_verified(path, artifact_type, trust_level, passed, chash);
-    alog_record(load64(sv + 56), ae);
+    alog_record(load64(sv + 48), ae);
 
     return vr;
 }
@@ -4397,7 +4380,7 @@ fn sv_add_revocation(sv, entry) {
     var result = rl_add(rl, entry);
     if (result == ERR_NONE) {
         var ae = audit_revocation_added(rev_key_id(entry), rev_content_hash(entry), rev_reason(entry));
-        alog_record(load64(sv + 56), ae);
+        alog_record(load64(sv + 48), ae);
     }
     return result;
 }

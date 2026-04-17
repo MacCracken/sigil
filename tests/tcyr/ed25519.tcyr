@@ -43,9 +43,7 @@ fn main() {
     ed25519_sign(sk, "", 0, sig);
 
     var sig_hex = hex_encode(sig, 64);
-    syscall(1, 1, "sig: ", 5);
-    syscall(1, 1, sig_hex, 128);
-    syscall(1, 1, "\n", 1);
+    assert_streq(sig_hex, "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b", "sig matches rfc8032 TEST 1");
 
     test_group("ed25519 verify");
     var valid = ed25519_verify(pk, "", 0, sig);
@@ -56,6 +54,46 @@ fn main() {
     store8(sig, (load8(sig) & 0xFF) ^ 1);
     var invalid = ed25519_verify(pk, "", 0, sig);
     assert_eq(invalid, 0, "tampered sig rejected");
+
+    # ============================================================
+    # RFC 8032 §7.1 TEST 2 — 1-byte message
+    # ============================================================
+    test_group("rfc8032 TEST 2");
+    var seed2 = hex_decode("4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb", 64);
+    var sk2 = alloc(64);
+    var pk2 = alloc(32);
+    ed25519_keypair(seed2, sk2, pk2);
+    var pk2_hex = hex_encode(pk2, 32);
+    assert_streq(pk2_hex, "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c", "TEST 2 pk");
+
+    var msg2 = hex_decode("72", 2);
+    var sig2 = alloc(64);
+    ed25519_sign(sk2, msg2, 1, sig2);
+    var sig2_hex = hex_encode(sig2, 64);
+    assert_streq(sig2_hex, "92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69da085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00", "TEST 2 sig");
+
+    var valid2 = ed25519_verify(pk2, msg2, 1, sig2);
+    assert_eq(valid2, 1, "TEST 2 verify");
+
+    # ============================================================
+    # RFC 8032 §7.1 TEST 3 — 2-byte message
+    # ============================================================
+    test_group("rfc8032 TEST 3");
+    var seed3 = hex_decode("c5aa8df43f9f837bedb7442f31dcb7b166d38535076f094b85ce3a2e0b4458f7", 64);
+    var sk3 = alloc(64);
+    var pk3 = alloc(32);
+    ed25519_keypair(seed3, sk3, pk3);
+    var pk3_hex = hex_encode(pk3, 32);
+    assert_streq(pk3_hex, "fc51cd8e6218a1a38da47ed00230f0580816ed13ba3303ac5deb911548908025", "TEST 3 pk");
+
+    var msg3 = hex_decode("af82", 4);
+    var sig3 = alloc(64);
+    ed25519_sign(sk3, msg3, 2, sig3);
+    var sig3_hex = hex_encode(sig3, 64);
+    assert_streq(sig3_hex, "6291d657deec24024827e69c3abe01a30ce548a284743a445e3680d7db5ac3ac18ff9b538d16f290ae67f760984dc6594a7c15e9716ed28dc027beceea1ec40a", "TEST 3 sig");
+
+    var valid3 = ed25519_verify(pk3, msg3, 2, sig3);
+    assert_eq(valid3, 1, "TEST 3 verify");
 
     # ============================================================
     # Random keypair sign/verify roundtrip

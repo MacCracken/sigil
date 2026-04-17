@@ -5,6 +5,110 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.4.1] — 2026-04-16
+
+### Infrastructure
+
+CI workflow brought forward to Cyrius 5.1.13 and the native `cyrius`
+toolchain. No library/code changes — tests, benches, and fuzz
+results are identical to 2.4.0.
+
+- **`.github/workflows/ci.yml`** rewritten:
+  - `CYRIUS_VERSION` bumped `3.3.4` → `5.1.13`.
+  - Install path switched from `git clone MacCracken/cyrius` + raw
+    `cc3` binary copy to the official `install.sh`
+    (`curl … /scripts/install.sh | CYRIUS_VERSION=… sh`), which
+    populates `~/.cyrius/bin/cyrius` matching local dev.
+  - Every job now runs `cyrius deps` before building so the
+    git-pinned sakshi 2.0.0 declared in `[deps.sakshi]` is resolved
+    into `lib/sakshi.cyr`. Previously the CI would fail to locate
+    that include.
+  - Build job compiles the 2.2.0 smoke entry
+    (`cyrius build -D SIGIL_SMOKE programs/smoke.cyr`) and runs the
+    resulting binary; exit 0 is the gate.
+  - Test / bench / fuzz jobs call `cyrius test`, `cyrius bench`,
+    and `cyrius build` directly — no more manual
+    `cat file | cc3 > out` plumbing.
+  - Fuzz time budget raised from 10 s → 30 s per harness to give
+    the 2000-round `fuzz_ed25519` xorshift sweep realistic headroom
+    on cold runners.
+  - Security scan regex tightened: previously matched the phrase
+    "private key" in comments. Now requires `(private_key|secret_key|
+    SECRET)` **plus** an assignment to a ≥32-char hex literal, and
+    skips `test` / `example` / `rfc8032` files so RFC test vectors
+    don't trip the scan.
+- **`.github/workflows/release.yml`** is unchanged. It already
+  consumes `ci.yml` via `workflow_call`, so it inherits the
+  toolchain refresh automatically. The version-sync check
+  (introduced post-2.2.0) already reads `cyrius.cyml`.
+
+### Verified locally
+
+- `cyrius build -D SIGIL_SMOKE programs/smoke.cyr build/sigil-smoke`
+  → exit 0.
+- `cyrius test` over `tests/tcyr/*.tcyr` → 10/10 pass, same as 2.4.0.
+- `CYRIUS_DCE=1 cyrius bench tests/bcyr/sigil.bcyr` → 12 benches,
+  numbers consistent with 2.4.0.
+- `cyrius build fuzz/*.fcyr` + run with 30 s cap → 3/3 OK.
+
+## [2.4.0] — 2026-04-16
+
+### Breaking
+
+- **Removed `sv_set_cache_enabled` and `sv_clear_cache`** from the
+  SigilVerifier API. These were stubs: they wrote to fields at `+48`
+  (`cache_enabled`) and `+64` (`cache`) but no read path consulted
+  them. No in-tree or downstream consumer uses either function
+  (verified across the 6 local AGNOS app repos). A verification
+  cache inside a trust-boundary module without strict invalidation
+  on revocation / policy change / key rotation is a CVE shape — if
+  a caller ever needs caching, it belongs at a layer above sigil
+  with domain-specific invalidation semantics. Deferred as a
+  breaking change in the 2.1.2 CHANGELOG; now done.
+- **`SigilVerifier` struct: 72 → 56 bytes.** The `cache_enabled` and
+  `cache` slots are gone and `audit_log` moved from `+56` to `+48`.
+  Consumers that hold raw offsets into the struct must recompile;
+  anyone using the accessor functions (`sv_audit_log` etc.) is
+  unaffected.
+
+### Test coverage
+
+- **RFC 8032 §7.1 TEST 2** (1-byte message `0x72`) and **TEST 3**
+  (2-byte message `0xaf82`) added to `tests/tcyr/ed25519.tcyr`. Each
+  vector verifies the derived public key, the signature bytes (not
+  just verify-accepts), and the positive verify path. Signature
+  bytes of TEST 1 are now also asserted (previously just printed).
+- **`fp_inv` property tests** in `tests/tcyr/field.tcyr`: direct
+  `fp_inv(a) · a ≡ 1 (mod p)` over a spread of inputs (1, 2, 7,
+  `0xdeadbeef`, a 256-bit pseudo-random value, `p−1` self-inverse).
+  Regression guard for the 2.2.0 Bernstein addition chain.
+- **`fuzz/fuzz_ed25519.fcyr`**: new harness. Generates a valid
+  (pk, msg, sig) triple, then 2000 rounds of deterministic
+  single-byte corruption across sig/msg/pk via xorshift64 PRNG.
+  Asserts every corrupted verify returns 0 or 1 (no crash, no OOB)
+  and that ≥95% of corruptions are rejected.
+- Test count: `ed25519.tcyr` 8 → 15 assertions; `field.tcyr` 10 →
+  18 assertions. 10/10 test files still pass.
+- **TEST 1024** (1023-byte message) deferred — requires bundled
+  test-data file rather than an inline 2046-char hex literal.
+  **TEST SHA(abc)** is ed25519ph (prehash variant); sigil only
+  implements pure Ed25519, so it is out of scope.
+
+### Added
+
+- **`ed25519_verify` benchmark** in `tests/bcyr/sigil.bcyr`.
+  Baseline ~7.2 ms: the fast `[S]B` (fixed-base table, ~1.1 ms) plus
+  the CT variable-base `[h]A` (~5.4 ms) plus `ge_from_bytes` and
+  SHA-512 framing. 12 benchmarks total (was 11).
+
+### Backlog
+
+- **CI is on Cyrius 3.3.4** (`.github/workflows/ci.yml` env var).
+  The project targets 5.1.13. The workflow also uses `cc3` directly
+  and bypasses `cyrius deps`, so it would not resolve sakshi 2.0.0.
+  Noted for a dedicated 2.4.x infrastructure patch — too broad to
+  bundle into a coverage release.
+
 ## [2.3.0] — 2026-04-16
 
 ### Performance

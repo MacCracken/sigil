@@ -1,0 +1,121 @@
+# fuzz_ed25519.fcyr — ed25519_verify must not crash on garbage input.
+#
+# Generates a valid keypair + signature, then runs thousands of
+# iterations with pseudo-randomly corrupted bytes in sig/msg/pk.
+# Expected behavior: verify returns 0 or 1 (never aborts, never
+# reads out of bounds).  Any deviation is caught by the final
+# assertion on the corruption counters.
+#
+# Deterministic xorshift64 PRNG — same seed = reproducible failure.
+
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fmt.cyr"
+include "lib/json.cyr"
+include "lib/sakshi.cyr"
+include "lib/chrono.cyr"
+
+include "src/types.cyr"
+include "src/error.cyr"
+include "src/sha256.cyr"
+include "src/hex.cyr"
+include "src/ct.cyr"
+include "src/hmac.cyr"
+include "src/sha512.cyr"
+include "lib/bigint.cyr"
+include "src/bigint_ext.cyr"
+include "src/ed25519.cyr"
+
+# Deterministic xorshift64 — state in a global so repeated calls
+# produce a consistent stream without leaking state across the
+# verify function calls (which would clobber locals).
+var _rng_state = 0;
+
+fn rng_seed(s) { _rng_state = s; return 0; }
+fn rng_next() {
+    var x = _rng_state;
+    x = x ^ (x << 13);
+    x = x ^ (x >> 7);
+    x = x ^ (x << 17);
+    _rng_state = x;
+    return x;
+}
+
+fn main() {
+    alloc_init();
+    ed25519_init();
+    rng_seed(0x9E3779B97F4A7C15);  # golden-ratio seed
+
+    # One valid (pk, msg, sig) triple.
+    var seed = hex_decode("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60", 64);
+    var sk = alloc(64);
+    var pk = alloc(32);
+    ed25519_keypair(seed, sk, pk);
+
+    var msg = alloc(64);
+    memset(msg, 0x42, 64);
+    var sig = alloc(64);
+    ed25519_sign(sk, msg, 64, sig);
+
+    # Baseline: untouched triple must verify.
+    assert_eq(ed25519_verify(pk, msg, 64, sig), 1, "clean triple verifies");
+
+    # Scratch buffers for mutated copies.
+    var pk_m = alloc(32);
+    var msg_m = alloc(64);
+    var sig_m = alloc(64);
+
+    # 2000 rounds of single-byte corruption across sig/msg/pk.
+    # verify() must return 0 or 1 — never crash, never OOB read.
+    # Track rejection counts so a buggy implementation (e.g.
+    # accepting tampered sigs) surfaces as a failed assertion.
+    var rejected = 0;
+    var accepted = 0;
+    var round = 0;
+    while (round < 2000) {
+        memcpy(pk_m, pk, 32);
+        memcpy(msg_m, msg, 64);
+        memcpy(sig_m, sig, 64);
+
+        # Pick target buffer (0=sig, 1=msg, 2=pk) and byte offset.
+        var r = rng_next();
+        var which = r & 3;
+        if (which > 2) { which = 0; }
+        var off = (r >> 4) & 63;
+        var flip = (r >> 16) & 0xFF;
+        if (flip == 0) { flip = 1; }
+
+        if (which == 0) {
+            store8(sig_m + off, (load8(sig_m + off) & 0xFF) ^ flip);
+        } elif (which == 1) {
+            store8(msg_m + off, (load8(msg_m + off) & 0xFF) ^ flip);
+        } else {
+            var off32 = off & 31;
+            store8(pk_m + off32, (load8(pk_m + off32) & 0xFF) ^ flip);
+        }
+
+        var v = ed25519_verify(pk_m, msg_m, 64, sig_m);
+        if (v == 0) { rejected = rejected + 1; }
+        elif (v == 1) { accepted = accepted + 1; }
+        round = round + 1;
+    }
+
+    # Overwhelmingly the corruption should be rejected. A small
+    # acceptance rate is possible from second-preimage collisions
+    # (e.g. flipping the high bit of pk that encodes the x-parity)
+    # but most single-bit flips in sig/msg must fail the RFC 8032
+    # algebraic check.
+    assert_eq(rejected + accepted, 2000, "all rounds returned 0 or 1");
+    assert_gt(rejected, 1900, "vast majority rejected (>95%)");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

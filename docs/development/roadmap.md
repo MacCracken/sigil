@@ -3,18 +3,18 @@
 Forward-looking work only. For completed items and version history, see
 [CHANGELOG.md](../../CHANGELOG.md).
 
-## 2.4.0 — Coverage & correctness
+## 2.4.x — Test-data & fuzz expansion
 
-- [ ] Ed25519 RFC 8032 test vectors 2–5 (currently only vector 1).
-- [ ] `fp_inv` regression tests — direct `fp_inv(a) * a ≡ 1 (mod p)`
-      check on a spread of inputs (the addition chain is currently
-      validated only through `ge_to_bytes`).
-- [ ] `ed25519_verify` benchmark (currently bench covers keypair/sign
-      but not verify).
-- [ ] Decision on the stubbed `SigilVerifier` cache fields
-      (`sv_set_cache_enabled`, `sv_clear_cache`) — wire up or remove.
-      Flagged as breaking in 2.1.2 CHANGELOG.
-- [ ] Expanded fuzz corpus / longer fuzz runs in CI.
+- [ ] **RFC 8032 TEST 1024**: 1023-byte message vector. Requires
+      bundled test-data file (too long for an inline hex literal).
+      Land as a fixture under `tests/data/rfc8032/` and a reader
+      in the test prologue.
+- [ ] **Expanded fuzz corpus**: current `fuzz_ed25519` runs 2000
+      rounds of single-byte corruption; add multi-byte mutations
+      and structure-aware mutators (e.g. varying S past L to
+      exercise the canonical-S reject path from §5.1.7). CI fuzz
+      window is already 30 s per harness (bumped from 10 s in
+      2.4.1).
 
 ## 2.5.0 — AGNOS integration
 
