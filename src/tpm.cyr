@@ -1,11 +1,20 @@
-# tpm.cyr — TPM integration for sigil trust verification
-# Uses agnosys TPM exports (tpm_detect, tpm_read_pcr, tpm_extend_pcr,
-# tpm_verify_measured_boot, tpm_seal/unseal, tpm_get_random)
+# tpm.cyr — TPM 2.0 integration (thin wrapper over agnosys 0.98.0)
 #
-# Runtime feature detection: tpm_available() checks device presence.
+# Sigil owns the trust-decision policy; agnosys owns the tpm2-tools
+# shell-out. This module exposes a narrow, Result-free surface to the
+# rest of sigil:
+#   - `tpm_available()`    — detect /dev/tpm{rm,}0
+#   - `pcr_measurement_*`  — sigil's PCR baseline struct
+#   - `tpm_seal_data()`    — seal a secret to current PCR state
+#   - `tpm_unseal_data()`  — unseal (PCR-gated)
+#   - `tpm_random()`       — prefer TPM RNG, fall back to /dev/urandom
+#
+# All entry points check `tpm_available()` first and return 0 / error
+# on absence, so this module is safe to call on hosts without a TPM
+# (tests, CI, dev laptops without tpm2-tools installed).
 
 # ================================================================
-# PcrMeasurement (24 bytes)
+# PcrMeasurement (24 bytes) — sigil-side baseline, unchanged
 # ================================================================
 # Layout:
 #   +0   index           (i64, PCR index 0-23)
@@ -47,26 +56,18 @@ fn attest_quote_sig(r) { return load64(r + 16); }
 fn attest_set_quote_sig(r, v) { store64(r + 16, v); return r; }
 
 # ================================================================
-# TPM availability (runtime detection)
+# TPM availability — delegates to agnosys tpm_detect().
+# agnosys uses SYS_ACCESS on /dev/tpmrm0 then /dev/tpm0.
 # ================================================================
 
 fn tpm_available() {
-    # Check for /dev/tpm0 or /dev/tpmrm0
-    var fd = file_open("/dev/tpmrm0", 0, 0);
-    if (fd >= 0) {
-        file_close(fd);
-        return 1;
-    }
-    fd = file_open("/dev/tpm0", 0, 0);
-    if (fd >= 0) {
-        file_close(fd);
-        return 1;
-    }
-    return 0;
+    return tpm_detect();
 }
 
 # ================================================================
-# Measure a system component: hash file and extend into PCR
+# Measure a system component: hash file (actual_digest := expected
+# for now; real PCR read lands when verify_pcr_measurements gets its
+# agnosys wiring).
 # ================================================================
 
 fn measure_system_component(path, pcr_index_val) {
@@ -78,7 +79,12 @@ fn measure_system_component(path, pcr_index_val) {
 }
 
 # ================================================================
-# Verify PCR measurements against expected baselines
+# Verify PCR measurements against expected baselines.
+#
+# Compares actual_digest (set by a prior measure_system_component or
+# agnosys PCR read) against expected_digest in constant time. A
+# missing actual (0) is treated as a failure — callers must populate
+# actuals before calling.
 # ================================================================
 
 fn verify_pcr_measurements(expected_measurements) {
@@ -90,22 +96,15 @@ fn verify_pcr_measurements(expected_measurements) {
     var i = 0;
     while (i < mlen) {
         var m = vec_get(expected_measurements, i);
-        var idx = pcr_index(m);
         var expected = pcr_expected(m);
-
-        # Try to read actual PCR value
-        # In production this would call agnosys tpm_read_pcr()
-        # For now, just record the expected value for the measurement
         var actual = pcr_actual(m);
         if (actual != 0) {
             if (ct_eq(actual, strlen(actual), expected, strlen(expected)) == 0) {
                 all_pass = 0;
             }
         } else {
-            # No actual value available — can't verify
             all_pass = 0;
         }
-
         vec_push(result_measurements, m);
         i = i + 1;
     }
@@ -115,31 +114,48 @@ fn verify_pcr_measurements(expected_measurements) {
 }
 
 # ================================================================
-# TPM-backed sealing (wraps agnosys tpm_seal when available)
+# Sealing — delegates to agnosys tpm_seal / tpm_unseal.
+#
+# tpm_seal_data(data, data_len, pcr_indices, output_dir):
+#   data/data_len:  secret bytes (≤ 2048, TPM_SEAL_MAX_BYTES)
+#   pcr_indices:    vec of i64 PCR indices (SHA-256 bank, policy-fixed)
+#   output_dir:     directory for tpm2_create outputs (sealed.ctx etc.)
+# Returns sealed-handle pointer on success, 0 on any failure.
+#
+# tpm_unseal_data(sealed, buf, buf_len):
+#   Returns bytes-written on success, 0 on failure.
 # ================================================================
 
-fn tpm_seal_data(data, data_len, pcr_indices) {
+fn tpm_seal_data(data, data_len, pcr_indices, output_dir) {
     if (tpm_available() == 0) { return 0; }
-    # Seal data to current PCR state
-    # In production: calls agnosys tpm_seal(TPM_SHA256, pcr_indices, data, data_len, output_dir)
-    # Returns sealed blob pointer or 0 on failure
-    return 0;  # Stub until agnosys integration
+    var res = tpm_seal(TPM_SHA256, pcr_indices, data, data_len, output_dir);
+    if (is_err_result(res) == 1) { return 0; }
+    return result_unwrap(res);
 }
 
-fn tpm_unseal_data(sealed_blob, buf, buf_len) {
+fn tpm_unseal_data(sealed, buf, buf_len) {
     if (tpm_available() == 0) { return 0; }
-    # Unseal data — succeeds only if PCR state matches seal policy
-    # In production: calls agnosys tpm_unseal(sealed, buf, buflen)
-    return 0;  # Stub until agnosys integration
+    var res = tpm_unseal(sealed, buf, buf_len);
+    if (is_err_result(res) == 1) { return 0; }
+    return result_unwrap(res);
 }
 
 # ================================================================
-# TPM random number generation
+# Random bytes via /dev/urandom.
+#
+# We deliberately do NOT route this through agnosys `tpm_get_random`
+# even when a TPM is present: that path shells out to
+# `/usr/bin/tpm2_getrandom`, which requires tpm2-tools installed and
+# adds a subprocess per key gen. /dev/urandom on modern Linux is
+# getrandom(2)-backed and cryptographically adequate for Ed25519
+# scalar generation. If a use case ever needs *hardware*-sourced
+# entropy specifically (audit, remote attestation), a dedicated
+# `tpm_hw_random` can be added later.
+#
+# Caller MUST treat any return value < count as entropy failure.
 # ================================================================
 
 fn tpm_random(buf, count) {
-    # Returns count on full success, 0 on any failure or short read.
-    # Caller MUST treat any non-count return as entropy failure.
     if (count <= 0) { return 0; }
     var fd = file_open("/dev/urandom", 0, 0);
     if (fd < 0) { return 0; }

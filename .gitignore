@@ -4,6 +4,7 @@
 
 # Cyrius deps cache (symlinked by `cyrius deps` to ~/.cyrius/deps/...)
 /lib/sakshi.cyr
+/lib/agnosys.cyr
 
 # Editor
 .idea/

@@ -1,0 +1,78 @@
+# ima.cyr — Linux IMA (Integrity Measurement Architecture) integration.
+# Thin wrapper over agnosys ima_* functions.
+#
+# Sigil-facing surface:
+#   - `sigil_ima_available()`          — IMA active on this host?
+#   - `sigil_ima_measurement_count()`  — number of kernel measurements
+#   - `sigil_ima_policy_loaded()`      — is an IMA policy installed?
+#   - `sigil_ima_snapshot()`           — aggregate (active, count, policy) struct
+#
+# All calls are safe on hosts without IMA — they return 0 counts and
+# active=0 rather than failing. This mirrors the TPM module's
+# runtime-detection posture.
+
+# ================================================================
+# ImaSnapshot (24 bytes) — sigil-side summary of agnosys ima_status
+# ================================================================
+# Layout:
+#   +0   active           (i64, 0 or 1)
+#   +8   measurement_cnt  (i64)
+#   +16  policy_loaded    (i64, 0 or 1)
+
+fn sigil_ima_snapshot_new(active, count, policy) {
+    var s = fl_alloc(24);
+    store64(s, active);
+    store64(s + 8, count);
+    store64(s + 16, policy);
+    return s;
+}
+
+fn sigil_ima_active(s) { return load64(s); }
+fn sigil_ima_count(s) { return load64(s + 8); }
+fn sigil_ima_policy(s) { return load64(s + 16); }
+
+# ================================================================
+# sigil_ima_snapshot — query current kernel IMA state
+#
+# Delegates to agnosys `ima_get_status()`, unwraps the Result, and
+# returns a sigil-native snapshot. On a host without IMA mounted at
+# /sys/kernel/security/ima, agnosys returns Ok(inactive); we pass
+# that through.
+# ================================================================
+
+fn sigil_ima_snapshot() {
+    var res = ima_get_status();
+    if (is_err_result(res) == 1) {
+        return sigil_ima_snapshot_new(0, 0, 0);
+    }
+    var ag = result_unwrap(res);
+    return sigil_ima_snapshot_new(
+        ima_status_active(ag),
+        ima_status_measurement_count(ag),
+        ima_status_policy_loaded(ag)
+    );
+}
+
+# Convenience predicates — avoid allocating a snapshot when the
+# caller only wants one field.
+
+fn sigil_ima_available() {
+    var s = sigil_ima_snapshot();
+    var v = sigil_ima_active(s);
+    fl_free(s);
+    return v;
+}
+
+fn sigil_ima_measurement_count() {
+    var s = sigil_ima_snapshot();
+    var v = sigil_ima_count(s);
+    fl_free(s);
+    return v;
+}
+
+fn sigil_ima_policy_loaded() {
+    var s = sigil_ima_snapshot();
+    var v = sigil_ima_policy(s);
+    fl_free(s);
+    return v;
+}

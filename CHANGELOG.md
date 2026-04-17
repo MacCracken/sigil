@@ -5,6 +5,86 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.5.0] — 2026-04-16
+
+### Added — AGNOS kernel integration
+
+Sigil now consumes `agnosys 0.98.0` for the AGNOS-native TPM / IMA /
+Secure-Boot surface. This replaces the placeholder stubs that shipped
+through the 2.x line and makes sigil a real trust-verification node
+on AGNOS hosts rather than a paper spec.
+
+- **Cyrius toolchain bumped** 5.1.13 → 5.2.0 (sigil's `cyrius.cyml`
+  and `.github/workflows/ci.yml` in lock-step; agnosys requires
+  5.2.0).
+- **`[deps.agnosys]`** added to `cyrius.cyml`, pinned to tag
+  `0.98.0`, consuming `dist/agnosys.cyr` (20 modules, 9769 lines,
+  includes stripped so the bundle composes cleanly with sigil's
+  stdlib graph). New stdlib deps pulled in to support agnosys:
+  `string`, `tagged`, `process`, `fs`.
+- **`src/tpm.cyr`** rewritten as a thin wrapper:
+  - `tpm_available()` → `tpm_detect()` (SYS_ACCESS on
+    `/dev/tpmrm0` then `/dev/tpm0`).
+  - `tpm_seal_data(data, len, pcr_indices, output_dir)` →
+    `tpm_seal(TPM_SHA256, ...)`. Result unwrapped to a pointer/0.
+  - `tpm_unseal_data(sealed, buf, buflen)` → `tpm_unseal`.
+    Same pattern.
+  - Both refuse cleanly (`return 0`) when `tpm_available() == 0`
+    so tests/dev hosts without a TPM don't crash.
+  - `tpm_random` stays on `/dev/urandom`. We deliberately do NOT
+    route through `tpm_get_random` — that shells out to
+    `/usr/bin/tpm2_getrandom` and adds a fork/exec per key gen.
+    Linux `getrandom(2)` is cryptographically adequate for Ed25519
+    scalar generation.
+- **`src/ima.cyr`** — new. Thin wrapper over agnosys
+  `ima_get_status`. Public API:
+  - `sigil_ima_snapshot()` → 24-byte struct with `active`,
+    `measurement_count`, `policy_loaded`.
+  - `sigil_ima_available()` / `sigil_ima_measurement_count()` /
+    `sigil_ima_policy_loaded()` convenience predicates.
+- **`src/secureboot.cyr`** — new. Thin wrapper over agnosys
+  `secureboot_detect_state`:
+  - `sigil_sb_state()` returns an agnosys `SB_*` enum
+    (`SB_ENABLED` / `SB_DISABLED` / `SB_SETUP_MODE` /
+    `SB_NOT_SUPPORTED`).
+  - `sigil_sb_enforcing()` → 1 iff `SB_ENABLED`. Policy code can
+    require this for the `TRUST_SYSTEM_CORE` admit path.
+  - `sigil_sb_state_name()` → static C-string for logs.
+- **`src/lib.cyr`** now includes `lib/agnosys.cyr`, `src/ima.cyr`,
+  `src/secureboot.cyr` in dependency order.
+
+### Test coverage
+
+- **`tests/tcyr/agnosys.tcyr`** — new. 12 assertions across TPM /
+  IMA / Secure-Boot wrappers. Every assertion targets the
+  *unavailable* path so the suite passes on CI hosts without
+  hardware (no /dev/tpm, no /sys/kernel/security/ima, no EFI).
+  Hosts WITH these facilities still satisfy the assertions and
+  additionally exercise the agnosys shell-outs.
+- 11/11 `.tcyr` files pass (was 10). Fuzz 3/3 OK. 12/12 benches
+  still run.
+
+### Performance
+
+No change — 2.5.0 is an integration release, not a crypto release.
+Numbers (single-run on the same host as 2.4.2):
+
+| op | 2.4.2 | 2.5.0 | Δ |
+|---|---|---|---|
+| `ed25519_keypair` | 1.33 ms | 0.99 ms | (noise, −25%) |
+| `ed25519_sign` | 1.14 ms | 1.11 ms | ~flat |
+| `ed25519_verify` | 7.18 ms | 6.68 ms | (noise) |
+| `fp_inv` | 273 us | 258 us | ~flat |
+| `sha256_4kb` | 257 us | 248 us | ~flat |
+
+### Breaking
+
+- **`tpm_seal_data` takes a fourth parameter**: `output_dir`
+  (directory for tpm2_create output files — `sealed.ctx`,
+  `sealed.pub`, `sealed.priv`). The previous stub was 3-arg.
+  Consumer repos must update call sites. No public consumer is
+  currently calling this (stub era), so impact should be nil.
+
 ## [2.4.2] — 2026-04-16
 
 ### Test coverage

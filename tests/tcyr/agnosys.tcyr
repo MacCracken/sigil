@@ -1,0 +1,127 @@
+# agnosys.tcyr — sanity tests for the 2.5.0 agnosys-backed wrappers
+# (src/tpm.cyr, src/ima.cyr, src/secureboot.cyr).
+#
+# Runs on hosts without a real TPM / IMA / EFI — so every assertion
+# targets the "unavailable" path. A host WITH these facilities will
+# still satisfy every assertion (values are bounded, not pinned) but
+# will additionally exercise the agnosys shell-out paths as a side
+# effect.
+
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/string.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fs.cyr"
+include "lib/fmt.cyr"
+include "lib/json.cyr"
+include "lib/sakshi.cyr"
+include "lib/chrono.cyr"
+include "lib/bigint.cyr"
+include "lib/tagged.cyr"
+include "lib/process.cyr"
+include "lib/agnosys.cyr"
+
+include "src/types.cyr"
+include "src/error.cyr"
+include "src/sha256.cyr"
+include "src/hex.cyr"
+include "src/ct.cyr"
+include "src/hmac.cyr"
+include "src/sha512.cyr"
+include "src/bigint_ext.cyr"
+include "src/ed25519.cyr"
+include "src/tpm.cyr"
+include "src/ima.cyr"
+include "src/secureboot.cyr"
+
+fn is_bool(v) {
+    if (v == 0) { return 1; }
+    if (v == 1) { return 1; }
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+
+    # ============================================================
+    # TPM: detection + random must never crash. On a CI runner
+    # without /dev/tpm*, tpm_available() is 0 and tpm_random()
+    # falls back to /dev/urandom (always present on Linux).
+    # ============================================================
+    test_group("tpm availability");
+    var avail = tpm_available();
+    assert_eq(is_bool(avail), 1, "tpm_available is 0 or 1");
+
+    test_group("tpm_random (urandom)");
+    var rbuf = alloc(32);
+    memset(rbuf, 0, 32);
+    var got = tpm_random(rbuf, 32);
+    assert_eq(got, 32, "tpm_random filled 32 bytes");
+    var any_nonzero = 0;
+    var i = 0;
+    while (i < 32) {
+        if ((load8(rbuf + i) & 0xFF) != 0) { any_nonzero = 1; }
+        i = i + 1;
+    }
+    assert_eq(any_nonzero, 1, "random is not all-zero");
+
+    test_group("tpm seal/unseal guard");
+    # On a host without a TPM, both must refuse cleanly (not crash).
+    var vind = vec_new();
+    vec_push(vind, 7);
+    if (avail == 0) {
+        var sealed = tpm_seal_data("secret", 6, vind, "/tmp");
+        assert_eq(sealed, 0, "seal refuses without TPM");
+        var ubuf = alloc(64);
+        var un = tpm_unseal_data(0, ubuf, 64);
+        assert_eq(un, 0, "unseal refuses without TPM");
+    }
+
+    # ============================================================
+    # IMA: snapshot must never crash. On a host without IMA at
+    # /sys/kernel/security/ima, every field is 0.
+    # ============================================================
+    test_group("ima snapshot");
+    var snap = sigil_ima_snapshot();
+    assert_eq(is_bool(sigil_ima_active(snap)), 1, "ima active is 0 or 1");
+    assert_gte(sigil_ima_count(snap), 0, "ima count non-negative");
+    assert_eq(is_bool(sigil_ima_policy(snap)), 1, "ima policy is 0 or 1");
+    fl_free(snap);
+
+    if (sigil_ima_available() == 0) {
+        assert_eq(sigil_ima_measurement_count(), 0, "inactive → 0 count");
+        assert_eq(sigil_ima_policy_loaded(), 0, "inactive → no policy");
+    }
+
+    # ============================================================
+    # Secure Boot: state must be one of the agnosys SB_* constants.
+    # On non-EFI hosts, state == SB_NOT_SUPPORTED.
+    # ============================================================
+    test_group("secureboot state");
+    var st = sigil_sb_state();
+    var st_ok = 0;
+    if (st == SB_NOT_SUPPORTED) { st_ok = 1; }
+    if (st == SB_ENABLED) { st_ok = 1; }
+    if (st == SB_DISABLED) { st_ok = 1; }
+    if (st == SB_SETUP_MODE) { st_ok = 1; }
+    assert_eq(st_ok, 1, "sb state is a known enum");
+
+    var enforce = sigil_sb_enforcing();
+    var want_enforce = 0;
+    if (st == SB_ENABLED) { want_enforce = 1; }
+    assert_eq(enforce, want_enforce, "enforcing iff SB_ENABLED");
+
+    var nm = sigil_sb_state_name();
+    assert(nm != 0, "state name ptr non-null");
+    assert_gt(strlen(nm), 0, "state name non-empty");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

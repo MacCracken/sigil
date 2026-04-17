@@ -1,0 +1,38 @@
+# secureboot.cyr — UEFI Secure Boot state for sigil trust policy.
+# Thin wrapper over agnosys secureboot_* functions.
+#
+# Sigil-facing surface:
+#   - `sigil_sb_state()`       — returns the SB state enum (agnosys value)
+#   - `sigil_sb_enforcing()`   — 1 iff state == SB_ENABLED
+#   - `sigil_sb_state_name()`  — static C-string: "enabled"/"disabled"/…
+#
+# Used by policy enforcement: a trust policy may require
+# sigil_sb_enforcing() == 1 before admitting an artifact as
+# TRUST_SYSTEM_CORE. Non-EFI hosts report "not_supported" (pass-through
+# from agnosys).
+
+# ================================================================
+# sigil_sb_state — query current Secure Boot state.
+# Returns the agnosys-defined SB_* constant. On hosts without EFI or
+# where mokutil fails, this is SB_NOT_SUPPORTED.
+# ================================================================
+
+fn sigil_sb_state() {
+    var res = secureboot_detect_state();
+    if (is_err_result(res) == 1) {
+        return SB_NOT_SUPPORTED;
+    }
+    return result_unwrap(res);
+}
+
+# 1 iff Secure Boot is actively enforcing (SB_ENABLED).
+# SB_SETUP_MODE (keys can still be enrolled) and SB_DISABLED both
+# return 0 — sigil must not treat either as a trusted boot chain.
+fn sigil_sb_enforcing() {
+    return secureboot_is_enforcing(sigil_sb_state());
+}
+
+# Human-readable state (static C-string, do not free).
+fn sigil_sb_state_name() {
+    return secureboot_state_str(sigil_sb_state());
+}
