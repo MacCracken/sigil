@@ -4,6 +4,11 @@ Forward-looking work only. For shipped items and version history
 see [CHANGELOG.md](../../CHANGELOG.md). At v2.8.x the originally
 scoped 2.x plan is complete; everything below is work toward 3.0.
 
+**Shipped in 2.8.4:** AES-256-GCM AEAD primitive (`src/aes_gcm.cyr`)
+— FIPS 197 block cipher + NIST SP 800-38D GCM mode, software-only.
+Consumed by majra's `ipc_encrypted.cyr`. A hardware AES-NI path
+remains future work (blocked on Cyrius inline-asm support).
+
 ## Road to v3.0
 
 v3.0 is defined by **post-quantum capability** and **parallel

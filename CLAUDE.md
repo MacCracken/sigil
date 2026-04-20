@@ -23,6 +23,7 @@ This project is part of **AGNOS** — an AI-native operating system. The genesis
 Sigil is the **single crypto/trust boundary** for the AGNOS operating system. It owns:
 - Ed25519 signing and verification (publisher keyring)
 - SHA-256 file integrity measurement and verification
+- HMAC-SHA256 (RFC 2104) and AES-256-GCM (NIST SP 800-38D) AEAD
 - Trust chain: boot chain → agent binaries → configs → packages
 - Revocation list management
 - Trust levels, policies, and enforcement modes
@@ -49,6 +50,7 @@ src/
   tpm.cyr         — TPM interface (when agnosys exports available)
   ed25519.cyr     — Ed25519 implementation (RFC 8032)
   ct.cyr          — Constant-time comparison utilities
+  aes_gcm.cyr     — AES-256-GCM AEAD (FIPS 197 + NIST SP 800-38D)
 ```
 
 ## Development Process
@@ -128,7 +130,7 @@ Run a closeout pass before tagging x.Y.0 or x.0.0. Ship as the last patch of the
 ## Key Design Constraints
 
 - **Sigil IS the trust boundary** — every crypto decision lives here
-- **Own the crypto** — Ed25519 (RFC 8032), SHA-256 (FIPS 180-4), HMAC-SHA256 (RFC 2104) implemented in Cyrius, no external deps
+- **Own the crypto** — Ed25519 (RFC 8032), SHA-256 (FIPS 180-4), HMAC-SHA256 (RFC 2104), AES-256-GCM (FIPS 197 + NIST SP 800-38D) implemented in Cyrius, no external deps
 - **Inherit from libro** — SHA-256, hex encode/decode, constant_time_eq, key zeroization pattern. Improve: proper HMAC (not simplified), add Ed25519 asymmetric signing
 - **Constant-time comparison** — bitwise OR accumulation for hash/signature comparison, no early exit
 - **Key material zeroization** — overwrite key buffers with zeros before free
@@ -140,16 +142,49 @@ Run a closeout pass before tagging x.Y.0 or x.0.0. Ship as the last patch of the
 - **Runtime feature detection** over compile-time gating (follow libro pattern)
 - **Target size** — compiled binary contribution should be small and measurable
 
-## Known Cyrius Compiler Constraints
+## Known Cyrius Compiler Quirks (5.4.8)
 
-1. Local variable clobbering — function parameters/locals overwritten by nested calls; workaround: save to globals
-2. `map_get` after `map_set` in same call chain — lookups may fail; workaround: restructure to minimize call depth
-3. No `\r` escape sequence — use raw byte 13 for carriage return
-4. Fixup table limit (8192) — split into multiple compilation units if exceeded
-5. `var buf[N]` is N bytes, not N elements — for 80 i64 values, declare `var buf[640]`
-6. Negative literals not supported — use `(0 - N)` instead of `-N`
-7. Max ~64 global vars with initializers — use enums for constants
-8. `match` is a reserved keyword — do not use as variable name
+Most cc3-era workarounds documented in earlier sigil versions are
+now resolved under cc5. Quirks still worth knowing:
+
+1. **Local variable clobbering** — still possible across deeply
+   nested call chains in cc5, though rarer than cc3. Not a
+   guaranteed bug. If a local's value looks wrong after a
+   function call, promote it to a global as a workaround. The
+   sha256 / ed25519 / aes_gcm modules all use this pattern for
+   their round-state.
+2. **`fl_alloc` vs bump `alloc` discipline** — `fl_alloc` +
+   `fl_free` for per-call scratch (round keys, GCM tables).
+   `alloc()` for init-time tables that live the whole program
+   (S-box, rcon, fixed-base combs). Never call `free()` on an
+   `alloc()` block — the freelist and bump allocators are
+   separate heaps and `free` only exists on the freelist side.
+3. **`var buf[N]` is N bytes, not N elements** — for 80 i64
+   values, declare `var buf[640]`. This is intentional, not a
+   bug, but tripping on it is easy.
+4. **`match` is a reserved keyword** — do not use as a variable
+   name.
+5. **Fixup table cap: 16384** — up from 8192 in cc3. Individual
+   `store8` init blocks of 256+ entries will still hit this
+   (see the S-box init in `src/aes_gcm.cyr` which instead
+   decodes from a hex string literal). Split into multiple
+   compilation units if you must hand-unroll.
+
+### Resolved under cc5 (stop treating as bugs)
+
+- **`\r` escape sequence** — works since 4.x. Don't hand-emit
+  byte 13 with `store8(buf, 13)`.
+- **Negative literals `-1`, `-N`** — work since 3.10.3. No need
+  for `(0 - N)`.
+- **Compound assignment `+=`, `-=`, `*=`, etc.** — work since 3.10.3.
+- **Undefined functions** — cc5 still resolves them as a fall-
+  through stub that crashes at call time rather than a compile-
+  time error. The aes_gcm bring-up hit this: a stray `free(...)`
+  call (from muscle memory, no such function in sigil's world)
+  crashed at runtime with a segfault loop. When a test silently
+  "restarts main" forever, suspect an undefined-function call.
+- **256-initialized-global cap** — removed.
+- **`map_get` after `map_set` in deep call chains** — resolved.
 
 ## DO NOT
 

@@ -1,0 +1,146 @@
+# aes_gcm.tcyr — AES-256-GCM test vectors (NIST SP 800-38D Appendix B)
+#
+# Verifies:
+#   1. Empty PT + empty AAD, zero key + zero IV (encrypt + decrypt).
+#   2. Single-block PT, empty AAD, zero key + zero IV (NIST § B).
+#   3. NIST Test Case 14 equivalent — four-block PT, no AAD, real key.
+#   4. NIST Test Case 15 — AAD path, partial final block.
+#   5. Decrypt success with valid tag, decrypt failure with one-bit
+#      tag flip (and assertion that pt_out is zeroed on failure —
+#      AEAD contract: no plaintext leak on tag mismatch).
+
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fmt.cyr"
+include "lib/json.cyr"
+include "lib/sakshi.cyr"
+include "lib/chrono.cyr"
+
+include "src/types.cyr"
+include "src/error.cyr"
+include "src/sha256.cyr"
+include "src/hex.cyr"
+include "src/ct.cyr"
+include "src/hmac.cyr"
+include "src/aes_gcm.cyr"
+
+fn main() {
+    alloc_init();
+
+    # ============================================================
+    # Test 1: empty PT, empty AAD, zero key, zero IV
+    # ============================================================
+    test_group("NIST empty PT+AAD, zero key+IV");
+
+    var key_t1 = hex_decode("0000000000000000000000000000000000000000000000000000000000000000", 64);
+    var iv_t1  = hex_decode("000000000000000000000000", 24);
+    var tag_t1[16];
+    aes_gcm_encrypt(key_t1, iv_t1, 0, 0, 0, 0, 0, &tag_t1);
+    var tag_t1_hex = hex_encode(&tag_t1, 16);
+    assert_streq(tag_t1_hex, "530f8afbc74536b9a963b4f1c4cb738b", "test1 tag");
+
+    # ============================================================
+    # Test 2: single zero block PT, empty AAD, zero key, zero IV
+    # ============================================================
+    test_group("NIST single-block PT, zero key+IV");
+
+    var pt_t2 = hex_decode("00000000000000000000000000000000", 32);
+    var ct_t2[16];
+    var tag_t2[16];
+    aes_gcm_encrypt(key_t1, iv_t1, 0, 0, pt_t2, 16, &ct_t2, &tag_t2);
+    var ct_t2_hex  = hex_encode(&ct_t2, 16);
+    var tag_t2_hex = hex_encode(&tag_t2, 16);
+    assert_streq(ct_t2_hex,  "cea7403d4d606b6e074ec5d3baf39d18", "test2 ct");
+    assert_streq(tag_t2_hex, "d0d1c8a799996bf0265b98b5d48ab919", "test2 tag");
+
+    # ============================================================
+    # Test 3: NIST Test Case 14 equivalent — full 64-byte PT, no AAD
+    # ============================================================
+    test_group("NIST TC14: 64-byte PT, no AAD");
+
+    var key_t3 = hex_decode("feffe9928665731c6d6a8f9467308308feffe9928665731c6d6a8f9467308308", 64);
+    var iv_t3  = hex_decode("cafebabefacedbaddecaf888", 24);
+    var pt_t3  = hex_decode("d9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a318a721c3c0c95956809532fcf0e2449a6b525b16aedf5aa0de657ba637b391aafd255", 128);
+    var ct_t3[64];
+    var tag_t3[16];
+    aes_gcm_encrypt(key_t3, iv_t3, 0, 0, pt_t3, 64, &ct_t3, &tag_t3);
+    var ct_t3_hex  = hex_encode(&ct_t3, 64);
+    var tag_t3_hex = hex_encode(&tag_t3, 16);
+    assert_streq(ct_t3_hex,  "522dc1f099567d07f47f37a32a84427d643a8cdcbfe5c0c97598a2bd2555d1aa8cb08e48590dbb3da7b08b1056828838c5f61e6393ba7a0abcc9f662898015ad", "test3 ct");
+    assert_streq(tag_t3_hex, "b094dac5d93471bdec1a502270e3cc6c", "test3 tag");
+
+    # ============================================================
+    # Test 4: NIST Test Case 15 — AAD + partial final block PT
+    # ============================================================
+    test_group("NIST TC15: AAD + 60-byte PT");
+
+    var pt_t4  = hex_decode("d9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a318a721c3c0c95956809532fcf0e2449a6b525b16aedf5aa0de657ba637b39", 120);
+    var aad_t4 = hex_decode("feedfacedeadbeeffeedfacedeadbeefabaddad2", 40);
+    var ct_t4[60];
+    var tag_t4[16];
+    aes_gcm_encrypt(key_t3, iv_t3, aad_t4, 20, pt_t4, 60, &ct_t4, &tag_t4);
+    var ct_t4_hex  = hex_encode(&ct_t4, 60);
+    var tag_t4_hex = hex_encode(&tag_t4, 16);
+    assert_streq(ct_t4_hex,  "522dc1f099567d07f47f37a32a84427d643a8cdcbfe5c0c97598a2bd2555d1aa8cb08e48590dbb3da7b08b1056828838c5f61e6393ba7a0abcc9f662", "test4 ct");
+    assert_streq(tag_t4_hex, "76fc6ece0f4e1768cddf8853bb2d551b", "test4 tag");
+
+    # ============================================================
+    # Decrypt — success path
+    # ============================================================
+    test_group("decrypt valid tag (TC15 roundtrip)");
+
+    var pt_out[60];
+    memset(&pt_out, 0xAA, 60);  # preseed with junk to verify overwrite
+    var rc = aes_gcm_decrypt(key_t3, iv_t3, aad_t4, 20, &ct_t4, 60, &tag_t4, &pt_out);
+    assert_eq(rc, ERR_NONE, "decrypt rc = ERR_NONE");
+    var pt_out_hex = hex_encode(&pt_out, 60);
+    assert_streq(pt_out_hex, "d9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a318a721c3c0c95956809532fcf0e2449a6b525b16aedf5aa0de657ba637b39", "decrypt pt matches");
+
+    # ============================================================
+    # Decrypt — forged tag (one-bit flip)
+    # ============================================================
+    test_group("decrypt forged tag returns integrity error");
+
+    var forged_tag[16];
+    memcpy(&forged_tag, &tag_t4, 16);
+    # Flip low bit of first tag byte
+    store8(&forged_tag, (load8(&forged_tag) ^ 0x01) & 0xFF);
+
+    var pt_out2[60];
+    memset(&pt_out2, 0x5A, 60);  # known sentinel
+    var rc2 = aes_gcm_decrypt(key_t3, iv_t3, aad_t4, 20, &ct_t4, 60, &forged_tag, &pt_out2);
+    assert_eq(rc2, ERR_INTEGRITY_MISMATCH, "forged tag -> ERR_INTEGRITY_MISMATCH");
+
+    # AEAD contract: pt_out2 must NOT hold the real plaintext.
+    # aes_gcm_decrypt zeros pt_out on failure, so the first byte
+    # must now be 0 (not 0x5A, not the real pt byte 0xd9).
+    assert_eq(load8(&pt_out2) & 0xFF, 0, "pt_out zeroed on tag failure byte 0");
+    assert_eq(load8(&pt_out2 + 30) & 0xFF, 0, "pt_out zeroed on tag failure mid");
+    assert_eq(load8(&pt_out2 + 59) & 0xFF, 0, "pt_out zeroed on tag failure tail");
+
+    # ============================================================
+    # Decrypt empty roundtrip (tag-only auth)
+    # ============================================================
+    test_group("decrypt empty roundtrip");
+
+    var rc3 = aes_gcm_decrypt(key_t1, iv_t1, 0, 0, 0, 0, &tag_t1, 0);
+    assert_eq(rc3, ERR_NONE, "empty decrypt ok");
+
+    # Flip a bit of the empty-message tag and expect failure.
+    var bad_tag_t1[16];
+    memcpy(&bad_tag_t1, &tag_t1, 16);
+    store8(&bad_tag_t1, (load8(&bad_tag_t1) ^ 0x80) & 0xFF);
+    var rc4 = aes_gcm_decrypt(key_t1, iv_t1, 0, 0, 0, 0, &bad_tag_t1, 0);
+    assert_eq(rc4, ERR_INTEGRITY_MISMATCH, "empty decrypt forged -> err");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

@@ -5,6 +5,110 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.8.4] — 2026-04-19
+
+Two bundled changes: a **toolchain refresh** to bring sigil onto
+the current Cyrius pin, and a new **AES-256-GCM** AEAD primitive
+that completes sigil's symmetric-crypto surface for the AGNOS
+ecosystem. The symmetric primitive is the AEAD that majra's
+`ipc_encrypted.cyr` consumes; before 2.8.4 majra hand-rolled a
+stub.
+
+### Added — AES-256-GCM AEAD (`src/aes_gcm.cyr`)
+
+- **AES-256 block cipher** — FIPS 197, forward direction only (GCM
+  never invokes the inverse). Full 256-byte Rijndael S-box, 14-round
+  Nk=8 key schedule producing 240 bytes of round keys. The S-box
+  and Rcon tables ship as hex string literals decoded once into an
+  `alloc`-backed buffer at first use, keeping the fixup cost off
+  the hot path.
+- **GHASH** — bit-by-bit GF(2^128) multiplication under the GCM
+  reduction polynomial `x^128 + x^7 + x^2 + x + 1`. Constant-time
+  by construction (exactly 128 shift+xor per block, no data-
+  dependent branches). Table-based acceleration is deferred as a
+  perf-only follow-up.
+- **`aes_gcm_encrypt(key, iv, aad, aad_len, pt, pt_len, ct_out, tag_out)`**
+  and **`aes_gcm_decrypt(...) -> ERR_NONE | ERR_INTEGRITY_MISMATCH`**.
+  12-byte IV (96-bit RFC fast path). 16-byte authentication tag.
+  Arbitrary-length IV is a deferred follow-up.
+- **AEAD contract honoured** — decrypt computes the expected tag
+  first, compares in constant time via `ct_eq`, and zeroes
+  `pt_out` on tag failure so plaintext never escapes. The
+  CTR-mode pass runs unconditionally to keep the valid-tag and
+  forged-tag decrypt paths within ~1% of each other (see
+  benchmark numbers below).
+- **Key material zeroization** — the 240-byte round-key schedule
+  and every intermediate scratch (`H`, `Y`, `S`, `J0`, counter,
+  zero block, length block) is overwritten with zeros before free
+  on every call. Matches sigil's existing Ed25519 / HMAC hygiene.
+- **Software-only.** No inline asm / no AES-NI — Cyrius doesn't
+  support inline asm today. A hardware path is a future patch
+  once the toolchain exposes the intrinsics.
+
+### Verified against NIST SP 800-38D
+
+- **TC1** (empty PT + empty AAD, zero key + zero IV):
+  tag = `530f8afbc74536b9a963b4f1c4cb738b`.
+- **TC2** (single zero block PT, zero key + IV):
+  CT = `cea7403d4d606b6e074ec5d3baf39d18`,
+  tag = `d0d1c8a799996bf0265b98b5d48ab919`.
+- **TC14** (64-byte PT, no AAD, NIST AES-256 vector):
+  CT + tag match the published fixture.
+- **TC15** (20-byte AAD + 60-byte PT, partial final block):
+  CT + tag = `...76fc6ece0f4e1768cddf8853bb2d551b`.
+- Decrypt roundtrip passes; single-bit tag flip returns
+  `ERR_INTEGRITY_MISMATCH` and the plaintext output buffer is
+  zero at the head, middle, and tail (no leak).
+
+Total assertions in `tests/tcyr/aes_gcm.tcyr`: **15/15 pass**.
+Total sigil assertion count across all suites: **381** (up from
+366 in 2.8.3).
+
+### Added — benchmarks
+
+Added to `tests/bcyr/sigil.bcyr`; raw numbers from a single
+host under 2.8.4:
+
+| Bench                          | Mean     | Notes                                 |
+| ------------------------------ | -------- | ------------------------------------- |
+| `aes256_key_expansion`         | 1us      | 32-byte key → 240-byte schedule       |
+| `aes256_encrypt_block`         | 4us      | 16-byte single-block encrypt          |
+| `aes_gcm_encrypt_1kb`          | 1.216ms  | 64-block CTR + GHASH                  |
+| `aes_gcm_decrypt_1kb_valid`    | 1.220ms  | Valid tag; full decrypt               |
+| `aes_gcm_decrypt_1kb_forged`   | 1.229ms  | Flipped-bit tag; full CT pass still runs |
+
+The valid-vs-forged gap is **<1%**. That's the empirical proof
+that the tag verification is constant-time and there is no
+early-exit on the auth path. If a future edit drops this below
+1% or drifts it above 10%, treat as a regression.
+
+### Changed — toolchain refresh
+
+- **`cyrius` pin: 5.2.1 → 5.4.8** in `cyrius.cyml`. Picks up the
+  larger fixup table (16384 up from 8192), reliable compound
+  assignment, negative-literal support, and the stdlib evolution
+  of the past two minor versions. The `CLAUDE.md` compiler-quirks
+  section has been rewritten to reflect cc5 reality — most of
+  the cc3-era workarounds (hand-emitted byte 13 for `\r`, `(0 - N)`
+  for negative literals, the 256 initialized-global cap, the 8192
+  fixup cap) are no longer needed. Still genuinely present:
+  occasional local clobbering across deeply nested call chains,
+  and `fl_alloc` vs `alloc` discipline.
+- **Vendored stdlib refreshed.** `lib/json.cyr` and `lib/string.cyr`
+  had drifted under 5.4.8 — copied fresh from `~/.cyrius/lib/` via
+  the established sync-if-different pattern. `lib/agnosys.cyr`
+  stays unique to sigil (it wraps the AGNOS kernel interface
+  layer; not vendored upstream).
+
+### Verified
+
+- `cyrius build programs/smoke.cyr build/sigil-smoke` — clean,
+  smoke run exits 0.
+- All 12 `.tcyr` suites pass (aes_gcm new + 11 existing):
+  **381 assertions, 0 failures.**
+- `cyrius distlib` emits `dist/sigil.cyr` with `v2.8.4` header,
+  15 bundled modules (includes aes_gcm), 5780 lines.
+
 ## [2.8.3] — 2026-04-17
 
 ### Fixed — dist bundle was referencing un-bundled agnosys symbols

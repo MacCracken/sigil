@@ -20,6 +20,8 @@ include "src/error.cyr"
 include "src/sha256.cyr"
 include "src/hex.cyr"
 include "src/ct.cyr"
+include "src/hmac.cyr"
+include "src/aes_gcm.cyr"
 include "src/sha512.cyr"
 include "src/bigint_ext.cyr"
 include "src/ed25519.cyr"
@@ -247,6 +249,112 @@ fn main() {
         ri = ri + 1;
     }
     vec_push(benches, b11);
+
+    # ============================================================
+    # AES-256 key expansion — 32-byte key → 240-byte round-key schedule
+    # ============================================================
+    var b_aes_kx = bench_new("aes256_key_expansion");
+    var aes_key = hex_decode("feffe9928665731c6d6a8f9467308308feffe9928665731c6d6a8f9467308308", 64);
+    var aes_rk = alloc(240);
+    ri = 0;
+    while (ri < rounds) {
+        bench_batch_start(b_aes_kx);
+        var bi = 0;
+        while (bi < 1000) {
+            aes256_key_expand(aes_key, aes_rk);
+            bi = bi + 1;
+        }
+        bench_batch_stop(b_aes_kx, 1000);
+        ri = ri + 1;
+    }
+    vec_push(benches, b_aes_kx);
+
+    # ============================================================
+    # AES-256 single-block encrypt — 16-byte input, 14 rounds
+    # ============================================================
+    var b_aes_enc = bench_new("aes256_encrypt_block");
+    var aes_blk_in = alloc(16);
+    memset(aes_blk_in, 0x00, 16);
+    var aes_blk_out = alloc(16);
+    aes256_key_expand(aes_key, aes_rk);
+    ri = 0;
+    while (ri < rounds) {
+        bench_batch_start(b_aes_enc);
+        var bi = 0;
+        while (bi < 10000) {
+            aes256_encrypt_block(aes_rk, aes_blk_in, aes_blk_out);
+            bi = bi + 1;
+        }
+        bench_batch_stop(b_aes_enc, 10000);
+        ri = ri + 1;
+    }
+    vec_push(benches, b_aes_enc);
+
+    # ============================================================
+    # AES-GCM encrypt 1 KB — CTR path + GHASH over 64 blocks
+    # ============================================================
+    var b_gcm_enc = bench_new("aes_gcm_encrypt_1kb");
+    var gcm_iv = hex_decode("cafebabefacedbaddecaf888", 24);
+    var gcm_pt = alloc(1024);
+    memset(gcm_pt, 0x42, 1024);
+    var gcm_ct = alloc(1024);
+    var gcm_tag = alloc(16);
+    ri = 0;
+    while (ri < rounds) {
+        bench_batch_start(b_gcm_enc);
+        var bi = 0;
+        while (bi < 100) {
+            aes_gcm_encrypt(aes_key, gcm_iv, 0, 0, gcm_pt, 1024, gcm_ct, gcm_tag);
+            bi = bi + 1;
+        }
+        bench_batch_stop(b_gcm_enc, 100);
+        ri = ri + 1;
+    }
+    vec_push(benches, b_gcm_enc);
+
+    # ============================================================
+    # AES-GCM decrypt 1 KB — valid tag path (full CTR decrypt)
+    # ============================================================
+    # Produce one known-good (ct, tag) pair to decrypt in the loop.
+    aes_gcm_encrypt(aes_key, gcm_iv, 0, 0, gcm_pt, 1024, gcm_ct, gcm_tag);
+    var gcm_dec_out = alloc(1024);
+    var b_gcm_dec = bench_new("aes_gcm_decrypt_1kb_valid");
+    ri = 0;
+    while (ri < rounds) {
+        bench_batch_start(b_gcm_dec);
+        var bi = 0;
+        while (bi < 100) {
+            aes_gcm_decrypt(aes_key, gcm_iv, 0, 0, gcm_ct, 1024, gcm_tag, gcm_dec_out);
+            bi = bi + 1;
+        }
+        bench_batch_stop(b_gcm_dec, 100);
+        ri = ri + 1;
+    }
+    vec_push(benches, b_gcm_dec);
+
+    # ============================================================
+    # AES-GCM decrypt 1 KB — forged tag path
+    # MUST be within ~10% of the valid-tag bench — constant-time
+    # tag verification (no early exit on mismatch, no CTR skip
+    # on failure). If this is dramatically faster than _valid,
+    # there is an early-exit bug.
+    # ============================================================
+    var gcm_forged_tag = alloc(16);
+    memcpy(gcm_forged_tag, gcm_tag, 16);
+    store8(gcm_forged_tag, (load8(gcm_forged_tag) ^ 0x01) & 0xFF);
+    var b_gcm_forged = bench_new("aes_gcm_decrypt_1kb_forged");
+    ri = 0;
+    while (ri < rounds) {
+        bench_batch_start(b_gcm_forged);
+        var bi = 0;
+        while (bi < 100) {
+            aes_gcm_decrypt(aes_key, gcm_iv, 0, 0, gcm_ct, 1024, gcm_forged_tag, gcm_dec_out);
+            bi = bi + 1;
+        }
+        bench_batch_stop(b_gcm_forged, 100);
+        ri = ri + 1;
+    }
+    vec_push(benches, b_gcm_forged);
 
     # Report
     syscall(1, 1, "=== Sigil Benchmarks ===\n", 24);
