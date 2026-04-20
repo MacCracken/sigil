@@ -1,0 +1,120 @@
+# aes_ni.cyr — AES-NI hardware-acceleration scaffold (2.9.0: STAGED)
+#
+# STATUS: the CPUID probe and AESENC dispatch are staged but NOT
+# wired into the GCM hot path in 2.9.0. The inline-asm bodies below
+# are byte-accurate (Intel SDM Vol 2A opcode sequences, verified
+# against the published instruction encodings); the block encryptor
+# produces the correct ciphertext for the FIPS 197 §C.3 vector
+# when exercised directly. The CPUID probe encodes correctly and
+# writes 0x7ed8320b-style ECX values on an AES-NI host.
+#
+# What held this back from 2.9.0 shipping live: cc5-5.4.12 has a
+# codegen anomaly where an inline-asm store into a caller-supplied
+# output pointer **works** when the emitting function is defined
+# in the same compilation unit as the caller, but **does not
+# observable-write** when the emitting function is defined in a
+# module pulled in via `include`. The same byte sequence lands in
+# the binary (verified via `objdump`); the store at `mov [rdi],
+# rcx` disassembles identically; the caller's post-call reload from
+# its local slot reads the pre-call zero. We reproduced this on
+# three independent minimal programs — inline works, include-scope
+# does not. The same behaviour reproduces with a plain pointer-
+# store ignoring CPUID entirely, ruling out the CPUID path itself.
+# Filed as a cyrius bug; sigil's 2.9.0 ships HKDF live and treats
+# the AES-NI path as a stub documented here.
+#
+# 2.9.1 plan: either the cyrius fix lands and these functions wire
+# into the GCM dispatch unchanged, or we rehome the asm into a
+# single compilation-unit build (`programs/smoke_ni.cyr` style)
+# until the bug is fixed.
+#
+# AES-NI opcode reference (Intel SDM Vol 2A §3.2, §5):
+#   AESENC xmm0, [rdi+disp]       66 0F 38 DC 47/87 <disp>
+#   AESENCLAST xmm0, [rdi+disp]   66 0F 38 DD 47/87 <disp>
+#   CPUID                          0F A2     (eax=1 → ECX bit 25 = AES-NI)
+#   PXOR xmm0, [rdi]               66 0F EF 07
+#   MOVDQU xmm0, [rsi]             F3 0F 6F 06
+#   MOVDQU [rdx], xmm0             F3 0F 7F 02
+
+# _aes_ni_cache: 2 = uncached, 0 = unavailable (software path), 1 = available.
+# 2.9.0 pins the cache to 0 until the cc5 codegen issue is resolved,
+# so aes_ni_available() returns 0 and the GCM dispatch stays on the
+# well-tested software path.
+var _aes_ni_cache = 0;
+
+# Publicly callable feature probe. Caches the 0/1 result so we only
+# pay the CPUID (a serializing instruction) once per process.
+# In 2.9.0 this returns 0 unconditionally — see module header.
+fn aes_ni_available() {
+    return _aes_ni_cache;
+}
+
+# _aes_ni_cpuid_probe — write CPUID leaf 1 ECX to *out.
+# Takes a caller-supplied pointer rather than returning the value:
+# see module header for why the return path currently mis-behaves
+# across include boundaries.
+fn _aes_ni_cpuid_probe(out) {
+    #ifdef CYRIUS_ARCH_X86
+    asm {
+        # Param out = [rbp-8]. Load into rdi.
+        0x48; 0x8B; 0x7D; 0xF8;        # mov rdi, [rbp-8]
+        0x53;                          # push rbx (callee-saved; CPUID clobbers it)
+        0xB8; 0x01; 0x00; 0x00; 0x00;  # mov eax, 1
+        0x31; 0xC9;                    # xor ecx, ecx (subleaf 0)
+        0x0F; 0xA2;                    # cpuid
+        0x48; 0x89; 0x0F;              # mov [rdi], rcx  ; *out = ecx
+        0x5B;                          # pop rbx
+    }
+    #endif
+    return 0;
+}
+
+# aes256_encrypt_block_ni — hardware AES-256 single-block encrypt.
+#
+# Byte-accurate AESENC + AESENCLAST sequence over round_keys
+# (240-byte expanded schedule, same layout as the software
+# encryptor). Consumes:
+#   round_keys — rdi — 15 round keys of 16 bytes each
+#   in_block   — rsi — 16-byte plaintext
+#   out_block  — rdx — 16-byte ciphertext (caller-allocated)
+#
+# Status: reaches the CPU's AESENC machinery correctly when called
+# directly inside a single-compilation-unit build. Not wired into
+# aes_gcm_encrypt in 2.9.0 (see module header).
+fn aes256_encrypt_block_ni(round_keys, in_block, out_block) {
+    #ifdef CYRIUS_ARCH_X86
+    asm {
+        # Params: round_keys=[rbp-8], in_block=[rbp-16], out_block=[rbp-24]
+        0x48; 0x8B; 0x7D; 0xF8;        # mov rdi, [rbp-8]   (round_keys)
+        0x48; 0x8B; 0x75; 0xF0;        # mov rsi, [rbp-16]  (in_block)
+        0x48; 0x8B; 0x55; 0xE8;        # mov rdx, [rbp-24]  (out_block)
+
+        # movdqu xmm0, [rsi]           ; state = in_block
+        0xF3; 0x0F; 0x6F; 0x06;
+        # pxor xmm0, [rdi]             ; state ^= round_key[0]
+        0x66; 0x0F; 0xEF; 0x07;
+
+        # Rounds 1..7: AESENC xmm0, [rdi + N*16]  (disp8 form)
+        0x66; 0x0F; 0x38; 0xDC; 0x47; 0x10;
+        0x66; 0x0F; 0x38; 0xDC; 0x47; 0x20;
+        0x66; 0x0F; 0x38; 0xDC; 0x47; 0x30;
+        0x66; 0x0F; 0x38; 0xDC; 0x47; 0x40;
+        0x66; 0x0F; 0x38; 0xDC; 0x47; 0x50;
+        0x66; 0x0F; 0x38; 0xDC; 0x47; 0x60;
+        0x66; 0x0F; 0x38; 0xDC; 0x47; 0x70;
+        # Rounds 8..13: AESENC xmm0, [rdi + N*16]  (disp32 form; 128..208 beyond disp8 range)
+        0x66; 0x0F; 0x38; 0xDC; 0x87; 0x80; 0x00; 0x00; 0x00;
+        0x66; 0x0F; 0x38; 0xDC; 0x87; 0x90; 0x00; 0x00; 0x00;
+        0x66; 0x0F; 0x38; 0xDC; 0x87; 0xA0; 0x00; 0x00; 0x00;
+        0x66; 0x0F; 0x38; 0xDC; 0x87; 0xB0; 0x00; 0x00; 0x00;
+        0x66; 0x0F; 0x38; 0xDC; 0x87; 0xC0; 0x00; 0x00; 0x00;
+        0x66; 0x0F; 0x38; 0xDC; 0x87; 0xD0; 0x00; 0x00; 0x00;
+        # Round 14 (final): AESENCLAST xmm0, [rdi+224]
+        0x66; 0x0F; 0x38; 0xDD; 0x87; 0xE0; 0x00; 0x00; 0x00;
+
+        # movdqu [rdx], xmm0           ; out_block = state
+        0xF3; 0x0F; 0x7F; 0x02;
+    }
+    #endif
+    return 0;
+}

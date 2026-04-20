@@ -1,0 +1,48 @@
+# aes_ni.tcyr — AES-NI scaffold presence check
+#
+# In 2.9.0 the AES-NI path is STAGED but NOT dispatched from
+# aes_gcm_encrypt. See the aes_ni.cyr module header for the cc5
+# codegen anomaly that held the live wire-up back. This test
+# asserts the probe/dispatch functions exist and that the stubbed
+# `aes_ni_available()` returns 0 so that the software GCM path
+# stays authoritative.
+
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fmt.cyr"
+include "lib/json.cyr"
+include "lib/sakshi.cyr"
+include "lib/chrono.cyr"
+
+include "src/types.cyr"
+include "src/error.cyr"
+include "src/sha256.cyr"
+include "src/hex.cyr"
+include "src/ct.cyr"
+include "src/hmac.cyr"
+include "src/aes_ni.cyr"
+include "src/aes_gcm.cyr"
+
+fn main() {
+    alloc_init();
+
+    test_group("AES-NI scaffold in 2.9.0 is dormant");
+
+    # aes_ni_available returns 0 until the dispatch lands in a
+    # follow-up. Verify that it returns exactly 0 (not -1, not a
+    # stray garbage value) and is deterministic across repeated
+    # calls.
+    assert_eq(aes_ni_available(), 0, "aes_ni_available() == 0 (stubbed in 2.9.0)");
+    assert_eq(aes_ni_available(), 0, "aes_ni_available() stable across calls");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

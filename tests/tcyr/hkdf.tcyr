@@ -1,0 +1,137 @@
+# hkdf.tcyr — HKDF-SHA256 RFC 5869 test vectors
+#
+# Verifies:
+#   §A.1 Test Case 1 — standard IKM + salt + info, 42-byte OKM
+#   §A.2 Test Case 2 — 80-byte IKM + 80-byte salt + 80-byte info,
+#                      82-byte OKM (three expand rounds)
+#   §A.3 Test Case 3 — no salt, no info, 42-byte OKM
+#   Edge: out_len > 255*32 returns error
+#   Edge: out_len == 0 returns 0 and writes nothing
+
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fmt.cyr"
+include "lib/json.cyr"
+include "lib/sakshi.cyr"
+include "lib/chrono.cyr"
+
+include "src/types.cyr"
+include "src/error.cyr"
+include "src/sha256.cyr"
+include "src/hex.cyr"
+include "src/ct.cyr"
+include "src/hmac.cyr"
+include "src/hkdf.cyr"
+
+fn main() {
+    alloc_init();
+
+    # ============================================================
+    # RFC 5869 §A.1 — Test Case 1
+    # ============================================================
+    test_group("RFC 5869 TC1");
+
+    var ikm1 = hex_decode("0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b", 44);
+    var salt1 = hex_decode("000102030405060708090a0b0c", 26);
+    var info1 = hex_decode("f0f1f2f3f4f5f6f7f8f9", 20);
+
+    var prk1[32];
+    hkdf_extract(salt1, 13, ikm1, 22, &prk1);
+    var prk1_hex = hex_encode(&prk1, 32);
+    assert_streq(prk1_hex,
+        "077709362c2e32df0ddc3f0dc47bba6390b6c73bb50f9c3122ec844ad7c2b3e5",
+        "TC1 PRK");
+
+    var okm1[42];
+    var rc1 = hkdf_expand(&prk1, 32, info1, 10, &okm1, 42);
+    assert_eq(rc1, 0, "TC1 expand rc");
+    var okm1_hex = hex_encode(&okm1, 42);
+    assert_streq(okm1_hex,
+        "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865",
+        "TC1 OKM");
+
+    # One-shot hkdf() should match.
+    var okm1b[42];
+    var rc1b = hkdf(salt1, 13, ikm1, 22, info1, 10, &okm1b, 42);
+    assert_eq(rc1b, 0, "TC1 oneshot rc");
+    var okm1b_hex = hex_encode(&okm1b, 42);
+    assert_streq(okm1b_hex,
+        "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865",
+        "TC1 oneshot OKM");
+
+    # ============================================================
+    # RFC 5869 §A.2 — Test Case 2 (long inputs, 82-byte OKM)
+    # ============================================================
+    test_group("RFC 5869 TC2");
+
+    var ikm2 = hex_decode("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f", 160);
+    var salt2 = hex_decode("606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeaf", 160);
+    var info2 = hex_decode("b0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff", 160);
+
+    var prk2[32];
+    hkdf_extract(salt2, 80, ikm2, 80, &prk2);
+    var prk2_hex = hex_encode(&prk2, 32);
+    assert_streq(prk2_hex,
+        "06a6b88c5853361a06104c9ceb35b45cef760014904671014a193f40c15fc244",
+        "TC2 PRK");
+
+    var okm2[82];
+    var rc2 = hkdf_expand(&prk2, 32, info2, 80, &okm2, 82);
+    assert_eq(rc2, 0, "TC2 expand rc");
+    var okm2_hex = hex_encode(&okm2, 82);
+    assert_streq(okm2_hex,
+        "b11e398dc80327a1c8e7f78c596a49344f012eda2d4efad8a050cc4c19afa97c59045a99cac7827271cb41c65e590e09da3275600c2f09b8367793a9aca3db71cc30c58179ec3e87c14c01d5c1f3434f1d87",
+        "TC2 OKM");
+
+    # ============================================================
+    # RFC 5869 §A.3 — Test Case 3 (no salt, no info)
+    # ============================================================
+    test_group("RFC 5869 TC3");
+
+    var ikm3 = hex_decode("0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b", 44);
+
+    var prk3[32];
+    hkdf_extract(0, 0, ikm3, 22, &prk3);
+    var prk3_hex = hex_encode(&prk3, 32);
+    assert_streq(prk3_hex,
+        "19ef24a32c717b167f33a91d6f648bdf96596776afdb6377ac434c1c293ccb04",
+        "TC3 PRK (empty salt)");
+
+    var okm3[42];
+    var rc3 = hkdf_expand(&prk3, 32, 0, 0, &okm3, 42);
+    assert_eq(rc3, 0, "TC3 expand rc");
+    var okm3_hex = hex_encode(&okm3, 42);
+    assert_streq(okm3_hex,
+        "8da4e775a563c18f715f802a063c5a31b8a11f5c5ee1879ec3454e5f3c738d2d9d201395faa4b61a96c8",
+        "TC3 OKM (empty info)");
+
+    # ============================================================
+    # Edge: out_len over RFC 5869 §2.3 cap (255*32 = 8160)
+    # ============================================================
+    test_group("HKDF cap enforcement");
+
+    var dummy_prk[32];
+    memset(&dummy_prk, 0, 32);
+    var big_out[32];  # we don't care about contents — call should fail fast
+    var rc_cap = hkdf_expand(&dummy_prk, 32, 0, 0, &big_out, 8161);
+    assert_eq(rc_cap, (0 - 2), "out_len > 255*32 returns -2");
+
+    # ============================================================
+    # Edge: out_len == 0 is a no-op success
+    # ============================================================
+    test_group("HKDF zero-length out");
+
+    var rc_zero = hkdf_expand(&dummy_prk, 32, 0, 0, 0, 0);
+    assert_eq(rc_zero, 0, "out_len == 0 returns 0");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

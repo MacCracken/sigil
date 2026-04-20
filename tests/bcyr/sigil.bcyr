@@ -21,6 +21,7 @@ include "src/sha256.cyr"
 include "src/hex.cyr"
 include "src/ct.cyr"
 include "src/hmac.cyr"
+include "src/hkdf.cyr"
 include "src/aes_gcm.cyr"
 include "src/sha512.cyr"
 include "src/bigint_ext.cyr"
@@ -355,6 +356,51 @@ fn main() {
         ri = ri + 1;
     }
     vec_push(benches, b_gcm_forged);
+
+    # ============================================================
+    # HKDF-SHA256 extract — PRK = HMAC(salt, IKM) over 64B IKM + 32B salt
+    # ============================================================
+    var b_hkdf_extract = bench_new("hkdf_extract");
+    var hkdf_ikm = alloc(64);
+    memset(hkdf_ikm, 0x0B, 64);
+    var hkdf_salt = alloc(32);
+    memset(hkdf_salt, 0x42, 32);
+    var hkdf_prk = alloc(32);
+    ri = 0;
+    while (ri < rounds) {
+        bench_batch_start(b_hkdf_extract);
+        var bi = 0;
+        while (bi < 1000) {
+            hkdf_extract(hkdf_salt, 32, hkdf_ikm, 64, hkdf_prk);
+            bi = bi + 1;
+        }
+        bench_batch_stop(b_hkdf_extract, 1000);
+        ri = ri + 1;
+    }
+    vec_push(benches, b_hkdf_extract);
+
+    # ============================================================
+    # HKDF-SHA256 expand — derive 4096 bytes of OKM per iteration
+    # (128 SHA-256 HMAC rounds per call; this is the expensive path)
+    # ============================================================
+    var b_hkdf_expand = bench_new("hkdf_expand_4kb");
+    # Drive the expander from a well-formed PRK produced by extract.
+    hkdf_extract(hkdf_salt, 32, hkdf_ikm, 64, hkdf_prk);
+    var hkdf_info = alloc(32);
+    memset(hkdf_info, 0x73, 32);
+    var hkdf_okm = alloc(4096);
+    ri = 0;
+    while (ri < rounds) {
+        bench_batch_start(b_hkdf_expand);
+        var bi = 0;
+        while (bi < 100) {
+            hkdf_expand(hkdf_prk, 32, hkdf_info, 32, hkdf_okm, 4096);
+            bi = bi + 1;
+        }
+        bench_batch_stop(b_hkdf_expand, 100);
+        ri = ri + 1;
+    }
+    vec_push(benches, b_hkdf_expand);
 
     # Report
     syscall(1, 1, "=== Sigil Benchmarks ===\n", 24);

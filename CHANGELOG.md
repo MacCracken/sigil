@@ -5,13 +5,115 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [2.9.0-dev] - unreleased
+## [2.9.0] — 2026-04-20
 
-Next-minor work: **HKDF** (RFC 5869) on top of existing HMAC-SHA256,
-and **AES-NI / pmull hardware-accelerated AES-GCM** paths with
-runtime feature detection. Both unlock downstream consumers —
-HKDF feeds majra's planned QUIC transport; AES-NI brings GCM
-throughput from ~1ms/KB (software) to the 50-100µs/KB range.
+Ships **HKDF** (RFC 5869) on top of the existing HMAC-SHA256
+primitive — the key-derivation building block majra's planned
+QUIC transport needs. Stages the AES-NI hardware-acceleration
+scaffold (CPUID probe + AESENC opcode sequences) but defers the
+live dispatch into `aes_gcm_encrypt` to a follow-up release; see
+the Deferred section below.
+
+### Added — HKDF-SHA256 (`src/hkdf.cyr`)
+
+- **`hkdf_extract(salt, salt_len, ikm, ikm_len, prk_out)`** — RFC
+  5869 §2.2 extract step. One HMAC-SHA256 call; 32-byte PRK
+  output. Empty salt is handled per spec (HashLen zero bytes
+  substituted), so callers can pass `(0, 0)` cleanly.
+- **`hkdf_expand(prk, prk_len, info, info_len, out, out_len)`** —
+  RFC 5869 §2.3 expand step. Iterative HMAC over
+  `T(i-1) || info || i`; emits up to `out_len` bytes of OKM. The
+  RFC cap of `255 * HashLen = 8160` bytes is enforced (returns
+  `-2` on overflow). Scratch buffer holding `T(i-1) || info || i`
+  and every `T(i)` intermediate is zeroized before free.
+- **`hkdf(salt, salt_len, ikm, ikm_len, info, info_len, out, out_len)`** —
+  extract+expand one-shot convenience wrapper. The intermediate
+  PRK lives on the stack, is consumed by the expand step, and is
+  zeroized before return — callers never see it.
+- **Globals for cross-call state** — the expand loop's scratch
+  pointer, info pointer, output pointer, counter, and produced
+  count live in `_hkdf_*` globals. The deeply nested HMAC→SHA-256
+  call chain clobbers locals on cc5 across module boundaries
+  (we hit this during TC2 bring-up); globals are the sigil-wide
+  standard workaround for this exact pattern (see sha256.cyr,
+  ed25519.cyr, aes_gcm.cyr for the same treatment).
+
+### Verified against RFC 5869 Appendix A
+
+- **TC1** (standard IKM + salt + info, 42-byte OKM): PRK + OKM
+  match.
+- **TC2** (80-byte IKM + 80-byte salt + 80-byte info, 82-byte OKM
+  across three expand rounds): PRK + OKM match.
+- **TC3** (no salt, no info, 42-byte OKM): PRK + OKM match.
+- Edge: `out_len > 8160` returns `-2`. Edge: `out_len == 0`
+  returns 0 and writes nothing.
+
+Total assertions in `tests/tcyr/hkdf.tcyr`: **13/13 pass**.
+
+### Added — benchmarks
+
+Added to `tests/bcyr/sigil.bcyr`; raw numbers from a single host
+on 5.4.12-1:
+
+| Bench              | Mean     | Notes                                  |
+| ------------------ | -------- | -------------------------------------- |
+| `hkdf_extract`     | 21us     | 64B IKM + 32B salt, one HMAC-SHA256    |
+| `hkdf_expand_4kb`  | 2.807ms  | Derive 4096B of OKM (128 HMAC rounds)  |
+
+The `hkdf_extract` number tracks the 10-20µs band for HMAC-SHA256
+over a single short message. `hkdf_expand_4kb` is an HMAC-per-32B
+loop (128 rounds to fill 4 KB); the ~22µs per round matches the
+extract cost. Both are entirely limited by SHA-256 throughput.
+
+### Deferred — AES-NI hardware acceleration
+
+The AES-NI bring-up staged but did not wire in fully. The
+scaffold lives in `src/aes_ni.cyr`:
+
+- `aes_ni_available()` — CPUID leaf 1 ECX bit 25 feature probe.
+- `aes256_encrypt_block_ni(round_keys, in, out)` — byte-accurate
+  `AESENC`/`AESENCLAST` sequence over the 14 round keys.
+- Round-key layout-compatible with the software encryptor, so
+  the dispatch is a one-line switch once the blocker clears.
+
+**Why it didn't ship live:** cc5-5.4.12 has a codegen anomaly
+where an inline-asm store into a caller-supplied output pointer
+observably works when the emitting function is in the same
+compilation unit as the caller, but does NOT observable-write
+when the function is pulled in via `include` from a separate
+source module. The byte sequence emitted is byte-for-byte
+identical (verified via `objdump`); the disassembly shows the
+`mov [rdi], rcx` and `movq [rdi], 0x12345678` instructions at
+the expected offsets; the caller's post-call reload from its
+local slot reads the pre-call zero. Reproduced on three minimal
+programs — module-scope does not write, inline does. Filed as a
+cyrius bug.
+
+Until the bug clears, `aes_ni_available()` is pinned to 0 and
+the GCM dispatch stays on the well-tested software path. The
+scaffold asm is stable and ships in `dist/sigil.cyr` so the
+2.9.1 activation is a one-line change. Software GCM numbers
+(~1.2ms/KB encrypt) are unchanged from 2.8.4.
+
+### Changed
+
+- **`cyrius.cyml` [package] description** — adds "HKDF" to the
+  primitive list: Ed25519, SHA-256/512, HMAC, **HKDF**,
+  AES-256-GCM, integrity, audit.
+- **`src/lib.cyr` and `cyrius.cyml` [lib] modules** — add
+  `src/hkdf.cyr` after `src/hmac.cyr` and `src/aes_ni.cyr` after
+  that. Dist bundle now ships 17 modules (15 + HKDF + AES-NI).
+
+### Verified
+
+- `cyrius build programs/smoke.cyr build/sigil-smoke` — clean.
+- All 14 `.tcyr` suites pass (hkdf new + aes_ni stub new + 12
+  existing): **396 assertions, 0 failures** (up from 381 in
+  2.8.4).
+- `cyrius build tests/bcyr/sigil.bcyr build/bench && ./build/bench`
+  runs clean; HKDF rows captured alongside the existing 17.
+- `cyrius distlib` emits `dist/sigil.cyr` with `v2.9.0` header;
+  bundle includes hkdf.cyr and aes_ni.cyr.
 
 ## [2.8.4] — 2026-04-19
 

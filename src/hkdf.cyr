@@ -1,0 +1,187 @@
+# hkdf.cyr — HKDF (RFC 5869) on top of HMAC-SHA256
+#
+# HKDF is a two-stage key derivation function:
+#   1. Extract: PRK = HMAC-SHA256(salt, IKM)       (32-byte PRK)
+#   2. Expand: OKM = T(1) || T(2) || ... || T(N)
+#      where T(0) = empty, T(i) = HMAC-SHA256(PRK, T(i-1) || info || i)
+#
+# HashLen = 32 (SHA-256), so max OKM length = 255 * 32 = 8160 bytes
+# per RFC 5869 §2.3.
+#
+# Security hygiene (matches sigil's existing pattern):
+#   - PRK (the pseudorandom key) is key material and is zeroized
+#     before free when the extract+expand convenience function is
+#     used. When callers drive extract+expand themselves, they own
+#     the PRK buffer and are responsible for zeroization.
+#   - T(i-1) and every HMAC intermediate is zeroized after the last
+#     block is emitted.
+#   - No branch on secret data: the loop count is derived from
+#     out_len which is public.
+#
+# RFC 5869 §2.2: if salt is empty / not provided, use a string of
+# HashLen zeros (32 zeros for SHA-256). Callers can pass
+# (salt=0, salt_len=0) and this module handles the substitution.
+#
+# RFC 5869 §2.3: if info is empty / not provided, the concatenation
+# "T(i-1) || info || i" collapses to "T(i-1) || i" (info contributes
+# zero bytes). Callers can pass (info=0, info_len=0) and this module
+# handles that cleanly.
+
+# ================================================================
+# hkdf_extract — PRK = HMAC-SHA256(salt, IKM)
+# ================================================================
+# salt    : pointer to salt bytes (may be 0 if salt_len == 0)
+# salt_len: length of salt in bytes
+# ikm     : pointer to input keying material
+# ikm_len : length of IKM in bytes
+# prk_out : caller-provided 32-byte output buffer; receives the PRK
+# Returns 0 on success, non-zero on input-validation failure.
+
+fn hkdf_extract(salt, salt_len, ikm, ikm_len, prk_out) {
+    if (salt_len < 0) { return (0 - 1); }
+    if (ikm_len < 0) { return (0 - 1); }
+
+    # RFC 5869 §2.2: a NULL/empty salt is treated as HashLen zero bytes.
+    if (salt_len == 0) {
+        var zero_salt[32];
+        memset(&zero_salt, 0, 32);
+        hmac_sha256(&zero_salt, 32, ikm, ikm_len, prk_out);
+        memset(&zero_salt, 0, 32);
+        return 0;
+    }
+
+    hmac_sha256(salt, salt_len, ikm, ikm_len, prk_out);
+    return 0;
+}
+
+# ================================================================
+# hkdf_expand — OKM = T(1) || T(2) || ... || T(N)
+# ================================================================
+# prk      : pointer to 32-byte pseudorandom key (output of extract)
+# prk_len  : length of PRK (should be >= 32; SHA-256 always gives 32)
+# info     : pointer to context/application info (may be 0 if info_len == 0)
+# info_len : length of info in bytes
+# out      : caller-provided buffer of size >= out_len
+# out_len  : number of OKM bytes to produce
+#
+# Returns:
+#   0   on success
+#  -1   on negative-length input
+#  -2   on out_len > 255*32 (RFC 5869 §2.3 cap)
+
+# Globals: Cyrius single-pass compiler can clobber locals across
+# nested call chains. hkdf_expand has a deep call chain (hmac_sha256
+# itself calls sha256_init / update / finalize with memcpy/memset
+# around them), so the round state lives in globals.
+var _hkdf_scratch = 0;
+var _hkdf_scratch_len = 0;
+var _hkdf_prk = 0;
+var _hkdf_prk_len = 0;
+var _hkdf_info = 0;
+var _hkdf_info_len = 0;
+var _hkdf_out = 0;
+var _hkdf_out_len = 0;
+var _hkdf_produced = 0;
+var _hkdf_counter = 0;
+
+fn hkdf_expand(prk, prk_len, info, info_len, out, out_len) {
+    if (prk_len < 0) { return (0 - 1); }
+    if (info_len < 0) { return (0 - 1); }
+    if (out_len < 0) { return (0 - 1); }
+    # HashLen = 32. Max OKM = 255 * 32 = 8160 bytes.
+    if (out_len > 8160) { return (0 - 2); }
+    if (out_len == 0) { return 0; }
+
+    # Promote all parameters to globals so nested HMAC calls can't
+    # clobber them via cc5's register allocator.
+    _hkdf_prk = prk;
+    _hkdf_prk_len = prk_len;
+    _hkdf_info = info;
+    _hkdf_info_len = info_len;
+    _hkdf_out = out;
+    _hkdf_out_len = out_len;
+
+    # Scratch holds "T(i-1) || info || counter" — the HMAC input for
+    # each round. Max size = 32 + info_len + 1. `alloc` via fl_alloc
+    # because we want a proper free at the end + secret material.
+    _hkdf_scratch_len = 32 + info_len + 1;
+    _hkdf_scratch = fl_alloc(_hkdf_scratch_len);
+    memset(_hkdf_scratch, 0, _hkdf_scratch_len);
+
+    var t_prev[32];
+    memset(&t_prev, 0, 32);
+    var t_current[32];
+    memset(&t_current, 0, 32);
+
+    _hkdf_produced = 0;
+    _hkdf_counter = 1;   # RFC 5869: i starts at 1
+
+    while (_hkdf_produced < _hkdf_out_len) {
+        # Build input to HMAC: T(i-1) || info || counter
+        # First round (counter=1): T(0) is empty, so skip the T_prev copy.
+        var scratch_write = 0;
+        if (_hkdf_counter > 1) {
+            memcpy(_hkdf_scratch, &t_prev, 32);
+            scratch_write = 32;
+        }
+        if (_hkdf_info_len > 0) {
+            memcpy(_hkdf_scratch + scratch_write, _hkdf_info, _hkdf_info_len);
+            scratch_write = scratch_write + _hkdf_info_len;
+        }
+        store8(_hkdf_scratch + scratch_write, _hkdf_counter & 0xFF);
+        scratch_write = scratch_write + 1;
+
+        # T(i) = HMAC-SHA256(PRK, scratch[0..scratch_write])
+        hmac_sha256(_hkdf_prk, _hkdf_prk_len, _hkdf_scratch, scratch_write, &t_current);
+
+        # Copy min(32, out_len - produced) bytes into the output.
+        var take = 32;
+        if (_hkdf_out_len - _hkdf_produced < 32) {
+            take = _hkdf_out_len - _hkdf_produced;
+        }
+        memcpy(_hkdf_out + _hkdf_produced, &t_current, take);
+        _hkdf_produced = _hkdf_produced + take;
+
+        # Save T(i) for the next iteration.
+        memcpy(&t_prev, &t_current, 32);
+
+        _hkdf_counter = _hkdf_counter + 1;
+    }
+
+    # Zeroize all key-derived scratch before free.
+    memset(_hkdf_scratch, 0, _hkdf_scratch_len);
+    fl_free(_hkdf_scratch);
+    memset(&t_prev, 0, 32);
+    memset(&t_current, 0, 32);
+    # Wipe the global pointers so nothing leaks between calls.
+    _hkdf_scratch = 0;
+    _hkdf_prk = 0;
+    _hkdf_info = 0;
+    _hkdf_out = 0;
+    return 0;
+}
+
+# ================================================================
+# hkdf — extract + expand convenience wrapper
+# ================================================================
+# One-shot HKDF. Derives out_len bytes of OKM from (salt, IKM, info).
+# The intermediate PRK is allocated on the stack, used, and zeroized
+# before return — callers never see it.
+#
+# Returns:
+#   0   on success
+#  -1   on negative-length input
+#  -2   on out_len > 255*32
+
+fn hkdf(salt, salt_len, ikm, ikm_len, info, info_len, out, out_len) {
+    var prk[32];
+    var rc1 = hkdf_extract(salt, salt_len, ikm, ikm_len, &prk);
+    if (rc1 != 0) {
+        memset(&prk, 0, 32);
+        return rc1;
+    }
+    var rc2 = hkdf_expand(&prk, 32, info, info_len, out, out_len);
+    # PRK is key material — zeroize regardless of expand's outcome.
+    memset(&prk, 0, 32);
+    return rc2;
+}

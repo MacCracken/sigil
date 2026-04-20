@@ -1,7 +1,7 @@
 [package]
 name = "sigil"
-version = "2.9.0-dev"
-description = "Sigil — system-wide trust verification for AGNOS. Ed25519, SHA-256/512, HMAC, AES-256-GCM, integrity, audit."
+version = "2.9.0"
+description = "Sigil — system-wide trust verification for AGNOS. Ed25519, SHA-256/512, HMAC, HKDF, AES-256-GCM, integrity, audit."
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/sigil"
 language = "cyrius"
@@ -35,6 +35,8 @@ modules = [
     "src/hex.cyr",
     "src/ct.cyr",
     "src/hmac.cyr",
+    "src/hkdf.cyr",
+    "src/aes_ni.cyr",
     "src/aes_gcm.cyr",
     "src/sha512.cyr",
     "src/bigint_ext.cyr",

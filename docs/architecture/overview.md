@@ -11,6 +11,8 @@ lib.cyr (entry point)
   ├── hex.cyr           Hex encode/decode
   ├── ct.cyr            Constant-time comparison
   ├── hmac.cyr          HMAC-SHA256 (RFC 2104)
+  ├── hkdf.cyr          HKDF-SHA256 (RFC 5869)
+  ├── aes_ni.cyr        AES-NI scaffold (dormant in 2.9.0; dispatch in 2.9.1)
   ├── aes_gcm.cyr       AES-256-GCM AEAD (FIPS 197 + NIST SP 800-38D)
   ├── bigint_ext.cyr    256-bit field arithmetic (mod p = 2^255-19)
   ├── ed25519.cyr       Ed25519 (RFC 8032)
