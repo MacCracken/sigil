@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.9.0-dev] - unreleased
+
+Next-minor work: **HKDF** (RFC 5869) on top of existing HMAC-SHA256,
+and **AES-NI / pmull hardware-accelerated AES-GCM** paths with
+runtime feature detection. Both unlock downstream consumers —
+HKDF feeds majra's planned QUIC transport; AES-NI brings GCM
+throughput from ~1ms/KB (software) to the 50-100µs/KB range.
+
 ## [2.8.4] — 2026-04-19
 
 Two bundled changes: a **toolchain refresh** to bring sigil onto

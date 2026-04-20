@@ -1,6 +1,6 @@
 [package]
 name = "sigil"
-version = "2.8.4"
+version = "2.9.0-dev"
 description = "Sigil — system-wide trust verification for AGNOS. Ed25519, SHA-256/512, HMAC, AES-256-GCM, integrity, audit."
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/sigil"
