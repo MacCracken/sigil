@@ -117,20 +117,27 @@ fn artifact_type_name(t) {
 }
 
 # ================================================================
-# TrustPolicy (64 bytes)
+# TrustPolicy (72 bytes)
 # ================================================================
 # Layout:
-#   +0   enforcement        (i64)
-#   +8   minimum_trust_level (i64)
-#   +16  allow_unsigned     (i64, 0=false 1=true)
-#   +24  verify_on_boot     (i64)
-#   +32  verify_on_install  (i64)
-#   +40  verify_on_execute  (i64)
-#   +48  revocation_check   (i64)
-#   +56  hash_algorithm     (i64)
+#   +0   enforcement           (i64)
+#   +8   minimum_trust_level   (i64)
+#   +16  allow_unsigned        (i64, 0=false 1=true)
+#   +24  verify_on_boot        (i64)
+#   +32  verify_on_install     (i64)
+#   +40  verify_on_execute     (i64)
+#   +48  revocation_check      (i64)
+#   +56  hash_algorithm        (i64)
+#   +64  required_sig_alg      (i64, SignatureAlgorithm enum)
+#
+# required_sig_alg added in 2.10.0 alongside ML-DSA-65 landing.
+# Default is SIG_ALG_ED25519 so legacy policies behave exactly as
+# before. Consumers opting in to PQC set it to SIG_ALG_HYBRID
+# (requires both Ed25519 and ML-DSA-65 signatures to verify) or
+# SIG_ALG_ML_DSA_65 (PQC-only, future state).
 
 fn trust_policy_new() {
-    var p = fl_alloc(64);
+    var p = fl_alloc(72);
     store64(p, ENFORCE_STRICT);
     store64(p + 8, TRUST_VERIFIED);
     store64(p + 16, 0);
@@ -139,6 +146,7 @@ fn trust_policy_new() {
     store64(p + 40, 1);
     store64(p + 48, 1);
     store64(p + 56, HASH_ALG_SHA256);
+    store64(p + 64, SIG_ALG_ED25519);
     return p;
 }
 
@@ -150,6 +158,7 @@ fn policy_verify_on_install(p) { return load64(p + 32); }
 fn policy_verify_on_execute(p) { return load64(p + 40); }
 fn policy_revocation_check(p) { return load64(p + 48); }
 fn policy_hash_alg(p) { return load64(p + 56); }
+fn policy_required_sig_alg(p) { return load64(p + 64); }
 
 fn policy_set_enforcement(p, v) { store64(p, v); return p; }
 fn policy_set_min_trust(p, v) { store64(p + 8, v); return p; }
@@ -159,6 +168,7 @@ fn policy_set_verify_on_install(p, v) { store64(p + 32, v); return p; }
 fn policy_set_verify_on_execute(p, v) { store64(p + 40, v); return p; }
 fn policy_set_revocation_check(p, v) { store64(p + 48, v); return p; }
 fn policy_set_hash_alg(p, v) { store64(p + 56, v); return p; }
+fn policy_set_required_sig_alg(p, v) { store64(p + 64, v); return p; }
 
 # ================================================================
 # TrustCheck (24 bytes)
@@ -5527,6 +5537,43 @@ fn mldsa65_verify(sig, msg, msglen, pk) {
         i = i + 1;
     }
     if (diff != 0) { return 1; }
+    return 0;
+}
+
+# ================================================================
+# Hybrid Ed25519 + ML-DSA-65 verification primitive
+# ================================================================
+# Gate a message against one, the other, or both algorithms
+# according to `required_alg`:
+#
+#   SIG_ALG_ED25519    — verify ed25519 only; `mldsa_*` may be 0.
+#   SIG_ALG_ML_DSA_65  — verify ml-dsa only; `ed_*` may be 0.
+#   SIG_ALG_HYBRID     — both must pass (AND).
+#
+# Ed25519 convention: sig is 64 bytes, pk is 32 bytes.
+# ML-DSA-65 convention: sig is MLDSA65_SIG_BYTES, pk is
+# MLDSA65_PK_BYTES.
+#
+# Returns 1 if the requirement is satisfied (all required
+# algorithms verify), 0 otherwise. This is the raw crypto gate —
+# higher-level verifier logic (trust store, revocation, key pins)
+# lives in src/verify.cyr and calls this entry point once it has
+# established that the artifact is present and the signer keys
+# are known.
+fn sigil_verify_hybrid(msg, msg_len, ed_sig, ed_pk, mldsa_sig, mldsa_pk, required_alg) {
+    if (required_alg == SIG_ALG_ED25519) {
+        return ed25519_verify(ed_pk, msg, msg_len, ed_sig);
+    }
+    if (required_alg == SIG_ALG_ML_DSA_65) {
+        if (mldsa65_verify(mldsa_sig, msg, msg_len, mldsa_pk) == 0) { return 1; }
+        return 0;
+    }
+    if (required_alg == SIG_ALG_HYBRID) {
+        if (ed25519_verify(ed_pk, msg, msg_len, ed_sig) != 1) { return 0; }
+        if (mldsa65_verify(mldsa_sig, msg, msg_len, mldsa_pk) != 0) { return 0; }
+        return 1;
+    }
+    # Unknown algorithm: fail closed.
     return 0;
 }
 

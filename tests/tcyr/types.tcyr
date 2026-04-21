@@ -108,6 +108,7 @@ fn main() {
     assert_eq(policy_verify_on_execute(p), 1, "default verify execute");
     assert_eq(policy_revocation_check(p), 1, "default revocation check");
     assert_eq(policy_hash_alg(p), HASH_ALG_SHA256, "default hash sha256");
+    assert_eq(policy_required_sig_alg(p), SIG_ALG_ED25519, "default required sig ed25519");
 
     # ============================================================
     # TrustPolicy — builder-style setters
@@ -124,6 +125,10 @@ fn main() {
     assert_eq(policy_verify_on_boot(p2), 0, "disable boot");
     policy_set_hash_alg(p2, HASH_ALG_SHA512);
     assert_eq(policy_hash_alg(p2), HASH_ALG_SHA512, "set sha512");
+    policy_set_required_sig_alg(p2, SIG_ALG_HYBRID);
+    assert_eq(policy_required_sig_alg(p2), SIG_ALG_HYBRID, "set hybrid");
+    policy_set_required_sig_alg(p2, SIG_ALG_ML_DSA_65);
+    assert_eq(policy_required_sig_alg(p2), SIG_ALG_ML_DSA_65, "set ml-dsa only");
 
     # ============================================================
     # TrustCheck

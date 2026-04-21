@@ -19,8 +19,21 @@ include "lib/io.cyr"
 include "lib/fmt.cyr"
 include "lib/json.cyr"
 include "lib/sakshi.cyr"
+include "lib/bigint.cyr"
+include "lib/ct.cyr"
 include "lib/keccak.cyr"
 
+# Ed25519 stack (for hybrid verification test).
+include "src/types.cyr"
+include "src/error.cyr"
+include "src/sha256.cyr"
+include "src/hex.cyr"
+include "src/ct.cyr"
+include "src/sha512.cyr"
+include "src/bigint_ext.cyr"
+include "src/ed25519.cyr"
+
+# ML-DSA stack.
 include "src/mldsa_params.cyr"
 include "src/mldsa_reduce.cyr"
 include "src/mldsa_ntt.cyr"
@@ -151,6 +164,69 @@ fn main() {
     mldsa65_sign(sig_empty, msg_a, 0, sk_a);
     var rc_empty = mldsa65_verify(sig_empty, msg_a, 0, pk_a);
     assert_eq(rc_empty, 0, "empty message round-trip");
+
+    # ============================================================
+    # Hybrid verification primitive
+    # ============================================================
+    test_group("sigil_verify_hybrid");
+
+    # Build an Ed25519 keypair from the same-looking deterministic seed.
+    ed25519_init();
+    var ed_seed = alloc(32);
+    var ei = 0;
+    while (ei < 32) { store8(ed_seed + ei, 0x42 ^ ei); ei = ei + 1; }
+    var ed_sk = alloc(64);
+    var ed_pk = alloc(32);
+    ed25519_keypair(ed_seed, ed_sk, ed_pk);
+    var ed_sig = alloc(64);
+    ed25519_sign(ed_sk, msg_a, 16, ed_sig);
+
+    # ed25519-only branch.
+    assert_eq(
+        sigil_verify_hybrid(msg_a, 16, ed_sig, ed_pk, 0, 0, SIG_ALG_ED25519),
+        1,
+        "hybrid: ed25519-only verifies"
+    );
+
+    # ml-dsa-only branch uses the sig_a + pk_a pair from earlier.
+    assert_eq(
+        sigil_verify_hybrid(msg_a, 16, 0, 0, sig_a, pk_a, SIG_ALG_ML_DSA_65),
+        1,
+        "hybrid: ml-dsa-only verifies"
+    );
+
+    # Hybrid requires both — happy path.
+    assert_eq(
+        sigil_verify_hybrid(msg_a, 16, ed_sig, ed_pk, sig_a, pk_a, SIG_ALG_HYBRID),
+        1,
+        "hybrid: both valid → pass"
+    );
+
+    # Hybrid fails if either half is bad.
+    # Bad ed25519: flip one bit in ed_sig.
+    store8(ed_sig, (load8(ed_sig) & 0xFF) ^ 0x01);
+    assert_eq(
+        sigil_verify_hybrid(msg_a, 16, ed_sig, ed_pk, sig_a, pk_a, SIG_ALG_HYBRID),
+        0,
+        "hybrid: tampered ed25519 → fail"
+    );
+    store8(ed_sig, (load8(ed_sig) & 0xFF) ^ 0x01);  # restore
+
+    # Bad ml-dsa: flip one bit in sig_a.
+    store8(sig_a, (load8(sig_a) & 0xFF) ^ 0x01);
+    assert_eq(
+        sigil_verify_hybrid(msg_a, 16, ed_sig, ed_pk, sig_a, pk_a, SIG_ALG_HYBRID),
+        0,
+        "hybrid: tampered ml-dsa → fail"
+    );
+    store8(sig_a, (load8(sig_a) & 0xFF) ^ 0x01);  # restore
+
+    # Unknown algorithm fails closed.
+    assert_eq(
+        sigil_verify_hybrid(msg_a, 16, ed_sig, ed_pk, sig_a, pk_a, 99),
+        0,
+        "hybrid: unknown algorithm fails closed"
+    );
 
     return assert_summary();
 }

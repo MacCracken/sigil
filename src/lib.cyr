@@ -39,6 +39,17 @@ include "src/sha512.cyr"
 include "src/bigint_ext.cyr"
 include "src/ed25519.cyr"
 # ML-DSA-65 (FIPS 204) — post-quantum signing, sigil 3.0 enabler.
+# Opt-in via `-D SIGIL_PQC` at compile time. The chain adds ~2100
+# lines of Cyrius on top of the Ed25519 baseline, which pushes the
+# full `src/lib.cyr` expansion past the toolchain preprocessor's
+# 1 MB cap when combined with agnosys + stdlib. Consumers that
+# need PQC (daimon, kavach) define SIGIL_PQC; the default build
+# keeps the ed25519-only surface and fits within the cap.
+#
+# Tests reference the individual src/mldsa_*.cyr files directly
+# (see tests/tcyr/mldsa*.tcyr), so they remain exercised in CI
+# regardless of the gate.
+#ifdef SIGIL_PQC
 include "src/mldsa_params.cyr"
 include "src/mldsa_reduce.cyr"
 include "src/mldsa_ntt.cyr"
@@ -47,6 +58,7 @@ include "src/mldsa_rounding.cyr"
 include "src/mldsa_encode.cyr"
 include "src/mldsa_sample.cyr"
 include "src/mldsa.cyr"
+#endif
 include "src/trust.cyr"
 include "src/integrity.cyr"
 include "src/policy.cyr"

@@ -432,3 +432,40 @@ fn mldsa65_verify(sig, msg, msglen, pk) {
     if (diff != 0) { return 1; }
     return 0;
 }
+
+# ================================================================
+# Hybrid Ed25519 + ML-DSA-65 verification primitive
+# ================================================================
+# Gate a message against one, the other, or both algorithms
+# according to `required_alg`:
+#
+#   SIG_ALG_ED25519    — verify ed25519 only; `mldsa_*` may be 0.
+#   SIG_ALG_ML_DSA_65  — verify ml-dsa only; `ed_*` may be 0.
+#   SIG_ALG_HYBRID     — both must pass (AND).
+#
+# Ed25519 convention: sig is 64 bytes, pk is 32 bytes.
+# ML-DSA-65 convention: sig is MLDSA65_SIG_BYTES, pk is
+# MLDSA65_PK_BYTES.
+#
+# Returns 1 if the requirement is satisfied (all required
+# algorithms verify), 0 otherwise. This is the raw crypto gate —
+# higher-level verifier logic (trust store, revocation, key pins)
+# lives in src/verify.cyr and calls this entry point once it has
+# established that the artifact is present and the signer keys
+# are known.
+fn sigil_verify_hybrid(msg, msg_len, ed_sig, ed_pk, mldsa_sig, mldsa_pk, required_alg) {
+    if (required_alg == SIG_ALG_ED25519) {
+        return ed25519_verify(ed_pk, msg, msg_len, ed_sig);
+    }
+    if (required_alg == SIG_ALG_ML_DSA_65) {
+        if (mldsa65_verify(mldsa_sig, msg, msg_len, mldsa_pk) == 0) { return 1; }
+        return 0;
+    }
+    if (required_alg == SIG_ALG_HYBRID) {
+        if (ed25519_verify(ed_pk, msg, msg_len, ed_sig) != 1) { return 0; }
+        if (mldsa65_verify(mldsa_sig, msg, msg_len, mldsa_pk) != 0) { return 0; }
+        return 1;
+    }
+    # Unknown algorithm: fail closed.
+    return 0;
+}
