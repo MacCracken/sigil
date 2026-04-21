@@ -27,6 +27,9 @@ include "src/aes_gcm.cyr"
 include "src/sha512.cyr"
 include "src/bigint_ext.cyr"
 include "src/ed25519.cyr"
+include "src/mldsa_params.cyr"
+include "src/mldsa_reduce.cyr"
+include "src/mldsa_ntt.cyr"
 
 fn main() {
     alloc_init();
@@ -402,6 +405,47 @@ fn main() {
         ri = ri + 1;
     }
     vec_push(benches, b_hkdf_expand);
+
+    # ============================================================
+    # ML-DSA NTT (forward) — one 256-coeff poly per iteration.
+    # The NTT dominates keygen / sign / verify cost; this bench
+    # measures the primitive in isolation so regressions show up
+    # before they hit the full signature bench.
+    # ============================================================
+    mldsa_ntt_init();
+    var ntt_poly = alloc(256 * 8);
+    var ntt_i = 0;
+    while (ntt_i < 256) {
+        store64(ntt_poly + ntt_i * 8, ntt_i);
+        ntt_i = ntt_i + 1;
+    }
+    var b_ntt = bench_new("mldsa_ntt");
+    ri = 0;
+    while (ri < rounds) {
+        bench_batch_start(b_ntt);
+        var bi = 0;
+        while (bi < 100) {
+            mldsa_ntt(ntt_poly);
+            bi = bi + 1;
+        }
+        bench_batch_stop(b_ntt, 100);
+        ri = ri + 1;
+    }
+    vec_push(benches, b_ntt);
+
+    var b_invntt = bench_new("mldsa_invntt");
+    ri = 0;
+    while (ri < rounds) {
+        bench_batch_start(b_invntt);
+        var bi = 0;
+        while (bi < 100) {
+            mldsa_invntt_tomont(ntt_poly);
+            bi = bi + 1;
+        }
+        bench_batch_stop(b_invntt, 100);
+        ri = ri + 1;
+    }
+    vec_push(benches, b_invntt);
 
     # Report
     syscall(1, 1, "=== Sigil Benchmarks ===\n", 24);

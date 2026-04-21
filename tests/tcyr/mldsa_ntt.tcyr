@@ -1,0 +1,178 @@
+# mldsa_ntt.tcyr — NTT + inverse round-trip tests
+#
+# The forward/inverse pair here matches the pq-crystals reference
+# exactly: `invntt_tomont(ntt(a)) = a · R  (mod Q)` where R = 2^32.
+# The appended · R factor is deliberate — sigil keeps multiplied
+# results in Montgomery form so the next NTT layer can consume
+# them without a further mul-by-R. The tests therefore compare
+# against `a · R mod Q`, not plain `a`.
+
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/chrono.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fmt.cyr"
+include "lib/json.cyr"
+include "lib/sakshi.cyr"
+
+include "src/mldsa_params.cyr"
+include "src/mldsa_reduce.cyr"
+include "src/mldsa_ntt.cyr"
+
+# Helpers --------------------------------------------------------
+
+# Canonical residue (mod Q) in [0, Q). Used to compare coefficient
+# outputs without worrying about which signed representative each
+# side lands on.
+fn canon(x) {
+    var r = x - (x / MLDSA_Q) * MLDSA_Q;
+    if (r < 0) { r = r + MLDSA_Q; }
+    return r;
+}
+
+# Return alloc'd 256·8-byte poly, all zeros.
+fn poly_alloc_zero() {
+    var p = alloc(256 * 8);
+    var i = 0;
+    while (i < 256) {
+        store64(p + i * 8, 0);
+        i = i + 1;
+    }
+    return p;
+}
+
+# In-place: poly[i] = f(i) for i < 256.
+fn poly_set_linear(p, start, step) {
+    var i = 0;
+    while (i < 256) {
+        store64(p + i * 8, start + step * i);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Copy n coefficients.
+fn poly_copy(dst, src) {
+    var i = 0;
+    while (i < 256) {
+        store64(dst + i * 8, load64(src + i * 8));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# True iff every coefficient of p matches (q * R) mod Q.
+# p is assumed to be the result of invntt_tomont(ntt(q)).
+fn assert_equals_times_R(p, q, label) {
+    var R = 4193792;                # = 2^32 mod Q
+    var bad = 0;
+    var i = 0;
+    while (i < 256) {
+        var got = canon(load64(p + i * 8));
+        var want = canon(load64(q + i * 8) * R);
+        if (got != want) { bad = bad + 1; }
+        i = i + 1;
+    }
+    assert_eq(bad, 0, label);
+    return 0;
+}
+
+# True iff every coefficient is zero.
+fn assert_all_zero(p, label) {
+    var bad = 0;
+    var i = 0;
+    while (i < 256) {
+        if (load64(p + i * 8) != 0) { bad = bad + 1; }
+        i = i + 1;
+    }
+    assert_eq(bad, 0, label);
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+
+    # ============================================================
+    # Init + zetas sanity
+    # ============================================================
+    test_group("ntt init + zetas");
+    mldsa_ntt_init();
+    # Spot-check a few known values from pq-crystals ref/ntt.c.
+    # Index 0 is 0; index 1 is 25847; index 2 is -2608894; last is 1976782.
+    assert_eq(load64(_mldsa_zetas + 0 * 8), 0, "zetas[0] = 0");
+    assert_eq(load64(_mldsa_zetas + 1 * 8), 25847, "zetas[1] = 25847");
+    assert_eq(load64(_mldsa_zetas + 2 * 8), 0 - 2608894, "zetas[2] = -2608894");
+    assert_eq(load64(_mldsa_zetas + 255 * 8), 1976782, "zetas[255] = 1976782");
+
+    # ============================================================
+    # Zero round-trip
+    # ============================================================
+    test_group("ntt zero round-trip");
+    var p0 = poly_alloc_zero();
+    mldsa_ntt(p0);
+    assert_all_zero(p0, "ntt(0) = 0");
+    mldsa_invntt_tomont(p0);
+    assert_all_zero(p0, "invntt(ntt(0)) = 0");
+
+    # ============================================================
+    # Round-trip: linear ramp 0..255
+    # ============================================================
+    test_group("ntt round-trip: linear ramp");
+    var p1 = poly_alloc_zero();
+    var p1_orig = poly_alloc_zero();
+    poly_set_linear(p1, 0, 1);              # p1[i] = i
+    poly_copy(p1_orig, p1);
+    mldsa_ntt(p1);
+    mldsa_invntt_tomont(p1);
+    assert_equals_times_R(p1, p1_orig, "invntt(ntt(0..255)) = (0..255)·R");
+
+    # ============================================================
+    # Round-trip: delta at index 0 only
+    # ============================================================
+    test_group("ntt round-trip: delta");
+    var p2 = poly_alloc_zero();
+    var p2_orig = poly_alloc_zero();
+    store64(p2, 1);                         # p2[0] = 1, else 0
+    store64(p2_orig, 1);
+    mldsa_ntt(p2);
+    # After forward NTT on constant 1, every output coefficient
+    # should be 1 (constant poly evaluates to 1 at every root).
+    var ones = 0;
+    var i = 0;
+    while (i < 256) {
+        if (canon(load64(p2 + i * 8)) == 1) { ones = ones + 1; }
+        i = i + 1;
+    }
+    assert_eq(ones, 256, "ntt(delta_0) = all 1s");
+    mldsa_invntt_tomont(p2);
+    assert_equals_times_R(p2, p2_orig, "invntt(ntt(delta_0)) = delta_0·R");
+
+    # ============================================================
+    # Round-trip: mixed small coefficients (covers +/- inputs)
+    # ============================================================
+    test_group("ntt round-trip: mixed small");
+    var p3 = poly_alloc_zero();
+    var p3_orig = poly_alloc_zero();
+    # Pattern: +i for even i, -i for odd i.
+    var j = 0;
+    while (j < 256) {
+        var v = j;
+        if ((j & 1) == 1) { v = 0 - j; }
+        store64(p3 + j * 8, v);
+        store64(p3_orig + j * 8, v);
+        j = j + 1;
+    }
+    mldsa_ntt(p3);
+    mldsa_invntt_tomont(p3);
+    assert_equals_times_R(p3, p3_orig, "invntt(ntt(±ramp)) = (±ramp)·R");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);
