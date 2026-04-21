@@ -3775,6 +3775,335 @@ fn mldsa_invntt_tomont(a) {
     return 0;
 }
 
+# --- mldsa_poly.cyr ---
+
+# mldsa_poly.cyr — poly + polyvec operations for ML-DSA
+#
+# Thin layer over the reduce + NTT primitives that expresses
+# the FIPS 204 signing / verification algorithms as polynomial
+# vector arithmetic. The reference is pq-crystals/dilithium
+# `ref/poly.c` + `ref/polyvec.c`; API surface and data layout
+# match 1:1.
+#
+# Buffer layout (all heap-allocated by callers):
+#   poly         — 256·8 bytes, one i64 per coefficient
+#   polyvecl     — L (=5) × 2048 bytes; vec[i] = base + i·2048
+#   polyveck     — K (=6) × 2048 bytes; same scheme
+#   matrix A     — K · L × 2048 bytes; row i at base + i · L · 2048
+#
+# Hot paths (`polyvecl_pointwise_acc_montgomery`,
+# `polyvec_matrix_pointwise_montgomery`) promote their loop
+# state to module-level globals because cc5 clobbers locals
+# across deeply nested call chains (the matrix product goes
+# 3 levels deep into per-coefficient Montgomery reduces, same
+# call-depth pattern that bit sha256 / ed25519).
+
+# ================================================================
+# Per-poly operations
+# ================================================================
+
+# c = a + b (componentwise, no modular reduction).
+# Caller ensures |coeff| stays within a safe range.
+fn mldsa_poly_add(c, a, b) {
+    var i = 0;
+    while (i < 256) {
+        store64(c + i * 8, load64(a + i * 8) + load64(b + i * 8));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# c = a - b (componentwise, no modular reduction).
+fn mldsa_poly_sub(c, a, b) {
+    var i = 0;
+    while (i < 256) {
+        store64(c + i * 8, load64(a + i * 8) - load64(b + i * 8));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Reduce every coefficient to [-6283008, 6283008] via reduce32.
+fn mldsa_poly_reduce(a) {
+    var i = 0;
+    while (i < 256) {
+        store64(a + i * 8, mldsa_reduce32(load64(a + i * 8)));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Bring every coefficient into canonical [0, Q) via caddq.
+fn mldsa_poly_caddq(a) {
+    var i = 0;
+    while (i < 256) {
+        store64(a + i * 8, mldsa_caddq(load64(a + i * 8)));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# a ← a · 2^D  (used by verify to recover c · 2^D · t1). Assumes
+# inputs fit in 2^{31-D} in absolute value — not checked.
+fn mldsa_poly_shiftl(a) {
+    var i = 0;
+    while (i < 256) {
+        store64(a + i * 8, load64(a + i * 8) << MLDSA_D);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# c[i] = montgomery_reduce(a[i] · b[i]).
+# Used in NTT domain: multiplies two NTT-form polys and brings
+# the product back into a Montgomery-form representation of the
+# same length.
+fn mldsa_poly_pointwise_montgomery(c, a, b) {
+    var i = 0;
+    while (i < 256) {
+        var prod = load64(a + i * 8) * load64(b + i * 8);
+        store64(c + i * 8, mldsa_montgomery_reduce(prod));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Infinity-norm bound check: returns 1 if any |coeff| ≥ B, else 0.
+# Early exit on the first violation is OK — the C ref notes the
+# probability of each coefficient violating is independent of
+# secret data; what must *not* leak is the sign of the violating
+# coefficient, which this branchless abs() handles.
+# B > (Q-1)/8 auto-fails to catch out-of-range bounds.
+fn mldsa_poly_chknorm(a, B) {
+    if (B > (MLDSA_Q - 1) / 8) { return 1; }
+    var i = 0;
+    while (i < 256) {
+        var c = load64(a + i * 8);
+        # Branchless absolute value: sign_mask is 0 (c≥0) or −1 (c<0).
+        var sign_mask = 0 - ((c >> 63) & 1);
+        var abs_c = c - (sign_mask & (c + c));
+        if (abs_c >= B) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ================================================================
+# Polyvec L (length L = 5)
+# ================================================================
+
+fn mldsa_polyvecl_add(w, u, v) {
+    var i = 0;
+    while (i < MLDSA65_L) {
+        mldsa_poly_add(w + i * 2048, u + i * 2048, v + i * 2048);
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn mldsa_polyvecl_reduce(v) {
+    var i = 0;
+    while (i < MLDSA65_L) {
+        mldsa_poly_reduce(v + i * 2048);
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn mldsa_polyvecl_ntt(v) {
+    var i = 0;
+    while (i < MLDSA65_L) {
+        mldsa_ntt(v + i * 2048);
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn mldsa_polyvecl_invntt_tomont(v) {
+    var i = 0;
+    while (i < MLDSA65_L) {
+        mldsa_invntt_tomont(v + i * 2048);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# r[i] = a · v[i] for i in 0..L (scalar-poly × vec).
+fn mldsa_polyvecl_pointwise_poly_montgomery(r, a, v) {
+    var i = 0;
+    while (i < MLDSA65_L) {
+        mldsa_poly_pointwise_montgomery(r + i * 2048, a, v + i * 2048);
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn mldsa_polyvecl_chknorm(v, bound) {
+    var i = 0;
+    while (i < MLDSA65_L) {
+        if (mldsa_poly_chknorm(v + i * 2048, bound) == 1) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ================================================================
+# Polyvec K (length K = 6)
+# ================================================================
+
+fn mldsa_polyveck_add(w, u, v) {
+    var i = 0;
+    while (i < MLDSA65_K) {
+        mldsa_poly_add(w + i * 2048, u + i * 2048, v + i * 2048);
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn mldsa_polyveck_sub(w, u, v) {
+    var i = 0;
+    while (i < MLDSA65_K) {
+        mldsa_poly_sub(w + i * 2048, u + i * 2048, v + i * 2048);
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn mldsa_polyveck_reduce(v) {
+    var i = 0;
+    while (i < MLDSA65_K) {
+        mldsa_poly_reduce(v + i * 2048);
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn mldsa_polyveck_caddq(v) {
+    var i = 0;
+    while (i < MLDSA65_K) {
+        mldsa_poly_caddq(v + i * 2048);
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn mldsa_polyveck_shiftl(v) {
+    var i = 0;
+    while (i < MLDSA65_K) {
+        mldsa_poly_shiftl(v + i * 2048);
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn mldsa_polyveck_ntt(v) {
+    var i = 0;
+    while (i < MLDSA65_K) {
+        mldsa_ntt(v + i * 2048);
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn mldsa_polyveck_invntt_tomont(v) {
+    var i = 0;
+    while (i < MLDSA65_K) {
+        mldsa_invntt_tomont(v + i * 2048);
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn mldsa_polyveck_pointwise_poly_montgomery(r, a, v) {
+    var i = 0;
+    while (i < MLDSA65_K) {
+        mldsa_poly_pointwise_montgomery(r + i * 2048, a, v + i * 2048);
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn mldsa_polyveck_chknorm(v, bound) {
+    var i = 0;
+    while (i < MLDSA65_K) {
+        if (mldsa_poly_chknorm(v + i * 2048, bound) == 1) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ================================================================
+# Accumulated pointwise product: w = Σ u[i] · v[i]
+# ================================================================
+# Scratch buffer + loop state promoted to globals (see header
+# comment). One-time alloc; reused across every acc call.
+
+var _mldsa_pac_scratch = 0;
+var _mldsa_pac_inited = 0;
+var _mldsa_pac_w = 0;
+var _mldsa_pac_u = 0;
+var _mldsa_pac_v = 0;
+var _mldsa_pac_i = 0;
+
+fn _mldsa_pac_init() {
+    if (_mldsa_pac_inited == 1) { return 0; }
+    _mldsa_pac_scratch = alloc(2048);
+    _mldsa_pac_inited = 1;
+    return 0;
+}
+
+# w = u[0]·v[0] + u[1]·v[1] + ... + u[L-1]·v[L-1] in NTT domain.
+# Each inner pointwise is a montgomery_reduce, so the sum is
+# already scaled by R^{-1}.
+fn mldsa_polyvecl_pointwise_acc_montgomery(w, u, v) {
+    _mldsa_pac_init();
+    _mldsa_pac_w = w;
+    _mldsa_pac_u = u;
+    _mldsa_pac_v = v;
+    # w = u[0] · v[0].
+    mldsa_poly_pointwise_montgomery(_mldsa_pac_w, _mldsa_pac_u, _mldsa_pac_v);
+    _mldsa_pac_i = 1;
+    while (_mldsa_pac_i < MLDSA65_L) {
+        mldsa_poly_pointwise_montgomery(
+            _mldsa_pac_scratch,
+            _mldsa_pac_u + _mldsa_pac_i * 2048,
+            _mldsa_pac_v + _mldsa_pac_i * 2048
+        );
+        mldsa_poly_add(_mldsa_pac_w, _mldsa_pac_w, _mldsa_pac_scratch);
+        _mldsa_pac_i = _mldsa_pac_i + 1;
+    }
+    return 0;
+}
+
+# ================================================================
+# Matrix-vector product: t = A · v  (A is K rows × L cols)
+# ================================================================
+# Used during A·s1, A·y, and A·z computations in keygen / sign /
+# verify. Row i of A is an L-element polyvecl at offset
+# i · L · 2048 bytes from the matrix base. Each row is reduced
+# against v via polyvecl_pointwise_acc_montgomery.
+
+var _mldsa_mat_t = 0;
+var _mldsa_mat_A = 0;
+var _mldsa_mat_v = 0;
+var _mldsa_mat_i = 0;
+
+fn mldsa_polyvec_matrix_pointwise_montgomery(t, A, v) {
+    _mldsa_mat_t = t;
+    _mldsa_mat_A = A;
+    _mldsa_mat_v = v;
+    _mldsa_mat_i = 0;
+    while (_mldsa_mat_i < MLDSA65_K) {
+        mldsa_polyvecl_pointwise_acc_montgomery(
+            _mldsa_mat_t + _mldsa_mat_i * 2048,
+            _mldsa_mat_A + _mldsa_mat_i * MLDSA65_L * 2048,
+            _mldsa_mat_v
+        );
+        _mldsa_mat_i = _mldsa_mat_i + 1;
+    }
+    return 0;
+}
+
 # --- trust.cyr ---
 
 # trust.cyr — signing, verification, key management

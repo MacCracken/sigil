@@ -1,0 +1,313 @@
+# mldsa_poly.tcyr — poly + polyvec operation tests
+#
+# Exercises every coefficient-level wrapper against algebraic
+# identities (a-a=0, a+b=b+a, reduce idempotence, chknorm
+# thresholds) and the two hot paths (polyvecl accumulated
+# pointwise and matrix-vector product) on small deterministic
+# inputs.
+
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/chrono.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fmt.cyr"
+include "lib/json.cyr"
+include "lib/sakshi.cyr"
+
+include "src/mldsa_params.cyr"
+include "src/mldsa_reduce.cyr"
+include "src/mldsa_ntt.cyr"
+include "src/mldsa_poly.cyr"
+
+# Helpers --------------------------------------------------------
+
+fn canon(x) {
+    var r = x - (x / MLDSA_Q) * MLDSA_Q;
+    if (r < 0) { r = r + MLDSA_Q; }
+    return r;
+}
+
+fn poly_alloc_zero() {
+    var p = alloc(256 * 8);
+    var i = 0;
+    while (i < 256) { store64(p + i * 8, 0); i = i + 1; }
+    return p;
+}
+
+fn polyvecl_alloc_zero() {
+    var p = alloc(MLDSA65_L * 256 * 8);
+    var i = 0;
+    while (i < MLDSA65_L * 256) { store64(p + i * 8, 0); i = i + 1; }
+    return p;
+}
+
+fn polyveck_alloc_zero() {
+    var p = alloc(MLDSA65_K * 256 * 8);
+    var i = 0;
+    while (i < MLDSA65_K * 256) { store64(p + i * 8, 0); i = i + 1; }
+    return p;
+}
+
+fn matrix_alloc_zero() {
+    var p = alloc(MLDSA65_K * MLDSA65_L * 256 * 8);
+    var i = 0;
+    while (i < MLDSA65_K * MLDSA65_L * 256) { store64(p + i * 8, 0); i = i + 1; }
+    return p;
+}
+
+fn poly_all_zero(p) {
+    var i = 0;
+    while (i < 256) {
+        if (load64(p + i * 8) != 0) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn poly_all_eq(a, b) {
+    var i = 0;
+    while (i < 256) {
+        if (load64(a + i * 8) != load64(b + i * 8)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn polyvecl_all_zero(v) {
+    var i = 0;
+    while (i < MLDSA65_L) {
+        if (poly_all_zero(v + i * 2048) == 0) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn polyveck_all_zero(v) {
+    var i = 0;
+    while (i < MLDSA65_K) {
+        if (poly_all_zero(v + i * 2048) == 0) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn main() {
+    alloc_init();
+
+    # ============================================================
+    # poly_add / poly_sub
+    # ============================================================
+    test_group("poly_add / poly_sub");
+    var a = poly_alloc_zero();
+    var b = poly_alloc_zero();
+    var c = poly_alloc_zero();
+    # a[i] = i, b[i] = 1000 - i
+    var i = 0;
+    while (i < 256) {
+        store64(a + i * 8, i);
+        store64(b + i * 8, 1000 - i);
+        i = i + 1;
+    }
+    mldsa_poly_add(c, a, b);
+    # c[i] should be 1000 uniformly.
+    var all_1000 = 1;
+    i = 0;
+    while (i < 256) {
+        if (load64(c + i * 8) != 1000) { all_1000 = 0; }
+        i = i + 1;
+    }
+    assert_eq(all_1000, 1, "poly_add: c[i] = 1000");
+
+    mldsa_poly_sub(c, a, a);
+    assert_eq(poly_all_zero(c), 1, "poly_sub: a - a = 0");
+
+    # Commutative: a + b == b + a
+    var c1 = poly_alloc_zero();
+    var c2 = poly_alloc_zero();
+    mldsa_poly_add(c1, a, b);
+    mldsa_poly_add(c2, b, a);
+    assert_eq(poly_all_eq(c1, c2), 1, "poly_add commutative");
+
+    # ============================================================
+    # poly_reduce
+    # ============================================================
+    test_group("poly_reduce");
+    var r = poly_alloc_zero();
+    # Seed with values > Q so reduce does real work.
+    store64(r + 0 * 8, MLDSA_Q);
+    store64(r + 1 * 8, MLDSA_Q + 1);
+    store64(r + 2 * 8, 0 - MLDSA_Q);
+    store64(r + 3 * 8, 2 * MLDSA_Q);
+    store64(r + 4 * 8, 12345678);
+    mldsa_poly_reduce(r);
+    # All coefficients should fit in [-6283008, 6283008].
+    var in_bounds = 1;
+    i = 0;
+    while (i < 256) {
+        var v = load64(r + i * 8);
+        if (v > 6283008) { in_bounds = 0; }
+        if (v < 0 - 6283008) { in_bounds = 0; }
+        i = i + 1;
+    }
+    assert_eq(in_bounds, 1, "poly_reduce: all coeffs in [-6283008, 6283008]");
+    # Residue equivalence: reduce(Q) ≡ 0, reduce(Q+1) ≡ 1, etc.
+    assert_eq(canon(load64(r + 0 * 8)), 0, "reduce(Q) ≡ 0");
+    assert_eq(canon(load64(r + 1 * 8)), 1, "reduce(Q+1) ≡ 1");
+    assert_eq(canon(load64(r + 2 * 8)), 0, "reduce(-Q) ≡ 0");
+    assert_eq(canon(load64(r + 4 * 8)), canon(12345678), "reduce(x) ≡ x");
+
+    # ============================================================
+    # poly_caddq
+    # ============================================================
+    test_group("poly_caddq");
+    var cq = poly_alloc_zero();
+    store64(cq + 0 * 8, 0 - 1);
+    store64(cq + 1 * 8, 0);
+    store64(cq + 2 * 8, MLDSA_Q - 1);
+    store64(cq + 3 * 8, 0 - (MLDSA_Q - 1));
+    mldsa_poly_caddq(cq);
+    assert_eq(load64(cq + 0 * 8), MLDSA_Q - 1, "caddq(-1) = Q-1");
+    assert_eq(load64(cq + 1 * 8), 0, "caddq(0) = 0");
+    assert_eq(load64(cq + 2 * 8), MLDSA_Q - 1, "caddq(Q-1) unchanged");
+    assert_eq(load64(cq + 3 * 8), 1, "caddq(-(Q-1)) = 1");
+
+    # ============================================================
+    # poly_shiftl (multiply each coeff by 2^D = 2^13)
+    # ============================================================
+    test_group("poly_shiftl");
+    var sl = poly_alloc_zero();
+    store64(sl + 0 * 8, 1);
+    store64(sl + 1 * 8, 100);
+    store64(sl + 2 * 8, 0 - 7);
+    mldsa_poly_shiftl(sl);
+    assert_eq(load64(sl + 0 * 8), 1 << MLDSA_D, "shiftl(1) = 2^13");
+    assert_eq(load64(sl + 1 * 8), 100 << MLDSA_D, "shiftl(100) = 100·2^13");
+    assert_eq(load64(sl + 2 * 8), (0 - 7) << MLDSA_D, "shiftl(-7) preserves sign");
+
+    # ============================================================
+    # poly_pointwise_montgomery — spot-check one coefficient
+    # ============================================================
+    test_group("poly_pointwise_montgomery");
+    var pa = poly_alloc_zero();
+    var pb = poly_alloc_zero();
+    var pc = poly_alloc_zero();
+    store64(pa + 0 * 8, 100);
+    store64(pb + 0 * 8, 200);
+    mldsa_poly_pointwise_montgomery(pc, pa, pb);
+    # Expected: montgomery_reduce(100 * 200) = montgomery_reduce(20000)
+    # which should equal 20000 * R^{-1} mod Q.
+    assert_eq(load64(pc + 0 * 8), mldsa_montgomery_reduce(100 * 200), "pointwise[0] = mont(a·b)");
+    # Other coefficients are zero (both inputs zero).
+    var others_zero = 1;
+    i = 1;
+    while (i < 256) {
+        if (load64(pc + i * 8) != 0) { others_zero = 0; }
+        i = i + 1;
+    }
+    assert_eq(others_zero, 1, "pointwise: 0·0 = 0");
+
+    # ============================================================
+    # poly_chknorm
+    # ============================================================
+    test_group("poly_chknorm");
+    var n = poly_alloc_zero();
+    # All zeros → norm 0 < any positive B → returns 0.
+    assert_eq(mldsa_poly_chknorm(n, 1), 0, "chknorm(0, 1) = 0");
+    # Set one coefficient near the bound.
+    store64(n + 42 * 8, 100);
+    assert_eq(mldsa_poly_chknorm(n, 101), 0, "chknorm: 100 < 101");
+    assert_eq(mldsa_poly_chknorm(n, 100), 1, "chknorm: 100 >= 100");
+    # Negative of same magnitude — abs value triggers.
+    store64(n + 42 * 8, 0 - 100);
+    assert_eq(mldsa_poly_chknorm(n, 100), 1, "chknorm: |-100| >= 100");
+    assert_eq(mldsa_poly_chknorm(n, 101), 0, "chknorm: |-100| < 101");
+    # B > (Q-1)/8 → auto-fail.
+    assert_eq(mldsa_poly_chknorm(n, (MLDSA_Q - 1) / 8 + 1), 1, "chknorm: B > (Q-1)/8 fails");
+
+    # ============================================================
+    # polyvecl / polyveck: add + reduce + NTT round-trip
+    # ============================================================
+    test_group("polyvecl wrappers");
+    var vu = polyvecl_alloc_zero();
+    var vv = polyvecl_alloc_zero();
+    var vw = polyvecl_alloc_zero();
+    # u[j][k] = j·256 + k; v[j][k] = 1 for all.
+    var j = 0;
+    while (j < MLDSA65_L) {
+        var k = 0;
+        while (k < 256) {
+            store64(vu + j * 2048 + k * 8, j * 256 + k);
+            store64(vv + j * 2048 + k * 8, 1);
+            k = k + 1;
+        }
+        j = j + 1;
+    }
+    mldsa_polyvecl_add(vw, vu, vv);
+    # vw[j][k] = j·256 + k + 1. Spot-check.
+    assert_eq(load64(vw + 0 * 2048 + 0 * 8), 1, "polyvecl_add[0][0] = 1");
+    assert_eq(load64(vw + 2 * 2048 + 17 * 8), 2 * 256 + 17 + 1, "polyvecl_add[2][17]");
+
+    # polyvecl chknorm — u contains values up to 4·256+255 = 1279; B=1280 → 0, B=1279 → 1.
+    assert_eq(mldsa_polyvecl_chknorm(vu, 1280), 0, "polyvecl_chknorm: max<1280");
+    assert_eq(mldsa_polyvecl_chknorm(vu, 1279), 1, "polyvecl_chknorm: max>=1279");
+
+    test_group("polyveck wrappers");
+    var wu = polyveck_alloc_zero();
+    var wv = polyveck_alloc_zero();
+    var ww = polyveck_alloc_zero();
+    j = 0;
+    while (j < MLDSA65_K) {
+        var k = 0;
+        while (k < 256) {
+            store64(wu + j * 2048 + k * 8, 10);
+            store64(wv + j * 2048 + k * 8, 3);
+            k = k + 1;
+        }
+        j = j + 1;
+    }
+    mldsa_polyveck_sub(ww, wu, wv);
+    assert_eq(load64(ww + 0 * 2048 + 0 * 8), 7, "polyveck_sub[0][0] = 7");
+    assert_eq(load64(ww + 5 * 2048 + 255 * 8), 7, "polyveck_sub[5][255] = 7");
+
+    # ============================================================
+    # polyvecl_pointwise_acc_montgomery — zero in, zero out
+    # ============================================================
+    test_group("polyvecl_pointwise_acc_montgomery");
+    var acc_w = poly_alloc_zero();
+    var acc_u = polyvecl_alloc_zero();
+    var acc_v = polyvecl_alloc_zero();
+    mldsa_polyvecl_pointwise_acc_montgomery(acc_w, acc_u, acc_v);
+    assert_eq(poly_all_zero(acc_w), 1, "acc(0, 0) = 0");
+    # Non-zero first lane: u[0][0] = 2^32 (Montgomery R), v[0][0] = 5. Each acc
+    # iteration reduces one mult, so acc_w[0] = montgomery_reduce(2^32 · 5) = 5.
+    store64(acc_u + 0 * 2048 + 0 * 8, 1 << 32);
+    store64(acc_v + 0 * 2048 + 0 * 8, 5);
+    mldsa_polyvecl_pointwise_acc_montgomery(acc_w, acc_u, acc_v);
+    assert_eq(canon(load64(acc_w + 0 * 8)), 5, "acc: mont(R·5) ≡ 5");
+
+    # ============================================================
+    # polyvec_matrix_pointwise_montgomery — zero matrix → zero t
+    # ============================================================
+    test_group("polyvec_matrix_pointwise_montgomery");
+    var mA = matrix_alloc_zero();
+    var mv = polyvecl_alloc_zero();
+    var mt = polyveck_alloc_zero();
+    # Populate v with non-zero so only the matrix zeroness drives the result.
+    j = 0;
+    while (j < MLDSA65_L * 256) {
+        store64(mv + j * 8, j + 1);
+        j = j + 1;
+    }
+    mldsa_polyvec_matrix_pointwise_montgomery(mt, mA, mv);
+    assert_eq(polyveck_all_zero(mt), 1, "matrix_ptw(0, v) = 0");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

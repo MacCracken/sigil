@@ -44,6 +44,7 @@ modules = [
     "src/mldsa_params.cyr",
     "src/mldsa_reduce.cyr",
     "src/mldsa_ntt.cyr",
+    "src/mldsa_poly.cyr",
     "src/trust.cyr",
     "src/integrity.cyr",
     "src/policy.cyr",
