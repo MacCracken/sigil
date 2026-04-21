@@ -19,6 +19,7 @@ include "lib/chrono.cyr"
 include "lib/bigint.cyr"
 include "lib/tagged.cyr"
 include "lib/process.cyr"
+include "lib/ct.cyr"
 
 # AGNOS kernel interfaces (agnosys 0.98.0, bundled)
 include "lib/agnosys.cyr"
@@ -36,6 +37,9 @@ include "src/aes_gcm.cyr"
 include "src/sha512.cyr"
 include "src/bigint_ext.cyr"
 include "src/ed25519.cyr"
+# ML-DSA-65 (FIPS 204) — post-quantum signing, sigil 3.0 enabler.
+include "src/mldsa_params.cyr"
+include "src/mldsa_reduce.cyr"
 include "src/trust.cyr"
 include "src/integrity.cyr"
 include "src/policy.cyr"

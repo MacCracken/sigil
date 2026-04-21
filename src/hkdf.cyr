@@ -108,9 +108,14 @@ fn hkdf_expand(prk, prk_len, info, info_len, out, out_len) {
     _hkdf_scratch = fl_alloc(_hkdf_scratch_len);
     memset(_hkdf_scratch, 0, _hkdf_scratch_len);
 
-    var t_prev[32];
+    # T(i-1) and T(i) are HMAC outputs and therefore key material
+    # per RFC 5869. `secret var` zeroes both on function exit
+    # (covers the happy-path ret and any early errors); init
+    # memsets retained because the counter==1 branch leaves t_prev
+    # untouched and we memcpy out of it.
+    secret var t_prev[32];
     memset(&t_prev, 0, 32);
-    var t_current[32];
+    secret var t_current[32];
     memset(&t_current, 0, 32);
 
     _hkdf_produced = 0;
@@ -148,11 +153,10 @@ fn hkdf_expand(prk, prk_len, info, info_len, out, out_len) {
         _hkdf_counter = _hkdf_counter + 1;
     }
 
-    # Zeroize all key-derived scratch before free.
+    # Zeroize the heap scratch before free. t_prev / t_current are
+    # `secret var` — zeroed on function exit by the compiler.
     memset(_hkdf_scratch, 0, _hkdf_scratch_len);
     fl_free(_hkdf_scratch);
-    memset(&t_prev, 0, 32);
-    memset(&t_current, 0, 32);
     # Wipe the global pointers so nothing leaks between calls.
     _hkdf_scratch = 0;
     _hkdf_prk = 0;
@@ -174,14 +178,10 @@ fn hkdf_expand(prk, prk_len, info, info_len, out, out_len) {
 #  -2   on out_len > 255*32
 
 fn hkdf(salt, salt_len, ikm, ikm_len, info, info_len, out, out_len) {
-    var prk[32];
+    # PRK is key material. `secret var` handles zeroization on
+    # every return path (both rc1 error and rc2 success/error).
+    secret var prk[32];
     var rc1 = hkdf_extract(salt, salt_len, ikm, ikm_len, &prk);
-    if (rc1 != 0) {
-        memset(&prk, 0, 32);
-        return rc1;
-    }
-    var rc2 = hkdf_expand(&prk, 32, info, info_len, out, out_len);
-    # PRK is key material — zeroize regardless of expand's outcome.
-    memset(&prk, 0, 32);
-    return rc2;
+    if (rc1 != 0) { return rc1; }
+    return hkdf_expand(&prk, 32, info, info_len, out, out_len);
 }

@@ -1,0 +1,81 @@
+# mldsa_params.cyr — ML-DSA parameters (FIPS 204, August 2024)
+#
+# Module-lattice-based digital signature — the post-quantum signing
+# half of sigil 3.0. Keccak / SHAKE plumbing comes from Cyrius
+# stdlib (`lib/keccak.cyr`, since 5.4.15); ML-DSA rides on top.
+#
+# Reference: NIST FIPS 204 final, August 13, 2024.
+# Canonical impl: github.com/pq-crystals/dilithium (ref/).
+#
+# Only ML-DSA-65 (NIST security category 3) is parameterised here.
+# ML-DSA-44 and ML-DSA-87 can be layered later without disturbing
+# these constants — hence the MLDSA_ vs MLDSA65_ prefix split.
+#
+# Constants shadow the pq-crystals ref/params.h names so any
+# cross-reference against that source reads identically.
+
+# ================================================================
+# Universal ML-DSA parameters (shared across 44/65/87)
+# ================================================================
+# Spec FIPS 204 §4 Table 1. These are independent of the security
+# category — every ML-DSA instance uses the same ring Z_q[X]/(X^n+1)
+# and the same Power2Round dropped-bit count d.
+
+var MLDSA_N = 256;                  # ring poly degree (also SHAKE sample count per poly)
+var MLDSA_Q = 8380417;              # prime modulus = 2^23 - 2^13 + 1
+var MLDSA_D = 13;                   # Power2Round drops the bottom d bits of t
+var MLDSA_ROOT_OF_UNITY = 1753;     # primitive 512th root of unity mod Q, Montgomery form
+
+# Seed-level sizes
+var MLDSA_SEEDBYTES = 32;           # ξ, ρ, rnd: 32-byte inputs to SHAKE
+var MLDSA_CRHBYTES = 64;            # CRH output length (SHAKE-256 squeeze depth for μ, ρ')
+var MLDSA_TRBYTES = 64;             # tr = SHAKE-256(pk, 64) — key-commitment hash
+var MLDSA_RNDBYTES = 32;            # signing randomness (hedged mode)
+
+# ================================================================
+# ML-DSA-65 parameters (NIST security category 3)
+# ================================================================
+# Per spec FIPS 204 §4 Table 1, ML-DSA-65 column.
+
+var MLDSA65_K = 6;                  # matrix rows (t, w, etc. live in R_q^k)
+var MLDSA65_L = 5;                  # matrix cols (s1, y, z live in R_q^l)
+var MLDSA65_ETA = 4;                # secret-key coefficient range: [-η, η]
+var MLDSA65_TAU = 49;               # number of ±1 coefficients in the challenge c
+var MLDSA65_BETA = 196;             # = τ * η, commitment-norm bound
+var MLDSA65_GAMMA1 = 524288;        # = 1 << 19, mask range for y (§4 Table 1)
+var MLDSA65_GAMMA2 = 261888;        # = (Q-1)/32, low-bits decompose radius
+var MLDSA65_OMEGA = 55;             # hint-weight cap across the polynomial vector
+var MLDSA65_CTILDEBYTES = 48;       # c̃ output length, 2·λ/8 bits at λ=192
+
+# ================================================================
+# Packed-poly byte sizes (ML-DSA-65, derived from the params above)
+# ================================================================
+# Each is bytes-per-poly (one poly = N=256 coefficients). Kept as
+# literals rather than expressions because Cyrius module-scope
+# var initializers are evaluated as runtime assignment, not CTFE.
+# The test file asserts each derivation against the underlying
+# parameters so drift is caught immediately.
+
+var MLDSA65_POLYT1_PACKEDBYTES = 320;       # t1 bits = 23-D = 10, so 10*N/8 = 320
+var MLDSA65_POLYT0_PACKEDBYTES = 416;       # t0 bits = D+1 = 13, so 13*N/8 = 416 (balanced)
+var MLDSA65_POLYZ_PACKEDBYTES = 640;        # z bits = 20 (GAMMA1 = 1<<19 → log2+1), 20*N/8 = 640
+var MLDSA65_POLYW1_PACKEDBYTES = 128;       # w1 bits = 4 (GAMMA2 = (Q-1)/32 branch), 4*N/8 = 128
+var MLDSA65_POLYETA_PACKEDBYTES = 128;      # η=4 → 4 bits per coeff, 4*N/8 = 128
+var MLDSA65_POLYVECH_PACKEDBYTES = 61;      # hint vec: OMEGA + K = 55 + 6 = 61
+
+# ================================================================
+# Public API byte sizes (ML-DSA-65)
+# ================================================================
+# Spec §5.1/§5.2 pk/sk encoding; §7.2 sig encoding.
+#   pk = ρ ‖ t1                    = SEEDBYTES + K·POLYT1_PACKEDBYTES
+#   sk = ρ ‖ K ‖ tr ‖ s1 ‖ s2 ‖ t0 = 2·SEEDBYTES + TRBYTES
+#                                    + L·POLYETA_PACKEDBYTES
+#                                    + K·POLYETA_PACKEDBYTES
+#                                    + K·POLYT0_PACKEDBYTES
+#   sig = c̃ ‖ z ‖ h               = CTILDEBYTES + L·POLYZ_PACKEDBYTES
+#                                    + POLYVECH_PACKEDBYTES
+# The concrete numbers for ML-DSA-65 land at:
+
+var MLDSA65_PK_BYTES = 1952;        # = 32 + 6*320
+var MLDSA65_SK_BYTES = 4032;        # = 64 + 64 + 5*128 + 6*128 + 6*416
+var MLDSA65_SIG_BYTES = 3309;       # = 48 + 5*640 + 61

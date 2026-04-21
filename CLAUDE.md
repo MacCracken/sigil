@@ -142,7 +142,7 @@ Run a closeout pass before tagging x.Y.0 or x.0.0. Ship as the last patch of the
 - **Runtime feature detection** over compile-time gating (follow libro pattern)
 - **Target size** — compiled binary contribution should be small and measurable
 
-## Known Cyrius Compiler Quirks (5.4.8)
+## Known Cyrius Compiler Quirks (5.5.11)
 
 Most cc3-era workarounds documented in earlier sigil versions are
 now resolved under cc5. Quirks still worth knowing:

@@ -1,0 +1,124 @@
+# mldsa_params.tcyr — ML-DSA parameter sanity tests
+#
+# Asserts every constant in src/mldsa_params.cyr matches FIPS 204
+# for ML-DSA-65, and that every declared-as-literal derived size
+# is arithmetically consistent with its underlying parameters.
+# Drift in either direction (e.g. someone bumps GAMMA1 without
+# bumping POLYZ_PACKEDBYTES) is caught here.
+
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/chrono.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fmt.cyr"
+include "lib/json.cyr"
+include "lib/sakshi.cyr"
+
+include "src/mldsa_params.cyr"
+
+fn main() {
+    alloc_init();
+
+    # ============================================================
+    # Universal ML-DSA parameters (FIPS 204 §4 Table 1)
+    # ============================================================
+    test_group("MLDSA universal params");
+    assert_eq(MLDSA_N, 256, "N = 256");
+    assert_eq(MLDSA_Q, 8380417, "Q = 8380417 = 2^23 - 2^13 + 1");
+    # Sanity: verify the closed-form for Q.
+    assert_eq(MLDSA_Q, (1 << 23) - (1 << 13) + 1, "Q closed form");
+    assert_eq(MLDSA_D, 13, "D = 13");
+    assert_eq(MLDSA_ROOT_OF_UNITY, 1753, "ROOT_OF_UNITY = 1753");
+    assert_eq(MLDSA_SEEDBYTES, 32, "SEEDBYTES = 32");
+    assert_eq(MLDSA_CRHBYTES, 64, "CRHBYTES = 64");
+    assert_eq(MLDSA_TRBYTES, 64, "TRBYTES = 64");
+    assert_eq(MLDSA_RNDBYTES, 32, "RNDBYTES = 32");
+
+    # ============================================================
+    # ML-DSA-65 parameters (FIPS 204 §4 Table 1, category 3)
+    # ============================================================
+    test_group("MLDSA-65 params");
+    assert_eq(MLDSA65_K, 6, "K = 6");
+    assert_eq(MLDSA65_L, 5, "L = 5");
+    assert_eq(MLDSA65_ETA, 4, "ETA = 4");
+    assert_eq(MLDSA65_TAU, 49, "TAU = 49");
+    assert_eq(MLDSA65_BETA, 196, "BETA = 196");
+    # β = τ · η
+    assert_eq(MLDSA65_BETA, MLDSA65_TAU * MLDSA65_ETA, "BETA = TAU * ETA");
+    assert_eq(MLDSA65_GAMMA1, 524288, "GAMMA1 = 524288");
+    assert_eq(MLDSA65_GAMMA1, 1 << 19, "GAMMA1 = 1 << 19");
+    assert_eq(MLDSA65_GAMMA2, 261888, "GAMMA2 = 261888");
+    assert_eq(MLDSA65_GAMMA2, (MLDSA_Q - 1) / 32, "GAMMA2 = (Q-1)/32");
+    assert_eq(MLDSA65_OMEGA, 55, "OMEGA = 55");
+    assert_eq(MLDSA65_CTILDEBYTES, 48, "CTILDEBYTES = 48 (λ=192)");
+
+    # ============================================================
+    # Packed poly sizes: literals vs. underlying derivations
+    # ============================================================
+    # Each poly holds N = 256 coefficients. Packed-bytes = bits/coeff
+    # · N / 8. If MLDSA_N or a parameter changes, this test fails.
+    test_group("MLDSA-65 packed poly sizes");
+    assert_eq(MLDSA65_POLYT1_PACKEDBYTES, 320, "POLYT1 = 320");
+    # t1 holds the high 23 - D = 10 bits of t. 10 * 256 / 8 = 320.
+    assert_eq(MLDSA65_POLYT1_PACKEDBYTES, 10 * MLDSA_N / 8, "POLYT1 = 10·N/8");
+    assert_eq(MLDSA65_POLYT0_PACKEDBYTES, 416, "POLYT0 = 416");
+    # t0 is balanced in (-2^(D-1), 2^(D-1)], packed as D+0 = 13 bits/coeff.
+    assert_eq(MLDSA65_POLYT0_PACKEDBYTES, 13 * MLDSA_N / 8, "POLYT0 = 13·N/8");
+    assert_eq(MLDSA65_POLYZ_PACKEDBYTES, 640, "POLYZ = 640");
+    # z coefficients live in (-γ1, γ1]; γ1 = 2^19 so 20 bits/coeff.
+    assert_eq(MLDSA65_POLYZ_PACKEDBYTES, 20 * MLDSA_N / 8, "POLYZ = 20·N/8");
+    assert_eq(MLDSA65_POLYW1_PACKEDBYTES, 128, "POLYW1 = 128");
+    # w1 when γ2 = (Q-1)/32: coefficients fit in 4 bits.
+    assert_eq(MLDSA65_POLYW1_PACKEDBYTES, 4 * MLDSA_N / 8, "POLYW1 = 4·N/8");
+    assert_eq(MLDSA65_POLYETA_PACKEDBYTES, 128, "POLYETA = 128");
+    # η=4 → coefficients in [-4, 4], packed as 4 bits/coeff.
+    assert_eq(MLDSA65_POLYETA_PACKEDBYTES, 4 * MLDSA_N / 8, "POLYETA = 4·N/8 when η=4");
+    assert_eq(MLDSA65_POLYVECH_PACKEDBYTES, 61, "POLYVECH = 61");
+    # Hint vector packs OMEGA indices + K per-poly counters.
+    assert_eq(MLDSA65_POLYVECH_PACKEDBYTES, MLDSA65_OMEGA + MLDSA65_K, "POLYVECH = OMEGA + K");
+
+    # ============================================================
+    # Public API byte sizes (ML-DSA-65)
+    # ============================================================
+    test_group("MLDSA-65 key / sig sizes");
+    assert_eq(MLDSA65_PK_BYTES, 1952, "pk = 1952 bytes");
+    # pk = ρ ‖ t1 = SEEDBYTES + K · POLYT1
+    assert_eq(
+        MLDSA65_PK_BYTES,
+        MLDSA_SEEDBYTES + MLDSA65_K * MLDSA65_POLYT1_PACKEDBYTES,
+        "pk = SEEDBYTES + K·POLYT1"
+    );
+
+    assert_eq(MLDSA65_SK_BYTES, 4032, "sk = 4032 bytes");
+    # sk = ρ ‖ K ‖ tr ‖ s1 ‖ s2 ‖ t0
+    #    = 2·SEEDBYTES + TRBYTES + L·POLYETA + K·POLYETA + K·POLYT0
+    assert_eq(
+        MLDSA65_SK_BYTES,
+        2 * MLDSA_SEEDBYTES
+            + MLDSA_TRBYTES
+            + MLDSA65_L * MLDSA65_POLYETA_PACKEDBYTES
+            + MLDSA65_K * MLDSA65_POLYETA_PACKEDBYTES
+            + MLDSA65_K * MLDSA65_POLYT0_PACKEDBYTES,
+        "sk = 2·SEEDBYTES + TRBYTES + L·POLYETA + K·POLYETA + K·POLYT0"
+    );
+
+    assert_eq(MLDSA65_SIG_BYTES, 3309, "sig = 3309 bytes");
+    # sig = c̃ ‖ z ‖ h = CTILDEBYTES + L·POLYZ + POLYVECH
+    assert_eq(
+        MLDSA65_SIG_BYTES,
+        MLDSA65_CTILDEBYTES
+            + MLDSA65_L * MLDSA65_POLYZ_PACKEDBYTES
+            + MLDSA65_POLYVECH_PACKEDBYTES,
+        "sig = CTILDEBYTES + L·POLYZ + POLYVECH"
+    );
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

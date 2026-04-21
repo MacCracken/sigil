@@ -816,8 +816,11 @@ fn ct_eq_32(a, b) {
 # ================================================================
 
 fn hmac_sha256(key, key_len, msg, msg_len, out) {
-    # Step 1: Derive K' (64 bytes)
-    var kprime[64];
+    # Step 1: Derive K' (64 bytes). `secret var` guarantees the
+    # buffer is zeroed on function exit (Cyrius 5.3.5+). The init
+    # memset below is retained for program correctness — the
+    # key_len < 64 branch relies on the upper bytes being zero.
+    secret var kprime[64];
     memset(&kprime, 0, 64);
 
     if (key_len > 64) {
@@ -830,7 +833,7 @@ fn hmac_sha256(key, key_len, msg, msg_len, out) {
     }
 
     # Step 2: inner = SHA-256((K' xor ipad) || message)
-    var ipad[64];
+    secret var ipad[64];
     var i = 0;
     while (i < 64) {
         store8(&ipad + i, (load8(&kprime + i) & 0xFF) ^ 0x36);
@@ -845,7 +848,7 @@ fn hmac_sha256(key, key_len, msg, msg_len, out) {
     fl_free(inner_ctx);
 
     # Step 3: outer = SHA-256((K' xor opad) || inner)
-    var opad[64];
+    secret var opad[64];
     i = 0;
     while (i < 64) {
         store8(&opad + i, (load8(&kprime + i) & 0xFF) ^ 0x5c);
@@ -858,13 +861,9 @@ fn hmac_sha256(key, key_len, msg, msg_len, out) {
     sha256_finalize(outer_ctx, out);
     fl_free(outer_ctx);
 
-    # Zeroize key-derived material on stack before return.
-    # kprime holds K', ipad/opad hold K' XOR 0x36/0x5c. inner_hash
-    # is a plain digest (public) but zero it too for consistency.
-    memset(&kprime, 0, 64);
-    memset(&ipad, 0, 64);
-    memset(&opad, 0, 64);
-    memset(&inner_hash, 0, 32);
+    # kprime / ipad / opad are `secret var` — zeroed on return by
+    # the compiler. inner_hash is a public digest; left as a plain
+    # var (no security need to clear).
     return 0;
 }
 
@@ -981,9 +980,14 @@ fn hkdf_expand(prk, prk_len, info, info_len, out, out_len) {
     _hkdf_scratch = fl_alloc(_hkdf_scratch_len);
     memset(_hkdf_scratch, 0, _hkdf_scratch_len);
 
-    var t_prev[32];
+    # T(i-1) and T(i) are HMAC outputs and therefore key material
+    # per RFC 5869. `secret var` zeroes both on function exit
+    # (covers the happy-path ret and any early errors); init
+    # memsets retained because the counter==1 branch leaves t_prev
+    # untouched and we memcpy out of it.
+    secret var t_prev[32];
     memset(&t_prev, 0, 32);
-    var t_current[32];
+    secret var t_current[32];
     memset(&t_current, 0, 32);
 
     _hkdf_produced = 0;
@@ -1021,11 +1025,10 @@ fn hkdf_expand(prk, prk_len, info, info_len, out, out_len) {
         _hkdf_counter = _hkdf_counter + 1;
     }
 
-    # Zeroize all key-derived scratch before free.
+    # Zeroize the heap scratch before free. t_prev / t_current are
+    # `secret var` — zeroed on function exit by the compiler.
     memset(_hkdf_scratch, 0, _hkdf_scratch_len);
     fl_free(_hkdf_scratch);
-    memset(&t_prev, 0, 32);
-    memset(&t_current, 0, 32);
     # Wipe the global pointers so nothing leaks between calls.
     _hkdf_scratch = 0;
     _hkdf_prk = 0;
@@ -1047,16 +1050,12 @@ fn hkdf_expand(prk, prk_len, info, info_len, out, out_len) {
 #  -2   on out_len > 255*32
 
 fn hkdf(salt, salt_len, ikm, ikm_len, info, info_len, out, out_len) {
-    var prk[32];
+    # PRK is key material. `secret var` handles zeroization on
+    # every return path (both rc1 error and rc2 success/error).
+    secret var prk[32];
     var rc1 = hkdf_extract(salt, salt_len, ikm, ikm_len, &prk);
-    if (rc1 != 0) {
-        memset(&prk, 0, 32);
-        return rc1;
-    }
-    var rc2 = hkdf_expand(&prk, 32, info, info_len, out, out_len);
-    # PRK is key material — zeroize regardless of expand's outcome.
-    memset(&prk, 0, 32);
-    return rc2;
+    if (rc1 != 0) { return rc1; }
+    return hkdf_expand(&prk, 32, info, info_len, out, out_len);
 }
 
 # --- aes_ni.cyr ---
@@ -2768,14 +2767,14 @@ var _gsm_bit = 0;
 
 # Constant-time conditional move on a 128-byte extended point.
 # If bit == 1: dst := src.  If bit == 0: dst unchanged.
-# No branches on `bit`; uses mask = -bit  (0 or all-ones).
+# Per-limb select via stdlib ct_select (lib/ct.cyr) — identical
+# mask-xor arithmetic, single audit surface across the codebase.
 fn ge_cmov(dst, src, bit) {
-    var mask = 0 - bit;
     var i = 0;
     while (i < 128) {
         var d = load64(dst + i);
         var sv = load64(src + i);
-        store64(dst + i, d ^ (mask & (d ^ sv)));
+        store64(dst + i, ct_select(bit, d, sv));
         i = i + 8;
     }
     return 0;
@@ -3372,7 +3371,10 @@ fn ed25519_generate_keypair(sk_out, pk_out) {
     # produced in that case are all-zero (sk_out / pk_out are set from
     # a zeroed seed) so any verify against them will fail deterministically
     # rather than silently accepting a garbage key.
-    var seed[32];
+    # `secret var` clears seed on every return path (Cyrius 5.3.5+).
+    # Init memset retained because file_read into a partial buffer
+    # on the error path below might leave upper bytes stale.
+    secret var seed[32];
     memset(&seed, 0, 32);
     var fd = file_open("/dev/urandom", 0, 0);
     if (fd < 0) {
@@ -3385,7 +3387,6 @@ fn ed25519_generate_keypair(sk_out, pk_out) {
         var n = file_read(fd, (&seed) + got, 32 - got);
         if (n <= 0) {
             file_close(fd);
-            memset(&seed, 0, 32);
             memset(sk_out, 0, 64);
             memset(pk_out, 0, 32);
             return 0;
@@ -3394,8 +3395,220 @@ fn ed25519_generate_keypair(sk_out, pk_out) {
     }
     file_close(fd);
     ed25519_keypair(&seed, sk_out, pk_out);
-    memset(&seed, 0, 32);
     return 1;
+}
+
+# --- mldsa_params.cyr ---
+
+# mldsa_params.cyr — ML-DSA parameters (FIPS 204, August 2024)
+#
+# Module-lattice-based digital signature — the post-quantum signing
+# half of sigil 3.0. Keccak / SHAKE plumbing comes from Cyrius
+# stdlib (`lib/keccak.cyr`, since 5.4.15); ML-DSA rides on top.
+#
+# Reference: NIST FIPS 204 final, August 13, 2024.
+# Canonical impl: github.com/pq-crystals/dilithium (ref/).
+#
+# Only ML-DSA-65 (NIST security category 3) is parameterised here.
+# ML-DSA-44 and ML-DSA-87 can be layered later without disturbing
+# these constants — hence the MLDSA_ vs MLDSA65_ prefix split.
+#
+# Constants shadow the pq-crystals ref/params.h names so any
+# cross-reference against that source reads identically.
+
+# ================================================================
+# Universal ML-DSA parameters (shared across 44/65/87)
+# ================================================================
+# Spec FIPS 204 §4 Table 1. These are independent of the security
+# category — every ML-DSA instance uses the same ring Z_q[X]/(X^n+1)
+# and the same Power2Round dropped-bit count d.
+
+var MLDSA_N = 256;                  # ring poly degree (also SHAKE sample count per poly)
+var MLDSA_Q = 8380417;              # prime modulus = 2^23 - 2^13 + 1
+var MLDSA_D = 13;                   # Power2Round drops the bottom d bits of t
+var MLDSA_ROOT_OF_UNITY = 1753;     # primitive 512th root of unity mod Q, Montgomery form
+
+# Seed-level sizes
+var MLDSA_SEEDBYTES = 32;           # ξ, ρ, rnd: 32-byte inputs to SHAKE
+var MLDSA_CRHBYTES = 64;            # CRH output length (SHAKE-256 squeeze depth for μ, ρ')
+var MLDSA_TRBYTES = 64;             # tr = SHAKE-256(pk, 64) — key-commitment hash
+var MLDSA_RNDBYTES = 32;            # signing randomness (hedged mode)
+
+# ================================================================
+# ML-DSA-65 parameters (NIST security category 3)
+# ================================================================
+# Per spec FIPS 204 §4 Table 1, ML-DSA-65 column.
+
+var MLDSA65_K = 6;                  # matrix rows (t, w, etc. live in R_q^k)
+var MLDSA65_L = 5;                  # matrix cols (s1, y, z live in R_q^l)
+var MLDSA65_ETA = 4;                # secret-key coefficient range: [-η, η]
+var MLDSA65_TAU = 49;               # number of ±1 coefficients in the challenge c
+var MLDSA65_BETA = 196;             # = τ * η, commitment-norm bound
+var MLDSA65_GAMMA1 = 524288;        # = 1 << 19, mask range for y (§4 Table 1)
+var MLDSA65_GAMMA2 = 261888;        # = (Q-1)/32, low-bits decompose radius
+var MLDSA65_OMEGA = 55;             # hint-weight cap across the polynomial vector
+var MLDSA65_CTILDEBYTES = 48;       # c̃ output length, 2·λ/8 bits at λ=192
+
+# ================================================================
+# Packed-poly byte sizes (ML-DSA-65, derived from the params above)
+# ================================================================
+# Each is bytes-per-poly (one poly = N=256 coefficients). Kept as
+# literals rather than expressions because Cyrius module-scope
+# var initializers are evaluated as runtime assignment, not CTFE.
+# The test file asserts each derivation against the underlying
+# parameters so drift is caught immediately.
+
+var MLDSA65_POLYT1_PACKEDBYTES = 320;       # t1 bits = 23-D = 10, so 10*N/8 = 320
+var MLDSA65_POLYT0_PACKEDBYTES = 416;       # t0 bits = D+1 = 13, so 13*N/8 = 416 (balanced)
+var MLDSA65_POLYZ_PACKEDBYTES = 640;        # z bits = 20 (GAMMA1 = 1<<19 → log2+1), 20*N/8 = 640
+var MLDSA65_POLYW1_PACKEDBYTES = 128;       # w1 bits = 4 (GAMMA2 = (Q-1)/32 branch), 4*N/8 = 128
+var MLDSA65_POLYETA_PACKEDBYTES = 128;      # η=4 → 4 bits per coeff, 4*N/8 = 128
+var MLDSA65_POLYVECH_PACKEDBYTES = 61;      # hint vec: OMEGA + K = 55 + 6 = 61
+
+# ================================================================
+# Public API byte sizes (ML-DSA-65)
+# ================================================================
+# Spec §5.1/§5.2 pk/sk encoding; §7.2 sig encoding.
+#   pk = ρ ‖ t1                    = SEEDBYTES + K·POLYT1_PACKEDBYTES
+#   sk = ρ ‖ K ‖ tr ‖ s1 ‖ s2 ‖ t0 = 2·SEEDBYTES + TRBYTES
+#                                    + L·POLYETA_PACKEDBYTES
+#                                    + K·POLYETA_PACKEDBYTES
+#                                    + K·POLYT0_PACKEDBYTES
+#   sig = c̃ ‖ z ‖ h               = CTILDEBYTES + L·POLYZ_PACKEDBYTES
+#                                    + POLYVECH_PACKEDBYTES
+# The concrete numbers for ML-DSA-65 land at:
+
+var MLDSA65_PK_BYTES = 1952;        # = 32 + 6*320
+var MLDSA65_SK_BYTES = 4032;        # = 64 + 64 + 5*128 + 6*128 + 6*416
+var MLDSA65_SIG_BYTES = 3309;       # = 48 + 5*640 + 61
+
+# --- mldsa_reduce.cyr ---
+
+# mldsa_reduce.cyr — modular reduction primitives for ML-DSA
+#
+# Three operations used throughout the NTT / poly arithmetic
+# layers. Bounds and formulas mirror pq-crystals/dilithium
+# `ref/reduce.c`, which is the FIPS-204 reference implementation.
+#
+# Representation: every coefficient is a Cyrius i64 holding the
+# signed 32-bit Montgomery-form value. Callers keep the value
+# within the documented bounds of each helper; we do not re-check.
+#
+# Cyrius arithmetic notes (cc5):
+#   - `>>` is LOGICAL shift right (zero-fill). Do not use for
+#     arithmetic sign-extension.
+#   - `/` is SIGNED 64-bit integer division (IDIV). Safe for the
+#     Montgomery divide-by-2^32 step because the dividend is
+#     always exactly divisible by 2^32.
+#   - Integer wraparound is i64 two's-complement; subtracting a
+#     larger unsigned value naturally produces a negative i64.
+#
+# Constants (from pq-crystals ref/reduce.h):
+#   MONT  = -4186625  = 2^32  mod Q  in signed form (Montgomery R)
+#   QINV  =  58728449 = Q^{-1} mod 2^32 (used in montgomery_reduce)
+# Neither constant is parameter-set dependent; both hold for every
+# ML-DSA variant since they derive only from (Q, N).
+
+var MLDSA_MONT = 0 - 4186625;           # R = 2^32 mod Q, signed form
+var MLDSA_QINV = 58728449;              # Q * QINV ≡ -1 (mod 2^32)
+
+# ================================================================
+# mldsa_montgomery_reduce — montgomery_reduce in FIPS 204 notation
+# ================================================================
+# Input:  a  with |a| ≤ Q * 2^31
+# Output: r  with |r| < Q     (r ≡ a * 2^{-32} mod Q)
+#
+# Algorithm (C reference):
+#   t = (int32_t)a * QINV;                # low 32 bits of a*QINV, signed
+#   r = (a - (int64_t)t * Q) >> 32;       # arithmetic shift right by 32
+# Cyrius port:
+#   - Compute low 32 bits of a*QINV via i64 wraparound arithmetic,
+#     then sign-extend to i64 by subtracting 2^32 when bit 31 set.
+#   - The final shift is implemented as signed division by 2^32,
+#     which is equivalent here because `a - t*Q` is always an
+#     exact multiple of 2^32 by Montgomery construction.
+
+fn mldsa_montgomery_reduce(a) {
+    # Step 1: t_low = low 32 bits of a * QINV (unsigned view).
+    var t_raw = a * MLDSA_QINV;
+    var t_low = t_raw & 0xFFFFFFFF;
+    # Sign-extend to i64: if bit 31 is set, subtract 2^32.
+    var t = t_low - ((t_low & 0x80000000) << 1);
+    # Step 2: arithmetic shift right by 32 on (a − t·Q).
+    # The dividend is an exact multiple of 2^32 (Montgomery
+    # construction), so ASR and signed division agree. We use
+    # bitwise shift + sign-fill instead of IDIV because IDIV is
+    # the slowest instruction in the butterfly hot path
+    # (~20 cycles on modern x86 vs ~2 for shift+or) and because
+    # IDIV's timing, though bounded here, depends on the quotient
+    # magnitude — not strictly constant-time.
+    var diff = a - t * MLDSA_Q;
+    var logical = diff >> 32;
+    var sign = (diff >> 63) & 1;
+    var fill = (0 - sign) << 32;
+    return logical | fill;
+}
+
+# ================================================================
+# mldsa_reduce32 — reduce32 in FIPS 204 notation
+# ================================================================
+# Input:  a  with |a| ≤ 2^31 - 2^22 - 1  (spec constraint)
+# Output: r  with -6283008 ≤ r ≤ 6283008  (r ≡ a mod Q)
+#
+# Barrett-style nearest-multiple reduction: the approximate
+# quotient t = ⌊(a + 2^22) / 2^23⌋ rounds a/Q to nearest, and
+# t·Q is subtracted from a. The residual's magnitude is at most
+# ⌈Q/2⌉ plus a small rounding slack, giving the 6283008 bound.
+#
+# The `/ 2^23` in the C reference is an **arithmetic** shift —
+# rounds toward −∞ — whereas Cyrius's `/` is IDIV, which truncates
+# toward zero. The two agree on non-negative dividends but disagree
+# on negative ones (for a = −Q, C gives t = −1, Cyrius IDIV would
+# give t = 0). Emulate arithmetic shift right by 23 as
+# `(x >> 23) | ((−sign(x)) << 41)`:
+#   - `x >> 23` is Cyrius's logical right shift, fills zeros.
+#   - `(x >> 63) & 1` exposes the i64 sign bit via that same
+#     logical shift.
+#   - `0 − sign` is all-ones on negative, zero otherwise; shifted
+#     left 41 it forms a mask covering the top 23 bits, which the
+#     OR folds into the logical-shift result.
+# No data-dependent branch; all straight-line arithmetic.
+
+fn mldsa_reduce32(a) {
+    var x = a + (1 << 22);
+    var logical = x >> 23;
+    var sign = (x >> 63) & 1;
+    var fill = (0 - sign) << 41;
+    var t = logical | fill;
+    return a - t * MLDSA_Q;
+}
+
+# ================================================================
+# mldsa_caddq — caddq in FIPS 204 notation (conditional add Q)
+# ================================================================
+# Input:  a  with -Q < a < Q
+# Output: r  with 0 ≤ r < Q    (r ≡ a mod Q, canonical rep)
+#
+# The C reference uses `a + ((a >> 31) & Q)` where the shift is
+# arithmetic on a signed int32. In Cyrius (logical >>, i64), we
+# read the i64 sign bit directly: `(a >> 63) & 1` is 1 for any
+# negative i64, 0 otherwise. Multiply by Q to get the conditional
+# addend. No data-dependent branch — the sign-bit extraction and
+# multiply are straight-line arithmetic.
+
+fn mldsa_caddq(a) {
+    var neg = (a >> 63) & 1;
+    return a + neg * MLDSA_Q;
+}
+
+# ================================================================
+# mldsa_freeze — reduce to canonical [0, Q) representation
+# ================================================================
+# Convenience wrapper = caddq ∘ reduce32. Used at pack boundaries
+# where the coefficient must be the unique in-range representative.
+
+fn mldsa_freeze(a) {
+    return mldsa_caddq(mldsa_reduce32(a));
 }
 
 # --- trust.cyr ---
@@ -3920,7 +4133,8 @@ fn verify_data(data, len, sig, public_key) {
 fn generate_keypair(sk_out, pk_out) {
     # sk_out: 64 bytes (seed || pk), pk_out: 32 bytes
     # Returns key_id (C-string) on success, 0 on entropy failure.
-    var seed[32];
+    # `secret var` zeroizes seed on every return (Cyrius 5.3.5+).
+    secret var seed[32];
     memset(&seed, 0, 32);
     var fd = file_open("/dev/urandom", 0, 0);
     if (fd < 0) { return 0; }
@@ -3929,14 +4143,12 @@ fn generate_keypair(sk_out, pk_out) {
         var n = file_read(fd, (&seed) + got, 32 - got);
         if (n <= 0) {
             file_close(fd);
-            memset(&seed, 0, 32);
             return 0;
         }
         got = got + n;
     }
     file_close(fd);
     ed25519_keypair(&seed, sk_out, pk_out);
-    memset(&seed, 0, 32);
 
     # key_id = first 16 hex chars of public key
     var hex = hex_encode(pk_out, 32);

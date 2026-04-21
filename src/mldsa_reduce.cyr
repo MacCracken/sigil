@@ -1,0 +1,126 @@
+# mldsa_reduce.cyr — modular reduction primitives for ML-DSA
+#
+# Three operations used throughout the NTT / poly arithmetic
+# layers. Bounds and formulas mirror pq-crystals/dilithium
+# `ref/reduce.c`, which is the FIPS-204 reference implementation.
+#
+# Representation: every coefficient is a Cyrius i64 holding the
+# signed 32-bit Montgomery-form value. Callers keep the value
+# within the documented bounds of each helper; we do not re-check.
+#
+# Cyrius arithmetic notes (cc5):
+#   - `>>` is LOGICAL shift right (zero-fill). Do not use for
+#     arithmetic sign-extension.
+#   - `/` is SIGNED 64-bit integer division (IDIV). Safe for the
+#     Montgomery divide-by-2^32 step because the dividend is
+#     always exactly divisible by 2^32.
+#   - Integer wraparound is i64 two's-complement; subtracting a
+#     larger unsigned value naturally produces a negative i64.
+#
+# Constants (from pq-crystals ref/reduce.h):
+#   MONT  = -4186625  = 2^32  mod Q  in signed form (Montgomery R)
+#   QINV  =  58728449 = Q^{-1} mod 2^32 (used in montgomery_reduce)
+# Neither constant is parameter-set dependent; both hold for every
+# ML-DSA variant since they derive only from (Q, N).
+
+var MLDSA_MONT = 0 - 4186625;           # R = 2^32 mod Q, signed form
+var MLDSA_QINV = 58728449;              # Q * QINV ≡ -1 (mod 2^32)
+
+# ================================================================
+# mldsa_montgomery_reduce — montgomery_reduce in FIPS 204 notation
+# ================================================================
+# Input:  a  with |a| ≤ Q * 2^31
+# Output: r  with |r| < Q     (r ≡ a * 2^{-32} mod Q)
+#
+# Algorithm (C reference):
+#   t = (int32_t)a * QINV;                # low 32 bits of a*QINV, signed
+#   r = (a - (int64_t)t * Q) >> 32;       # arithmetic shift right by 32
+# Cyrius port:
+#   - Compute low 32 bits of a*QINV via i64 wraparound arithmetic,
+#     then sign-extend to i64 by subtracting 2^32 when bit 31 set.
+#   - The final shift is implemented as signed division by 2^32,
+#     which is equivalent here because `a - t*Q` is always an
+#     exact multiple of 2^32 by Montgomery construction.
+
+fn mldsa_montgomery_reduce(a) {
+    # Step 1: t_low = low 32 bits of a * QINV (unsigned view).
+    var t_raw = a * MLDSA_QINV;
+    var t_low = t_raw & 0xFFFFFFFF;
+    # Sign-extend to i64: if bit 31 is set, subtract 2^32.
+    var t = t_low - ((t_low & 0x80000000) << 1);
+    # Step 2: arithmetic shift right by 32 on (a − t·Q).
+    # The dividend is an exact multiple of 2^32 (Montgomery
+    # construction), so ASR and signed division agree. We use
+    # bitwise shift + sign-fill instead of IDIV because IDIV is
+    # the slowest instruction in the butterfly hot path
+    # (~20 cycles on modern x86 vs ~2 for shift+or) and because
+    # IDIV's timing, though bounded here, depends on the quotient
+    # magnitude — not strictly constant-time.
+    var diff = a - t * MLDSA_Q;
+    var logical = diff >> 32;
+    var sign = (diff >> 63) & 1;
+    var fill = (0 - sign) << 32;
+    return logical | fill;
+}
+
+# ================================================================
+# mldsa_reduce32 — reduce32 in FIPS 204 notation
+# ================================================================
+# Input:  a  with |a| ≤ 2^31 - 2^22 - 1  (spec constraint)
+# Output: r  with -6283008 ≤ r ≤ 6283008  (r ≡ a mod Q)
+#
+# Barrett-style nearest-multiple reduction: the approximate
+# quotient t = ⌊(a + 2^22) / 2^23⌋ rounds a/Q to nearest, and
+# t·Q is subtracted from a. The residual's magnitude is at most
+# ⌈Q/2⌉ plus a small rounding slack, giving the 6283008 bound.
+#
+# The `/ 2^23` in the C reference is an **arithmetic** shift —
+# rounds toward −∞ — whereas Cyrius's `/` is IDIV, which truncates
+# toward zero. The two agree on non-negative dividends but disagree
+# on negative ones (for a = −Q, C gives t = −1, Cyrius IDIV would
+# give t = 0). Emulate arithmetic shift right by 23 as
+# `(x >> 23) | ((−sign(x)) << 41)`:
+#   - `x >> 23` is Cyrius's logical right shift, fills zeros.
+#   - `(x >> 63) & 1` exposes the i64 sign bit via that same
+#     logical shift.
+#   - `0 − sign` is all-ones on negative, zero otherwise; shifted
+#     left 41 it forms a mask covering the top 23 bits, which the
+#     OR folds into the logical-shift result.
+# No data-dependent branch; all straight-line arithmetic.
+
+fn mldsa_reduce32(a) {
+    var x = a + (1 << 22);
+    var logical = x >> 23;
+    var sign = (x >> 63) & 1;
+    var fill = (0 - sign) << 41;
+    var t = logical | fill;
+    return a - t * MLDSA_Q;
+}
+
+# ================================================================
+# mldsa_caddq — caddq in FIPS 204 notation (conditional add Q)
+# ================================================================
+# Input:  a  with -Q < a < Q
+# Output: r  with 0 ≤ r < Q    (r ≡ a mod Q, canonical rep)
+#
+# The C reference uses `a + ((a >> 31) & Q)` where the shift is
+# arithmetic on a signed int32. In Cyrius (logical >>, i64), we
+# read the i64 sign bit directly: `(a >> 63) & 1` is 1 for any
+# negative i64, 0 otherwise. Multiply by Q to get the conditional
+# addend. No data-dependent branch — the sign-bit extraction and
+# multiply are straight-line arithmetic.
+
+fn mldsa_caddq(a) {
+    var neg = (a >> 63) & 1;
+    return a + neg * MLDSA_Q;
+}
+
+# ================================================================
+# mldsa_freeze — reduce to canonical [0, Q) representation
+# ================================================================
+# Convenience wrapper = caddq ∘ reduce32. Used at pack boundaries
+# where the coefficient must be the unique in-range representative.
+
+fn mldsa_freeze(a) {
+    return mldsa_caddq(mldsa_reduce32(a));
+}

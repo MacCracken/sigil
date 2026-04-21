@@ -12,8 +12,11 @@
 # ================================================================
 
 fn hmac_sha256(key, key_len, msg, msg_len, out) {
-    # Step 1: Derive K' (64 bytes)
-    var kprime[64];
+    # Step 1: Derive K' (64 bytes). `secret var` guarantees the
+    # buffer is zeroed on function exit (Cyrius 5.3.5+). The init
+    # memset below is retained for program correctness — the
+    # key_len < 64 branch relies on the upper bytes being zero.
+    secret var kprime[64];
     memset(&kprime, 0, 64);
 
     if (key_len > 64) {
@@ -26,7 +29,7 @@ fn hmac_sha256(key, key_len, msg, msg_len, out) {
     }
 
     # Step 2: inner = SHA-256((K' xor ipad) || message)
-    var ipad[64];
+    secret var ipad[64];
     var i = 0;
     while (i < 64) {
         store8(&ipad + i, (load8(&kprime + i) & 0xFF) ^ 0x36);
@@ -41,7 +44,7 @@ fn hmac_sha256(key, key_len, msg, msg_len, out) {
     fl_free(inner_ctx);
 
     # Step 3: outer = SHA-256((K' xor opad) || inner)
-    var opad[64];
+    secret var opad[64];
     i = 0;
     while (i < 64) {
         store8(&opad + i, (load8(&kprime + i) & 0xFF) ^ 0x5c);
@@ -54,13 +57,9 @@ fn hmac_sha256(key, key_len, msg, msg_len, out) {
     sha256_finalize(outer_ctx, out);
     fl_free(outer_ctx);
 
-    # Zeroize key-derived material on stack before return.
-    # kprime holds K', ipad/opad hold K' XOR 0x36/0x5c. inner_hash
-    # is a plain digest (public) but zero it too for consistency.
-    memset(&kprime, 0, 64);
-    memset(&ipad, 0, 64);
-    memset(&opad, 0, 64);
-    memset(&inner_hash, 0, 32);
+    # kprime / ipad / opad are `secret var` — zeroed on return by
+    # the compiler. inner_hash is a public digest; left as a plain
+    # var (no security need to clear).
     return 0;
 }
 

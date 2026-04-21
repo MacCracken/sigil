@@ -185,14 +185,14 @@ var _gsm_bit = 0;
 
 # Constant-time conditional move on a 128-byte extended point.
 # If bit == 1: dst := src.  If bit == 0: dst unchanged.
-# No branches on `bit`; uses mask = -bit  (0 or all-ones).
+# Per-limb select via stdlib ct_select (lib/ct.cyr) — identical
+# mask-xor arithmetic, single audit surface across the codebase.
 fn ge_cmov(dst, src, bit) {
-    var mask = 0 - bit;
     var i = 0;
     while (i < 128) {
         var d = load64(dst + i);
         var sv = load64(src + i);
-        store64(dst + i, d ^ (mask & (d ^ sv)));
+        store64(dst + i, ct_select(bit, d, sv));
         i = i + 8;
     }
     return 0;
@@ -789,7 +789,10 @@ fn ed25519_generate_keypair(sk_out, pk_out) {
     # produced in that case are all-zero (sk_out / pk_out are set from
     # a zeroed seed) so any verify against them will fail deterministically
     # rather than silently accepting a garbage key.
-    var seed[32];
+    # `secret var` clears seed on every return path (Cyrius 5.3.5+).
+    # Init memset retained because file_read into a partial buffer
+    # on the error path below might leave upper bytes stale.
+    secret var seed[32];
     memset(&seed, 0, 32);
     var fd = file_open("/dev/urandom", 0, 0);
     if (fd < 0) {
@@ -802,7 +805,6 @@ fn ed25519_generate_keypair(sk_out, pk_out) {
         var n = file_read(fd, (&seed) + got, 32 - got);
         if (n <= 0) {
             file_close(fd);
-            memset(&seed, 0, 32);
             memset(sk_out, 0, 64);
             memset(pk_out, 0, 32);
             return 0;
@@ -811,6 +813,5 @@ fn ed25519_generate_keypair(sk_out, pk_out) {
     }
     file_close(fd);
     ed25519_keypair(&seed, sk_out, pk_out);
-    memset(&seed, 0, 32);
     return 1;
 }

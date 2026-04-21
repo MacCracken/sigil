@@ -1,0 +1,150 @@
+# mldsa_reduce.tcyr — modular reduction sanity tests
+#
+# Checks the three reduce primitives against the algebraic
+# identities they must satisfy:
+#
+#   montgomery_reduce(a) ≡ a · R^{-1}  (mod Q),  |r| < Q
+#   reduce32(a)          ≡ a           (mod Q),  |r| ≤ 6283008
+#   caddq(a)             ≡ a           (mod Q),  0 ≤ r < Q
+#
+# Known identities exploited:
+#   - Any multiple of Q reduces to 0 (mod Q).
+#   - montgomery_reduce(a · 2^32) ≡ a (mod Q). This gives an
+#     easy round-trip: pick a in (−Q, Q), left-shift by 32,
+#     feed through montgomery_reduce, expect a back (modulo Q).
+#   - caddq(reduce32(a)) == the canonical [0, Q) representative.
+
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/chrono.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fmt.cyr"
+include "lib/json.cyr"
+include "lib/sakshi.cyr"
+
+include "src/mldsa_params.cyr"
+include "src/mldsa_reduce.cyr"
+
+# Helper: compute canonical residue of x mod Q in [0, Q).
+# Used to check `(a ≡ b (mod Q))` without worrying about which
+# representative each side lands on.
+fn canon_mod_q(x) {
+    var r = x - (x / MLDSA_Q) * MLDSA_Q;    # r ∈ (-Q, Q)
+    if (r < 0) { r = r + MLDSA_Q; }
+    return r;
+}
+
+fn main() {
+    alloc_init();
+
+    # ============================================================
+    # Constants
+    # ============================================================
+    test_group("reduce constants");
+    # MONT should encode 2^32 mod Q, in signed (-Q, Q) form.
+    # 2^32 mod 8380417 = 4193792. The signed representative in
+    # range (−Q, Q) with smaller magnitude is 4193792 − Q = −4186625.
+    assert_eq(MLDSA_MONT, 0 - 4186625, "MONT = -4186625");
+    # QINV constant: Q * QINV ≡ +1 (mod 2^32). The C reference
+    # subtracts t·Q (not adds), so the inverse is positive in this
+    # Montgomery formulation: for `(a − t·Q) >> 32` to clear the
+    # low 32 bits we need Q · QINV ≡ 1 (mod 2^32).
+    var qinv_check = (MLDSA_Q * MLDSA_QINV) & 0xFFFFFFFF;
+    assert_eq(qinv_check, 1, "Q * QINV ≡ +1 mod 2^32");
+
+    # ============================================================
+    # montgomery_reduce
+    # ============================================================
+    test_group("montgomery_reduce");
+    # Trivial: 0 stays 0.
+    assert_eq(mldsa_montgomery_reduce(0), 0, "montgomery(0) = 0");
+    # Any multiple of Q: Q · R^{-1} ≡ 0 (mod Q).
+    assert_eq(canon_mod_q(mldsa_montgomery_reduce(MLDSA_Q)), 0, "montgomery(Q) ≡ 0");
+    assert_eq(canon_mod_q(mldsa_montgomery_reduce(MLDSA_Q * 42)), 0, "montgomery(42·Q) ≡ 0");
+    # Round-trip: montgomery(a · 2^32) ≡ a. Input bound a·2^32 ≤ Q·2^31
+    # holds when |a| ≤ Q/2 ≈ 4190208. Sample a few spot values.
+    var rt1 = mldsa_montgomery_reduce(1 * (1 << 32));
+    assert_eq(canon_mod_q(rt1), 1, "montgomery(2^32) ≡ 1");
+    var rt5 = mldsa_montgomery_reduce(5 * (1 << 32));
+    assert_eq(canon_mod_q(rt5), 5, "montgomery(5·2^32) ≡ 5");
+    var rt_neg = mldsa_montgomery_reduce((0 - 1) * (1 << 32));
+    assert_eq(canon_mod_q(rt_neg), MLDSA_Q - 1, "montgomery(-2^32) ≡ -1");
+    var rt_q_minus_1 = mldsa_montgomery_reduce((MLDSA_Q - 1) * (1 << 31));
+    # Here input is (Q-1)·2^31 = ((Q-1)/2)·2^32, so result ≡ (Q-1)/2... but
+    # (Q-1) is even? Q-1 = 8380416 = 2^12 * 2045.  Half = 4190208.
+    # So expected canonical is 4190208.
+    assert_eq(canon_mod_q(rt_q_minus_1), 4190208, "montgomery((Q-1)·2^31) ≡ (Q-1)/2");
+    # Output range: |r| < Q for all tested outputs.
+    assert(mldsa_montgomery_reduce(0) < MLDSA_Q, "bound: 0 < Q");
+    assert(mldsa_montgomery_reduce(MLDSA_Q * 42) < MLDSA_Q, "bound: 42·Q < Q");
+    assert(mldsa_montgomery_reduce(MLDSA_Q * 42) > (0 - MLDSA_Q), "bound: 42·Q > -Q");
+
+    # ============================================================
+    # reduce32
+    # ============================================================
+    test_group("reduce32");
+    # Trivial fixed points.
+    assert_eq(mldsa_reduce32(0), 0, "reduce32(0) = 0");
+    assert_eq(mldsa_reduce32(1), 1, "reduce32(1) = 1");
+    assert_eq(mldsa_reduce32(0 - 1), 0 - 1, "reduce32(-1) = -1");
+    # Multiples of Q reduce to 0 (or ±Q, but Barrett picks 0 at multiples).
+    assert_eq(mldsa_reduce32(MLDSA_Q), 0, "reduce32(Q) = 0");
+    assert_eq(mldsa_reduce32(MLDSA_Q * 2), 0, "reduce32(2Q) = 0");
+    assert_eq(mldsa_reduce32(0 - MLDSA_Q), 0, "reduce32(-Q) = 0  (uses ASR emulation)");
+    assert_eq(mldsa_reduce32(0 - MLDSA_Q * 3), 0, "reduce32(-3Q) = 0");
+    # Near-boundary: inputs that produce the extreme outputs.
+    # reduce32(Q + 1) = 1; reduce32(Q - 1) = -1 (since Q-1 rounds t to 1).
+    assert_eq(mldsa_reduce32(MLDSA_Q + 1), 1, "reduce32(Q+1) = 1");
+    assert_eq(mldsa_reduce32(MLDSA_Q - 1), 0 - 1, "reduce32(Q-1) = -1");
+    # Residue equivalence: reduce32(x) ≡ x (mod Q) for a handful of values.
+    var xs_pos = 12345678;
+    assert_eq(canon_mod_q(mldsa_reduce32(xs_pos)), canon_mod_q(xs_pos), "reduce32(12345678) ≡ x");
+    var xs_neg = 0 - 12345678;
+    assert_eq(canon_mod_q(mldsa_reduce32(xs_neg)), canon_mod_q(xs_neg), "reduce32(-12345678) ≡ x");
+    # Output bound: |r| ≤ 6283008. Check a spread.
+    assert(mldsa_reduce32(xs_pos) <= 6283008, "reduce32 bound + 12345678");
+    assert(mldsa_reduce32(xs_pos) >= 0 - 6283008, "reduce32 bound - 12345678");
+    assert(mldsa_reduce32(xs_neg) <= 6283008, "reduce32 bound + neg");
+    assert(mldsa_reduce32(xs_neg) >= 0 - 6283008, "reduce32 bound - neg");
+
+    # ============================================================
+    # caddq
+    # ============================================================
+    test_group("caddq");
+    assert_eq(mldsa_caddq(0), 0, "caddq(0) = 0");
+    assert_eq(mldsa_caddq(1), 1, "caddq(+1) unchanged");
+    assert_eq(mldsa_caddq(MLDSA_Q - 1), MLDSA_Q - 1, "caddq(Q-1) unchanged");
+    assert_eq(mldsa_caddq(0 - 1), MLDSA_Q - 1, "caddq(-1) = Q-1");
+    assert_eq(mldsa_caddq(0 - (MLDSA_Q - 1)), 1, "caddq(-(Q-1)) = 1");
+    # caddq output is always in [0, Q) for inputs in (−Q, Q).
+    assert(mldsa_caddq(0 - 1) < MLDSA_Q, "caddq output < Q");
+    assert(mldsa_caddq(0 - 1) >= 0, "caddq output >= 0");
+
+    # ============================================================
+    # freeze = caddq ∘ reduce32
+    # ============================================================
+    test_group("freeze");
+    assert_eq(mldsa_freeze(0), 0, "freeze(0) = 0");
+    assert_eq(mldsa_freeze(MLDSA_Q), 0, "freeze(Q) = 0");
+    assert_eq(mldsa_freeze(MLDSA_Q - 1), MLDSA_Q - 1, "freeze(Q-1) = Q-1");
+    assert_eq(mldsa_freeze(MLDSA_Q + 1), 1, "freeze(Q+1) = 1");
+    assert_eq(mldsa_freeze(0 - 1), MLDSA_Q - 1, "freeze(-1) = Q-1");
+    # Full idempotence: freeze(freeze(x)) == freeze(x). Ensures the
+    # canonical form is a fixed point of freeze.
+    var f1 = mldsa_freeze(12345678);
+    var f2 = mldsa_freeze(f1);
+    assert_eq(f1, f2, "freeze is idempotent");
+    # Residue equivalence against canon_mod_q.
+    assert_eq(mldsa_freeze(12345678), canon_mod_q(12345678), "freeze matches canon");
+    assert_eq(mldsa_freeze(0 - 12345678), canon_mod_q(0 - 12345678), "freeze matches canon (neg)");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);
