@@ -1,0 +1,221 @@
+# mldsa_sample.tcyr — SHAKE-driven sampling tests
+#
+# No KAT comparison yet (those come with the full keygen/sign/verify
+# wiring). Here we check structural invariants: determinism, output
+# ranges, SampleInBall weight and ±1 coefficient values, matrix
+# expand dimensioning. The point is to catch missing memset-before-
+# absorb, wrong block counts, etc. before they meet the signing loop.
+
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/string.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/chrono.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fmt.cyr"
+include "lib/json.cyr"
+include "lib/sakshi.cyr"
+include "lib/keccak.cyr"
+
+include "src/mldsa_params.cyr"
+include "src/mldsa_reduce.cyr"
+include "src/mldsa_ntt.cyr"
+include "src/mldsa_poly.cyr"
+include "src/mldsa_rounding.cyr"
+include "src/mldsa_sample.cyr"
+
+fn poly_eq(a, b) {
+    var i = 0;
+    while (i < 256) {
+        if (load64(a + i * 8) != load64(b + i * 8)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# Deterministic test seed: 32 bytes of 0xA5 pattern.
+fn test_seed_32() {
+    var s = alloc(32);
+    var i = 0;
+    while (i < 32) {
+        store8(s + i, 0xA5 ^ i);
+        i = i + 1;
+    }
+    return s;
+}
+
+# 64-byte test seed: 0xB7 XOR i.
+fn test_seed_64() {
+    var s = alloc(64);
+    var i = 0;
+    while (i < 64) {
+        store8(s + i, 0xB7 ^ i);
+        i = i + 1;
+    }
+    return s;
+}
+
+# 48-byte CTILDE test seed.
+fn test_seed_48() {
+    var s = alloc(48);
+    var i = 0;
+    while (i < 48) {
+        store8(s + i, 0xC3 ^ i);
+        i = i + 1;
+    }
+    return s;
+}
+
+fn main() {
+    alloc_init();
+
+    # ============================================================
+    # poly_uniform — SHAKE-128, range [0, Q)
+    # ============================================================
+    test_group("poly_uniform");
+    var rho = test_seed_32();
+    var pu_a = alloc(256 * 8);
+    var pu_b = alloc(256 * 8);
+    mldsa_poly_uniform(pu_a, rho, 0);
+    mldsa_poly_uniform(pu_b, rho, 0);
+    assert_eq(poly_eq(pu_a, pu_b), 1, "poly_uniform deterministic");
+
+    mldsa_poly_uniform(pu_b, rho, 1);
+    assert_eq(poly_eq(pu_a, pu_b), 0, "different nonce → different poly");
+
+    # All coefficients in [0, Q).
+    var bad = 0;
+    var i = 0;
+    while (i < 256) {
+        var c = load64(pu_a + i * 8);
+        if (c < 0) { bad = bad + 1; }
+        if (c >= MLDSA_Q) { bad = bad + 1; }
+        i = i + 1;
+    }
+    assert_eq(bad, 0, "poly_uniform: coeffs ∈ [0, Q)");
+
+    # ============================================================
+    # poly_uniform_eta — SHAKE-256, range [-η, η]
+    # ============================================================
+    test_group("poly_uniform_eta");
+    var crh = test_seed_64();
+    var pe_a = alloc(256 * 8);
+    var pe_b = alloc(256 * 8);
+    mldsa_poly_uniform_eta(pe_a, crh, 0);
+    mldsa_poly_uniform_eta(pe_b, crh, 0);
+    assert_eq(poly_eq(pe_a, pe_b), 1, "poly_uniform_eta deterministic");
+    mldsa_poly_uniform_eta(pe_b, crh, 1);
+    assert_eq(poly_eq(pe_a, pe_b), 0, "eta nonce differentiates");
+
+    var bad2 = 0;
+    i = 0;
+    while (i < 256) {
+        var c = load64(pe_a + i * 8);
+        if (c < 0 - MLDSA65_ETA) { bad2 = bad2 + 1; }
+        if (c > MLDSA65_ETA) { bad2 = bad2 + 1; }
+        i = i + 1;
+    }
+    assert_eq(bad2, 0, "poly_uniform_eta: coeffs ∈ [-η, η]");
+
+    # ============================================================
+    # poly_uniform_gamma1 — SHAKE-256, range [1-γ1, γ1]
+    # ============================================================
+    test_group("poly_uniform_gamma1");
+    var pg_a = alloc(256 * 8);
+    var pg_b = alloc(256 * 8);
+    mldsa_poly_uniform_gamma1(pg_a, crh, 100);
+    mldsa_poly_uniform_gamma1(pg_b, crh, 100);
+    assert_eq(poly_eq(pg_a, pg_b), 1, "poly_uniform_gamma1 deterministic");
+    mldsa_poly_uniform_gamma1(pg_b, crh, 101);
+    assert_eq(poly_eq(pg_a, pg_b), 0, "gamma1 nonce differentiates");
+
+    var bad3 = 0;
+    i = 0;
+    while (i < 256) {
+        var c = load64(pg_a + i * 8);
+        if (c < 1 - MLDSA65_GAMMA1) { bad3 = bad3 + 1; }
+        if (c > MLDSA65_GAMMA1) { bad3 = bad3 + 1; }
+        i = i + 1;
+    }
+    assert_eq(bad3, 0, "poly_uniform_gamma1: coeffs ∈ [1-γ1, γ1]");
+
+    # ============================================================
+    # poly_challenge — SampleInBall: exactly τ = 49 non-zero ±1 coeffs
+    # ============================================================
+    test_group("poly_challenge");
+    var ctilde = test_seed_48();
+    var ch_a = alloc(256 * 8);
+    var ch_b = alloc(256 * 8);
+    mldsa_poly_challenge(ch_a, ctilde);
+    mldsa_poly_challenge(ch_b, ctilde);
+    assert_eq(poly_eq(ch_a, ch_b), 1, "poly_challenge deterministic");
+
+    var nonzero = 0;
+    var bad_value = 0;
+    i = 0;
+    while (i < 256) {
+        var c = load64(ch_a + i * 8);
+        if (c != 0) {
+            nonzero = nonzero + 1;
+            if (c != 1) { if (c != 0 - 1) { bad_value = bad_value + 1; } }
+        }
+        i = i + 1;
+    }
+    assert_eq(nonzero, MLDSA65_TAU, "challenge weight = τ");
+    assert_eq(bad_value, 0, "challenge values are ±1");
+
+    # ============================================================
+    # polyvec_matrix_expand — K·L polys, all distinct (≠ first)
+    # ============================================================
+    test_group("polyvec_matrix_expand");
+    var mat = alloc(MLDSA65_K * MLDSA65_L * 256 * 8);
+    mldsa_polyvec_matrix_expand(mat, rho);
+    # First poly is non-zero (sampling rarely produces all-zero).
+    var first_nonzero = 0;
+    i = 0;
+    while (i < 256) {
+        if (load64(mat + i * 8) != 0) { first_nonzero = 1; }
+        i = i + 1;
+    }
+    assert_eq(first_nonzero, 1, "matrix[0][0] non-zero");
+
+    # Row 0 col 1 differs from row 0 col 0.
+    var poly01 = mat + 1 * 2048;
+    var differs_01 = 0;
+    i = 0;
+    while (i < 256) {
+        if (load64(mat + i * 8) != load64(poly01 + i * 8)) { differs_01 = 1; }
+        i = i + 1;
+    }
+    assert_eq(differs_01, 1, "matrix[0][0] ≠ matrix[0][1]");
+
+    # Row 1 col 0 differs from row 0 col 0 (different outer nonce).
+    var poly10 = mat + MLDSA65_L * 2048;  # i=1, j=0
+    var differs_10 = 0;
+    i = 0;
+    while (i < 256) {
+        if (load64(mat + i * 8) != load64(poly10 + i * 8)) { differs_10 = 1; }
+        i = i + 1;
+    }
+    assert_eq(differs_10, 1, "matrix[0][0] ≠ matrix[1][0]");
+
+    # Consistency check: re-expand gives the same matrix.
+    var mat2 = alloc(MLDSA65_K * MLDSA65_L * 256 * 8);
+    mldsa_polyvec_matrix_expand(mat2, rho);
+    var mat_bad = 0;
+    i = 0;
+    while (i < MLDSA65_K * MLDSA65_L * 256) {
+        if (load64(mat + i * 8) != load64(mat2 + i * 8)) { mat_bad = mat_bad + 1; }
+        i = i + 1;
+    }
+    assert_eq(mat_bad, 0, "matrix expand deterministic across whole K×L");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);
