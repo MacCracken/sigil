@@ -4328,6 +4328,405 @@ fn mldsa_polyveck_use_hint(w, u, h) {
     return 0;
 }
 
+# --- mldsa_encode.cyr ---
+
+# mldsa_encode.cyr — byte packing for ML-DSA keys and signatures
+#
+# Every byte that leaves sigil's ML-DSA surface goes through this
+# module — public keys, secret keys, and signatures. Reference:
+# pq-crystals/dilithium ref/poly.c (per-poly packers) +
+# ref/packing.c (pk/sk/sig assembly).
+#
+# Bit layouts (ML-DSA-65 branches only, GAMMA1 = 2^19, GAMMA2 =
+# (Q−1)/32, ETA = 4):
+#
+#   polyt1 : 10 bits/coeff unsigned — 4 coeffs → 5 bytes → 320 B
+#   polyt0 : 13 bits/coeff balanced (2^{D-1}−c) — 8 coeffs → 13 bytes → 416 B
+#   polyeta: 4 bits/coeff (η−c) — 2 coeffs → 1 byte → 128 B
+#   polyz  : 20 bits/coeff (γ1−c) — 2 coeffs → 5 bytes → 640 B
+#   polyw1 : 4 bits/coeff standard rep — 2 coeffs → 1 byte → 128 B
+#
+# All packers assume coefficients have already been reduced to
+# the documented range (caller's responsibility). No modular
+# reduction happens inside the packers.
+#
+# Cyrius note: bytes come from `load8` / go through `store8` with
+# explicit `& 0xFF` masks — Cyrius's load8/store8 sign-extend to
+# i64 on read and truncate on write, but intermediate arithmetic
+# on i64 needs explicit masking to stay within the byte lane.
+
+# ================================================================
+# polyt1_pack / polyt1_unpack (10 bits/coeff, 320 bytes per poly)
+# ================================================================
+
+fn _mldsa_polyt1_pack(r, a) {
+    var i = 0;
+    while (i < 256 / 4) {
+        var c0 = load64(a + (4 * i + 0) * 8);
+        var c1 = load64(a + (4 * i + 1) * 8);
+        var c2 = load64(a + (4 * i + 2) * 8);
+        var c3 = load64(a + (4 * i + 3) * 8);
+        store8(r + 5 * i + 0, c0 & 0xFF);
+        store8(r + 5 * i + 1, ((c0 >> 8) | (c1 << 2)) & 0xFF);
+        store8(r + 5 * i + 2, ((c1 >> 6) | (c2 << 4)) & 0xFF);
+        store8(r + 5 * i + 3, ((c2 >> 4) | (c3 << 6)) & 0xFF);
+        store8(r + 5 * i + 4, (c3 >> 2) & 0xFF);
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn _mldsa_polyt1_unpack(r, a) {
+    var i = 0;
+    while (i < 256 / 4) {
+        var b0 = load8(a + 5 * i + 0) & 0xFF;
+        var b1 = load8(a + 5 * i + 1) & 0xFF;
+        var b2 = load8(a + 5 * i + 2) & 0xFF;
+        var b3 = load8(a + 5 * i + 3) & 0xFF;
+        var b4 = load8(a + 5 * i + 4) & 0xFF;
+        store64(r + (4 * i + 0) * 8, ((b0 >> 0) | (b1 << 8)) & 0x3FF);
+        store64(r + (4 * i + 1) * 8, ((b1 >> 2) | (b2 << 6)) & 0x3FF);
+        store64(r + (4 * i + 2) * 8, ((b2 >> 4) | (b3 << 4)) & 0x3FF);
+        store64(r + (4 * i + 3) * 8, ((b3 >> 6) | (b4 << 2)) & 0x3FF);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ================================================================
+# polyt0_pack / polyt0_unpack (13 bits/coeff balanced, 416 bytes)
+# ================================================================
+# Coefficients land in (−2^{D−1}, 2^{D−1}]. Packed as
+# 2^{D−1} − c so the stored value is non-negative.
+
+fn _mldsa_polyt0_pack(r, a) {
+    var bias = 1 << (MLDSA_D - 1);
+    var i = 0;
+    while (i < 256 / 8) {
+        var t0 = bias - load64(a + (8 * i + 0) * 8);
+        var t1 = bias - load64(a + (8 * i + 1) * 8);
+        var t2 = bias - load64(a + (8 * i + 2) * 8);
+        var t3 = bias - load64(a + (8 * i + 3) * 8);
+        var t4 = bias - load64(a + (8 * i + 4) * 8);
+        var t5 = bias - load64(a + (8 * i + 5) * 8);
+        var t6 = bias - load64(a + (8 * i + 6) * 8);
+        var t7 = bias - load64(a + (8 * i + 7) * 8);
+        store8(r + 13 * i + 0,  t0 & 0xFF);
+        store8(r + 13 * i + 1,  ((t0 >> 8) | (t1 << 5)) & 0xFF);
+        store8(r + 13 * i + 2,  (t1 >> 3) & 0xFF);
+        store8(r + 13 * i + 3,  ((t1 >> 11) | (t2 << 2)) & 0xFF);
+        store8(r + 13 * i + 4,  ((t2 >> 6) | (t3 << 7)) & 0xFF);
+        store8(r + 13 * i + 5,  (t3 >> 1) & 0xFF);
+        store8(r + 13 * i + 6,  ((t3 >> 9) | (t4 << 4)) & 0xFF);
+        store8(r + 13 * i + 7,  (t4 >> 4) & 0xFF);
+        store8(r + 13 * i + 8,  ((t4 >> 12) | (t5 << 1)) & 0xFF);
+        store8(r + 13 * i + 9,  ((t5 >> 7) | (t6 << 6)) & 0xFF);
+        store8(r + 13 * i + 10, (t6 >> 2) & 0xFF);
+        store8(r + 13 * i + 11, ((t6 >> 10) | (t7 << 3)) & 0xFF);
+        store8(r + 13 * i + 12, (t7 >> 5) & 0xFF);
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn _mldsa_polyt0_unpack(r, a) {
+    var bias = 1 << (MLDSA_D - 1);
+    var i = 0;
+    while (i < 256 / 8) {
+        var b0 = load8(a + 13 * i + 0) & 0xFF;
+        var b1 = load8(a + 13 * i + 1) & 0xFF;
+        var b2 = load8(a + 13 * i + 2) & 0xFF;
+        var b3 = load8(a + 13 * i + 3) & 0xFF;
+        var b4 = load8(a + 13 * i + 4) & 0xFF;
+        var b5 = load8(a + 13 * i + 5) & 0xFF;
+        var b6 = load8(a + 13 * i + 6) & 0xFF;
+        var b7 = load8(a + 13 * i + 7) & 0xFF;
+        var b8 = load8(a + 13 * i + 8) & 0xFF;
+        var b9 = load8(a + 13 * i + 9) & 0xFF;
+        var b10 = load8(a + 13 * i + 10) & 0xFF;
+        var b11 = load8(a + 13 * i + 11) & 0xFF;
+        var b12 = load8(a + 13 * i + 12) & 0xFF;
+        var c0 = (b0 | (b1 << 8)) & 0x1FFF;
+        var c1 = ((b1 >> 5) | (b2 << 3) | (b3 << 11)) & 0x1FFF;
+        var c2 = ((b3 >> 2) | (b4 << 6)) & 0x1FFF;
+        var c3 = ((b4 >> 7) | (b5 << 1) | (b6 << 9)) & 0x1FFF;
+        var c4 = ((b6 >> 4) | (b7 << 4) | (b8 << 12)) & 0x1FFF;
+        var c5 = ((b8 >> 1) | (b9 << 7)) & 0x1FFF;
+        var c6 = ((b9 >> 6) | (b10 << 2) | (b11 << 10)) & 0x1FFF;
+        var c7 = ((b11 >> 3) | (b12 << 5)) & 0x1FFF;
+        store64(r + (8 * i + 0) * 8, bias - c0);
+        store64(r + (8 * i + 1) * 8, bias - c1);
+        store64(r + (8 * i + 2) * 8, bias - c2);
+        store64(r + (8 * i + 3) * 8, bias - c3);
+        store64(r + (8 * i + 4) * 8, bias - c4);
+        store64(r + (8 * i + 5) * 8, bias - c5);
+        store64(r + (8 * i + 6) * 8, bias - c6);
+        store64(r + (8 * i + 7) * 8, bias - c7);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ================================================================
+# polyeta_pack / polyeta_unpack (η = 4, 4 bits/coeff, 128 bytes)
+# ================================================================
+# Store η − c as a 4-bit value; two coefficients per byte.
+
+fn _mldsa_polyeta_pack(r, a) {
+    var i = 0;
+    while (i < 256 / 2) {
+        var t0 = MLDSA65_ETA - load64(a + (2 * i + 0) * 8);
+        var t1 = MLDSA65_ETA - load64(a + (2 * i + 1) * 8);
+        store8(r + i, (t0 | (t1 << 4)) & 0xFF);
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn _mldsa_polyeta_unpack(r, a) {
+    var i = 0;
+    while (i < 256 / 2) {
+        var b = load8(a + i) & 0xFF;
+        store64(r + (2 * i + 0) * 8, MLDSA65_ETA - (b & 0x0F));
+        store64(r + (2 * i + 1) * 8, MLDSA65_ETA - (b >> 4));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ================================================================
+# polyz_pack / polyz_unpack (γ1 = 2^19, 20 bits/coeff, 640 bytes)
+# ================================================================
+
+fn _mldsa_polyz_pack(r, a) {
+    var i = 0;
+    while (i < 256 / 2) {
+        var t0 = MLDSA65_GAMMA1 - load64(a + (2 * i + 0) * 8);
+        var t1 = MLDSA65_GAMMA1 - load64(a + (2 * i + 1) * 8);
+        store8(r + 5 * i + 0, t0 & 0xFF);
+        store8(r + 5 * i + 1, (t0 >> 8) & 0xFF);
+        store8(r + 5 * i + 2, ((t0 >> 16) | (t1 << 4)) & 0xFF);
+        store8(r + 5 * i + 3, (t1 >> 4) & 0xFF);
+        store8(r + 5 * i + 4, (t1 >> 12) & 0xFF);
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn _mldsa_polyz_unpack(r, a) {
+    var i = 0;
+    while (i < 256 / 2) {
+        var b0 = load8(a + 5 * i + 0) & 0xFF;
+        var b1 = load8(a + 5 * i + 1) & 0xFF;
+        var b2 = load8(a + 5 * i + 2) & 0xFF;
+        var b3 = load8(a + 5 * i + 3) & 0xFF;
+        var b4 = load8(a + 5 * i + 4) & 0xFF;
+        var c0 = (b0 | (b1 << 8) | (b2 << 16)) & 0xFFFFF;
+        var c1 = ((b2 >> 4) | (b3 << 4) | (b4 << 12)) & 0xFFFFF;
+        store64(r + (2 * i + 0) * 8, MLDSA65_GAMMA1 - c0);
+        store64(r + (2 * i + 1) * 8, MLDSA65_GAMMA1 - c1);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ================================================================
+# polyw1_pack (γ2 = (Q−1)/32 branch, 4 bits/coeff, 128 bytes)
+# ================================================================
+# No unpack — w1 only packs for the challenge-hash step. Input
+# coefficients are standard representatives in [0, 15].
+
+fn _mldsa_polyw1_pack(r, a) {
+    var i = 0;
+    while (i < 256 / 2) {
+        var c0 = load64(a + (2 * i + 0) * 8);
+        var c1 = load64(a + (2 * i + 1) * 8);
+        store8(r + i, (c0 | (c1 << 4)) & 0xFF);
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn mldsa_polyveck_pack_w1(r, v) {
+    var i = 0;
+    while (i < MLDSA65_K) {
+        _mldsa_polyw1_pack(r + i * MLDSA65_POLYW1_PACKEDBYTES, v + i * 2048);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ================================================================
+# pk / sk / sig assembly
+# ================================================================
+
+# pk = ρ (32 B) || t1 (K · 320 = 1920 B)
+fn mldsa_pack_pk(pk, rho, t1) {
+    memcpy(pk, rho, MLDSA_SEEDBYTES);
+    var i = 0;
+    while (i < MLDSA65_K) {
+        _mldsa_polyt1_pack(
+            pk + MLDSA_SEEDBYTES + i * MLDSA65_POLYT1_PACKEDBYTES,
+            t1 + i * 2048
+        );
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn mldsa_unpack_pk(rho, t1, pk) {
+    memcpy(rho, pk, MLDSA_SEEDBYTES);
+    var i = 0;
+    while (i < MLDSA65_K) {
+        _mldsa_polyt1_unpack(
+            t1 + i * 2048,
+            pk + MLDSA_SEEDBYTES + i * MLDSA65_POLYT1_PACKEDBYTES
+        );
+        i = i + 1;
+    }
+    return 0;
+}
+
+# sk = ρ (32) || K (32) || tr (64) || s1 (L·128) || s2 (K·128) || t0 (K·416)
+fn mldsa_pack_sk(sk, rho, key, tr, t0, s1, s2) {
+    var off = 0;
+    memcpy(sk + off, rho, MLDSA_SEEDBYTES);
+    off = off + MLDSA_SEEDBYTES;
+    memcpy(sk + off, key, MLDSA_SEEDBYTES);
+    off = off + MLDSA_SEEDBYTES;
+    memcpy(sk + off, tr, MLDSA_TRBYTES);
+    off = off + MLDSA_TRBYTES;
+    var i = 0;
+    while (i < MLDSA65_L) {
+        _mldsa_polyeta_pack(sk + off + i * MLDSA65_POLYETA_PACKEDBYTES, s1 + i * 2048);
+        i = i + 1;
+    }
+    off = off + MLDSA65_L * MLDSA65_POLYETA_PACKEDBYTES;
+    i = 0;
+    while (i < MLDSA65_K) {
+        _mldsa_polyeta_pack(sk + off + i * MLDSA65_POLYETA_PACKEDBYTES, s2 + i * 2048);
+        i = i + 1;
+    }
+    off = off + MLDSA65_K * MLDSA65_POLYETA_PACKEDBYTES;
+    i = 0;
+    while (i < MLDSA65_K) {
+        _mldsa_polyt0_pack(sk + off + i * MLDSA65_POLYT0_PACKEDBYTES, t0 + i * 2048);
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn mldsa_unpack_sk(rho, key, tr, t0, s1, s2, sk) {
+    var off = 0;
+    memcpy(rho, sk + off, MLDSA_SEEDBYTES);
+    off = off + MLDSA_SEEDBYTES;
+    memcpy(key, sk + off, MLDSA_SEEDBYTES);
+    off = off + MLDSA_SEEDBYTES;
+    memcpy(tr, sk + off, MLDSA_TRBYTES);
+    off = off + MLDSA_TRBYTES;
+    var i = 0;
+    while (i < MLDSA65_L) {
+        _mldsa_polyeta_unpack(s1 + i * 2048, sk + off + i * MLDSA65_POLYETA_PACKEDBYTES);
+        i = i + 1;
+    }
+    off = off + MLDSA65_L * MLDSA65_POLYETA_PACKEDBYTES;
+    i = 0;
+    while (i < MLDSA65_K) {
+        _mldsa_polyeta_unpack(s2 + i * 2048, sk + off + i * MLDSA65_POLYETA_PACKEDBYTES);
+        i = i + 1;
+    }
+    off = off + MLDSA65_K * MLDSA65_POLYETA_PACKEDBYTES;
+    i = 0;
+    while (i < MLDSA65_K) {
+        _mldsa_polyt0_unpack(t0 + i * 2048, sk + off + i * MLDSA65_POLYT0_PACKEDBYTES);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# sig = c̃ (CTILDEBYTES) || z (L·POLYZ_PACKEDBYTES) || h (OMEGA+K bytes)
+# Hint encoding: bytes [0, OMEGA) hold concatenated non-zero
+# coefficient indices across the K hint polys; bytes [OMEGA, OMEGA+K)
+# hold the cumulative count of non-zero coefficients after each
+# poly i. Strong unforgeability requires strictly-increasing
+# indices within each poly and zero-bytes in unused tail slots.
+fn mldsa_pack_sig(sig, c, z, h) {
+    var off = 0;
+    memcpy(sig + off, c, MLDSA65_CTILDEBYTES);
+    off = off + MLDSA65_CTILDEBYTES;
+    var i = 0;
+    while (i < MLDSA65_L) {
+        _mldsa_polyz_pack(sig + off + i * MLDSA65_POLYZ_PACKEDBYTES, z + i * 2048);
+        i = i + 1;
+    }
+    off = off + MLDSA65_L * MLDSA65_POLYZ_PACKEDBYTES;
+    # Zero the hint region (OMEGA index slots + K count slots).
+    memset(sig + off, 0, MLDSA65_OMEGA + MLDSA65_K);
+    var k = 0;
+    i = 0;
+    while (i < MLDSA65_K) {
+        var j = 0;
+        while (j < 256) {
+            if (load64(h + i * 2048 + j * 8) != 0) {
+                store8(sig + off + k, j & 0xFF);
+                k = k + 1;
+            }
+            j = j + 1;
+        }
+        store8(sig + off + MLDSA65_OMEGA + i, k & 0xFF);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Returns 0 on success, 1 on malformed signature. Zeros `h` on
+# the way in so unused coefficient positions are explicitly zero.
+fn mldsa_unpack_sig(c, z, h, sig) {
+    var off = 0;
+    memcpy(c, sig + off, MLDSA65_CTILDEBYTES);
+    off = off + MLDSA65_CTILDEBYTES;
+    var i = 0;
+    while (i < MLDSA65_L) {
+        _mldsa_polyz_unpack(z + i * 2048, sig + off + i * MLDSA65_POLYZ_PACKEDBYTES);
+        i = i + 1;
+    }
+    off = off + MLDSA65_L * MLDSA65_POLYZ_PACKEDBYTES;
+    var k = 0;
+    i = 0;
+    while (i < MLDSA65_K) {
+        # Zero the output hint poly.
+        var zj = 0;
+        while (zj < 256) {
+            store64(h + i * 2048 + zj * 8, 0);
+            zj = zj + 1;
+        }
+        var ki = load8(sig + off + MLDSA65_OMEGA + i) & 0xFF;
+        if (ki < k) { return 1; }
+        if (ki > MLDSA65_OMEGA) { return 1; }
+        var j = k;
+        while (j < ki) {
+            # Strictly-increasing indices for strong unforgeability.
+            if (j > k) {
+                var idx_prev = load8(sig + off + j - 1) & 0xFF;
+                var idx_curr = load8(sig + off + j) & 0xFF;
+                if (idx_curr <= idx_prev) { return 1; }
+            }
+            var coeff_idx = load8(sig + off + j) & 0xFF;
+            store64(h + i * 2048 + coeff_idx * 8, 1);
+            j = j + 1;
+        }
+        k = ki;
+        i = i + 1;
+    }
+    # Tail of the index region must be all zero.
+    var j2 = k;
+    while (j2 < MLDSA65_OMEGA) {
+        if ((load8(sig + off + j2) & 0xFF) != 0) { return 1; }
+        j2 = j2 + 1;
+    }
+    return 0;
+}
+
 # --- mldsa_sample.cyr ---
 
 # mldsa_sample.cyr — rejection sampling + challenge expansion
@@ -4476,30 +4875,9 @@ fn mldsa_rej_eta(a, len, buf, buflen) {
     return ctr;
 }
 
-# ================================================================
-# polyz_unpack — decode SHAKE-256 output into a γ1-range poly
-# ================================================================
-# GAMMA1 = 2^19 branch only. Coefficients are stored as 20 bits
-# each, 2 coeffs per 5 bytes, little-endian. Decoded value is
-# (γ1 − packed), giving coefficients in [1 − γ1, γ1].
-
-fn _mldsa_polyz_unpack(r, a) {
-    var i = 0;
-    while (i < 256 / 2) {
-        var base = i * 5;
-        var c0 = load8(a + base + 0) & 0xFF;
-        c0 = c0 | ((load8(a + base + 1) & 0xFF) << 8);
-        c0 = c0 | ((load8(a + base + 2) & 0xFF) << 16);
-        c0 = c0 & 0xFFFFF;
-        var c1 = (load8(a + base + 2) & 0xFF) >> 4;
-        c1 = c1 | ((load8(a + base + 3) & 0xFF) << 4);
-        c1 = c1 | ((load8(a + base + 4) & 0xFF) << 12);
-        store64(r + (2 * i + 0) * 8, MLDSA65_GAMMA1 - c0);
-        store64(r + (2 * i + 1) * 8, MLDSA65_GAMMA1 - c1);
-        i = i + 1;
-    }
-    return 0;
-}
+# polyz_unpack lives in mldsa_encode.cyr (shared with pk/sk/sig
+# packing). That module is included before this one in lib.cyr
+# so `_mldsa_polyz_unpack` is in scope here.
 
 # ================================================================
 # poly_uniform — ExpandA single-poly driver (uses SHAKE-128)

@@ -144,30 +144,9 @@ fn mldsa_rej_eta(a, len, buf, buflen) {
     return ctr;
 }
 
-# ================================================================
-# polyz_unpack — decode SHAKE-256 output into a γ1-range poly
-# ================================================================
-# GAMMA1 = 2^19 branch only. Coefficients are stored as 20 bits
-# each, 2 coeffs per 5 bytes, little-endian. Decoded value is
-# (γ1 − packed), giving coefficients in [1 − γ1, γ1].
-
-fn _mldsa_polyz_unpack(r, a) {
-    var i = 0;
-    while (i < 256 / 2) {
-        var base = i * 5;
-        var c0 = load8(a + base + 0) & 0xFF;
-        c0 = c0 | ((load8(a + base + 1) & 0xFF) << 8);
-        c0 = c0 | ((load8(a + base + 2) & 0xFF) << 16);
-        c0 = c0 & 0xFFFFF;
-        var c1 = (load8(a + base + 2) & 0xFF) >> 4;
-        c1 = c1 | ((load8(a + base + 3) & 0xFF) << 4);
-        c1 = c1 | ((load8(a + base + 4) & 0xFF) << 12);
-        store64(r + (2 * i + 0) * 8, MLDSA65_GAMMA1 - c0);
-        store64(r + (2 * i + 1) * 8, MLDSA65_GAMMA1 - c1);
-        i = i + 1;
-    }
-    return 0;
-}
+# polyz_unpack lives in mldsa_encode.cyr (shared with pk/sk/sig
+# packing). That module is included before this one in lib.cyr
+# so `_mldsa_polyz_unpack` is in scope here.
 
 # ================================================================
 # poly_uniform — ExpandA single-poly driver (uses SHAKE-128)

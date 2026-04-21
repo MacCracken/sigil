@@ -1,0 +1,278 @@
+# mldsa_encode.tcyr — pack/unpack round-trip tests
+#
+# For each primitive pack/unpack pair, we populate the source
+# polynomial with deterministic values in the legal range for
+# that packer, round-trip through pack→unpack, and assert each
+# coefficient matches the input exactly. Covers every bit-layout
+# boundary used by ML-DSA-65.
+
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/string.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/chrono.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fmt.cyr"
+include "lib/json.cyr"
+include "lib/sakshi.cyr"
+
+include "src/mldsa_params.cyr"
+include "src/mldsa_reduce.cyr"
+include "src/mldsa_ntt.cyr"
+include "src/mldsa_poly.cyr"
+include "src/mldsa_rounding.cyr"
+include "src/mldsa_encode.cyr"
+
+fn poly_eq(a, b) {
+    var i = 0;
+    while (i < 256) {
+        if (load64(a + i * 8) != load64(b + i * 8)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn polyveck_eq(a, b) {
+    var i = 0;
+    while (i < MLDSA65_K) {
+        if (poly_eq(a + i * 2048, b + i * 2048) == 0) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn polyvecl_eq(a, b) {
+    var i = 0;
+    while (i < MLDSA65_L) {
+        if (poly_eq(a + i * 2048, b + i * 2048) == 0) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn bytes_eq(a, b, n) {
+    var i = 0;
+    while (i < n) {
+        if ((load8(a + i) & 0xFF) != (load8(b + i) & 0xFF)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn main() {
+    alloc_init();
+
+    # ============================================================
+    # polyt1 (10 bits/coeff, [0, 1023])
+    # ============================================================
+    test_group("polyt1 round-trip");
+    var t1_src = alloc(256 * 8);
+    var t1_dst = alloc(256 * 8);
+    var t1_bytes = alloc(MLDSA65_POLYT1_PACKEDBYTES);
+    var i = 0;
+    while (i < 256) {
+        store64(t1_src + i * 8, (i * 7 + 11) & 0x3FF);  # varied values in [0, 1023]
+        i = i + 1;
+    }
+    _mldsa_polyt1_pack(t1_bytes, t1_src);
+    _mldsa_polyt1_unpack(t1_dst, t1_bytes);
+    assert_eq(poly_eq(t1_src, t1_dst), 1, "polyt1 round-trip");
+
+    # Boundary: all-max (1023) and all-min (0).
+    i = 0;
+    while (i < 256) { store64(t1_src + i * 8, 1023); i = i + 1; }
+    _mldsa_polyt1_pack(t1_bytes, t1_src);
+    _mldsa_polyt1_unpack(t1_dst, t1_bytes);
+    assert_eq(poly_eq(t1_src, t1_dst), 1, "polyt1 max values");
+
+    # ============================================================
+    # polyt0 (13 bits balanced, (-4096, 4096])
+    # ============================================================
+    test_group("polyt0 round-trip");
+    var t0_src = alloc(256 * 8);
+    var t0_dst = alloc(256 * 8);
+    var t0_bytes = alloc(MLDSA65_POLYT0_PACKEDBYTES);
+    i = 0;
+    while (i < 256) {
+        # Rotate through balanced range.
+        var v = ((i * 37 + 3) & 0x1FFF) - 4096 + 1;
+        if (v > 4096) { v = v - 8191; }
+        store64(t0_src + i * 8, v);
+        i = i + 1;
+    }
+    _mldsa_polyt0_pack(t0_bytes, t0_src);
+    _mldsa_polyt0_unpack(t0_dst, t0_bytes);
+    assert_eq(poly_eq(t0_src, t0_dst), 1, "polyt0 round-trip (mixed)");
+
+    # Boundary: extremes 4096 and -4095.
+    i = 0;
+    while (i < 256) {
+        if ((i & 1) == 0) { store64(t0_src + i * 8, 4096); }
+        if ((i & 1) == 1) { store64(t0_src + i * 8, 0 - 4095); }
+        i = i + 1;
+    }
+    _mldsa_polyt0_pack(t0_bytes, t0_src);
+    _mldsa_polyt0_unpack(t0_dst, t0_bytes);
+    assert_eq(poly_eq(t0_src, t0_dst), 1, "polyt0 extremes");
+
+    # ============================================================
+    # polyeta (η = 4, [-4, 4])
+    # ============================================================
+    test_group("polyeta round-trip");
+    var e_src = alloc(256 * 8);
+    var e_dst = alloc(256 * 8);
+    var e_bytes = alloc(MLDSA65_POLYETA_PACKEDBYTES);
+    i = 0;
+    while (i < 256) {
+        var v = (i % 9) - 4;  # -4, -3, ..., 4, repeat
+        store64(e_src + i * 8, v);
+        i = i + 1;
+    }
+    _mldsa_polyeta_pack(e_bytes, e_src);
+    _mldsa_polyeta_unpack(e_dst, e_bytes);
+    assert_eq(poly_eq(e_src, e_dst), 1, "polyeta round-trip");
+
+    # ============================================================
+    # polyz (γ1 = 2^19, [1-γ1, γ1])
+    # ============================================================
+    test_group("polyz round-trip");
+    var z_src = alloc(256 * 8);
+    var z_dst = alloc(256 * 8);
+    var z_bytes = alloc(MLDSA65_POLYZ_PACKEDBYTES);
+    i = 0;
+    while (i < 256) {
+        # Range [1 - GAMMA1, GAMMA1].
+        var v = MLDSA65_GAMMA1 - (i * 4091) % (2 * MLDSA65_GAMMA1);
+        store64(z_src + i * 8, v);
+        i = i + 1;
+    }
+    _mldsa_polyz_pack(z_bytes, z_src);
+    _mldsa_polyz_unpack(z_dst, z_bytes);
+    assert_eq(poly_eq(z_src, z_dst), 1, "polyz round-trip");
+
+    # Boundaries: γ1 and 1 - γ1.
+    i = 0;
+    while (i < 256) {
+        if ((i & 1) == 0) { store64(z_src + i * 8, MLDSA65_GAMMA1); }
+        if ((i & 1) == 1) { store64(z_src + i * 8, 1 - MLDSA65_GAMMA1); }
+        i = i + 1;
+    }
+    _mldsa_polyz_pack(z_bytes, z_src);
+    _mldsa_polyz_unpack(z_dst, z_bytes);
+    assert_eq(poly_eq(z_src, z_dst), 1, "polyz extremes");
+
+    # ============================================================
+    # pk round-trip (ρ || t1)
+    # ============================================================
+    test_group("pack_pk / unpack_pk");
+    var pk_bytes = alloc(MLDSA65_PK_BYTES);
+    var rho_in = alloc(MLDSA_SEEDBYTES);
+    var rho_out = alloc(MLDSA_SEEDBYTES);
+    var t1v_in = alloc(MLDSA65_K * 256 * 8);
+    var t1v_out = alloc(MLDSA65_K * 256 * 8);
+    i = 0;
+    while (i < MLDSA_SEEDBYTES) { store8(rho_in + i, (i * 13 + 5) & 0xFF); i = i + 1; }
+    i = 0;
+    while (i < MLDSA65_K * 256) {
+        store64(t1v_in + i * 8, (i * 11 + 3) & 0x3FF);
+        i = i + 1;
+    }
+    mldsa_pack_pk(pk_bytes, rho_in, t1v_in);
+    mldsa_unpack_pk(rho_out, t1v_out, pk_bytes);
+    assert_eq(bytes_eq(rho_in, rho_out, MLDSA_SEEDBYTES), 1, "pk: ρ round-trip");
+    assert_eq(polyveck_eq(t1v_in, t1v_out), 1, "pk: t1 round-trip");
+
+    # ============================================================
+    # sk round-trip (ρ || K || tr || s1 || s2 || t0)
+    # ============================================================
+    test_group("pack_sk / unpack_sk");
+    var sk_bytes = alloc(MLDSA65_SK_BYTES);
+    var rho_s = alloc(MLDSA_SEEDBYTES);
+    var rho_s_o = alloc(MLDSA_SEEDBYTES);
+    var key_s = alloc(MLDSA_SEEDBYTES);
+    var key_s_o = alloc(MLDSA_SEEDBYTES);
+    var tr_s = alloc(MLDSA_TRBYTES);
+    var tr_s_o = alloc(MLDSA_TRBYTES);
+    var s1_in = alloc(MLDSA65_L * 256 * 8);
+    var s1_out = alloc(MLDSA65_L * 256 * 8);
+    var s2_in = alloc(MLDSA65_K * 256 * 8);
+    var s2_out = alloc(MLDSA65_K * 256 * 8);
+    var t0v_in = alloc(MLDSA65_K * 256 * 8);
+    var t0v_out = alloc(MLDSA65_K * 256 * 8);
+    i = 0;
+    while (i < MLDSA_SEEDBYTES) {
+        store8(rho_s + i, (i + 1) & 0xFF);
+        store8(key_s + i, (i + 100) & 0xFF);
+        i = i + 1;
+    }
+    i = 0;
+    while (i < MLDSA_TRBYTES) { store8(tr_s + i, (i * 7) & 0xFF); i = i + 1; }
+    i = 0;
+    while (i < MLDSA65_L * 256) {
+        store64(s1_in + i * 8, (i % 9) - 4);
+        i = i + 1;
+    }
+    i = 0;
+    while (i < MLDSA65_K * 256) {
+        store64(s2_in + i * 8, ((i + 17) % 9) - 4);
+        store64(t0v_in + i * 8, ((i * 31 + 7) & 0x1FFF) - 4095);
+        i = i + 1;
+    }
+    mldsa_pack_sk(sk_bytes, rho_s, key_s, tr_s, t0v_in, s1_in, s2_in);
+    mldsa_unpack_sk(rho_s_o, key_s_o, tr_s_o, t0v_out, s1_out, s2_out, sk_bytes);
+    assert_eq(bytes_eq(rho_s, rho_s_o, MLDSA_SEEDBYTES), 1, "sk: ρ");
+    assert_eq(bytes_eq(key_s, key_s_o, MLDSA_SEEDBYTES), 1, "sk: K");
+    assert_eq(bytes_eq(tr_s, tr_s_o, MLDSA_TRBYTES), 1, "sk: tr");
+    assert_eq(polyvecl_eq(s1_in, s1_out), 1, "sk: s1");
+    assert_eq(polyveck_eq(s2_in, s2_out), 1, "sk: s2");
+    assert_eq(polyveck_eq(t0v_in, t0v_out), 1, "sk: t0");
+
+    # ============================================================
+    # sig round-trip (c̃ || z || h)
+    # ============================================================
+    test_group("pack_sig / unpack_sig");
+    var sig_bytes = alloc(MLDSA65_SIG_BYTES);
+    var c_in = alloc(MLDSA65_CTILDEBYTES);
+    var c_out = alloc(MLDSA65_CTILDEBYTES);
+    var zv_in = alloc(MLDSA65_L * 256 * 8);
+    var zv_out = alloc(MLDSA65_L * 256 * 8);
+    var hv_in = alloc(MLDSA65_K * 256 * 8);
+    var hv_out = alloc(MLDSA65_K * 256 * 8);
+    i = 0;
+    while (i < MLDSA65_CTILDEBYTES) { store8(c_in + i, (i * 3 + 1) & 0xFF); i = i + 1; }
+    i = 0;
+    while (i < MLDSA65_L * 256) {
+        store64(zv_in + i * 8, (i % 7) - 3);  # small values well under γ1
+        i = i + 1;
+    }
+    # h: sparse 1s; ≤ OMEGA = 55 total across K lanes. Place 3 per lane.
+    i = 0;
+    while (i < MLDSA65_K * 256) { store64(hv_in + i * 8, 0); i = i + 1; }
+    var lane = 0;
+    while (lane < MLDSA65_K) {
+        store64(hv_in + lane * 2048 + 10 * 8, 1);
+        store64(hv_in + lane * 2048 + 50 * 8, 1);
+        store64(hv_in + lane * 2048 + 200 * 8, 1);
+        lane = lane + 1;
+    }
+    mldsa_pack_sig(sig_bytes, c_in, zv_in, hv_in);
+    var rc = mldsa_unpack_sig(c_out, zv_out, hv_out, sig_bytes);
+    assert_eq(rc, 0, "sig: unpack accepts well-formed input");
+    assert_eq(bytes_eq(c_in, c_out, MLDSA65_CTILDEBYTES), 1, "sig: c̃");
+    assert_eq(polyvecl_eq(zv_in, zv_out), 1, "sig: z");
+    assert_eq(polyveck_eq(hv_in, hv_out), 1, "sig: h");
+
+    # Malformed: corrupt the hint cumulative-count byte so it exceeds OMEGA.
+    store8(sig_bytes + MLDSA65_CTILDEBYTES + MLDSA65_L * MLDSA65_POLYZ_PACKEDBYTES + MLDSA65_OMEGA, MLDSA65_OMEGA + 5);
+    var rc_bad = mldsa_unpack_sig(c_out, zv_out, hv_out, sig_bytes);
+    assert_eq(rc_bad, 1, "sig: unpack rejects hint count > OMEGA");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);
