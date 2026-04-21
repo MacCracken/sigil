@@ -1,0 +1,226 @@
+# mldsa_rounding.tcyr — rounding + hint primitives
+#
+# Checks the algebraic identities that Power2Round, Decompose,
+# MakeHint, and UseHint must satisfy, plus the use_hint/make_hint
+# round-trip which is the central correctness condition exploited
+# by ML-DSA verification.
+
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/chrono.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fmt.cyr"
+include "lib/json.cyr"
+include "lib/sakshi.cyr"
+
+include "src/mldsa_params.cyr"
+include "src/mldsa_reduce.cyr"
+include "src/mldsa_ntt.cyr"
+include "src/mldsa_poly.cyr"
+include "src/mldsa_rounding.cyr"
+
+fn canon(x) {
+    var r = x - (x / MLDSA_Q) * MLDSA_Q;
+    if (r < 0) { r = r + MLDSA_Q; }
+    return r;
+}
+
+fn main() {
+    alloc_init();
+
+    # ============================================================
+    # power2round: a = a1·2^D + a0, |a0| ≤ 2^{D-1}
+    # ============================================================
+    test_group("power2round");
+    # Trivial cases.
+    mldsa_power2round(0);
+    assert_eq(_mldsa_p2r_a1, 0, "p2r(0).a1 = 0");
+    assert_eq(_mldsa_p2r_a0, 0, "p2r(0).a0 = 0");
+
+    mldsa_power2round(1);
+    assert_eq(_mldsa_p2r_a1, 0, "p2r(1).a1 = 0");
+    assert_eq(_mldsa_p2r_a0, 1, "p2r(1).a0 = 1");
+
+    # At exactly 2^{D-1} = 4096: the bias (2^{D-1}-1 = 4095) makes
+    # the rounding tie-break go *down*, so a1=0 and a0=4096. The
+    # a0 lands on the upper edge of the (-2^{D-1}, 2^{D-1}] range.
+    mldsa_power2round(1 << (MLDSA_D - 1));
+    assert_eq(_mldsa_p2r_a1, 0, "p2r(2^{D-1}).a1 = 0 (ties round down)");
+    assert_eq(_mldsa_p2r_a0, 1 << (MLDSA_D - 1), "p2r(2^{D-1}).a0 = 2^{D-1}");
+    # Just above 2^{D-1} flips to a1=1, a0=-4095.
+    mldsa_power2round((1 << (MLDSA_D - 1)) + 1);
+    assert_eq(_mldsa_p2r_a1, 1, "p2r(2^{D-1}+1).a1 = 1");
+    assert_eq(_mldsa_p2r_a0, 0 - ((1 << (MLDSA_D - 1)) - 1), "p2r(2^{D-1}+1).a0 = -(2^{D-1}-1)");
+
+    # Identity check across a spread of inputs.
+    var samples_p2r_bad = 0;
+    var tv_list = 13;  # how many test values
+    var test_values_p2r = alloc(tv_list * 8);
+    store64(test_values_p2r + 0 * 8, 0);
+    store64(test_values_p2r + 1 * 8, 1);
+    store64(test_values_p2r + 2 * 8, 4095);
+    store64(test_values_p2r + 3 * 8, 4096);
+    store64(test_values_p2r + 4 * 8, 4097);
+    store64(test_values_p2r + 5 * 8, 8191);
+    store64(test_values_p2r + 6 * 8, 8192);
+    store64(test_values_p2r + 7 * 8, 100000);
+    store64(test_values_p2r + 8 * 8, 1000000);
+    store64(test_values_p2r + 9 * 8, MLDSA_Q / 2);
+    store64(test_values_p2r + 10 * 8, MLDSA_Q - 4096);
+    store64(test_values_p2r + 11 * 8, MLDSA_Q - 1);
+    store64(test_values_p2r + 12 * 8, MLDSA_Q - 4097);
+    var i = 0;
+    while (i < tv_list) {
+        var a = load64(test_values_p2r + i * 8);
+        mldsa_power2round(a);
+        var a1 = _mldsa_p2r_a1;
+        var a0 = _mldsa_p2r_a0;
+        # Identity: a == a1·2^D + a0
+        if (a != a1 * (1 << MLDSA_D) + a0) { samples_p2r_bad = samples_p2r_bad + 1; }
+        # a0 bound: (-2^{D-1}, 2^{D-1}]  →  -4095 ≤ a0 ≤ 4096
+        if (a0 > (1 << (MLDSA_D - 1))) { samples_p2r_bad = samples_p2r_bad + 1; }
+        if (a0 <= 0 - (1 << (MLDSA_D - 1))) { samples_p2r_bad = samples_p2r_bad + 1; }
+        i = i + 1;
+    }
+    assert_eq(samples_p2r_bad, 0, "power2round identity + bound over 13 samples");
+
+    # ============================================================
+    # decompose: a ≡ a1·α + a0 (mod Q),  α = 2·γ2
+    # ============================================================
+    test_group("decompose");
+    var alpha = 2 * MLDSA65_GAMMA2;
+
+    # Trivial: decompose(0) gives (0, 0).
+    mldsa_decompose(0);
+    assert_eq(_mldsa_dec_a1, 0, "dec(0).a1 = 0");
+    assert_eq(_mldsa_dec_a0, 0, "dec(0).a0 = 0");
+
+    # Identity check across samples.
+    var samples_dec_bad = 0;
+    var tvn = 14;
+    var test_values_dec = alloc(tvn * 8);
+    store64(test_values_dec + 0 * 8, 0);
+    store64(test_values_dec + 1 * 8, 1);
+    store64(test_values_dec + 2 * 8, MLDSA65_GAMMA2);
+    store64(test_values_dec + 3 * 8, MLDSA65_GAMMA2 + 1);
+    store64(test_values_dec + 4 * 8, alpha);
+    store64(test_values_dec + 5 * 8, alpha - 1);
+    store64(test_values_dec + 6 * 8, alpha + 1);
+    store64(test_values_dec + 7 * 8, 3 * alpha);
+    store64(test_values_dec + 8 * 8, 8 * alpha);
+    store64(test_values_dec + 9 * 8, 15 * alpha);
+    store64(test_values_dec + 10 * 8, 15 * alpha + MLDSA65_GAMMA2);
+    store64(test_values_dec + 11 * 8, MLDSA_Q - 1);
+    store64(test_values_dec + 12 * 8, MLDSA_Q / 2);
+    store64(test_values_dec + 13 * 8, 12345678 % MLDSA_Q);
+    i = 0;
+    while (i < tvn) {
+        var a = load64(test_values_dec + i * 8);
+        mldsa_decompose(a);
+        var a1 = _mldsa_dec_a1;
+        var a0 = _mldsa_dec_a0;
+        # a1 must be in [0, 15]
+        if (a1 < 0) { samples_dec_bad = samples_dec_bad + 1; }
+        if (a1 > 15) { samples_dec_bad = samples_dec_bad + 1; }
+        # Identity mod Q: a ≡ a1·α + a0 (mod Q)
+        var expected = canon(a1 * alpha + a0);
+        if (expected != canon(a)) { samples_dec_bad = samples_dec_bad + 1; }
+        # Balanced a0 bound: (-α/2, α/2] == (-γ2, γ2]  except the wraparound case
+        if (a0 > MLDSA65_GAMMA2) { samples_dec_bad = samples_dec_bad + 1; }
+        if (a0 < 0 - MLDSA65_GAMMA2) { samples_dec_bad = samples_dec_bad + 1; }
+        i = i + 1;
+    }
+    assert_eq(samples_dec_bad, 0, "decompose identity + bounds over 14 samples");
+
+    # high_bits / low_bits convenience accessors.
+    test_group("high_bits / low_bits");
+    var hb = mldsa_high_bits(2 * alpha);
+    assert_eq(hb, 2, "high_bits(2α) = 2");
+    var lb = mldsa_low_bits(3 * alpha);
+    assert_eq(lb, 0, "low_bits(3α) = 0");
+
+    # ============================================================
+    # make_hint — the four documented cases
+    # ============================================================
+    test_group("make_hint");
+    # |a0| ≤ γ2 with a0 ≠ −γ2 (the clean interior): hint = 0.
+    assert_eq(mldsa_make_hint(0, 0), 0, "mh(0, 0) = 0");
+    assert_eq(mldsa_make_hint(MLDSA65_GAMMA2, 0), 0, "mh(γ2, 0) = 0");
+    assert_eq(mldsa_make_hint(MLDSA65_GAMMA2 - 1, 7), 0, "mh(γ2-1, 7) = 0");
+    # a0 > γ2 → overflow.
+    assert_eq(mldsa_make_hint(MLDSA65_GAMMA2 + 1, 0), 1, "mh(γ2+1, 0) = 1");
+    # a0 < −γ2 → overflow.
+    assert_eq(mldsa_make_hint(0 - MLDSA65_GAMMA2 - 1, 0), 1, "mh(-γ2-1, 0) = 1");
+    # a0 == −γ2 boundary: hint = 0 iff a1 == 0, hint = 1 otherwise.
+    assert_eq(mldsa_make_hint(0 - MLDSA65_GAMMA2, 0), 0, "mh(-γ2, 0) = 0");
+    assert_eq(mldsa_make_hint(0 - MLDSA65_GAMMA2, 3), 1, "mh(-γ2, 3) = 1");
+
+    # ============================================================
+    # use_hint
+    # ============================================================
+    test_group("use_hint");
+    # hint = 0 reduces to HighBits.
+    var a_val = 5 * alpha + 123;
+    var want_hi = mldsa_high_bits(a_val);
+    assert_eq(mldsa_use_hint(a_val, 0), want_hi, "use_hint(a, 0) = high_bits(a)");
+
+    # hint = 1 with a0 > 0 bumps a1 up.
+    # Pick a where a0 is definitely positive: a1·α + γ2/2.
+    var a_pos_lo = 5 * alpha + MLDSA65_GAMMA2 / 2;
+    mldsa_decompose(a_pos_lo);
+    assert(_mldsa_dec_a0 > 0, "prep: a0 > 0");
+    assert_eq(mldsa_use_hint(a_pos_lo, 1), (_mldsa_dec_a1 + 1) & 15, "use_hint(+, 1) = a1+1");
+
+    # hint = 1 with a0 < 0 bumps a1 down.
+    var a_neg_lo = 5 * alpha - MLDSA65_GAMMA2 / 2;
+    mldsa_decompose(a_neg_lo);
+    assert(_mldsa_dec_a0 < 0, "prep: a0 < 0");
+    assert_eq(mldsa_use_hint(a_neg_lo, 1), (_mldsa_dec_a1 - 1) & 15, "use_hint(-, 1) = a1-1");
+
+    # ============================================================
+    # Per-poly wrappers: zero in, zero out
+    # ============================================================
+    test_group("poly wrappers");
+    var pa = alloc(256 * 8);
+    var pa1 = alloc(256 * 8);
+    var pa0 = alloc(256 * 8);
+    var k = 0;
+    while (k < 256) {
+        store64(pa + k * 8, 0);
+        store64(pa1 + k * 8, 99);    # poison
+        store64(pa0 + k * 8, 99);
+        k = k + 1;
+    }
+    mldsa_poly_power2round(pa1, pa0, pa);
+    var p_bad = 0;
+    k = 0;
+    while (k < 256) {
+        if (load64(pa1 + k * 8) != 0) { p_bad = p_bad + 1; }
+        if (load64(pa0 + k * 8) != 0) { p_bad = p_bad + 1; }
+        k = k + 1;
+    }
+    assert_eq(p_bad, 0, "poly_power2round(0) = (0, 0)");
+
+    # make_hint on zero polys: hint count should be 0.
+    var ha0 = alloc(256 * 8);
+    var ha1 = alloc(256 * 8);
+    var hh  = alloc(256 * 8);
+    k = 0;
+    while (k < 256) {
+        store64(ha0 + k * 8, 0);
+        store64(ha1 + k * 8, 0);
+        k = k + 1;
+    }
+    var hint_weight = mldsa_poly_make_hint(hh, ha0, ha1);
+    assert_eq(hint_weight, 0, "poly_make_hint(0, 0) weight = 0");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

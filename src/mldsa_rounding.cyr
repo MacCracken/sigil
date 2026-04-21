@@ -1,0 +1,221 @@
+# mldsa_rounding.cyr — Power2Round, Decompose, HighBits, LowBits,
+# MakeHint, UseHint (FIPS 204 §8)
+#
+# These four primitives plus the Decompose helper make up the
+# "rounding layer" that bridges the NTT world (full coefficients
+# mod Q) and the signature-encoding world (a1 = high bits, a0 =
+# low bits, h = hint bits).
+#
+# Reference: pq-crystals/dilithium `ref/rounding.c`. We keep the
+# same call shapes; the only Cyrius-specific adaptation is the
+# multi-return idiom — C uses an out-pointer for a0, we expose
+# globals the caller can read after a call. That matches the
+# sha256 / ed25519 pattern already in sigil and avoids the
+# address-of-local dance for scalars.
+#
+# All functions operate on i64 values holding the signed-i32
+# range of Z_Q coefficients. Assume inputs are standard
+# representatives in [0, Q) unless noted.
+
+# ================================================================
+# Power2Round (D = 13 dropped bits)
+# ================================================================
+# Input:  a ∈ [0, Q)
+# Output: (a1, a0) with  a = a1 · 2^D + a0  (mod Q),
+#         a0 ∈ (−2^{D−1}, 2^{D−1}]
+#
+# Used in keygen to split t = t1·2^D + t0. t1 is published as
+# part of pk (lossy, 10 bits/coeff); t0 stays private in sk
+# (13 bits/coeff, balanced).
+
+var _mldsa_p2r_a1 = 0;      # output high part
+var _mldsa_p2r_a0 = 0;      # output low part (balanced)
+
+fn mldsa_power2round(a) {
+    # Standard trick: add 2^{D-1}-1 before the right-shift so
+    # the shift rounds to nearest instead of toward zero. Input
+    # is non-negative so the logical >> matches arithmetic >>.
+    var a1 = (a + (1 << (MLDSA_D - 1)) - 1) >> MLDSA_D;
+    _mldsa_p2r_a1 = a1;
+    _mldsa_p2r_a0 = a - (a1 << MLDSA_D);
+    return a1;
+}
+
+# ================================================================
+# Decompose — ML-DSA-65 branch only (GAMMA2 = (Q−1)/32)
+# ================================================================
+# Input:  a ∈ [0, Q)
+# Output: (a1, a0) with  a = a1 · α + a0  (mod Q),  α = 2·γ2,
+#         a0 ∈ (−α/2, α/2]  normally, except when a1 rolls over
+#         the highest digit (a1 = (Q−1)/α = 16) we set a1 = 0
+#         and a0 = a − Q ∈ [−α/2, 0).
+#
+# The C reference does this via Barrett-style nearest-multiple
+# quotient + a sign-bit Q correction. Cyrius equivalent:
+#   - the two right-shifts (>>7 and >>22) operate on non-negative
+#     intermediates, so logical shift is correct.
+#   - the final Q correction is `a0 -= (((Q−1)/2 − a0) >> 31) & Q`;
+#     we read the i64 sign bit via `(diff >> 63) & 1` and
+#     multiply by Q to pick up the branchless conditional subtract.
+
+var _mldsa_dec_a1 = 0;      # high bits (w1 in the spec)
+var _mldsa_dec_a0 = 0;      # low bits (balanced, w0)
+
+fn mldsa_decompose(a) {
+    var a1 = (a + 127) >> 7;
+    a1 = (a1 * 1025 + (1 << 21)) >> 22;
+    a1 = a1 & 15;
+    var a0 = a - a1 * 2 * MLDSA65_GAMMA2;
+    # Conditional subtract Q: if a0 > (Q−1)/2, bring it into the
+    # balanced negative range.
+    var diff = (MLDSA_Q - 1) / 2 - a0;
+    var sign = (diff >> 63) & 1;        # 1 iff diff < 0 iff a0 > (Q−1)/2
+    a0 = a0 - sign * MLDSA_Q;
+    _mldsa_dec_a1 = a1;
+    _mldsa_dec_a0 = a0;
+    return a1;
+}
+
+# Convenience accessors — HighBits / LowBits in FIPS 204 notation.
+fn mldsa_high_bits(a) {
+    mldsa_decompose(a);
+    return _mldsa_dec_a1;
+}
+
+fn mldsa_low_bits(a) {
+    mldsa_decompose(a);
+    return _mldsa_dec_a0;
+}
+
+# ================================================================
+# MakeHint — predict whether adding z flips the HighBits of r
+# ================================================================
+# Input:  a0 = LowBits(r+z), a1 = HighBits(r)  (per the spec)
+# Output: 1 if HighBits(r+z) ≠ HighBits(r), else 0
+#
+# Branches are fine here — the return value IS what eventually
+# ships as part of the public signature, so any control-flow
+# signal is already encoded in the output. No timing surface
+# beyond what the caller already publishes.
+
+fn mldsa_make_hint(a0, a1) {
+    if (a0 > MLDSA65_GAMMA2) { return 1; }
+    if (a0 < 0 - MLDSA65_GAMMA2) { return 1; }
+    if (a0 == 0 - MLDSA65_GAMMA2) {
+        if (a1 != 0) { return 1; }
+    }
+    return 0;
+}
+
+# ================================================================
+# UseHint — recover HighBits(r + small) from (r, hint)
+# ================================================================
+# Input:  a (a coefficient), hint ∈ {0, 1}
+# Output: corrected high-bits value
+#
+# Rule (GAMMA2 = (Q−1)/32 branch): call Decompose(a). If hint=0,
+# return a1 verbatim. Otherwise shift a1 by ±1 modulo 16 based
+# on the sign of a0. Wrap-around uses the same `& 15` mask as
+# the decompose step so a1 stays in [0, 15].
+
+fn mldsa_use_hint(a, hint) {
+    mldsa_decompose(a);
+    var a1 = _mldsa_dec_a1;
+    var a0 = _mldsa_dec_a0;
+    if (hint == 0) { return a1; }
+    if (a0 > 0) { return (a1 + 1) & 15; }
+    return (a1 - 1) & 15;
+}
+
+# ================================================================
+# Per-poly wrappers (iterate the per-coefficient primitive)
+# ================================================================
+
+# a1[i], a0[i] = power2round(a[i])
+fn mldsa_poly_power2round(a1, a0, a) {
+    var i = 0;
+    while (i < 256) {
+        mldsa_power2round(load64(a + i * 8));
+        store64(a1 + i * 8, _mldsa_p2r_a1);
+        store64(a0 + i * 8, _mldsa_p2r_a0);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# a1[i], a0[i] = decompose(a[i])
+fn mldsa_poly_decompose(a1, a0, a) {
+    var i = 0;
+    while (i < 256) {
+        mldsa_decompose(load64(a + i * 8));
+        store64(a1 + i * 8, _mldsa_dec_a1);
+        store64(a0 + i * 8, _mldsa_dec_a0);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# h[i] = make_hint(a0[i], a1[i]); returns total hint weight s.
+fn mldsa_poly_make_hint(h, a0, a1) {
+    var s = 0;
+    var i = 0;
+    while (i < 256) {
+        var bit = mldsa_make_hint(load64(a0 + i * 8), load64(a1 + i * 8));
+        store64(h + i * 8, bit);
+        s = s + bit;
+        i = i + 1;
+    }
+    return s;
+}
+
+# r[i] = use_hint(a[i], h[i])
+fn mldsa_poly_use_hint(r, a, h) {
+    var i = 0;
+    while (i < 256) {
+        store64(r + i * 8, mldsa_use_hint(load64(a + i * 8), load64(h + i * 8)));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ================================================================
+# Polyveck wrappers (K = 6 lanes)
+# ================================================================
+
+fn mldsa_polyveck_power2round(v1, v0, v) {
+    var i = 0;
+    while (i < MLDSA65_K) {
+        mldsa_poly_power2round(v1 + i * 2048, v0 + i * 2048, v + i * 2048);
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn mldsa_polyveck_decompose(v1, v0, v) {
+    var i = 0;
+    while (i < MLDSA65_K) {
+        mldsa_poly_decompose(v1 + i * 2048, v0 + i * 2048, v + i * 2048);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# h[i][j] = make_hint(v0[i][j], v1[i][j]); returns total weight.
+fn mldsa_polyveck_make_hint(h, v0, v1) {
+    var s = 0;
+    var i = 0;
+    while (i < MLDSA65_K) {
+        s = s + mldsa_poly_make_hint(h + i * 2048, v0 + i * 2048, v1 + i * 2048);
+        i = i + 1;
+    }
+    return s;
+}
+
+fn mldsa_polyveck_use_hint(w, u, h) {
+    var i = 0;
+    while (i < MLDSA65_K) {
+        mldsa_poly_use_hint(w + i * 2048, u + i * 2048, h + i * 2048);
+        i = i + 1;
+    }
+    return 0;
+}
