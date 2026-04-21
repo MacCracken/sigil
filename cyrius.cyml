@@ -48,6 +48,7 @@ modules = [
     "src/mldsa_rounding.cyr",
     "src/mldsa_encode.cyr",
     "src/mldsa_sample.cyr",
+    "src/mldsa.cyr",
     "src/trust.cyr",
     "src/integrity.cyr",
     "src/policy.cyr",

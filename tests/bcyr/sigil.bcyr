@@ -27,9 +27,15 @@ include "src/aes_gcm.cyr"
 include "src/sha512.cyr"
 include "src/bigint_ext.cyr"
 include "src/ed25519.cyr"
+include "lib/keccak.cyr"
 include "src/mldsa_params.cyr"
 include "src/mldsa_reduce.cyr"
 include "src/mldsa_ntt.cyr"
+include "src/mldsa_poly.cyr"
+include "src/mldsa_rounding.cyr"
+include "src/mldsa_encode.cyr"
+include "src/mldsa_sample.cyr"
+include "src/mldsa.cyr"
 
 fn main() {
     alloc_init();
@@ -446,6 +452,68 @@ fn main() {
         ri = ri + 1;
     }
     vec_push(benches, b_invntt);
+
+    # ============================================================
+    # ML-DSA-65 keygen / sign / verify (end-to-end).
+    # Small iteration count — each is ~8-12ms.
+    # ============================================================
+    var mldsa_seed = alloc(32);
+    var msi = 0;
+    while (msi < 32) { store8(mldsa_seed + msi, 0x5C ^ msi); msi = msi + 1; }
+    var mldsa_pk = alloc(MLDSA65_PK_BYTES);
+    var mldsa_sk = alloc(MLDSA65_SK_BYTES);
+    var mldsa_msg = alloc(64);
+    msi = 0;
+    while (msi < 64) { store8(mldsa_msg + msi, msi); msi = msi + 1; }
+    var mldsa_sig = alloc(MLDSA65_SIG_BYTES);
+
+    var b_kp = bench_new("mldsa65_keypair");
+    ri = 0;
+    while (ri < 5) {
+        bench_batch_start(b_kp);
+        var bi = 0;
+        while (bi < 3) {
+            mldsa65_keypair_from_seed(mldsa_seed, mldsa_pk, mldsa_sk);
+            bi = bi + 1;
+        }
+        bench_batch_stop(b_kp, 3);
+        ri = ri + 1;
+    }
+    vec_push(benches, b_kp);
+
+    # Pre-keygen once for sign/verify benches.
+    mldsa65_keypair_from_seed(mldsa_seed, mldsa_pk, mldsa_sk);
+
+    var b_sig = bench_new("mldsa65_sign");
+    ri = 0;
+    while (ri < 5) {
+        bench_batch_start(b_sig);
+        var bi = 0;
+        while (bi < 3) {
+            mldsa65_sign(mldsa_sig, mldsa_msg, 64, mldsa_sk);
+            bi = bi + 1;
+        }
+        bench_batch_stop(b_sig, 3);
+        ri = ri + 1;
+    }
+    vec_push(benches, b_sig);
+
+    # Pre-sign once for verify bench.
+    mldsa65_sign(mldsa_sig, mldsa_msg, 64, mldsa_sk);
+
+    var b_ver = bench_new("mldsa65_verify");
+    ri = 0;
+    while (ri < 5) {
+        bench_batch_start(b_ver);
+        var bi = 0;
+        while (bi < 3) {
+            mldsa65_verify(mldsa_sig, mldsa_msg, 64, mldsa_pk);
+            bi = bi + 1;
+        }
+        bench_batch_stop(b_ver, 3);
+        ri = ri + 1;
+    }
+    vec_push(benches, b_ver);
 
     # Report
     syscall(1, 1, "=== Sigil Benchmarks ===\n", 24);

@@ -1,0 +1,159 @@
+# mldsa.tcyr — end-to-end keypair / sign / verify round-trip
+#
+# Without pulling in external KAT files, the strongest correctness
+# check we have is a closed-loop test: generate a keypair from a
+# deterministic seed, sign a known message, and verify the
+# signature against the pk — plus tamper paths (wrong pk, wrong
+# message, wrong signature) that must fail.
+
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/string.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/chrono.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fmt.cyr"
+include "lib/json.cyr"
+include "lib/sakshi.cyr"
+include "lib/keccak.cyr"
+
+include "src/mldsa_params.cyr"
+include "src/mldsa_reduce.cyr"
+include "src/mldsa_ntt.cyr"
+include "src/mldsa_poly.cyr"
+include "src/mldsa_rounding.cyr"
+include "src/mldsa_encode.cyr"
+include "src/mldsa_sample.cyr"
+include "src/mldsa.cyr"
+
+fn fill_seed(buf, seed_byte) {
+    var i = 0;
+    while (i < 32) {
+        store8(buf + i, (seed_byte ^ i) & 0xFF);
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+
+    # ============================================================
+    # Deterministic round-trip with seed A
+    # ============================================================
+    test_group("mldsa65 round-trip seed A");
+    var seed_a = alloc(32);
+    fill_seed(seed_a, 0x11);
+    var pk_a = alloc(MLDSA65_PK_BYTES);
+    var sk_a = alloc(MLDSA65_SK_BYTES);
+    mldsa65_keypair_from_seed(seed_a, pk_a, sk_a);
+
+    # Sign a short message.
+    var msg_a = alloc(16);
+    var i = 0;
+    while (i < 16) { store8(msg_a + i, i * 7 + 1); i = i + 1; }
+    var sig_a = alloc(MLDSA65_SIG_BYTES);
+    mldsa65_sign(sig_a, msg_a, 16, sk_a);
+
+    # Verify should accept.
+    var rc_ok = mldsa65_verify(sig_a, msg_a, 16, pk_a);
+    assert_eq(rc_ok, 0, "round-trip: sig verifies");
+
+    # ============================================================
+    # Determinism: same seed → same pk, sk; same sk+msg → same sig
+    # ============================================================
+    test_group("mldsa65 determinism");
+    var pk_b = alloc(MLDSA65_PK_BYTES);
+    var sk_b = alloc(MLDSA65_SK_BYTES);
+    mldsa65_keypair_from_seed(seed_a, pk_b, sk_b);
+    var pk_bad = 0;
+    i = 0;
+    while (i < MLDSA65_PK_BYTES) {
+        if ((load8(pk_a + i) & 0xFF) != (load8(pk_b + i) & 0xFF)) { pk_bad = pk_bad + 1; }
+        i = i + 1;
+    }
+    assert_eq(pk_bad, 0, "keypair deterministic across pk");
+    var sk_bad = 0;
+    i = 0;
+    while (i < MLDSA65_SK_BYTES) {
+        if ((load8(sk_a + i) & 0xFF) != (load8(sk_b + i) & 0xFF)) { sk_bad = sk_bad + 1; }
+        i = i + 1;
+    }
+    assert_eq(sk_bad, 0, "keypair deterministic across sk");
+
+    var sig_b = alloc(MLDSA65_SIG_BYTES);
+    mldsa65_sign(sig_b, msg_a, 16, sk_a);
+    var sig_bad = 0;
+    i = 0;
+    while (i < MLDSA65_SIG_BYTES) {
+        if ((load8(sig_a + i) & 0xFF) != (load8(sig_b + i) & 0xFF)) { sig_bad = sig_bad + 1; }
+        i = i + 1;
+    }
+    assert_eq(sig_bad, 0, "sign deterministic (rnd = 0^32 profile)");
+
+    # ============================================================
+    # Tamper paths — every bad input must fail.
+    # ============================================================
+    test_group("mldsa65 tamper rejection");
+
+    # Wrong message: flip one byte.
+    var msg_tamper = alloc(16);
+    i = 0;
+    while (i < 16) { store8(msg_tamper + i, load8(msg_a + i)); i = i + 1; }
+    store8(msg_tamper + 7, (load8(msg_tamper + 7) & 0xFF) ^ 0x01);
+    var rc_wrong_msg = mldsa65_verify(sig_a, msg_tamper, 16, pk_a);
+    assert_eq(rc_wrong_msg, 1, "sig invalid against tampered message");
+
+    # Wrong pk (different seed).
+    var seed_c = alloc(32);
+    fill_seed(seed_c, 0x22);
+    var pk_c = alloc(MLDSA65_PK_BYTES);
+    var sk_c = alloc(MLDSA65_SK_BYTES);
+    mldsa65_keypair_from_seed(seed_c, pk_c, sk_c);
+    var rc_wrong_pk = mldsa65_verify(sig_a, msg_a, 16, pk_c);
+    assert_eq(rc_wrong_pk, 1, "sig invalid against different pk");
+
+    # Tampered signature: flip one byte in c̃.
+    var sig_tamper = alloc(MLDSA65_SIG_BYTES);
+    i = 0;
+    while (i < MLDSA65_SIG_BYTES) { store8(sig_tamper + i, load8(sig_a + i)); i = i + 1; }
+    store8(sig_tamper + 3, (load8(sig_tamper + 3) & 0xFF) ^ 0x01);
+    var rc_wrong_sig = mldsa65_verify(sig_tamper, msg_a, 16, pk_a);
+    assert_eq(rc_wrong_sig, 1, "tampered sig rejected");
+
+    # Cross-key: seed_c's sk signs msg_a, verify against pk_a → fail.
+    var sig_cross = alloc(MLDSA65_SIG_BYTES);
+    mldsa65_sign(sig_cross, msg_a, 16, sk_c);
+    var rc_cross = mldsa65_verify(sig_cross, msg_a, 16, pk_a);
+    assert_eq(rc_cross, 1, "cross-key sig rejected");
+    # But the cross sig should verify against its own pk.
+    var rc_cross_ok = mldsa65_verify(sig_cross, msg_a, 16, pk_c);
+    assert_eq(rc_cross_ok, 0, "cross-key sig valid against own pk");
+
+    # ============================================================
+    # Longer message
+    # ============================================================
+    test_group("mldsa65 longer message");
+    var big_msg = alloc(500);
+    i = 0;
+    while (i < 500) { store8(big_msg + i, (i * 131 + 17) & 0xFF); i = i + 1; }
+    var sig_big = alloc(MLDSA65_SIG_BYTES);
+    mldsa65_sign(sig_big, big_msg, 500, sk_a);
+    var rc_big = mldsa65_verify(sig_big, big_msg, 500, pk_a);
+    assert_eq(rc_big, 0, "500-byte message round-trip");
+
+    # Empty message.
+    var sig_empty = alloc(MLDSA65_SIG_BYTES);
+    mldsa65_sign(sig_empty, msg_a, 0, sk_a);
+    var rc_empty = mldsa65_verify(sig_empty, msg_a, 0, pk_a);
+    assert_eq(rc_empty, 0, "empty message round-trip");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);
