@@ -38,13 +38,24 @@ include "src/aes_gcm.cyr"
 include "src/sha512.cyr"
 include "src/bigint_ext.cyr"
 include "src/ed25519.cyr"
-# ML-DSA-65 (FIPS 204) — post-quantum signing, sigil 3.0 enabler.
-# Opt-in via `-D SIGIL_PQC` at compile time. The chain adds ~2100
-# lines of Cyrius on top of the Ed25519 baseline, which pushes the
-# full `src/lib.cyr` expansion past the toolchain preprocessor's
-# 1 MB cap when combined with agnosys + stdlib. Consumers that
-# need PQC (daimon, kavach) define SIGIL_PQC; the default build
-# keeps the ed25519-only surface and fits within the cap.
+# ML-DSA-65 (FIPS 204) — post-quantum signing.
+#
+# Opt-in via `-D SIGIL_PQC` at the cyrius build invocation
+# (cmdline flag, not an in-source #define — see below). The
+# mldsa chain adds ~2100 lines of Cyrius on top of the Ed25519
+# baseline. Re-measured on cc5 5.5.32:
+#   - Default build (no flag):    ~930 KB expansion, under cap
+#   - With `-D SIGIL_PQC`:        ~1,047 KB expansion, under cap
+#   - Unconditional (no #ifdef):  1,049,596 B expansion, **over cap**
+# The cmdline-`-D` path squeaks in under the 1 MB preprocessor
+# output cap by ~1 KB. Moving the define into source (via
+# `#define SIGIL_PQC 1`) or deleting the #ifdef entirely both
+# overflow the cap. The gate therefore stays as a cmdline-only
+# opt-in until cyrius raises the preprocess_out buffer beyond
+# 1 MB — tracked for a future cyrius minor; not sigil's work.
+#
+# Consumers that need PQC (daimon, kavach) pass `-D SIGIL_PQC`;
+# the default build keeps the ed25519-only surface.
 #
 # Tests reference the individual src/mldsa_*.cyr files directly
 # (see tests/tcyr/mldsa*.tcyr), so they remain exercised in CI

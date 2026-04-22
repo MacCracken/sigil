@@ -197,6 +197,17 @@ now resolved under cc5. Quirks still worth knowing:
    pre-allocate-upfront pattern — it sidesteps the whole
    problem and the verify hot path only reads read-only
    globals (fixed-base comb, round-key tables).
+8. **Preprocessor output cap: 1 MB** — cc5's `preprocess_out`
+   buffer is 1,048,576 bytes (`src/frontend/lex.cyr:1436`
+   checks `op > 1048576`). The full sigil+stdlib+agnosys+mldsa
+   expansion sits right at the cap: `-D SIGIL_PQC` cmdline
+   works (squeaks under by ~1 KB), but a `#define SIGIL_PQC 1`
+   at the top of `src/lib.cyr` overflows by 1020 bytes —
+   moving an equivalent definition from the cmdline into
+   source costs extra expansion bytes in the IFDEF pass.
+   PQC therefore stays a cmdline-opt-in for the 3.0 cycle.
+   When cyrius raises this buffer (or adds a flag to select a
+   larger one), revisit default-on.
 
 ### Resolved under cc5 (stop treating as bugs)
 
