@@ -69,6 +69,30 @@ test.
   function crash-back-to-main). With the include added, the
   test completes cleanly with 16 passed, 0 failed. Found via
   the CLAUDE.md "main restart loop" quirk.
+- **`fuzz/fuzz_ed25519.fcyr` — add missing `lib/ct.cyr`
+  include.** Same class of defect as the mldsa_sample fix:
+  `lib/ct.cyr` defines `ct_select`, which `src/ed25519.cyr`
+  uses during scalar multiplication (`_ge_table_select` for the
+  constant-time fixed-base lookup). The fuzz harness included
+  `src/ct.cyr` (`ct_eq` / `ct_eq_32`) but not `lib/ct.cyr`, so
+  cc5 stubbed `ct_select` and the first `ed25519_sign` or
+  `_ed_B_table` build at runtime SEGV'd. With `lib/ct.cyr`
+  added, all 11 fuzz assertions pass — canonical-S reject,
+  single-byte corruption rejection, multi-byte corruption
+  rejection, point-decoding edge cases. Same include
+  hardening applied to `fuzz_integrity.fcyr` and
+  `fuzz_revocation.fcyr` defensively (they didn't trip on
+  5.5.30 but they include `src/ed25519.cyr` and could regress
+  on future ed25519 changes that pull ct_select into an
+  earlier code path).
+- **`.github/workflows/ci.yml` cyrius pin 5.2.1 → 5.5.30.**
+  CI was running six minors behind the sigil source; the
+  `lib/hashmap.cyr` u64-key branch added in 5.5.20 and the
+  macOS `lib/alloc.cyr` selector added in 5.5.16 were
+  unparseable under 5.2.1, producing the `expected '=', got var`
+  error at line 808 of the preprocessed include stream on
+  `cyrius build programs/smoke.cyr`. Matches the new pin in
+  `cyrius.cyml`.
 
 ### Performance
 
@@ -99,12 +123,6 @@ would close that gap.
   mldsa_poly 32, mldsa_reduce 42, mldsa_rounding 28,
   mldsa_sample 16, mldsa 17, security 39, sha512 3, sigil 96,
   types 78, verify 48. All green.
-
-### Known Issues (inherited — deferred to 3.0 scope)
-
-- **`fuzz_ed25519.fcyr` segfaults** under the 5-second fuzz run
-  in `scripts/check.sh`. Pre-existing, not introduced by 2.9.1.
-  Tracked for the 3.0 closeout pass.
 
 ## [2.9.0] — 2026-04-20
 
