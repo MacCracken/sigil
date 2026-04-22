@@ -142,7 +142,7 @@ Run a closeout pass before tagging x.Y.0 or x.0.0. Ship as the last patch of the
 - **Runtime feature detection** over compile-time gating (follow libro pattern)
 - **Target size** — compiled binary contribution should be small and measurable
 
-## Known Cyrius Compiler Quirks (5.5.11)
+## Known Cyrius Compiler Quirks (5.5.30)
 
 Most cc3-era workarounds documented in earlier sigil versions are
 now resolved under cc5. Quirks still worth knowing:
@@ -162,13 +162,29 @@ now resolved under cc5. Quirks still worth knowing:
 3. **`var buf[N]` is N bytes, not N elements** — for 80 i64
    values, declare `var buf[640]`. This is intentional, not a
    bug, but tripping on it is easy.
-4. **`match` is a reserved keyword** — do not use as a variable
-   name.
+4. **Reserved keywords as identifiers** — `match`, `in`,
+   `default`, `shared`, `object`, `case`, `else` all reject as
+   variable/field/fn names. Under 5.5.26 the diagnostic is
+   explicit ("expected identifier, got reserved keyword
+   '<name>' — rename the variable/field/fn"); older releases
+   printed "got unknown" and were confusing. If a rename-at-a-
+   distance diagnostic still reads unclearly, check the token
+   isn't one of these.
 5. **Fixup table cap: 16384** — up from 8192 in cc3. Individual
    `store8` init blocks of 256+ entries will still hit this
    (see the S-box init in `src/aes_gcm.cyr` which instead
    decodes from a hex string literal). Split into multiple
    compilation units if you must hand-unroll.
+6. **Array globals are 16-byte-aligned (since 5.5.21)** — any
+   `var x[N]` with `N > 8` is placed on a 16-byte boundary by
+   the x86 fixup pass. That removes the previous #GP trap on
+   SSE m128 operands (PXOR / MOVDQA / AESENC m128-form) loading
+   from round-key globals. Shape-sensitivity to "preceding
+   globals in the TU" — the workaround used in sigil 2.9.0's
+   `_aes_ni_cache = 0` staging — is no longer needed. Re-enable
+   the AES-NI dispatch and re-test; if any residual silent-
+   discard remains it's a separate fixup/CP bug not covered by
+   the alignment patch.
 
 ### Resolved under cc5 (stop treating as bugs)
 

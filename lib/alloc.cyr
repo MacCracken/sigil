@@ -8,11 +8,19 @@
 #
 # v5.5.0 split the implementation: Linux + aarch64 use the brk-
 # based path below; Windows (CYRIUS_TARGET_WIN) delegates to
-# lib/alloc_windows.cyr which uses VirtualAlloc. arena_* helpers
-# are OS-agnostic and shipped inline after the selector.
+# lib/alloc_windows.cyr which uses VirtualAlloc. v5.5.16 adds the
+# macOS (CYRIUS_TARGET_MACOS) delegation to lib/alloc_macos.cyr
+# (mmap-based — Darwin has no brk, and BSD syscall 12 is chdir,
+# so the Linux branch silently corrupts _heap_base when it runs
+# on Mach-O). arena_* helpers are OS-agnostic and shipped inline
+# after the selector.
 
 #ifdef CYRIUS_TARGET_WIN
 include "lib/alloc_windows.cyr"
+#endif
+
+#ifdef CYRIUS_TARGET_MACOS
+include "lib/alloc_macos.cyr"
 #endif
 
 #ifdef CYRIUS_TARGET_LINUX

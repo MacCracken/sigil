@@ -13,7 +13,10 @@
 #   - Tag: 128-bit, constant-time compared via sigil's ct_eq.
 #
 # Security floor (matches CLAUDE.md § Security Hardening):
-#   - Software-only. No inline asm / no AES-NI (Cyrius lacks asm).
+#   - AES block encrypt dispatches to AES-NI when available
+#     (runtime CPUID probe in src/aes_ni.cyr), otherwise runs the
+#     constant-time software path in this file. Both paths produce
+#     byte-identical output against FIPS 197 §C.3.
 #   - Constant-time tag compare; no early exit on secret data.
 #   - No branches on key bytes or plaintext.
 #   - Round-key buffers and the GHASH subkey H are zeroized
@@ -23,6 +26,12 @@
 # Globals: Cyrius single-pass compiler can clobber locals across
 # nested calls; working state lives in globals where it must
 # survive a nested call chain (same pattern as sha256.cyr).
+
+# aes_ni.cyr supplies aes_ni_available() and aes256_encrypt_block_ni
+# for the dispatcher in aes256_encrypt_block below. Including it
+# here means any consumer of aes_gcm automatically pulls the
+# hardware path in without having to list it separately.
+include "src/aes_ni.cyr"
 
 # ================================================================
 # AES S-box (forward direction, FIPS 197 Fig. 7)
@@ -275,6 +284,24 @@ fn _aes_mix_columns() {
 }
 
 fn aes256_encrypt_block(round_keys, in_block, out_block) {
+    # AES-NI dispatch. The PXOR / AESENC memory-operand forms used
+    # by aes256_encrypt_block_ni require the round_keys pointer to
+    # be 16-byte aligned (#GP otherwise). Cyrius 5.5.21 guarantees
+    # 16-alignment for array globals `var rk[240]`, and
+    # `fl_alloc(240)` returns 16-aligned pointers because the block
+    # header is a multiple of 16. Bump-`alloc(240)` is only 8-byte
+    # aligned, so callers using that path bypass the NI branch here
+    # and run the software fallback — matches the CLAUDE.md
+    # discipline ("fl_alloc for round keys") without requiring every
+    # call site to know about the alignment invariant.
+    if (aes_ni_available() == 1) {
+        if ((round_keys & 15) == 0) {
+            aes256_encrypt_block_ni(round_keys, in_block, out_block);
+            return 0;
+        }
+    }
+
+    # Software path (FIPS 197 §5.1).
     _aes_state_init();
     memcpy(_aes_state, in_block, 16);
 

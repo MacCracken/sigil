@@ -26,6 +26,7 @@ include "src/mldsa_reduce.cyr"
 include "src/mldsa_ntt.cyr"
 include "src/mldsa_poly.cyr"
 include "src/mldsa_rounding.cyr"
+include "src/mldsa_encode.cyr"
 include "src/mldsa_sample.cyr"
 
 fn poly_eq(a, b) {

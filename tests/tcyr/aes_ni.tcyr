@@ -1,11 +1,17 @@
-# aes_ni.tcyr — AES-NI scaffold presence check
+# aes_ni.tcyr — AES-NI probe + FIPS 197 §C.3 vector (both paths)
 #
-# In 2.9.0 the AES-NI path is STAGED but NOT dispatched from
-# aes_gcm_encrypt. See the aes_ni.cyr module header for the cc5
-# codegen anomaly that held the live wire-up back. This test
-# asserts the probe/dispatch functions exist and that the stubbed
-# `aes_ni_available()` returns 0 so that the software GCM path
-# stays authoritative.
+# 2.9.1 enables the AES-NI dispatch in aes_gcm.cyr's
+# aes256_encrypt_block now that Cyrius 5.5.21's 16-byte array-
+# global alignment fix has landed. This test confirms:
+#
+#   1. `aes_ni_available()` returns 0 or 1 (not the uncached 2) and
+#      is stable across calls.
+#   2. The dispatcher `aes256_encrypt_block` produces FIPS 197 §C.3
+#      output — covers the software path on non-NI hosts and the
+#      hardware path on NI hosts via the dispatch branch.
+#   3. On AES-NI hosts, `aes256_encrypt_block_ni` is called directly
+#      and must independently produce the same C.3 ciphertext —
+#      catches any future regression in the NI path itself.
 
 include "lib/assert.cyr"
 include "lib/alloc.cyr"
@@ -30,17 +36,94 @@ include "src/hmac.cyr"
 include "src/aes_ni.cyr"
 include "src/aes_gcm.cyr"
 
+# FIPS 197 §C.3 AES-256 test vector.
+# Key:       000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
+# Plaintext: 00112233445566778899aabbccddeeff
+# Expected:  8ea2b7ca516745bfeafc49904b496089
+fn fill_vec(key, pt) {
+    var i = 0;
+    while (i < 32) { store8(key + i, i); i = i + 1; }
+    i = 0;
+    while (i < 16) { store8(pt + i, (i * 17) & 0xFF); i = i + 1; }  # 0x00, 0x11, ... 0xFF
+    return 0;
+}
+
+fn bytes_eq(a, b, n) {
+    var i = 0;
+    while (i < n) {
+        if ((load8(a + i) & 0xFF) != (load8(b + i) & 0xFF)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
 fn main() {
     alloc_init();
 
-    test_group("AES-NI scaffold in 2.9.0 is dormant");
+    test_group("aes_ni_available");
 
-    # aes_ni_available returns 0 until the dispatch lands in a
-    # follow-up. Verify that it returns exactly 0 (not -1, not a
-    # stray garbage value) and is deterministic across repeated
-    # calls.
-    assert_eq(aes_ni_available(), 0, "aes_ni_available() == 0 (stubbed in 2.9.0)");
-    assert_eq(aes_ni_available(), 0, "aes_ni_available() stable across calls");
+    var first = aes_ni_available();
+    # After the first call, the uncached sentinel (2) must be resolved.
+    if (first != 0) {
+        if (first != 1) {
+            assert_eq(0, 1, "aes_ni_available() returned stray value");
+        }
+    }
+    assert_eq(first == 0 || first == 1, 1, "probe returns 0 or 1");
+
+    # Stable across calls (caches the CPUID probe result).
+    var second = aes_ni_available();
+    assert_eq(first, second, "aes_ni_available() is idempotent");
+
+    # ============================================================
+    # FIPS 197 §C.3 AES-256 single-block vector.
+    # Both hardware and software paths must produce the expected
+    # ciphertext. Since aes256_encrypt_block dispatches to NI when
+    # available, a single call covers both paths on AES-NI hosts
+    # (via the dispatch) and the software path on non-NI hosts.
+    # ============================================================
+    test_group("FIPS 197 C.3 block encrypt");
+
+    var key = alloc(32);
+    var pt = alloc(16);
+    fill_vec(key, pt);
+
+    var round_keys = fl_alloc(240);
+    aes256_key_expand(key, round_keys);
+
+    var ct = alloc(16);
+    aes256_encrypt_block(round_keys, pt, ct);
+
+    # Expected ciphertext: 8ea2b7ca516745bfeafc49904b496089.
+    var expected = alloc(16);
+    store8(expected + 0,  0x8e); store8(expected + 1,  0xa2);
+    store8(expected + 2,  0xb7); store8(expected + 3,  0xca);
+    store8(expected + 4,  0x51); store8(expected + 5,  0x67);
+    store8(expected + 6,  0x45); store8(expected + 7,  0xbf);
+    store8(expected + 8,  0xea); store8(expected + 9,  0xfc);
+    store8(expected + 10, 0x49); store8(expected + 11, 0x90);
+    store8(expected + 12, 0x4b); store8(expected + 13, 0x49);
+    store8(expected + 14, 0x60); store8(expected + 15, 0x89);
+    assert_eq(bytes_eq(ct, expected, 16), 1, "AES-256(C.3 key, C.3 pt) matches vector");
+
+    # On AES-NI hosts, verify aes256_encrypt_block_ni directly
+    # (not through the dispatcher) produces the same C.3 ciphertext.
+    # The previous call covered the NI path transitively through
+    # the dispatcher; this call locks the NI function in on its own
+    # so a future regression that breaks the NI implementation
+    # without breaking the dispatcher (e.g. the software fallback
+    # getting wired in by mistake) is caught here.
+    test_group("FIPS 197 C.3 through AES-NI path directly");
+    if (aes_ni_available() == 1) {
+        var ct_ni = alloc(16);
+        # Pre-fill with sentinels so a dead-store regression surfaces
+        # as a vector mismatch rather than a coincidentally-correct
+        # zero-fill.
+        var fi = 0;
+        while (fi < 16) { store8(ct_ni + fi, 0xA5); fi = fi + 1; }
+        aes256_encrypt_block_ni(round_keys, pt, ct_ni);
+        assert_eq(bytes_eq(ct_ni, expected, 16), 1, "NI path matches C.3 vector");
+    }
 
     return assert_summary();
 }

@@ -5,6 +5,107 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.9.1] — 2026-04-21
+
+Activates the AES-NI hardware dispatch staged in 2.9.0, now that
+Cyrius 5.5.21's 16-byte array-global alignment fix has shipped.
+`aes256_encrypt_block` delegates to the NI path at runtime on
+AES-NI hosts and falls back to the FIPS 197 §5.1 software path
+otherwise. Also bumps the Cyrius toolchain pin to 5.5.30 and
+closes out a latent stdlib-include gap in the ML-DSA sampling
+test.
+
+### Changed
+
+- **`src/aes_gcm.cyr` — AES-NI dispatch live.** `aes256_encrypt_block`
+  calls `aes_ni_available()` on entry; when AES-NI is reported
+  AND the `round_keys` pointer is 16-byte aligned, it delegates
+  to `aes256_encrypt_block_ni`. Otherwise it falls through to the
+  software FIPS 197 §5.1 path below. The 16-alignment guard is
+  load-bearing: the NI path's PXOR / AESENC memory-operand forms
+  #GP on unaligned round-key pointers, and while Cyrius 5.5.21
+  guarantees 16-alignment for array globals and `fl_alloc` returns
+  16-aligned blocks, bump-`alloc(240)` is only 8-aligned.
+  Upstream callers that already followed CLAUDE.md's
+  "fl_alloc-for-round-keys" discipline now get the NI speedup
+  transparently; any caller using `alloc(240)` keeps running the
+  software path without crashing. The security guarantees
+  (constant-time tag compare, round-key zeroization, no branches
+  on secret data) are unchanged.
+- **`src/aes_gcm.cyr` now `include`s `src/aes_ni.cyr`** at the
+  top. Prior arrangement required every consumer to list both
+  files; omitting the NI include let cc5 silently stub
+  `aes_ni_available` / `aes256_encrypt_block_ni` and crash at
+  first call. Folding the dependency in makes `src/aes_gcm.cyr`
+  self-contained.
+- **`src/aes_ni.cyr` — probe caches CPUID result, dispatch live.**
+  Replaces the 2.9.0 pin of `_aes_ni_cache = 0`. First call to
+  `aes_ni_available()` runs the CPUID leaf-1 probe and caches
+  0 or 1 in the global; later calls return the cached answer.
+  Module header rewritten to drop the "deferred pending Cyrius
+  fix" narrative — 5.5.21 closed out the failure mode.
+- **`cyrius.cyml` cyrius pin 5.5.11 → 5.5.30.** Picks up the
+  array-global alignment fix (5.5.21) that unblocked AES-NI, the
+  `cyrfmt --write` flag (5.5.22), the per-arch `sys_*` routing
+  in `lib/io.cyr` (5.5.18), the macOS `lib/alloc_macos.cyr`
+  delegation (5.5.16), the u64-keyed `lib/hashmap.cyr` variant
+  (5.5.20), and the expanded reserved-keyword diagnostic (5.5.26).
+  NSS/PAM/fdlopen stdlib work (5.5.23–5.5.30) is irrelevant to
+  sigil's single-threaded crypto core.
+- **`CLAUDE.md` quirks section refreshed to 5.5.30.** Quirk #4
+  updated to list the full reserved-keyword set cc5 5.5.26
+  diagnoses (`match`, `in`, `default`, `shared`, `object`,
+  `case`, `else`). New quirk #6 documents the 16-byte alignment
+  guarantee for `var x[N]` with `N > 8` since 5.5.21.
+
+### Fixed
+
+- **`tests/tcyr/mldsa_sample.tcyr` — add missing
+  `src/mldsa_encode.cyr` include.** `src/mldsa_sample.cyr:242`
+  calls `_mldsa_polyz_unpack` which is defined in
+  `src/mldsa_encode.cyr`. The test was pulling sample without
+  encode, so cc5 stubbed the symbol and the run looped through
+  the first three `test_group()` headers forever (undefined-
+  function crash-back-to-main). With the include added, the
+  test completes cleanly with 16 passed, 0 failed. Found via
+  the CLAUDE.md "main restart loop" quirk.
+
+### Performance
+
+Single-threaded, Linux x86_64 with AES-NI, `cyrius bench` via
+`scripts/check.sh`:
+
+| benchmark                       | 2.9.0 (software) | 2.9.1 (AES-NI)  | delta       |
+|---------------------------------|------------------|-----------------|-------------|
+| aes256_encrypt_block            | 4 µs             | **11 ns**       | **363×**    |
+| aes_gcm_encrypt_1kb             | 1.223 ms         | **900 µs**      | 26% faster  |
+| aes_gcm_decrypt_1kb_valid       | 1.230 ms         | **901 µs**      | 27% faster  |
+| aes_gcm_decrypt_1kb_forged      | 1.228 ms         | **904 µs**      | 26% faster  |
+
+`aes256_key_expansion` stays on the software path (no NI
+counterpart used) at ~1 µs. GCM gains are modest compared to the
+raw block-encrypt win because GHASH (bit-by-bit GF(2^128)
+multiply) dominates 1 KB runs — a future NI/CLMUL-assisted GHASH
+would close that gap.
+
+### Verified
+
+- FIPS 197 §C.3 AES-256 single-block vector matches on both the
+  hardware path (via `aes256_encrypt_block_ni` directly) and the
+  dispatcher. `tests/tcyr/aes_ni.tcyr` — 4 passed, 0 failed.
+- Full test suite on cc5 5.5.30: aes_gcm 15, aes_ni 4, agnosys
+  26, bigint 13, crypto 25, ed25519 20, ed25519_bug 3, field 18,
+  hkdf 13, mldsa_encode 20, mldsa_ntt 10, mldsa_params 39,
+  mldsa_poly 32, mldsa_reduce 42, mldsa_rounding 28,
+  mldsa_sample 16, mldsa 17, security 39, sha512 3, sigil 96,
+  types 78, verify 48. All green.
+
+### Known Issues (inherited — deferred to 3.0 scope)
+
+- **`fuzz_ed25519.fcyr` segfaults** under the 5-second fuzz run
+  in `scripts/check.sh`. Pre-existing, not introduced by 2.9.1.
+  Tracked for the 3.0 closeout pass.
+
 ## [2.9.0] — 2026-04-20
 
 Ships **HKDF** (RFC 5869) on top of the existing HMAC-SHA256

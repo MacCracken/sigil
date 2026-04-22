@@ -266,7 +266,10 @@ fn main() {
     # ============================================================
     var b_aes_kx = bench_new("aes256_key_expansion");
     var aes_key = hex_decode("feffe9928665731c6d6a8f9467308308feffe9928665731c6d6a8f9467308308", 64);
-    var aes_rk = alloc(240);
+    # fl_alloc, not alloc — round-key tables need 16-byte alignment
+    # for the AES-NI m128-operand path (see src/aes_gcm.cyr's
+    # dispatcher + CLAUDE.md's fl_alloc-for-round-keys discipline).
+    var aes_rk = fl_alloc(240);
     ri = 0;
     while (ri < rounds) {
         bench_batch_start(b_aes_kx);
