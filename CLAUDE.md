@@ -142,7 +142,7 @@ Run a closeout pass before tagging x.Y.0 or x.0.0. Ship as the last patch of the
 - **Runtime feature detection** over compile-time gating (follow libro pattern)
 - **Target size** — compiled binary contribution should be small and measurable
 
-## Known Cyrius Compiler Quirks (5.5.30)
+## Known Cyrius Compiler Quirks (5.5.32)
 
 Most cc3-era workarounds documented in earlier sigil versions are
 now resolved under cc5. Quirks still worth knowing:
@@ -185,6 +185,18 @@ now resolved under cc5. Quirks still worth knowing:
    the AES-NI dispatch and re-test; if any residual silent-
    discard remains it's a separate fixup/CP bug not covered by
    the alignment patch.
+7. **Stdlib thread-safety (5.5.31/32)** — atomics + race-free
+   mutex are available (`lib/atomic.cyr`, `lib/thread.cyr`);
+   `string.cyr` is safe by construction. **But:** `alloc`,
+   `hashmap`, and `vec` are NOT thread-safe. A multi-threaded
+   sigil path (e.g. parallel `sv_verify_batch` fan-out) must
+   either pre-allocate all per-worker scratch in the main
+   thread before spawn, or mutex-wrap every call into
+   containers shared across workers. Alloc-from-worker with no
+   mutex will corrupt the bump pointer. Prefer the
+   pre-allocate-upfront pattern — it sidesteps the whole
+   problem and the verify hot path only reads read-only
+   globals (fixed-base comb, round-key tables).
 
 ### Resolved under cc5 (stop treating as bugs)
 
