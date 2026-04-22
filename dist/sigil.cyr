@@ -6683,7 +6683,7 @@ fn crl_apply_to(c, rl) {
 # Deliberate format choice: one JSON object per line, newline-
 # separated. Cyrius' lib/json.cyr parses a single object at a time
 # and has no array support, so JSONL is the cleanest round-trip
-# format and matches `alog_append_to_file`.  Rust's `to_json()`
+# format and matches `alog_save`.  Rust's `to_json()`
 # produced a JSON array; JSONL is trivially convertible with
 # `jq -s`.
 #
@@ -7266,8 +7266,12 @@ fn alog_clear(log) {
     return log;
 }
 
-# Append audit events to file (one JSON line per event)
-fn alog_append_to_file(log, path) {
+# Append audit events to file (one JSON line per event).
+# Renamed from alog_append_to_file in 3.0 to match the rl_save /
+# crl_save / sv_save_trust_store vocabulary. Still O_APPEND under
+# the hood — the name reflects the contract (persist to disk),
+# not the write mode.
+fn alog_save(log, path) {
     var fd = file_open(path, 1089, 420);  # O_WRONLY|O_CREAT|O_APPEND, 0644
     if (fd < 0) { return ERR_IO; }
     var events = load64(log);
@@ -7318,7 +7322,8 @@ fn _alog_write_str(dst, src) {
 }
 
 # ================================================================
-# alog_load_from_file(log, path) — inverse of alog_append_to_file.
+# alog_load(log, path) — inverse of alog_save. Renamed from
+# alog_load_from_file in 3.0.
 #
 # Reads JSONL (one event per line) from `path`, parses each line
 # as a flat JSON object, and pushes an AuditEvent into `log`. Lines
@@ -7418,7 +7423,7 @@ fn _alog_parse_one_line(log, line, llen) {
     return 1;
 }
 
-fn alog_load_from_file(log, path) {
+fn alog_load(log, path) {
     var buf = alloc(65536);
     var n = file_read_all(path, buf, 65536);
     if (n < 0) { return (0 - 1); }
