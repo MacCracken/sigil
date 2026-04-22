@@ -65,12 +65,17 @@ Cleanups that have been accumulating but were deferred to avoid
 mid-minor breakage. All go out in a single 3.0 bump so downstream
 consumers update once.
 
-- [ ] **Drop `hmac.cyr` module entirely.** `hmac_sha256` still
-      ships but has no sigil-internal caller — only exercised by
-      `tests/tcyr/crypto.tcyr` + `security.tcyr`. Ed25519 replaced
-      HMAC in every sigil flow. Consumers that want HMAC should
-      pull it from a dedicated stdlib module; sigil shouldn't be
-      the carrier.
+- [ ] **~~Drop `hmac.cyr` module entirely.~~** _Superseded — hmac
+      stays sigil-internal as an HKDF implementation detail._
+      The 2.9.0 HKDF landing made `src/hkdf.cyr` a direct
+      consumer of `hmac_sha256` (4 call sites in the extract +
+      expand paths), so the "no sigil-internal caller" premise
+      no longer holds. New stance: `src/hmac.cyr` is a private
+      primitive — consumers should call `hkdf_*` / future AEAD
+      surfaces, not `hmac_sha256` directly. The module header
+      in `src/hmac.cyr` documents this. No public surface
+      change; tests retain the hmac-specific assertions as
+      unit coverage of the primitive.
 - [ ] **Remove the `TRUST_COMMUNITY` enum variant** if it remains
       unused after a 3.0 consumer audit. Grep today: one test
       reference, no production path.

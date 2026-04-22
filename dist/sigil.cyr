@@ -820,7 +820,19 @@ fn ct_eq_32(a, b) {
 
 # hmac.cyr — HMAC-SHA256 (RFC 2104)
 # Proper ipad/opad construction, not simplified SHA-256(key||msg).
-
+#
+# Status in 3.0: sigil-internal primitive. Public consumers should
+# call `hkdf_*` (src/hkdf.cyr) rather than `hmac_sha256` directly
+# — HMAC's hot-path role in sigil is as the HKDF extract/expand
+# building block, and exposing it as a top-level API would
+# encourage miscomposition (consumers rolling their own KDFs when
+# HKDF already covers the use case correctly). The 2.x roadmap
+# entry proposing a full drop of this module is retired: the
+# 2.9.0 HKDF landing pulled `hmac_sha256` into sigil's internal
+# call graph, so it stays. `tests/tcyr/crypto.tcyr` and
+# `tests/tcyr/security.tcyr` retain hmac-level test vectors as
+# unit coverage of the primitive.
+#
 # HMAC(K, m) = H((K' xor opad) || H((K' xor ipad) || m))
 # where:
 #   K' = H(K) if len(K) > 64, else K padded to 64 bytes
