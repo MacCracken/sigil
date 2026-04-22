@@ -369,7 +369,7 @@ fn main() {
     # ============================================================
     test_group("audit file");
     var alog2 = audit_log_new();
-    alog_record(alog2, audit_artifact_verified("/test", ARTIFACT_CONFIG, TRUST_COMMUNITY, 1, "hash1"));
+    alog_record(alog2, audit_artifact_verified("/test", ARTIFACT_CONFIG, TRUST_VERIFIED, 1, "hash1"));
     var apath = "/tmp/sigil_test_audit.jsonl";
     var aresult = alog_save(alog2, apath);
     assert_eq(aresult, ERR_NONE, "append ok");
