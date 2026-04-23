@@ -5,8 +5,12 @@
 **Reporter:** sigil (AGNOS trust-verification library)
 **Cyrius version at time of report:** 5.5.35
 **Severity:** blocker for a specific downstream 3.0 feature
-**Status:** open — awaiting cyrius team review for inclusion in
-remaining 5.5.x work
+**Status:** **acknowledged — scheduled for cyrius 5.5.37** (per
+cyrius team confirmation 2026-04-22). No further cyrius-team
+action required from this filing; sigil will ungate
+`SIGIL_BATCH_PARALLEL` as a default-on path once 5.5.37 is the
+active toolchain. Filing kept as the durable record of the cap-
+raise motivation.
 
 ## Summary
 

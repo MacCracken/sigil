@@ -22,6 +22,16 @@ Actual parallelism on the dominant `ed25519_verify` (~8.4 ms per
 artifact) requires lifting those allocations out of the worker
 body.
 
+**Target cyrius toolchain: 5.6.0.** The 3.1 work deliberately
+waits for the cyrius 5.6 major bump rather than starting on
+5.5.37 (which ships the fixup-cap raise). Rationale: 5.6 is
+expected to bring broader language/stdlib improvements, and the
+Option 1 rewrite is a big enough rework to warrant the
+consolidated toolchain upgrade. If the cap raise in 5.5.37 is
+the only 3.1 dependency that matters for a specific subtask,
+that subtask can be cherry-picked earlier — but the full 3.1
+cycle opens on 5.6.0.
+
 - [ ] **Alloc-free verify hot path (Option 1 rewrite).** Rewrite
       `sv_verify_artifact` and its call chain to accept caller-
       provided scratch instead of allocating internally. Scope
