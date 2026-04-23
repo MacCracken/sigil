@@ -1,0 +1,236 @@
+# batch_parallel.tcyr — sv_verify_batch correctness across batch
+# sizes, artifact kinds, and repeat runs.
+#
+# This test is the correctness guard for the 3.0 parallel
+# sv_verify_batch landing. It must pass against both:
+#   1. the pre-parallel serial implementation (today)
+#   2. the post-parallel fan-out implementation (after pillar
+#      lands)
+#
+# Assertions:
+#   - batch output length == input count
+#   - batch result[i].passed          == serial sv_verify_artifact(paths[i]).passed
+#   - batch result[i].trust_level     == serial sv_verify_artifact(paths[i]).trust_level
+#   - batch result[i].content_hash    == serial sv_verify_artifact(paths[i]).content_hash
+#   - determinism: running the same batch twice yields identical results
+#
+# Scales tested: 0 (empty), 1 (single), 4 (below threshold), 32
+# (above threshold — exercises whatever parallel fan-out threshold
+# we land). Mixed artifact kinds at each scale: signed-valid /
+# unknown / revoked, round-robin.
+
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fmt.cyr"
+include "lib/json.cyr"
+include "lib/sakshi.cyr"
+include "lib/chrono.cyr"
+
+include "src/types.cyr"
+include "src/error.cyr"
+include "src/sha256.cyr"
+include "src/hex.cyr"
+include "lib/ct.cyr"
+include "src/ct.cyr"
+include "src/hmac.cyr"
+include "src/sha512.cyr"
+include "lib/bigint.cyr"
+include "src/bigint_ext.cyr"
+include "src/ed25519.cyr"
+include "src/trust.cyr"
+include "src/integrity.cyr"
+include "src/policy.cyr"
+include "src/audit.cyr"
+include "src/verify.cyr"
+
+# Build a 16-byte-per-entry artifacts buffer.
+# Layout matches sv_verify_batch's expected format:
+#   artifacts + i*16        -> path ptr
+#   artifacts + i*16 + 8    -> artifact_type
+fn build_artifacts(paths, types, count) {
+    if (count == 0) { return 0; }
+    var buf = alloc(count * 16);
+    var i = 0;
+    while (i < count) {
+        store64(buf + i * 16, vec_get(paths, i));
+        store64(buf + i * 16 + 8, vec_get(types, i));
+        i = i + 1;
+    }
+    return buf;
+}
+
+# Write a file with contents — returns the path (caller-owned).
+fn write_test_file(path, body) {
+    var fd = file_open(path, 577, 420);
+    file_write(fd, body, strlen(body));
+    file_close(fd);
+    return path;
+}
+
+# Run batch, run serial reference, compare result-by-result.
+fn assert_batch_matches_serial(sv, paths, types, count, label) {
+    var artifacts = build_artifacts(paths, types, count);
+
+    var batch_results = sv_verify_batch(sv, artifacts, count);
+    assert_eq(vec_len(batch_results), count, "batch: result count");
+
+    var i = 0;
+    while (i < count) {
+        var path = vec_get(paths, i);
+        var atype = vec_get(types, i);
+        var ref_vr = sv_verify_artifact(sv, path, atype);
+        var batch_vr = vec_get(batch_results, i);
+
+        assert_eq(vresult_passed(batch_vr),
+                  vresult_passed(ref_vr),
+                  "passed matches serial");
+
+        var ref_art = vresult_artifact(ref_vr);
+        var batch_art = vresult_artifact(batch_vr);
+        assert_eq(artifact_trust_level(batch_art),
+                  artifact_trust_level(ref_art),
+                  "trust_level matches serial");
+
+        # Content hash must be identical (same file contents).
+        var ref_h = artifact_content_hash(ref_art);
+        var batch_h = artifact_content_hash(batch_art);
+        if (ref_h == 0) {
+            assert_eq(batch_h, 0, "both null hash");
+        } else {
+            assert(batch_h != 0, "batch hash non-null");
+            assert_eq(streq(ref_h, batch_h), 1, "content hash matches");
+        }
+
+        i = i + 1;
+    }
+}
+
+# Assert determinism: running the same batch twice yields
+# structurally identical results.
+fn assert_batch_is_deterministic(sv, paths, types, count) {
+    var artifacts = build_artifacts(paths, types, count);
+    var r1 = sv_verify_batch(sv, artifacts, count);
+    var r2 = sv_verify_batch(sv, artifacts, count);
+    assert_eq(vec_len(r1), vec_len(r2), "determinism: len");
+
+    var i = 0;
+    while (i < count) {
+        var v1 = vec_get(r1, i);
+        var v2 = vec_get(r2, i);
+        assert_eq(vresult_passed(v1), vresult_passed(v2),
+                  "determinism: passed");
+        var a1 = vresult_artifact(v1);
+        var a2 = vresult_artifact(v2);
+        assert_eq(artifact_trust_level(a1), artifact_trust_level(a2),
+                  "determinism: trust_level");
+        i = i + 1;
+    }
+}
+
+fn main() {
+    alloc_init();
+    ed25519_init();
+
+    # ============================================================
+    # Setup: keyring + verifier + 3 archetype files
+    # ============================================================
+    var sk[64];
+    var pk[32];
+    var kid = generate_keypair(&sk, &pk);
+    var pk_hex = hex_encode(&pk, 32);
+
+    var kr = keyring_new("/tmp/sigil_batch_test_keys");
+    var kv = key_version_new(kid, pk_hex);
+    kv_set_secret_key(kv, &sk);
+    keyring_add_key(kr, kv);
+
+    var policy = trust_policy_new();
+    var sv = sigil_verifier_new(kr, policy);
+
+    # Archetype 1: signed + in trust store → TRUST_VERIFIED
+    var signed_path = write_test_file("/tmp/sigil_batch_signed.bin",
+                                       "signed-artifact-body");
+    var signed_art = sv_sign_artifact(sv, signed_path, &sk, kid,
+                                       ARTIFACT_SYSTEM_BINARY);
+    assert(signed_art != 0, "signed artifact registered");
+
+    # Archetype 2: unknown (not in trust store) → TRUST_UNVERIFIED
+    var unknown_path = write_test_file("/tmp/sigil_batch_unknown.bin",
+                                        "unknown-artifact-body");
+
+    # Archetype 3: signed, then revoked → TRUST_REVOKED
+    var revoked_path = write_test_file("/tmp/sigil_batch_revoked.bin",
+                                        "revoked-artifact-body");
+    var revoked_art = sv_sign_artifact(sv, revoked_path, &sk, kid,
+                                        ARTIFACT_SYSTEM_BINARY);
+    assert(revoked_art != 0, "revoked artifact registered");
+    var revoked_hash = artifact_content_hash(revoked_art);
+    var re = revocation_entry_new(0, revoked_hash, "batch test", "admin");
+    sv_add_revocation(sv, re);
+
+    # ============================================================
+    # count=0 — empty batch
+    # ============================================================
+    test_group("batch count=0");
+    var empty_paths = vec_new();
+    var empty_types = vec_new();
+    var empty_artifacts = 0;
+    var empty_results = sv_verify_batch(sv, empty_artifacts, 0);
+    assert_eq(vec_len(empty_results), 0, "empty batch = empty results");
+
+    # ============================================================
+    # count=1 — single artifact
+    # ============================================================
+    test_group("batch count=1 (signed)");
+    var p1 = vec_new();
+    var t1 = vec_new();
+    vec_push(p1, signed_path);
+    vec_push(t1, ARTIFACT_SYSTEM_BINARY);
+    assert_batch_matches_serial(sv, p1, t1, 1, "count=1");
+
+    # ============================================================
+    # count=4 — small batch (below parallel threshold)
+    # ============================================================
+    test_group("batch count=4 (mixed)");
+    var p4 = vec_new();
+    var t4 = vec_new();
+    vec_push(p4, signed_path);   vec_push(t4, ARTIFACT_SYSTEM_BINARY);
+    vec_push(p4, unknown_path);  vec_push(t4, ARTIFACT_SYSTEM_BINARY);
+    vec_push(p4, revoked_path);  vec_push(t4, ARTIFACT_SYSTEM_BINARY);
+    vec_push(p4, signed_path);   vec_push(t4, ARTIFACT_SYSTEM_BINARY);
+    assert_batch_matches_serial(sv, p4, t4, 4, "count=4");
+    assert_batch_is_deterministic(sv, p4, t4, 4);
+
+    # ============================================================
+    # count=32 — above any reasonable parallel threshold
+    # ============================================================
+    test_group("batch count=32 (mixed, round-robin)");
+    var p32 = vec_new();
+    var t32 = vec_new();
+    var i = 0;
+    while (i < 32) {
+        var r = i % 3;
+        if (r == 0) {
+            vec_push(p32, signed_path);
+        } elif (r == 1) {
+            vec_push(p32, unknown_path);
+        } else {
+            vec_push(p32, revoked_path);
+        }
+        vec_push(t32, ARTIFACT_SYSTEM_BINARY);
+        i = i + 1;
+    }
+    assert_batch_matches_serial(sv, p32, t32, 32, "count=32");
+    assert_batch_is_deterministic(sv, p32, t32, 32);
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);
