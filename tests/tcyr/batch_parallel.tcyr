@@ -31,6 +31,7 @@ include "lib/fmt.cyr"
 include "lib/json.cyr"
 include "lib/sakshi.cyr"
 include "lib/chrono.cyr"
+include "lib/thread.cyr"
 
 include "src/types.cyr"
 include "src/error.cyr"

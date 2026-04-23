@@ -25,6 +25,7 @@ include "lib/sakshi.cyr"
 include "lib/chrono.cyr"
 include "lib/bench.cyr"
 include "lib/bigint.cyr"
+include "lib/thread.cyr"
 
 include "src/types.cyr"
 include "src/error.cyr"

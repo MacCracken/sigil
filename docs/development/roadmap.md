@@ -9,6 +9,56 @@ scoped 2.x plan is complete; everything below is work toward 3.0.
 Consumed by majra's `ipc_encrypted.cyr`. A hardware AES-NI path
 remains future work (blocked on Cyrius inline-asm support).
 
+## Road to v3.1
+
+v3.1 is defined by **making parallel batch verify actually fast**.
+The 3.0 landing shipped the spawn/join/shard/mutex infrastructure
+gated behind `-D SIGIL_BATCH_PARALLEL`, with correctness preserved
+(228/228 tests) but measured 0.96x – 1.04x vs serial — no
+throughput win. The mutex wraps the full `sv_verify_artifact`
+call chain because its downstream hits `alloc` / `vec_push` /
+`map_get`, none of which are thread-safe under cyrius (quirk #7).
+Actual parallelism on the dominant `ed25519_verify` (~8.4 ms per
+artifact) requires lifting those allocations out of the worker
+body.
+
+- [ ] **Alloc-free verify hot path (Option 1 rewrite).** Rewrite
+      `sv_verify_artifact` and its call chain to accept caller-
+      provided scratch instead of allocating internally. Scope
+      captured in `docs/development/3.0-scope.md` § Post-3.0
+      follow-ups:
+      - `hash_file` returns a caller-provided hex buffer rather
+        than `alloc`-ing one per call
+      - `hex_decode` writes into a caller-provided 32-byte
+        buffer
+      - `trust_check_new` + `vresult_add_check` → replace the
+        per-check vec with a bounded fixed-size check array on
+        `verification_result` (≤ 6 standard checks; size with
+        headroom)
+      - `verification_result_new` → allow in-place construction
+        into a pre-allocated output slot
+      - `map_get` on the trust store — document read-only-is-safe
+        contract, or wrap in a rwlock
+      Expected wins: 3x+ speedup at 4 workers (ed25519_verify
+      truly parallel outside the mutex), lower per-artifact
+      latency, cleaner thread-safety story, smaller attack
+      surface.
+
+- [ ] **Ungate `SIGIL_BATCH_PARALLEL`.** Conditional on the
+      cyrius 16384 fixup-table cap lifting (tracked in
+      `docs/development/issues/2026-04-22-cyrius-fixup-cap-raises.md`).
+      When cyrius raises the cap, remove the gate in
+      `src/verify.cyr` + `src/lib.cyr` so the parallel path is
+      the default at `count >= _SIGIL_BATCH_PARALLEL_THRESHOLD`.
+      Keep the flag for one cycle as a no-op compatibility
+      shim, then drop it.
+
+- [ ] **Bench the 3.1 rewrite against 2.9.1 and the 3.0 mutex-
+      wrap baseline.** Three-way comparison (serial / 3.0 mutex-
+      wrap parallel / 3.1 alloc-free parallel) published in
+      `tests/bcyr/batch_parallel.bcyr` output, with CSV row
+      added to `benches/history.csv`.
+
 ## Road to v3.0
 
 v3.0 is defined by **post-quantum capability** and **parallel

@@ -22,6 +22,17 @@ include "lib/process.cyr"
 include "lib/ct.cyr"
 include "lib/keccak.cyr"
 
+# Threading primitives — only pulled in when the parallel batch
+# verify path is enabled. `lib/thread.cyr` adds ~N fixup-table
+# entries and, combined with the parallel fan-out body in
+# `src/verify.cyr`, pushes a default sigil build past the cyrius
+# 16384 fixup cap (quirk #5). Gated until cyrius raises the cap —
+# tracked in `docs/development/issues/2026-04-22-cyrius-fixup-
+# cap-raises.md`.
+#ifdef SIGIL_BATCH_PARALLEL
+include "lib/thread.cyr"
+#endif
+
 # AGNOS kernel interfaces (agnosys 0.98.0, bundled)
 include "lib/agnosys.cyr"
 

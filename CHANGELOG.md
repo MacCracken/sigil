@@ -5,6 +5,65 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] — 3.0 work-in-progress on branch `3.0`
+
+### Added
+
+- **Parallel `sv_verify_batch` infrastructure** behind
+  `-D SIGIL_BATCH_PARALLEL` (cmdline-opt-in, mirrors the existing
+  `-D SIGIL_PQC` pattern). Ships the worker-pool spawn/join/shard
+  machinery, a 4-worker default pool, a `_SIGIL_BATCH_PARALLEL_THRESHOLD = 4`
+  serial fast-path, and a shared `_sigil_batch_mutex` that
+  serialises `sv_verify_artifact` calls across workers. Correctness
+  is identical to the serial path (228/228 tests in
+  `tests/tcyr/batch_parallel.tcyr`, sizes 0/1/4/32, mixed
+  signed/unknown/revoked, determinism across repeat runs). **No
+  throughput win in 3.0** — measured 0.96x–1.04x vs serial because
+  the mutex wraps the full `sv_verify_artifact` call, including
+  the dominant `ed25519_verify` (~8.4 ms/artifact). Actual speedup
+  defers to 3.1's alloc-free verify-hot-path rewrite (tracked in
+  `docs/development/roadmap.md` § Road to v3.1).
+- **`tests/tcyr/batch_parallel.tcyr`** (228 assertions) —
+  correctness guard for `sv_verify_batch` asserting the batch
+  result matches a serial reference run per-artifact (passed,
+  trust_level, content hash) across mixed-archetype inputs; plus
+  determinism across repeat calls. Passes under both default build
+  and `-D SIGIL_BATCH_PARALLEL` build, so it regression-guards
+  both paths.
+- **`tests/bcyr/batch_parallel.bcyr`** — scaling-curve benchmark
+  for `sv_verify_batch` at counts 1/4/16/64. Separate from
+  `tests/bcyr/sigil.bcyr` because the full sigil+mldsa+verify
+  include set hits the 1 MB preprocessor cap (CLAUDE.md quirk #8).
+- **`docs/development/issues/2026-04-22-cyrius-fixup-cap-raises.md`**
+  — upstream cyrius issue requesting the 16384 fixup-table cap
+  be raised for sigil 3.1. Blocks ungating the
+  `SIGIL_BATCH_PARALLEL` flag.
+
+### Changed
+
+- **Cyrius pin** → `5.5.35` (was `5.5.30` on `main`, interim `5.5.32`
+  during 3.0 bring-up). Pin is the minimum-compatible floor; active
+  toolchain dispatches to whatever `cyriusly current` reports.
+- **`src/lib.cyr`** now conditionally `include`s `lib/thread.cyr`
+  behind `#ifdef SIGIL_BATCH_PARALLEL`. Default builds stay under
+  the cyrius 16384 fixup-table cap; parallel builds pull in the
+  threading primitives.
+- **Sub-3.0 breaking changes already landed on the `3.0` branch**
+  (staged here as the branch is unreleased): `TRUST_COMMUNITY`
+  enum variant removed (numeric slot 2 intentionally unassigned
+  for persisted-state compatibility); `alog_append_to_file` →
+  `alog_save`, `alog_load_from_file` → `alog_load` (vocabulary
+  alignment with `rl_save` / `crl_save` / `sv_save_trust_store`).
+
+### Known limitations
+
+- **Parallel batch verify is opt-in and not faster in 3.0.** See
+  "Added" note above. Consumers who need it today can enable the
+  flag for the thread-safety infrastructure; throughput wins
+  arrive in 3.1.
+- **`SIGIL_BATCH_PARALLEL` cannot be default-on** until cyrius
+  raises the fixup-table cap (filed).
+
 ## [2.9.1] — 2026-04-21
 
 Activates the AES-NI hardware dispatch staged in 2.9.0, now that
