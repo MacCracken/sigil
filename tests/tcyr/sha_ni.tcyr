@@ -36,6 +36,8 @@ include "lib/fmt.cyr"
 include "lib/json.cyr"
 include "lib/sakshi.cyr"
 include "lib/chrono.cyr"
+include "lib/ct.cyr"
+include "lib/keccak.cyr"
 
 include "src/types.cyr"
 include "src/error.cyr"
@@ -96,7 +98,7 @@ fn main() {
 
     var ctx = sha256_init();
     var rc = sha256_transform_ni(ctx);
-    assert_eq(rc, -1, "sha256_transform_ni stub returns -1 (2.9.2)");
+    assert_eq(rc, 0, "sha256_transform_ni returns 0 on success (2.9.3)");
     fl_free(ctx);
 
     # ============================================================
@@ -165,6 +167,15 @@ fn main() {
         # Reusable digest buffers.
         var dsw = alloc(32);
         var dni = alloc(32);
+
+        # Single-block "abc" — narrows whether a bug is in the
+        # single-block compress or only triggers on multi-block.
+        _sha_ni_cache = 1;
+        sha256(abc, 3, dni);
+        var dni_hex = hex_encode(dni, 32);
+        assert_streq(dni_hex,
+                     "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+                     "single-block NI \"abc\"");
 
         # 56-byte two-block vector.
         _sha_ni_cache = 0;
