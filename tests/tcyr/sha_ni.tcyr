@@ -89,17 +89,19 @@ fn main() {
     var host_supports_ni = probe;
 
     # ============================================================
-    # sha256_transform_ni stub contract
-    # 2.9.2: returns -1 (no-op, dispatcher falls through to software)
-    # 2.9.3: returns 0 (compressed in hardware) — flip the assertion
-    #        in Bite C when the asm body lands
+    # sha256_transform_ni return contract — only meaningful on
+    # SHA-NI-capable hosts. On a host without the extension the
+    # function would execute SHA256RNDS2/MSG1/MSG2 directly and
+    # raise #UD, so the test gates on probe.
     # ============================================================
-    test_group("sha256_transform_ni stub contract");
+    test_group("sha256_transform_ni return contract");
 
-    var ctx = sha256_init();
-    var rc = sha256_transform_ni(ctx);
-    assert_eq(rc, 0, "sha256_transform_ni returns 0 on success (2.9.3)");
-    fl_free(ctx);
+    if (host_supports_ni == 1) {
+        var ctx = sha256_init();
+        var rc = sha256_transform_ni(ctx);
+        assert_eq(rc, 0, "sha256_transform_ni returns 0 on success");
+        fl_free(ctx);
+    }
 
     # ============================================================
     # Ring 2 — software-path FIPS 180-4 vectors through dispatcher

@@ -76,21 +76,29 @@ fn _sha_ni_cpuid_probe(out) {
 # ================================================================
 # Module-global scratch buffers (lazy init on first transform).
 #
-#   _sha_ni_buf   — 64 bytes:
-#                     +0..31  packed state in/out (8 dwords)
-#                     +32..47 ABEF_save (kernel xmm9 spilled to mem)
-#                     +48..63 CDGH_save (kernel xmm10 spilled to mem)
-#   _sha_ni_K     — 256 bytes: 64 packed dwords of the K constants
-#   _sha_ni_bswap — 16 bytes: PSHUFFLE_BYTE_FLIP_MASK
+#   _sha_ni_buf — 80 bytes:
+#                   +0..31  packed state in/out (8 dwords)
+#                   +32..47 ABEF_save (kernel xmm9 spilled to mem)
+#                   +48..63 CDGH_save (kernel xmm10 spilled to mem)
+#                   +64..79 PSHUFFLE_BYTE_FLIP_MASK
+#   _sha_ni_K   — 256 bytes: 64 packed dwords of the K constants
 #
-# alloc() returns 16-byte-aligned blocks (Cyrius 5.5.21+), so
-# MOVDQU operands are aligned in practice; no MOVDQA risk because
-# the asm sticks to MOVDQU on these globals.
+# Bswap mask is embedded in _sha_ni_buf rather than a separate
+# allocation so `_sha_ni_compress_one` has only 3 parameters
+# (`ctx`, `buf`, `kbuf`). cc5 spills 3 params reliably to
+# [rbp-8], [rbp-16], [rbp-24] (proven by `aes_ni.cyr` since
+# 2.9.1); cc5.5.30 may spill a 4th param differently from cc5.6.x,
+# so we stay at 3 to keep the build portable across the toolchain
+# versions sigil's CI matrix uses.
+#
+# alloc() is 8-byte aligned but PSHUFB / PADDD with an m128
+# operand both require the memory address to be 16-aligned or
+# they raise #GP. Each buffer is over-allocated by 16 bytes and
+# aligned via `_sha_ni_align16`.
 # ================================================================
 
 var _sha_ni_buf = 0;
 var _sha_ni_K = 0;
-var _sha_ni_bswap = 0;
 
 # _sha_ni_pack_k_word — write K[i] as 4 little-endian bytes at dst+0..3.
 fn _sha_ni_pack_k_word(dst, k) {
@@ -115,20 +123,20 @@ fn _sha_ni_align16(addr) {
 fn _sha_ni_init() {
     if (_sha_ni_buf != 0) { return 0; }
 
-    _sha_ni_buf   = _sha_ni_align16(alloc(64 + 16));
-    _sha_ni_K     = _sha_ni_align16(alloc(256 + 16));
-    _sha_ni_bswap = _sha_ni_align16(alloc(16 + 16));
+    _sha_ni_buf = _sha_ni_align16(alloc(80 + 16));
+    _sha_ni_K   = _sha_ni_align16(alloc(256 + 16));
 
-    # PSHUFFLE_BYTE_FLIP_MASK — reverses bytes within each 32-bit dword.
-    # Matches the kernel constant 0x0c0d0e0f08090a0b0405060700010203.
-    store8(_sha_ni_bswap + 0,  0x03); store8(_sha_ni_bswap + 1,  0x02);
-    store8(_sha_ni_bswap + 2,  0x01); store8(_sha_ni_bswap + 3,  0x00);
-    store8(_sha_ni_bswap + 4,  0x07); store8(_sha_ni_bswap + 5,  0x06);
-    store8(_sha_ni_bswap + 6,  0x05); store8(_sha_ni_bswap + 7,  0x04);
-    store8(_sha_ni_bswap + 8,  0x0B); store8(_sha_ni_bswap + 9,  0x0A);
-    store8(_sha_ni_bswap + 10, 0x09); store8(_sha_ni_bswap + 11, 0x08);
-    store8(_sha_ni_bswap + 12, 0x0F); store8(_sha_ni_bswap + 13, 0x0E);
-    store8(_sha_ni_bswap + 14, 0x0D); store8(_sha_ni_bswap + 15, 0x0C);
+    # PSHUFFLE_BYTE_FLIP_MASK at buf+64..79 — reverses bytes within
+    # each 32-bit dword. Matches the kernel constant
+    # 0x0c0d0e0f08090a0b0405060700010203.
+    store8(_sha_ni_buf + 64, 0x03); store8(_sha_ni_buf + 65, 0x02);
+    store8(_sha_ni_buf + 66, 0x01); store8(_sha_ni_buf + 67, 0x00);
+    store8(_sha_ni_buf + 68, 0x07); store8(_sha_ni_buf + 69, 0x06);
+    store8(_sha_ni_buf + 70, 0x05); store8(_sha_ni_buf + 71, 0x04);
+    store8(_sha_ni_buf + 72, 0x0B); store8(_sha_ni_buf + 73, 0x0A);
+    store8(_sha_ni_buf + 74, 0x09); store8(_sha_ni_buf + 75, 0x08);
+    store8(_sha_ni_buf + 76, 0x0F); store8(_sha_ni_buf + 77, 0x0E);
+    store8(_sha_ni_buf + 78, 0x0D); store8(_sha_ni_buf + 79, 0x0C);
 
     # K constants from FIPS 180-4 §4.2.2 — packed 64×4-byte LE dwords.
     # Embedded directly rather than read from sha256.cyr's _sha256_K
@@ -206,12 +214,21 @@ fn _sha_ni_init() {
 # Parameters arrive on the stack at:
 #   [rbp-8]  ctx     — 144-byte SHA-256 context (h0..h7 at +0,
 #                       block buffer at +64)
-#   [rbp-16] scratch — 64-byte module global (state pack + saves)
+#   [rbp-16] buf     — 80-byte module global. Layout:
+#                        +0..31  packed state in/out
+#                        +32..47 ABEF_save
+#                        +48..63 CDGH_save
+#                        +64..79 PSHUFFLE_BYTE_FLIP_MASK
 #   [rbp-24] kbuf    — 256-byte packed K table
-#   [rbp-32] bswap   — 16-byte PSHUFFLE_BYTE_FLIP_MASK
+#
+# 3 params (rather than 4) so the [rbp-N] spill convention is the
+# one cc5 has used reliably for asm-block functions since 2.9.1
+# (`aes_ni.cyr`'s 3-param `aes256_encrypt_block_ni`); cc5.5.30 may
+# spill a 4th param into a register rather than the stack, which
+# breaks the `mov ..., [rbp-32]` form.
 #
 # Register usage inside the asm block:
-#   rdi = ctx, rsi = scratch, rcx = kbuf, rax = bswap, rdx = scalar tmp
+#   rdi = ctx, rsi = buf, rcx = kbuf, rdx = scalar tmp
 #   xmm0 = MSG, xmm1 = STATE0 (ABEF), xmm2 = STATE1 (CDGH),
 #   xmm3 = MSGTMP0, xmm4 = MSGTMP1, xmm5 = MSGTMP2, xmm6 = MSGTMP3,
 #   xmm7 = MSGTMP4 (palignr scratch)
@@ -220,14 +237,13 @@ fn _sha_ni_init() {
 # is safe because the asm block is straight-line with no calls
 # and Cyrius does not expect XMM state across the block.
 # ================================================================
-fn _sha_ni_compress_one(ctx, scratch, kbuf, bswap) {
+fn _sha_ni_compress_one(ctx, buf, kbuf) {
     #ifdef CYRIUS_ARCH_X86
     asm {
         # ── Param loads ───────────────────────────────────────────
         0x48; 0x8B; 0x7D; 0xF8;    # mov rdi, [rbp-8]   (ctx)
-        0x48; 0x8B; 0x75; 0xF0;    # mov rsi, [rbp-16]  (scratch)
+        0x48; 0x8B; 0x75; 0xF0;    # mov rsi, [rbp-16]  (buf)
         0x48; 0x8B; 0x4D; 0xE8;    # mov rcx, [rbp-24]  (kbuf)
-        0x48; 0x8B; 0x45; 0xE0;    # mov rax, [rbp-32]  (bswap)
 
         # ── Pack ctx h0..h7 (8 sparse 64-bit slots, low 32 bits each)
         #    into scratch[0..31] (8 packed little-endian dwords).
@@ -256,7 +272,7 @@ fn _sha_ni_compress_one(ctx, scratch, kbuf, bswap) {
 
         # ── Iter 0 — Rounds 0..3 — load MSGTMP0 = W[0..3] ─────────
         0xF3; 0x0F; 0x6F; 0x47; 0x40;          # movdqu xmm0, [rdi+64]
-        0x66; 0x0F; 0x38; 0x00; 0x00;          # pshufb xmm0, [rax]
+        0x66; 0x0F; 0x38; 0x00; 0x46; 0x40;    # pshufb xmm0, [rsi+64]
         0x66; 0x0F; 0x6F; 0xD8;                # movdqa xmm3, xmm0      MSGTMP0
         0x66; 0x0F; 0xFE; 0x41; 0x00;          # paddd  xmm0, [rcx+0]
         0x0F; 0x38; 0xCB; 0xD1;                # sha256rnds2 xmm2, xmm1
@@ -265,7 +281,7 @@ fn _sha_ni_compress_one(ctx, scratch, kbuf, bswap) {
 
         # ── Iter 1 — Rounds 4..7 — load MSGTMP1 = W[4..7] ─────────
         0xF3; 0x0F; 0x6F; 0x47; 0x50;          # movdqu xmm0, [rdi+80]
-        0x66; 0x0F; 0x38; 0x00; 0x00;          # pshufb xmm0, [rax]
+        0x66; 0x0F; 0x38; 0x00; 0x46; 0x40;    # pshufb xmm0, [rsi+64]
         0x66; 0x0F; 0x6F; 0xE0;                # movdqa xmm4, xmm0      MSGTMP1
         0x66; 0x0F; 0xFE; 0x41; 0x10;          # paddd  xmm0, [rcx+16]
         0x0F; 0x38; 0xCB; 0xD1;                # sha256rnds2 xmm2, xmm1
@@ -275,7 +291,7 @@ fn _sha_ni_compress_one(ctx, scratch, kbuf, bswap) {
 
         # ── Iter 2 — Rounds 8..11 — load MSGTMP2 = W[8..11] ───────
         0xF3; 0x0F; 0x6F; 0x47; 0x60;          # movdqu xmm0, [rdi+96]
-        0x66; 0x0F; 0x38; 0x00; 0x00;          # pshufb xmm0, [rax]
+        0x66; 0x0F; 0x38; 0x00; 0x46; 0x40;    # pshufb xmm0, [rsi+64]
         0x66; 0x0F; 0x6F; 0xE8;                # movdqa xmm5, xmm0      MSGTMP2
         0x66; 0x0F; 0xFE; 0x41; 0x20;          # paddd  xmm0, [rcx+32]
         0x0F; 0x38; 0xCB; 0xD1;                # sha256rnds2 xmm2, xmm1
@@ -286,7 +302,7 @@ fn _sha_ni_compress_one(ctx, scratch, kbuf, bswap) {
         # ── Iter 3 — Rounds 12..15 — load MSGTMP3 = W[12..15];
         #    also compute MSGTMP0 = W[16..19] for iter 4. ──────────
         0xF3; 0x0F; 0x6F; 0x47; 0x70;          # movdqu xmm0, [rdi+112]
-        0x66; 0x0F; 0x38; 0x00; 0x00;          # pshufb xmm0, [rax]
+        0x66; 0x0F; 0x38; 0x00; 0x46; 0x40;    # pshufb xmm0, [rsi+64]
         0x66; 0x0F; 0x6F; 0xF0;                # movdqa xmm6, xmm0      MSGTMP3
         0x66; 0x0F; 0xFE; 0x41; 0x30;          # paddd  xmm0, [rcx+48]
         0x0F; 0x38; 0xCB; 0xD1;                # sha256rnds2 xmm2, xmm1
@@ -478,6 +494,6 @@ fn _sha_ni_compress_one(ctx, scratch, kbuf, bswap) {
 # returns 0; this entry point is only invoked when SHA-NI is live.
 fn sha256_transform_ni(ctx) {
     if (_sha_ni_buf == 0) { _sha_ni_init(); }
-    _sha_ni_compress_one(ctx, _sha_ni_buf, _sha_ni_K, _sha_ni_bswap);
+    _sha_ni_compress_one(ctx, _sha_ni_buf, _sha_ni_K);
     return 0;
 }
