@@ -112,3 +112,9 @@ timestamp,label,benchmark,estimate,unit
 2026-04-02T03:49:56Z,v1.0.0,verify_artifact_signed_4kb,40.378,µs
 2026-04-02T03:49:56Z,v1.0.0,verify_artifact_signed_1mb,590.32,µs
 2026-04-02T03:49:56Z,v1.0.0,verify_batch_10x4kb,423.50,µs
+2026-04-25T00:00:00Z,v2.9.3,sha256_64b_sw,10.0,µs
+2026-04-25T00:00:00Z,v2.9.3,sha256_64b_ni,470,ns
+2026-04-25T00:00:00Z,v2.9.3,sha256_1kb_sw,88.0,µs
+2026-04-25T00:00:00Z,v2.9.3,sha256_1kb_ni,2.0,µs
+2026-04-25T00:00:00Z,v2.9.3,sha256_64kb_sw,5318,µs
+2026-04-25T00:00:00Z,v2.9.3,sha256_64kb_ni,157,µs

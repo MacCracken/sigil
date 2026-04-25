@@ -58,24 +58,6 @@ under "v5.2.x / v5.3.x — Sigil 3.0 enablers".
       shifts to multi-tenant.
 - [ ] **Dedicated `sigil_batch_verify_parallel` entry point.**
       Wrapper over `sv_verify_batch` once threading lands.
-- [ ] **SHA-256 hot-path throughput investigation.** Surfaced by sit
-      v0.6.4 perf review (2026-04-25). Sigil's current SHA-256 tops
-      out at ~12 MB/s on 64KB inputs (10us at 64B, 87us at 1KB,
-      5.27ms at 64KB per [sit's v0.6.4 bench snapshot](../../../sit/docs/benchmarks/2026-04-25-v0.6.4.md)).
-      Modern x86_64 SHA-NI hardware paths hit ~1 GB/s — ~80x headroom.
-      This is the dominant cost in sit's `status-100files` (100×
-      hash_file_as_blob) and `add-1MB` (single 1MB blob hash =
-      ~80ms of the 210ms total), so any throughput gain there
-      directly improves user-visible sit latency. Likely investigation
-      paths: (a) inline-asm SHA-NI when available; (b) hand-tuned
-      ARMv8 SHA2 extension when available; (c) software-only
-      micro-opts in the round function. cyrius 5.5.22+ exposes
-      `asm { byte; … }` blocks per the `_thread_spawn` precedent,
-      so the toolchain gate for hardware-path inline asm is cleared.
-      Staged for delivery on the 2.9.x line as 2.9.2 (probe + NI
-      compress) so sit picks up the throughput win without waiting
-      on the 3.0 release. Tracking entry remains here until shipped;
-      moves to CHANGELOG on completion.
 
 ### 3.0 breaking changes (staged)
 

@@ -5,6 +5,78 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.9.3] — 2026-04-25
+
+Lands the byte-encoded SHA-NI compress that 2.9.2 staged the probe
+for. `sha256_transform_ni` is now a real one-block compress derived
+verbatim from the Linux kernel's `arch/x86/crypto/sha256_ni_asm.S`
+(BSD/GPLv2 → GPL leg under sigil's GPL-3.0). On SHA-NI-capable
+x86_64 hosts, sigil's SHA-256 dispatcher routes through the hardware
+path; on hosts without the extension, the software FIPS 180-4 path
+remains the implementation.
+
+Bench numbers on the dev host (Cyrius 5.6.41) — software vs NI:
+
+| input | software | SHA-NI | speedup |
+| ----- | -------- | ------ | ------- |
+| 64 B  | 10 µs    | 470 ns | ~21×    |
+| 1 KB  | 88 µs    |  2 µs  | ~44×    |
+| 64 KB | 5.32 ms  | 157 µs | ~34×    |
+
+This closes out the SHA-256 hot-path entry from the roadmap. sit's
+`status-100files` and `add-1MB` paths (the ones that motivated the
+work) pick up the win automatically through the dispatcher.
+
+### Added
+
+- **Real `sha256_transform_ni` body in `src/sha_ni.cyr`.** Replaces
+  the 2.9.2 `-1` stub with a SHA-NI single-block compress. The
+  function packs sigil's 8-byte-per-h_i ctx layout into a contiguous
+  packed-dword state buffer at module-global scratch, runs the
+  kernel's 16-iteration ping-pong loop (PSHUFB byte-swap, SHA256RNDS2
+  pairs interleaved with SHA256MSG1/MSG2 schedule updates), then
+  unpacks back to ctx with zero-extending 64-bit stores so the
+  software path's `store64` invariant survives. State, K table, and
+  PSHUFFLE_BYTE_FLIP_MASK live in module-global aligned scratch
+  initialized lazily on first call (`_sha_ni_init`). The K constants
+  are embedded directly rather than read from `sha256.cyr`'s table
+  so this module has no init-order dependency.
+- **`_sha_ni_align16` helper.** `alloc()` is 8-byte-aligned but
+  PSHUFB and PADDD with m128 operands raise #GP on misaligned
+  addresses. The helper rounds an alloc'd pointer up to a 16-byte
+  boundary; init over-allocates each scratch buffer by 16 bytes and
+  uses the aligned slot.
+- **Cross-path test ring in `tests/tcyr/sha_ni.tcyr`.** FIPS 180-4
+  vectors (empty, "abc", 56-byte two-block, 1KB, 64KB) routed
+  through the dispatcher with `_sha_ni_cache` forced to 0 (software)
+  pin the software path's correctness. Cross-path equality at 56B /
+  1KB / 64KB hashes each input twice (once with `_sha_ni_cache=0`,
+  once with `_sha_ni_cache=1`) and asserts byte-equal digests —
+  catches any opcode-encoding regression deterministically. Test
+  also includes `lib/ct.cyr` and `lib/keccak.cyr` so the stdlib
+  symbols sigil's chain references are resolved (was an oversight).
+- **`tests/bcyr/sigil.bcyr` SHA-256 throughput rows** at 64B / 1KB
+  / 64KB for both software and NI paths. Captured in
+  `benches/history.csv` under the `v2.9.3` label.
+- **`docs/development/issues/2026-04-25-sha-ni-compress-design.md`.**
+  Pre-implementation design doc covering instruction semantics, the
+  state-layout impedance between sigil's ctx and SHA-NI's XMM
+  registers, the kernel-derived 16-iteration loop structure, and
+  the encoding plan. Lives under `docs/development/issues/` per the
+  project convention for in-flight design notes.
+
+### Changed
+
+- **`sha256_transform_ni` return contract.** Was `-1` (no-op
+  fall-through to software) in 2.9.2; now `0` (hashed in hardware).
+  The dispatcher in `sha256_transform` already handled both return
+  values, so callers see no surface change — only behavior change
+  is faster digests on SHA-NI hosts.
+
+### Removed
+
+- **SHA-256 hot-path roadmap entry.** Shipped, moves to this entry.
+
 ## [2.9.2] — 2026-04-25
 
 Lays the SHA-NI hardware-acceleration foundation surfaced by sit

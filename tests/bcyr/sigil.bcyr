@@ -17,6 +17,7 @@ include "lib/bigint.cyr"
 
 include "src/types.cyr"
 include "src/error.cyr"
+include "src/sha_ni.cyr"
 include "src/sha256.cyr"
 include "src/hex.cyr"
 include "lib/ct.cyr"
@@ -64,6 +65,113 @@ fn main() {
         ri = ri + 1;
     }
     vec_push(benches, b1);
+
+    # ============================================================
+    # SHA-256 sw vs NI at 64B / 1KB / 64KB.
+    # Forced via `_sha_ni_cache` so each row exercises a single
+    # path — lets us quantify the NI speedup the 2.9.3 work
+    # delivered. The roadmap entry that motivated this work
+    # (sit v0.6.4 perf review, 2026-04-25) called out these sizes
+    # specifically.
+    # ============================================================
+    var data_64kb = alloc(65536);
+    memset(data_64kb, 0x42, 65536);
+
+    # 64B — single block.
+    var b_sha_64b_sw = bench_new("sha256_64b_sw");
+    _sha_ni_cache = 0;
+    ri = 0;
+    while (ri < rounds) {
+        bench_batch_start(b_sha_64b_sw);
+        var bi = 0;
+        while (bi < 10000) {
+            sha256(data, 64, digest);
+            bi = bi + 1;
+        }
+        bench_batch_stop(b_sha_64b_sw, 10000);
+        ri = ri + 1;
+    }
+    vec_push(benches, b_sha_64b_sw);
+
+    var b_sha_64b_ni = bench_new("sha256_64b_ni");
+    _sha_ni_cache = 1;
+    ri = 0;
+    while (ri < rounds) {
+        bench_batch_start(b_sha_64b_ni);
+        var bi = 0;
+        while (bi < 10000) {
+            sha256(data, 64, digest);
+            bi = bi + 1;
+        }
+        bench_batch_stop(b_sha_64b_ni, 10000);
+        ri = ri + 1;
+    }
+    vec_push(benches, b_sha_64b_ni);
+
+    # 1KB — sit's hash_file_as_blob "small file" footprint.
+    var b_sha_1kb_sw = bench_new("sha256_1kb_sw");
+    _sha_ni_cache = 0;
+    ri = 0;
+    while (ri < rounds) {
+        bench_batch_start(b_sha_1kb_sw);
+        var bi = 0;
+        while (bi < 1000) {
+            sha256(data, 1024, digest);
+            bi = bi + 1;
+        }
+        bench_batch_stop(b_sha_1kb_sw, 1000);
+        ri = ri + 1;
+    }
+    vec_push(benches, b_sha_1kb_sw);
+
+    var b_sha_1kb_ni = bench_new("sha256_1kb_ni");
+    _sha_ni_cache = 1;
+    ri = 0;
+    while (ri < rounds) {
+        bench_batch_start(b_sha_1kb_ni);
+        var bi = 0;
+        while (bi < 1000) {
+            sha256(data, 1024, digest);
+            bi = bi + 1;
+        }
+        bench_batch_stop(b_sha_1kb_ni, 1000);
+        ri = ri + 1;
+    }
+    vec_push(benches, b_sha_1kb_ni);
+
+    # 64KB — sit's add-1MB hot path: a 1MB blob hashes as 16x 64KB chunks.
+    var b_sha_64kb_sw = bench_new("sha256_64kb_sw");
+    _sha_ni_cache = 0;
+    ri = 0;
+    while (ri < rounds) {
+        bench_batch_start(b_sha_64kb_sw);
+        var bi = 0;
+        while (bi < 50) {
+            sha256(data_64kb, 65536, digest);
+            bi = bi + 1;
+        }
+        bench_batch_stop(b_sha_64kb_sw, 50);
+        ri = ri + 1;
+    }
+    vec_push(benches, b_sha_64kb_sw);
+
+    var b_sha_64kb_ni = bench_new("sha256_64kb_ni");
+    _sha_ni_cache = 1;
+    ri = 0;
+    while (ri < rounds) {
+        bench_batch_start(b_sha_64kb_ni);
+        var bi = 0;
+        while (bi < 50) {
+            sha256(data_64kb, 65536, digest);
+            bi = bi + 1;
+        }
+        bench_batch_stop(b_sha_64kb_ni, 50);
+        ri = ri + 1;
+    }
+    vec_push(benches, b_sha_64kb_ni);
+
+    # Restore probe so any later benches see the natural cache state.
+    _sha_ni_cache = 2;
 
     # ============================================================
     # SHA-512 (4KB)
