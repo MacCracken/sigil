@@ -170,6 +170,15 @@ var _sha_ctx = 0;
 var _sha_i = 0;
 
 fn sha256_transform(ctx) {
+    # SHA-NI dispatch wire-point (2.9.2 foundation).
+    # When sha256_transform_ni returns 0 it has fully transformed
+    # the block and we return early. The 2.9.2 stub returns -1 so
+    # this falls through to the software path on every host; 2.9.3
+    # replaces the stub body with a byte-encoded SHA-NI compress.
+    if (sha_ni_available() == 1) {
+        if (sha256_transform_ni(ctx) == 0) { return 0; }
+    }
+
     _sha_ctx = ctx;
     var buf = ctx + 64;
 

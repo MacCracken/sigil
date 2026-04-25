@@ -1,0 +1,86 @@
+# sha_ni.cyr — SHA-NI hardware-acceleration dispatch (foundation, 2.9.2).
+#
+# Mirrors the aes_ni.cyr precedent. This module lays the
+# CPUID-probe + dispatch infrastructure for the Intel SHA
+# extensions (SHA256RNDS2 / SHA256MSG1 / SHA256MSG2). The probe
+# is live; the single-block compress entry point
+# `sha256_transform_ni` is a sentinel-returning stub in 2.9.2 and
+# is replaced with a byte-encoded SHA-NI compression sequence in
+# 2.9.3. Until then, `sha256_transform` keeps running the FIPS
+# 180-4 software path on every host, NI-capable or not.
+#
+# Why ship the probe ahead of the compress: the probe is the
+# only piece of infrastructure that doesn't risk a silent wrong-
+# hash. Wrong hardware-path opcodes in a SHA-256 transform would
+# produce digests that look right superficially but differ in
+# subtle ways from the spec — exactly the failure mode the
+# project's "Sigil IS the trust boundary" constraint forbids.
+# Splitting the probe (low-risk, mechanical) from the compress
+# (must be vector-tested against FIPS 180-4 with both paths
+# returning identical bytes) keeps each step verifiable.
+#
+# Detection reference (Intel SDM Vol 2A §3.2):
+#   CPUID leaf 7, sub-leaf 0 → EBX bit 29 = SHA extensions
+#
+# SHA-NI opcode reference (Intel SDM Vol 2A §3.2, §5):
+#   SHA256RNDS2 xmm1, xmm2/m128, <XMM0>     0F 38 CB /r
+#       Two SHA-256 rounds. K+W in implicit XMM0.
+#   SHA256MSG1  xmm1, xmm2/m128             0F 38 CC /r
+#       Intermediate calc for next four message dwords.
+#   SHA256MSG2  xmm1, xmm2/m128             0F 38 CD /r
+#       Final calc for next four message dwords.
+
+# _sha_ni_cache: 2 = uncached, 0 = unavailable, 1 = available.
+# Same sentinel discipline as _aes_ni_cache; one CPUID probe
+# per process.
+var _sha_ni_cache = 2;
+var _sha_ni_probe_out = 0;      # 8-byte scratch for the probe's *out param
+
+fn sha_ni_available() {
+    if (_sha_ni_cache != 2) { return _sha_ni_cache; }
+    if (_sha_ni_probe_out == 0) { _sha_ni_probe_out = alloc(8); }
+    store64(_sha_ni_probe_out, 0);
+    _sha_ni_cpuid_probe(_sha_ni_probe_out);
+    var ebx = load64(_sha_ni_probe_out);
+    # EBX bit 29 = SHA (Intel SDM Vol 2A §3.2 CPUID leaf 7 sub-leaf 0).
+    if ((ebx & (1 << 29)) != 0) {
+        _sha_ni_cache = 1;
+    } else {
+        _sha_ni_cache = 0;
+    }
+    return _sha_ni_cache;
+}
+
+# _sha_ni_cpuid_probe — write CPUID leaf 7 sub-leaf 0 EBX to *out.
+# Caller-supplied pointer keeps the CPUID-clobbered registers'
+# lifetime confined to the asm block; reload via load64 after.
+fn _sha_ni_cpuid_probe(out) {
+    #ifdef CYRIUS_ARCH_X86
+    asm {
+        # Param out = [rbp-8]. Load into rdi.
+        0x48; 0x8B; 0x7D; 0xF8;        # mov rdi, [rbp-8]
+        0x53;                          # push rbx (callee-saved; CPUID clobbers it)
+        0xB8; 0x07; 0x00; 0x00; 0x00;  # mov eax, 7   (leaf 7)
+        0x31; 0xC9;                    # xor ecx, ecx (sub-leaf 0)
+        0x0F; 0xA2;                    # cpuid
+        0x48; 0x89; 0x1F;              # mov [rdi], rbx  ; *out = ebx
+        0x5B;                          # pop rbx
+    }
+    #endif
+    return 0;
+}
+
+# sha256_transform_ni — SHA-NI single-block compression (stub, 2.9.2).
+#
+# Returns -1 to signal "not implemented" so callers fall through
+# to the software path. In 2.9.3 this body is replaced with the
+# byte-encoded Intel SHA-NI sequence (load ABEF/CDGH state,
+# pshufb message bytes, 16 message-schedule iterations × 4
+# rounds, store result). The caller contract for 2.9.3:
+#   - ctx points to a 144-byte SHA-256 context (h0..h7 at +0,
+#     buf at +64)
+#   - returns 0 on success, -1 on no-op (which lets the dispatcher
+#     in sha256_transform fall through to software cleanly)
+fn sha256_transform_ni(ctx) {
+    return -1;
+}

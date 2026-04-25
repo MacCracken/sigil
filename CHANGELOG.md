@@ -5,6 +5,99 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.9.2] — 2026-04-25
+
+Lays the SHA-NI hardware-acceleration foundation surfaced by sit
+v0.6.4's perf review (2026-04-25). Sigil's current SHA-256 tops out
+at ~12 MB/s on 64KB inputs versus ~1 GB/s on x86_64 SHA-NI hardware
+— ~80x headroom — and is the dominant cost in sit's `status-100files`
+and `add-1MB` flows. This release ships the CPUID probe + dispatch
+wire-point so the byte-encoded SHA-NI compress can land in 2.9.3 as
+a drop-in replacement for the stubbed `sha256_transform_ni` body
+without touching the dispatcher or the public surface.
+
+The split (foundation in 2.9.2, compress in 2.9.3) keeps the
+risky-encoding step contained: a wrong opcode in a SHA-256 transform
+produces silent wrong-hash digests, exactly the failure mode the
+"Sigil IS the trust boundary" constraint forbids. Shipping the probe
+ahead of the compress lets consumers (sit, daimon, kavach) pick up
+the dispatch infrastructure now and the throughput win on the next
+patch without a second wave of integration churn.
+
+### Added
+
+- **`src/sha_ni.cyr` — SHA-NI CPUID probe + dispatch entry point.**
+  `sha_ni_available()` runs CPUID leaf 7 sub-leaf 0 and returns 1
+  when EBX bit 29 (SHA extensions) is set, 0 otherwise. The probe
+  result is cached in `_sha_ni_cache` (sentinel = 2 means uncached),
+  matching `_aes_ni_cache` discipline so the CPUID instruction is
+  paid exactly once per process. `sha256_transform_ni(ctx)` is a
+  sentinel stub in 2.9.2: it returns `-1` to signal "not implemented"
+  so the dispatcher in `sha256_transform` falls through to the
+  software FIPS 180-4 path on every host. 2.9.3 replaces the stub
+  body with the byte-encoded Intel SHA-NI sequence (load ABEF/CDGH
+  state, byte-swap message dwords via PSHUFB, 16 message-schedule
+  iterations × 4 rounds via SHA256RNDS2/MSG1/MSG2, store result).
+- **`tests/tcyr/sha_ni.tcyr` — probe contract + dispatcher
+  regression test.** Confirms `sha_ni_available()` returns 0 or 1
+  (not the uncached sentinel 2) and is stable across calls; locks
+  in the 2.9.2 stub contract that `sha256_transform_ni` returns -1;
+  cross-checks `sha256("abc", 3, ...)` through the dispatcher
+  matches the FIPS 180-4 `ba7816bf...f20015ad` vector to verify the
+  new wire-point in `sha256_transform` doesn't regress the software
+  path.
+
+### Changed
+
+- **`src/sha256.cyr:172` — `sha256_transform` dispatch wire-point.**
+  Adds an `if (sha_ni_available() == 1) { if (sha256_transform_ni(ctx) == 0) { return 0; } }`
+  prelude. With the 2.9.2 stub returning -1 unconditionally, the
+  software path runs on every host — measured no regression
+  (existing 605 → 609 tests, all passing). When 2.9.3 replaces the
+  stub body, the dispatcher needs no change to pick up the
+  hardware path.
+- **`src/lib.cyr` and `cyrius.cyml` modules list — `src/sha_ni.cyr`
+  added before `src/sha256.cyr`.** Same dependency-order pattern as
+  `src/aes_ni.cyr` → `src/aes_gcm.cyr`. The dist bundle stays
+  self-contained.
+- **`docs/development/roadmap.md` — SHA-256 hot-path entry added
+  under Road to v3.0 / Sigil-internal.** Records the sit v0.6.4
+  source attribution, the 12 MB/s → 1 GB/s headroom, the
+  cyrius 5.5.22+ inline-asm gate now being clear, and the staged
+  delivery plan (foundation 2.9.2 / compress 2.9.3).
+- **`VERSION` and `cyrius.cyml` 2.9.1 → 2.9.2.**
+- **`cyrius.cyml` cyrius pin 5.5.30 → 5.6.40.** The pin had drifted
+  out of sync with the actively-installed toolchain (`cyrius --version`
+  reports 5.6.40); refreshing `lib/` via `cyrius deps` confirmed all
+  17 vendored stdlib modules now match the 5.6.40 install file-by-
+  file. `lib/alloc.cyr` picks up the v5.6.34 heap-grow rounding fix
+  (round to next 1MB boundary instead of stepping by exactly
+  0x100000) that prevents SIGSEGV on `alloc(>1MB)` near the brk
+  grow-point. The pin bump is documentation: `cyrius deps` already
+  uses whatever toolchain is on PATH, but the pin advertises what
+  the codebase has been validated against. 5.6.40 supersedes 5.5.30
+  with the cumulative 5.5.31..5.6.40 stdlib + frontend deltas.
+- **`cyrius.cyml` `[deps] stdlib` adds `"bench"`.** Previously
+  `lib/bench.cyr` was tracked in git but missing from the deps list,
+  so `cyrius deps` wouldn't repopulate it after a clean. The bench
+  harness (`tests/bcyr/sigil.bcyr`) includes it directly. Adding to
+  the deps list keeps `lib/` rebuildable from a clean state.
+
+### Notes for consumers
+
+- **No public-surface change.** Existing `sha256()`, `hash_data()`,
+  `hash_file()` calls continue to behave identically; the probe is
+  internal. Consumers don't need to update import sites.
+- **No throughput delta in 2.9.2.** sit's `status-100files` and
+  `add-1MB` flows are still software-bound until 2.9.3 lands the
+  compress. The release surfaces the foundation early so 2.9.3 is
+  a focused crypto-correctness patch with the integration already
+  exercised.
+- **3.0 compatibility.** The 3.0 branch will pick this up via a
+  main → 3.0 merge. The dispatch wire-point is orthogonal to the
+  3.0 PQC + parallel-batch-verify scope, so no merge conflicts
+  expected.
+
 ## [2.9.1] — 2026-04-21
 
 Activates the AES-NI hardware dispatch staged in 2.9.0, now that

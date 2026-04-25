@@ -28,6 +28,7 @@ include "lib/agnosys.cyr"
 # Sigil modules (dependency order)
 include "src/types.cyr"
 include "src/error.cyr"
+include "src/sha_ni.cyr"
 include "src/sha256.cyr"
 include "src/hex.cyr"
 include "src/ct.cyr"

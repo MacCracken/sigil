@@ -1,0 +1,112 @@
+# sha_ni.tcyr — SHA-NI probe test (2.9.2 foundation).
+#
+# Mirrors aes_ni.tcyr's test surface for the foundation step:
+#   1. `sha_ni_available()` returns 0 or 1 (not the uncached
+#      sentinel 2) and is stable across calls.
+#   2. `sha256_transform_ni` returns -1 in 2.9.2 to signal the
+#      stubbed compress path so `sha256_transform` falls through
+#      to the FIPS 180-4 software implementation. When 2.9.3
+#      replaces the stub with the byte-encoded SHA-NI compress,
+#      this test grows to cross-check NI output against the
+#      software path on FIPS 180-4 vectors.
+#   3. `sha256_transform` keeps producing the FIPS 180-4 abc
+#      vector regardless of probe outcome — confirms the
+#      dispatch wire-point in `sha256.cyr` doesn't regress the
+#      software path.
+
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fmt.cyr"
+include "lib/json.cyr"
+include "lib/sakshi.cyr"
+include "lib/chrono.cyr"
+
+include "src/types.cyr"
+include "src/error.cyr"
+include "src/sha_ni.cyr"
+include "src/sha256.cyr"
+include "src/hex.cyr"
+
+fn bytes_eq(a, b, n) {
+    var i = 0;
+    while (i < n) {
+        if ((load8(a + i) & 0xFF) != (load8(b + i) & 0xFF)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn main() {
+    alloc_init();
+
+    test_group("sha_ni_available");
+
+    var first = sha_ni_available();
+    if (first != 0) {
+        if (first != 1) {
+            assert_eq(0, 1, "sha_ni_available() returned stray value");
+        }
+    }
+    assert_eq(first == 0 || first == 1, 1, "probe returns 0 or 1");
+
+    # Stable across calls (caches the CPUID probe result).
+    var second = sha_ni_available();
+    assert_eq(first, second, "sha_ni_available() is idempotent");
+
+    # ============================================================
+    # 2.9.2 stub contract: sha256_transform_ni returns -1 to signal
+    # "no-op, fall through to software". 2.9.3 changes this to 0
+    # on success.
+    # ============================================================
+    test_group("sha256_transform_ni stub contract (2.9.2)");
+
+    var ctx = sha256_init();
+    var rc = sha256_transform_ni(ctx);
+    assert_eq(rc, -1, "sha256_transform_ni stub returns -1 in 2.9.2");
+    fl_free(ctx);
+
+    # ============================================================
+    # FIPS 180-4 SHA-256("abc") vector — ensure the dispatch wire-
+    # point in sha256_transform doesn't regress the software path.
+    # Expected: ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+    # ============================================================
+    test_group("FIPS 180-4 SHA-256(abc) through dispatcher");
+
+    var msg = alloc(3);
+    store8(msg + 0, 0x61);  # 'a'
+    store8(msg + 1, 0x62);  # 'b'
+    store8(msg + 2, 0x63);  # 'c'
+
+    var digest = alloc(32);
+    sha256(msg, 3, digest);
+
+    var expected = alloc(32);
+    store8(expected + 0,  0xba); store8(expected + 1,  0x78);
+    store8(expected + 2,  0x16); store8(expected + 3,  0xbf);
+    store8(expected + 4,  0x8f); store8(expected + 5,  0x01);
+    store8(expected + 6,  0xcf); store8(expected + 7,  0xea);
+    store8(expected + 8,  0x41); store8(expected + 9,  0x41);
+    store8(expected + 10, 0x40); store8(expected + 11, 0xde);
+    store8(expected + 12, 0x5d); store8(expected + 13, 0xae);
+    store8(expected + 14, 0x22); store8(expected + 15, 0x23);
+    store8(expected + 16, 0xb0); store8(expected + 17, 0x03);
+    store8(expected + 18, 0x61); store8(expected + 19, 0xa3);
+    store8(expected + 20, 0x96); store8(expected + 21, 0x17);
+    store8(expected + 22, 0x7a); store8(expected + 23, 0x9c);
+    store8(expected + 24, 0xb4); store8(expected + 25, 0x10);
+    store8(expected + 26, 0xff); store8(expected + 27, 0x61);
+    store8(expected + 28, 0xf2); store8(expected + 29, 0x00);
+    store8(expected + 30, 0x15); store8(expected + 31, 0xad);
+    assert_eq(bytes_eq(digest, expected, 32), 1, "SHA-256(abc) matches FIPS 180-4");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

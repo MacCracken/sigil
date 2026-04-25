@@ -1,11 +1,11 @@
 [package]
 name = "sigil"
-version = "2.9.1"
+version = "2.9.2"
 description = "Sigil — system-wide trust verification for AGNOS. Ed25519, SHA-256/512, HMAC, HKDF, AES-256-GCM, integrity, audit."
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/sigil"
 language = "cyrius"
-cyrius = "5.5.30"
+cyrius = "5.6.40"
 
 [build]
 entry = "programs/smoke.cyr"
@@ -31,6 +31,7 @@ defines = ["SIGIL_SMOKE"]
 modules = [
     "src/types.cyr",
     "src/error.cyr",
+    "src/sha_ni.cyr",
     "src/sha256.cyr",
     "src/hex.cyr",
     "src/ct.cyr",
@@ -57,7 +58,7 @@ modules = [
 ]
 
 [deps]
-stdlib = ["syscalls", "alloc", "freelist", "assert", "str", "string", "vec", "hashmap", "io", "fmt", "json", "chrono", "bigint", "tagged", "process", "fs"]
+stdlib = ["syscalls", "alloc", "freelist", "assert", "str", "string", "vec", "hashmap", "io", "fmt", "json", "chrono", "bigint", "tagged", "process", "fs", "bench"]
 
 # Sakshi is not yet folded into the Cyrius stdlib distribution (2.0.0 pending).
 # Pin to the published tag via git until the toolchain vendors it.
