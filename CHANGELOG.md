@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.9.4] — 2026-04-27
+
+### Changed — Build output renamed to align with package convention
+
+- **`[build].output`**: `build/sigil-smoke` → `build/sigil`. The
+  smoke-test program (still defined with `SIGIL_SMOKE`, still entry-pointed
+  at `programs/smoke.cyr`) is now produced at the canonical
+  `build/<package>` path that the genesis boot pipeline's
+  `--iso-check` expects. Unblocks ISO assembly (sigil was the lone
+  miss in an otherwise 25-of-26-ready boot chain).
+- **`dist/sigil.cyr`** regenerated to carry the bumped version.
+
+### Notes — roadmap left in the manifest
+
+A `[build]` comment block in `cyrius.cyml` documents the next two
+steps for sigil's boot-side artifact: a future patch will replace the
+smoke-test build with a real library probe (no `SIGIL_SMOKE` define);
+later still, the boot's `--iso-check` will look at `dist/sigil.cyr`
+directly once that path has been hardened in test. The eventual
+endgame is sigil folded into the Cyrius stdlib, like sandhi (5.7.0)
+and mabda (3.4.19).
+
+No source / behavior changes in 2.9.4. Crypto code, dispatcher
+routing, and SHA-NI hot path are byte-identical to 2.9.3.
+
 ## [2.9.3] — 2026-04-25
 
 Lands the byte-encoded SHA-NI compress that 2.9.2 staged the probe

@@ -1,6 +1,6 @@
 [package]
 name = "sigil"
-version = "2.9.3"
+version = "2.9.4"
 description = "Sigil — system-wide trust verification for AGNOS. Ed25519, SHA-256/512, HMAC, HKDF, AES-256-GCM, integrity, audit."
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/sigil"
@@ -11,11 +11,11 @@ cyrius = "5.6.42"
 entry = "programs/smoke.cyr"
 output = "build/sigil"
 defines = ["SIGIL_SMOKE"]
-# NOTE: smoke-test program currently produced at build/sigil so the
-# genesis boot pipeline's --iso-check (which expects build/<package>)
-# finds the artifact. Sigil 2.9.4 will replace this with a real
-# library-probe build that doesn't define SIGIL_SMOKE; later still,
-# the boot will look at dist/sigil.cyr (source bundle, sigil's actual
+# NOTE (2.9.4): smoke-test program currently produced at build/sigil so
+# the genesis boot pipeline's --iso-check (which expects build/<package>)
+# finds the artifact. A future patch will replace this with a real
+# library-probe build that doesn't define SIGIL_SMOKE; later still, the
+# boot will look at dist/sigil.cyr (source bundle, sigil's actual
 # consumer-facing artifact) once that path has been hardened in test.
 
 # `modules` declares the src/ files `cyrius distlib` concatenates
