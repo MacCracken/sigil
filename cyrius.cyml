@@ -9,8 +9,14 @@ cyrius = "5.6.42"
 
 [build]
 entry = "programs/smoke.cyr"
-output = "build/sigil-smoke"
+output = "build/sigil"
 defines = ["SIGIL_SMOKE"]
+# NOTE: smoke-test program currently produced at build/sigil so the
+# genesis boot pipeline's --iso-check (which expects build/<package>)
+# finds the artifact. Sigil 2.9.4 will replace this with a real
+# library-probe build that doesn't define SIGIL_SMOKE; later still,
+# the boot will look at dist/sigil.cyr (source bundle, sigil's actual
+# consumer-facing artifact) once that path has been hardened in test.
 
 # `modules` declares the src/ files `cyrius distlib` concatenates
 # into `dist/sigil.cyr`. Order matches src/lib.cyr's includes —
