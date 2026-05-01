@@ -13,7 +13,7 @@
 #           1KB, 64KB).
 #
 # Design and sourcing notes live in
-# `docs/development/issues/2026-04-25-sha-ni-compress-design.md`.
+# `docs/development/issues/archive/2026-04-25-sha-ni-compress-design.md`.
 # The compress sequence below is byte-for-byte derived from the
 # Linux kernel's arch/x86/crypto/sha256_ni_asm.S (Intel
 # Corporation, dual BSD/GPLv2 — Sigil is GPL-3.0 so the GPL leg
