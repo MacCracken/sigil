@@ -5,12 +5,17 @@
 **Reporter:** sigil (AGNOS trust-verification library)
 **Cyrius version at time of report:** 5.5.35
 **Severity:** blocker for a specific downstream 3.0 feature
-**Status:** **acknowledged — scheduled for cyrius 5.5.37** (per
-cyrius team confirmation 2026-04-22). No further cyrius-team
-action required from this filing; sigil will ungate
-`SIGIL_BATCH_PARALLEL` as a default-on path once 5.5.37 is the
-active toolchain. Filing kept as the durable record of the cap-
-raise motivation.
+**Status:** **resolved (2026-05-01).** Cap raised upstream in
+cyrius 5.5.37 as scheduled. Sigil ungated the
+`SIGIL_BATCH_PARALLEL` cmdline opt-in on the 3.0 branch under
+cyrius 5.7.48 — `lib/thread.cyr` now included unconditionally
+in `src/lib.cyr`, the `#ifdef SIGIL_BATCH_PARALLEL` guards in
+`src/verify.cyr` (worker fn + globals + parallel `sv_verify_batch`
+prelude) removed. Default builds compile clean and the parallel
+fan-out is now the default behaviour at
+`count >= _SIGIL_BATCH_PARALLEL_THRESHOLD` (still mutex-wrapped —
+throughput rewrite tracked in roadmap § Road to v3.1). Filing
+kept as the durable record.
 
 ## Summary
 

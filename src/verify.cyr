@@ -826,30 +826,20 @@ fn sv_save_trust_store(sv, path) {
 # ================================================================
 # Batch verification
 # ================================================================
-# Default build: serial. The parallel fan-out is gated behind
-# `-D SIGIL_BATCH_PARALLEL` because including `lib/thread.cyr` +
-# the fan-out code pushes sigil past cyrius's 16384-entry fixup-
-# table cap (CLAUDE.md quirk #5). This mirrors the `-D SIGIL_PQC`
-# cmdline-opt-in pattern for ML-DSA, which is gated on the
-# separate 1 MB preprocessor cap (quirk #8).
+# `sv_verify_batch` fans out across `_SIGIL_BATCH_WORKERS` threads
+# at `count >= _SIGIL_BATCH_PARALLEL_THRESHOLD`; below the
+# threshold it runs serial inline. The 5.5.x-era
+# `-D SIGIL_BATCH_PARALLEL` cmdline gate was dropped in 3.0 once
+# cyrius 5.5.37 raised the fixup-table cap (quirk #5) — the
+# parallel path is now the default and the test +bench files
+# (`tests/tcyr/batch_parallel.tcyr`, `tests/bcyr/batch_parallel.bcyr`)
+# exercise it without a build flag.
 #
-# Consumers opt in by building with `-D SIGIL_BATCH_PARALLEL`.
-# The test + bench files in `tests/tcyr/batch_parallel.tcyr` and
-# `tests/bcyr/batch_parallel.bcyr` exercise `sv_verify_batch`
-# under whichever compilation mode is active — they assert
-# correctness (identical to serial), so both modes share the
-# same regression surface.
-#
-# Dependency on cyrius upstream: when the fixup-table cap lifts
-# (tracked in `docs/development/issues/2026-04-22-cyrius-fixup-
-# cap-raises.md`), the gate can be removed and the parallel path
-# becomes the default behavior at count ≥ threshold.
-#
-# Threading safety contract (parallel path):
+# Threading safety contract:
 # - `sv_verify_artifact` calls `alloc` / `vec_push` / `map_get`,
-#   which are NOT thread-safe under cyrius 5.5.35 (CLAUDE.md
-#   quirk #7). We serialise the full call via `_sigil_batch_mutex`
-#   so only one worker allocates / mutates containers at a time.
+#   which are NOT thread-safe under cyrius (CLAUDE.md quirk #7).
+#   We serialise the full call via `_sigil_batch_mutex` so only
+#   one worker allocates / mutates containers at a time.
 # - `ed25519_verify` + SHA-256 compute themselves use stack-locals
 #   and read-only globals (fixed-base comb, round-key tables), so
 #   they run inside the mutex region just as a matter of code
@@ -858,11 +848,10 @@ fn sv_save_trust_store(sv, path) {
 #   dominates, the win comes from pipelining file-I/O latency
 #   across workers (SHA-256 streaming + file_read waits) while
 #   the mutex protects the bookkeeping layer.
-# - A fully-pure alloc-free verify path (documented in
-#   `docs/development/3.0-scope.md` § Post-3.0 follow-ups) would
-#   lift this ceiling. Deferred out of 3.0 scope.
+# - A fully-pure alloc-free verify path (the "Option 1" rewrite
+#   tracked in `docs/development/roadmap.md` § Road to v3.1) lifts
+#   this ceiling. Deferred to 3.1.
 
-#ifdef SIGIL_BATCH_PARALLEL
 var _sigil_batch_mutex = 0;
 var _SIGIL_BATCH_PARALLEL_THRESHOLD = 4;
 var _SIGIL_BATCH_WORKERS = 4;
@@ -893,10 +882,8 @@ fn _batch_worker(arg) {
     }
     return 0;
 }
-#endif
 
 fn sv_verify_batch(sv, artifacts, count) {
-    #ifdef SIGIL_BATCH_PARALLEL
     if (count >= _SIGIL_BATCH_PARALLEL_THRESHOLD) {
         if (_sigil_batch_mutex == 0) {
             _sigil_batch_mutex = mutex_new();
@@ -943,10 +930,8 @@ fn sv_verify_batch(sv, artifacts, count) {
         }
         return presults;
     }
-    #endif
 
-    # Serial path (default; also taken under parallel build when
-    # `count < _SIGIL_BATCH_PARALLEL_THRESHOLD`).
+    # Serial path — taken when `count < _SIGIL_BATCH_PARALLEL_THRESHOLD`.
     var results = vec_new();
     var i = 0;
     while (i < count) {
