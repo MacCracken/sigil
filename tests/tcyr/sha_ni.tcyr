@@ -114,8 +114,8 @@ fn main() {
     # Empty string.
     var empty = alloc(1);   # 0-byte alloc unsafe; alloc 1 and pass len=0
     check_sha256("SHA-256(\"\") software",
-                 empty, 0,
-                 "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+    empty, 0,
+    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
 
     # "abc" — single-block, 3 bytes.
     var abc = alloc(3);
@@ -123,8 +123,8 @@ fn main() {
     store8(abc + 1, 0x62);
     store8(abc + 2, 0x63);
     check_sha256("SHA-256(\"abc\") software",
-                 abc, 3,
-                 "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    abc, 3,
+    "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
 
     # FIPS 180-4 56-byte two-block vector:
     # "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"
@@ -136,23 +136,23 @@ fn main() {
         i = i + 1;
     }
     check_sha256("SHA-256(56-byte two-block) software",
-                 v56, 56,
-                 "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1");
+    v56, 56,
+    "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1");
 
     # 1 KB of 0x61 ('a') — exercises the multi-block update path.
     var k1 = alloc(1024);
     fill_bytes(k1, 0x61, 1024);
     check_sha256("SHA-256(1KB of 'a') software",
-                 k1, 1024,
-                 "2edc986847e209b4016e141a6dc8716d3207350f416969382d431539bf292e4a");
+    k1, 1024,
+    "2edc986847e209b4016e141a6dc8716d3207350f416969382d431539bf292e4a");
 
     # 64 KB of 0x61 — large-input throughput surface; the input
     # most representative of sit's hash_file_as_blob hot path.
     var k64 = alloc(65536);
     fill_bytes(k64, 0x61, 65536);
     check_sha256("SHA-256(64KB of 'a') software",
-                 k64, 65536,
-                 "bf718b6f653bebc184e1479f1935b8da974d701b893afcf49e701f3e2f9f9c5a");
+    k64, 65536,
+    "bf718b6f653bebc184e1479f1935b8da974d701b893afcf49e701f3e2f9f9c5a");
 
     # ============================================================
     # Ring 3 — cross-path equality (NI vs software)
@@ -176,8 +176,8 @@ fn main() {
         sha256(abc, 3, dni);
         var dni_hex = hex_encode(dni, 32);
         assert_streq(dni_hex,
-                     "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
-                     "single-block NI \"abc\"");
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        "single-block NI \"abc\"");
 
         # 56-byte two-block vector.
         _sha_ni_cache = 0;

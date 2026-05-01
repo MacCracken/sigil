@@ -1,11 +1,11 @@
 [package]
 name = "sigil"
-version = "2.9.4"
+version = "2.9.5"
 description = "Sigil — system-wide trust verification for AGNOS. Ed25519, SHA-256/512, HMAC, HKDF, AES-256-GCM, integrity, audit."
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/sigil"
 language = "cyrius"
-cyrius = "5.6.42"
+cyrius = "5.7.48"
 
 [build]
 entry = "programs/smoke.cyr"
@@ -34,6 +34,14 @@ defines = ["SIGIL_SMOKE"]
 # include via `src/lib.cyr` against a sibling checkout, which pulls
 # agnosys as a proper dep. `dist/sigil.cyr` is the self-contained
 # crypto + trust engine core.
+#
+# IMPORTANT: keep `modules` under `[lib]`, NOT `[build]`. 5.7.x
+# treats `[build].modules` as an auto-prepend list and inlines
+# every src/ file into the temp before the entry source — which
+# then re-includes them via `src/lib.cyr`'s include directives,
+# producing 374 duplicate-fn warnings. Same lesson agnosys
+# learned at 1.0.1 ("76% binary size reduction").
+[lib]
 modules = [
     "src/types.cyr",
     "src/error.cyr",
@@ -79,5 +87,5 @@ modules = ["dist/sakshi.cyr"]
 # the consumer (sigil) is responsible for the stdlib surface above.
 [deps.agnosys]
 git = "https://github.com/MacCracken/agnosys.git"
-tag = "1.0.3"
+tag = "1.0.4"
 modules = ["dist/agnosys.cyr"]

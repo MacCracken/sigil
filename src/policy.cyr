@@ -587,12 +587,12 @@ fn _crl_parse_header(line, llen) {
                 if (vlen > 0) {
                     var fb = load8(line + vs) & 0xFF;
                     if (fb >= 48) { if (fb <= 57) {
-                        var ii = 0;
-                        while (ii < vlen) {
-                            intv = intv * 10 + ((load8(line + vs + ii) & 0xFF) - 48);
-                            ii = ii + 1;
-                        }
-                    } }
+                            var ii = 0;
+                            while (ii < vlen) {
+                                intv = intv * 10 + ((load8(line + vs + ii) & 0xFF) - 48);
+                                ii = ii + 1;
+                            }
+                        } }
                 }
                 if (streq(k, "version") == 1) { version = intv; }
                 elif (streq(k, "issued_at") == 1) { issued_at = intv; }

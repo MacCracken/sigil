@@ -234,8 +234,8 @@ fn mldsa_pack_pk(pk, rho, t1) {
     var i = 0;
     while (i < MLDSA65_K) {
         _mldsa_polyt1_pack(
-            pk + MLDSA_SEEDBYTES + i * MLDSA65_POLYT1_PACKEDBYTES,
-            t1 + i * 2048
+        pk + MLDSA_SEEDBYTES + i * MLDSA65_POLYT1_PACKEDBYTES,
+        t1 + i * 2048
         );
         i = i + 1;
     }
@@ -247,8 +247,8 @@ fn mldsa_unpack_pk(rho, t1, pk) {
     var i = 0;
     while (i < MLDSA65_K) {
         _mldsa_polyt1_unpack(
-            t1 + i * 2048,
-            pk + MLDSA_SEEDBYTES + i * MLDSA65_POLYT1_PACKEDBYTES
+        t1 + i * 2048,
+        pk + MLDSA_SEEDBYTES + i * MLDSA65_POLYT1_PACKEDBYTES
         );
         i = i + 1;
     }

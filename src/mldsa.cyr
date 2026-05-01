@@ -98,8 +98,8 @@ fn _mldsa_sv_absorb(data, datalen) {
     var i = 0;
     while (i < datalen) {
         store8(
-            _mldsa_sv_state + _mldsa_sv_pos,
-            load8(_mldsa_sv_state + _mldsa_sv_pos) ^ load8(data + i)
+        _mldsa_sv_state + _mldsa_sv_pos,
+        load8(_mldsa_sv_state + _mldsa_sv_pos) ^ load8(data + i)
         );
         _mldsa_sv_pos = _mldsa_sv_pos + 1;
         i = i + 1;
@@ -113,8 +113,8 @@ fn _mldsa_sv_absorb(data, datalen) {
 
 fn _mldsa_sv_finalize() {
     store8(
-        _mldsa_sv_state + _mldsa_sv_pos,
-        load8(_mldsa_sv_state + _mldsa_sv_pos) ^ 0x1F
+    _mldsa_sv_state + _mldsa_sv_pos,
+    load8(_mldsa_sv_state + _mldsa_sv_pos) ^ 0x1F
     );
     store8(_mldsa_sv_state + 135, load8(_mldsa_sv_state + 135) ^ 0x80);
     _keccak_f1600(_mldsa_sv_state);
@@ -203,7 +203,7 @@ fn mldsa65_keypair_from_seed(seed, pk, sk) {
 
     # Assemble sk.
     mldsa_pack_sk(sk, _mldsa_ws_rho, _mldsa_ws_key, _mldsa_ws_tr,
-                  _mldsa_ws_t0, _mldsa_ws_s1, _mldsa_ws_s2);
+    _mldsa_ws_t0, _mldsa_ws_s1, _mldsa_ws_s2);
     return 0;
 }
 
@@ -260,7 +260,7 @@ fn mldsa65_sign(sig, msg, msglen, sk) {
 
     # 1. Unpack sk.
     mldsa_unpack_sk(_mldsa_ws_rho, _mldsa_ws_key, _mldsa_ws_tr,
-                    _mldsa_ws_t0, _mldsa_ws_s1, _mldsa_ws_s2, _mldsa_sign_sk);
+    _mldsa_ws_t0, _mldsa_ws_s1, _mldsa_ws_s2, _mldsa_sign_sk);
 
     # 2. mu = SHAKE256(tr ‖ 0x00 0x00 ‖ msg).
     _mldsa_sv_init();

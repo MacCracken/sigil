@@ -324,8 +324,8 @@ fn _build_ed_B_table() {
         while (_bt_k < 16) {
             # row[k] = row[k-1] + base_i
             ge_add(_bt_row + _bt_k * 128,
-                   _bt_row + (_bt_k - 1) * 128,
-                   _bt_base_i);
+            _bt_row + (_bt_k - 1) * 128,
+            _bt_base_i);
             _bt_k = _bt_k + 1;
         }
         if (_bt_table_i < 63) {

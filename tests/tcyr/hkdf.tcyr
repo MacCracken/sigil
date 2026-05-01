@@ -46,16 +46,16 @@ fn main() {
     hkdf_extract(salt1, 13, ikm1, 22, &prk1);
     var prk1_hex = hex_encode(&prk1, 32);
     assert_streq(prk1_hex,
-        "077709362c2e32df0ddc3f0dc47bba6390b6c73bb50f9c3122ec844ad7c2b3e5",
-        "TC1 PRK");
+    "077709362c2e32df0ddc3f0dc47bba6390b6c73bb50f9c3122ec844ad7c2b3e5",
+    "TC1 PRK");
 
     var okm1[42];
     var rc1 = hkdf_expand(&prk1, 32, info1, 10, &okm1, 42);
     assert_eq(rc1, 0, "TC1 expand rc");
     var okm1_hex = hex_encode(&okm1, 42);
     assert_streq(okm1_hex,
-        "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865",
-        "TC1 OKM");
+    "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865",
+    "TC1 OKM");
 
     # One-shot hkdf() should match.
     var okm1b[42];
@@ -63,8 +63,8 @@ fn main() {
     assert_eq(rc1b, 0, "TC1 oneshot rc");
     var okm1b_hex = hex_encode(&okm1b, 42);
     assert_streq(okm1b_hex,
-        "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865",
-        "TC1 oneshot OKM");
+    "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865",
+    "TC1 oneshot OKM");
 
     # ============================================================
     # RFC 5869 §A.2 — Test Case 2 (long inputs, 82-byte OKM)
@@ -79,16 +79,16 @@ fn main() {
     hkdf_extract(salt2, 80, ikm2, 80, &prk2);
     var prk2_hex = hex_encode(&prk2, 32);
     assert_streq(prk2_hex,
-        "06a6b88c5853361a06104c9ceb35b45cef760014904671014a193f40c15fc244",
-        "TC2 PRK");
+    "06a6b88c5853361a06104c9ceb35b45cef760014904671014a193f40c15fc244",
+    "TC2 PRK");
 
     var okm2[82];
     var rc2 = hkdf_expand(&prk2, 32, info2, 80, &okm2, 82);
     assert_eq(rc2, 0, "TC2 expand rc");
     var okm2_hex = hex_encode(&okm2, 82);
     assert_streq(okm2_hex,
-        "b11e398dc80327a1c8e7f78c596a49344f012eda2d4efad8a050cc4c19afa97c59045a99cac7827271cb41c65e590e09da3275600c2f09b8367793a9aca3db71cc30c58179ec3e87c14c01d5c1f3434f1d87",
-        "TC2 OKM");
+    "b11e398dc80327a1c8e7f78c596a49344f012eda2d4efad8a050cc4c19afa97c59045a99cac7827271cb41c65e590e09da3275600c2f09b8367793a9aca3db71cc30c58179ec3e87c14c01d5c1f3434f1d87",
+    "TC2 OKM");
 
     # ============================================================
     # RFC 5869 §A.3 — Test Case 3 (no salt, no info)
@@ -101,16 +101,16 @@ fn main() {
     hkdf_extract(0, 0, ikm3, 22, &prk3);
     var prk3_hex = hex_encode(&prk3, 32);
     assert_streq(prk3_hex,
-        "19ef24a32c717b167f33a91d6f648bdf96596776afdb6377ac434c1c293ccb04",
-        "TC3 PRK (empty salt)");
+    "19ef24a32c717b167f33a91d6f648bdf96596776afdb6377ac434c1c293ccb04",
+    "TC3 PRK (empty salt)");
 
     var okm3[42];
     var rc3 = hkdf_expand(&prk3, 32, 0, 0, &okm3, 42);
     assert_eq(rc3, 0, "TC3 expand rc");
     var okm3_hex = hex_encode(&okm3, 42);
     assert_streq(okm3_hex,
-        "8da4e775a563c18f715f802a063c5a31b8a11f5c5ee1879ec3454e5f3c738d2d9d201395faa4b61a96c8",
-        "TC3 OKM (empty info)");
+    "8da4e775a563c18f715f802a063c5a31b8a11f5c5ee1879ec3454e5f3c738d2d9d201395faa4b61a96c8",
+    "TC3 OKM (empty info)");
 
     # ============================================================
     # Edge: out_len over RFC 5869 §2.3 cap (255*32 = 8160)

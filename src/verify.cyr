@@ -556,8 +556,8 @@ fn sv_snapshot_trust_store(sv) {
         var chash = vec_get(keys, i);
         var artifact = map_get(store, chash);
         map_set(snap, chash, _snap_entry_new(
-            artifact_trust_level(artifact),
-            artifact_path(artifact)
+        artifact_trust_level(artifact),
+        artifact_path(artifact)
         ));
         i = i + 1;
     }
@@ -629,10 +629,10 @@ fn sv_diff_trust_store(sv, old_snap) {
         var new_art = map_get(store, chash);
         if (old_snap_entry == 0) {
             var ac = artifact_change_new(
-                chash,
-                artifact_path(new_art),
-                0 - 1,
-                artifact_trust_level(new_art)
+            chash,
+            artifact_path(new_art),
+            0 - 1,
+            artifact_trust_level(new_art)
             );
             vec_push(load64(diff), ac);
         } else {
@@ -640,10 +640,10 @@ fn sv_diff_trust_store(sv, old_snap) {
             var new_tl = artifact_trust_level(new_art);
             if (old_tl != new_tl) {
                 var ac = artifact_change_new(
-                    chash,
-                    artifact_path(new_art),
-                    old_tl,
-                    new_tl
+                chash,
+                artifact_path(new_art),
+                old_tl,
+                new_tl
                 );
                 vec_push(load64(diff + 16), ac);
             }
@@ -659,10 +659,10 @@ fn sv_diff_trust_store(sv, old_snap) {
         if (map_get(store, chash) == 0) {
             var old_snap_entry = map_get(old_snap, chash);
             var ac = artifact_change_new(
-                chash,
-                snap_entry_path(old_snap_entry),
-                snap_entry_trust_level(old_snap_entry),
-                0 - 1
+            chash,
+            snap_entry_path(old_snap_entry),
+            snap_entry_trust_level(old_snap_entry),
+            0 - 1
             );
             vec_push(load64(diff + 8), ac);
         }
@@ -802,20 +802,20 @@ fn sv_save_trust_store(sv, path) {
         var art = map_get(store, chash);
         if (i > 0) { file_write(fd, ",", 1); }
         file_write(fd, "{\"hash\":\"", 9);
-            json_write_escaped(fd, chash, strlen(chash));
-            file_write(fd, "\",\"path\":\"", 10);
-            var ap = artifact_path(art);
-            json_write_escaped(fd, ap, strlen(ap));
-            file_write(fd, "\",\"type\":", 9);
-            # fmt_int prints to stdout — use fmt_int_buf for file output.
-            memset(&nbuf, 0, 24);
-            var nlen = fmt_int_buf(artifact_type(art), &nbuf);
-            file_write(fd, &nbuf, nlen);
-            file_write(fd, ",\"trust\":", 9);
-            memset(&nbuf, 0, 24);
-            nlen = fmt_int_buf(artifact_trust_level(art), &nbuf);
-            file_write(fd, &nbuf, nlen);
-            file_write(fd, "}", 1);
+        json_write_escaped(fd, chash, strlen(chash));
+        file_write(fd, "\",\"path\":\"", 10);
+        var ap = artifact_path(art);
+        json_write_escaped(fd, ap, strlen(ap));
+        file_write(fd, "\",\"type\":", 9);
+        # fmt_int prints to stdout — use fmt_int_buf for file output.
+        memset(&nbuf, 0, 24);
+        var nlen = fmt_int_buf(artifact_type(art), &nbuf);
+        file_write(fd, &nbuf, nlen);
+        file_write(fd, ",\"trust\":", 9);
+        memset(&nbuf, 0, 24);
+        nlen = fmt_int_buf(artifact_trust_level(art), &nbuf);
+        file_write(fd, &nbuf, nlen);
+        file_write(fd, "}", 1);
         i = i + 1;
     }
     file_write(fd, "]", 1);

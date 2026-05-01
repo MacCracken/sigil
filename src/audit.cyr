@@ -151,30 +151,30 @@ fn alog_append_to_file(log, path) {
         var line = alloc(512);
         var pos = 0;
         pos = pos + _alog_write_str(line + pos, "{\"type\":\"");
-            pos = pos + _alog_write_str(line + pos, audit_event_name(ae_type(e)));
-            pos = pos + _alog_write_str(line + pos, "\",\"timestamp\":");
-            pos = pos + _alog_write_int(line + pos, ae_timestamp(e));
-            if (ae_path(e) != 0) {
-                pos = pos + _alog_write_str(line + pos, ",\"path\":\"");
-                pos = pos + _alog_write_str(line + pos, ae_path(e));
-                pos = pos + _alog_write_str(line + pos, "\"");
-            }
-            if (ae_key_id(e) != 0) {
-                pos = pos + _alog_write_str(line + pos, ",\"key_id\":\"");
-                pos = pos + _alog_write_str(line + pos, ae_key_id(e));
-                pos = pos + _alog_write_str(line + pos, "\"");
-            }
-            if (ae_content_hash(e) != 0) {
-                pos = pos + _alog_write_str(line + pos, ",\"content_hash\":\"");
-                pos = pos + _alog_write_str(line + pos, ae_content_hash(e));
-                pos = pos + _alog_write_str(line + pos, "\"");
-            }
-            if (ae_passed(e) != (0 - 1)) {
-                pos = pos + _alog_write_str(line + pos, ",\"passed\":");
-                if (ae_passed(e) == 1) { pos = pos + _alog_write_str(line + pos, "true"); }
-                else { pos = pos + _alog_write_str(line + pos, "false"); }
-            }
-            pos = pos + _alog_write_str(line + pos, "}\n");
+        pos = pos + _alog_write_str(line + pos, audit_event_name(ae_type(e)));
+        pos = pos + _alog_write_str(line + pos, "\",\"timestamp\":");
+        pos = pos + _alog_write_int(line + pos, ae_timestamp(e));
+        if (ae_path(e) != 0) {
+            pos = pos + _alog_write_str(line + pos, ",\"path\":\"");
+            pos = pos + _alog_write_str(line + pos, ae_path(e));
+            pos = pos + _alog_write_str(line + pos, "\"");
+        }
+        if (ae_key_id(e) != 0) {
+            pos = pos + _alog_write_str(line + pos, ",\"key_id\":\"");
+            pos = pos + _alog_write_str(line + pos, ae_key_id(e));
+            pos = pos + _alog_write_str(line + pos, "\"");
+        }
+        if (ae_content_hash(e) != 0) {
+            pos = pos + _alog_write_str(line + pos, ",\"content_hash\":\"");
+            pos = pos + _alog_write_str(line + pos, ae_content_hash(e));
+            pos = pos + _alog_write_str(line + pos, "\"");
+        }
+        if (ae_passed(e) != (0 - 1)) {
+            pos = pos + _alog_write_str(line + pos, ",\"passed\":");
+            if (ae_passed(e) == 1) { pos = pos + _alog_write_str(line + pos, "true"); }
+            else { pos = pos + _alog_write_str(line + pos, "false"); }
+        }
+        pos = pos + _alog_write_str(line + pos, "}\n");
         store8(line + pos, 0);
         file_write(fd, line, pos);
         i = i + 1;

@@ -366,13 +366,13 @@ fn keyring_save(kr) {
                         var kv = vec_get(versions, j);
                         if (j > 0) { file_write(fd, ",", 1); }
                         file_write(fd, "{\"key_id\":\"", 11);
-                            json_write_escaped(fd, kv_key_id(kv), strlen(kv_key_id(kv)));
-                            file_write(fd, "\",\"public_key_hex\":\"", 20);
-                            json_write_escaped(fd, kv_public_key_hex(kv), strlen(kv_public_key_hex(kv)));
-                            file_write(fd, "\",\"role\":\"", 10);
-                            var rn = key_role_name(kv_role(kv));
-                            json_write_escaped(fd, rn, strlen(rn));
-                            file_write(fd, "\"}", 2);
+                        json_write_escaped(fd, kv_key_id(kv), strlen(kv_key_id(kv)));
+                        file_write(fd, "\",\"public_key_hex\":\"", 20);
+                        json_write_escaped(fd, kv_public_key_hex(kv), strlen(kv_public_key_hex(kv)));
+                        file_write(fd, "\",\"role\":\"", 10);
+                        var rn = key_role_name(kv_role(kv));
+                        json_write_escaped(fd, rn, strlen(rn));
+                        file_write(fd, "\"}", 2);
                         j = j + 1;
                     }
                     file_write(fd, "]", 1);

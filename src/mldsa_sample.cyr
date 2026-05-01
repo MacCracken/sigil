@@ -178,8 +178,8 @@ fn mldsa_poly_uniform(a, seed, nonce) {
         var i = 0;
         while (i < _mldsa_pu_off) {
             store8(
-                _mldsa_sample_buf128 + i,
-                load8(_mldsa_sample_buf128 + _mldsa_pu_buflen - _mldsa_pu_off + i)
+            _mldsa_sample_buf128 + i,
+            load8(_mldsa_sample_buf128 + _mldsa_pu_buflen - _mldsa_pu_off + i)
             );
             i = i + 1;
         }
@@ -187,10 +187,10 @@ fn mldsa_poly_uniform(a, seed, nonce) {
         _mldsa_shake_squeeze_blocks(_mldsa_sample_buf128 + _mldsa_pu_off, 1, 168);
         _mldsa_pu_buflen = 168 + _mldsa_pu_off;
         _mldsa_pu_ctr = _mldsa_pu_ctr + mldsa_rej_uniform(
-            _mldsa_pu_a + _mldsa_pu_ctr * 8,
-            256 - _mldsa_pu_ctr,
-            _mldsa_sample_buf128,
-            _mldsa_pu_buflen
+        _mldsa_pu_a + _mldsa_pu_ctr * 8,
+        256 - _mldsa_pu_ctr,
+        _mldsa_sample_buf128,
+        _mldsa_pu_buflen
         );
     }
     return 0;
@@ -218,10 +218,10 @@ fn mldsa_poly_uniform_eta(a, seed, nonce) {
     while (_mldsa_pe_ctr < 256) {
         _mldsa_shake_squeeze_blocks(_mldsa_sample_buf256, 1, 136);
         _mldsa_pe_ctr = _mldsa_pe_ctr + mldsa_rej_eta(
-            _mldsa_pe_a + _mldsa_pe_ctr * 8,
-            256 - _mldsa_pe_ctr,
-            _mldsa_sample_buf256,
-            136
+        _mldsa_pe_a + _mldsa_pe_ctr * 8,
+        256 - _mldsa_pe_ctr,
+        _mldsa_sample_buf256,
+        136
         );
     }
     return 0;
@@ -321,9 +321,9 @@ fn mldsa_polyvec_matrix_expand(mat, rho) {
             var nonce = (i << 8) | j;
             # Row i of A is at offset i * L * 2048; poly (i,j) at +j*2048.
             mldsa_poly_uniform(
-                mat + (i * MLDSA65_L + j) * 2048,
-                rho,
-                nonce
+            mat + (i * MLDSA65_L + j) * 2048,
+            rho,
+            nonce
             );
             j = j + 1;
         }

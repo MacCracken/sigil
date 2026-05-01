@@ -1,6 +1,13 @@
 # sha256.cyr — FIPS 180-4 SHA-256 implementation
 # All arithmetic masked to 32 bits. Working state in globals
 # to survive nested function calls (Cyrius compiler constraint).
+#
+# `sha256_transform` dispatches to the SHA-NI hardware path via
+# `sha_ni_available()` / `sha256_transform_ni()`; pull the dispatch
+# infrastructure in so single-file consumers (test harnesses that
+# include only `src/sha256.cyr`) link cleanly.
+
+include "src/sha_ni.cyr"
 
 var MASK32 = 0xFFFFFFFF;
 

@@ -58,13 +58,13 @@ fn _mldsa_nibble(c) {
 fn _mldsa_decode_i32_le(hex_str, idx) {
     var base = idx * 8;
     var b0 = (_mldsa_nibble(load8(hex_str + base + 0) & 0xFF) << 4)
-           | _mldsa_nibble(load8(hex_str + base + 1) & 0xFF);
+    | _mldsa_nibble(load8(hex_str + base + 1) & 0xFF);
     var b1 = (_mldsa_nibble(load8(hex_str + base + 2) & 0xFF) << 4)
-           | _mldsa_nibble(load8(hex_str + base + 3) & 0xFF);
+    | _mldsa_nibble(load8(hex_str + base + 3) & 0xFF);
     var b2 = (_mldsa_nibble(load8(hex_str + base + 4) & 0xFF) << 4)
-           | _mldsa_nibble(load8(hex_str + base + 5) & 0xFF);
+    | _mldsa_nibble(load8(hex_str + base + 5) & 0xFF);
     var b3 = (_mldsa_nibble(load8(hex_str + base + 6) & 0xFF) << 4)
-           | _mldsa_nibble(load8(hex_str + base + 7) & 0xFF);
+    | _mldsa_nibble(load8(hex_str + base + 7) & 0xFF);
     var u = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
     # Sign-extend the 32-bit value to i64.
     return u - ((u & 0x80000000) << 1);

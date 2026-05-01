@@ -286,9 +286,9 @@ fn mldsa_polyvecl_pointwise_acc_montgomery(w, u, v) {
     _mldsa_pac_i = 1;
     while (_mldsa_pac_i < MLDSA65_L) {
         mldsa_poly_pointwise_montgomery(
-            _mldsa_pac_scratch,
-            _mldsa_pac_u + _mldsa_pac_i * 2048,
-            _mldsa_pac_v + _mldsa_pac_i * 2048
+        _mldsa_pac_scratch,
+        _mldsa_pac_u + _mldsa_pac_i * 2048,
+        _mldsa_pac_v + _mldsa_pac_i * 2048
         );
         mldsa_poly_add(_mldsa_pac_w, _mldsa_pac_w, _mldsa_pac_scratch);
         _mldsa_pac_i = _mldsa_pac_i + 1;
@@ -316,9 +316,9 @@ fn mldsa_polyvec_matrix_pointwise_montgomery(t, A, v) {
     _mldsa_mat_i = 0;
     while (_mldsa_mat_i < MLDSA65_K) {
         mldsa_polyvecl_pointwise_acc_montgomery(
-            _mldsa_mat_t + _mldsa_mat_i * 2048,
-            _mldsa_mat_A + _mldsa_mat_i * MLDSA65_L * 2048,
-            _mldsa_mat_v
+        _mldsa_mat_t + _mldsa_mat_i * 2048,
+        _mldsa_mat_A + _mldsa_mat_i * MLDSA65_L * 2048,
+        _mldsa_mat_v
         );
         _mldsa_mat_i = _mldsa_mat_i + 1;
     }

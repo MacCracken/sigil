@@ -47,9 +47,9 @@ fn sigil_ima_snapshot() {
     }
     var ag = result_unwrap(res);
     return sigil_ima_snapshot_new(
-        ima_status_active(ag),
-        ima_status_measurement_count(ag),
-        ima_status_policy_loaded(ag)
+    ima_status_active(ag),
+    ima_status_measurement_count(ag),
+    ima_status_policy_loaded(ag)
     );
 }
 

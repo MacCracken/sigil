@@ -288,10 +288,10 @@ fn main() {
     test_group("RL jsonl escape");
     var rl_esc = revocation_list_new();
     var re_esc = revocation_entry_new(
-        "key_with_\"quote\"",
-        "hash_with_\\backslash",
-        "reason with \"quotes\" and \\ and \n newline",
-        "admin_name"
+    "key_with_\"quote\"",
+    "hash_with_\\backslash",
+    "reason with \"quotes\" and \\ and \n newline",
+    "admin_name"
     );
     rl_add(rl_esc, re_esc);
     var esc_jsonl = rl_to_jsonl(rl_esc);

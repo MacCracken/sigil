@@ -5,6 +5,115 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.9.5] — 2026-04-30
+
+**Toolchain + dep refresh: cyrius 5.6.42 → 5.7.48, agnosys
+1.0.3 → 1.0.4, plus a structural fix to `cyrius.cyml` that
+unblocks 5.7.x's auto-deps prepend.** The agnosys bump pulls
+in the aarch64 portability sweep landed in agnosys 1.0.4
+(per-arch `src/syscall_*_linux.cyr` peer files; raw-syscall
+migration to `sys_*` wrappers). Sigil itself remains a
+crypto + trust library; no API change.
+
+### Fixed
+
+- **`[lib].modules` section header** added to `cyrius.cyml`.
+  Pre-fix the `modules = [...]` table sat directly under
+  `[build]` (whose preceding line was `defines = [...]`), so
+  TOML scoped it as `[build].modules`. Cyrius 5.7.x treats
+  `[build].modules` as an auto-prepend list — every src/ file
+  was inlined into the temp before the entry source, then
+  `src/lib.cyr`'s explicit `include` directives pulled them
+  in a second time. Result on 5.7.48: 374 `duplicate fn`
+  warnings on every `cyrius build` (374 = total fn count
+  across the library, since every fn was redefined). The
+  byte-identical fix is a one-line `[lib]` section header
+  before `modules = [...]`. This is the same lesson agnosys
+  learned at 1.0.1 ("76% binary size reduction"); sigil's
+  manifest layout pre-dates it. With the fix, the duplicate
+  count drops to **0**.
+- **`src/sha256.cyr` now `include "src/sha_ni.cyr"`.**
+  `sha256_transform()` dispatches via `sha_ni_available()`
+  / `sha256_transform_ni()` (the SHA-NI hardware path landed
+  in 2.9.3); previously the dispatch infrastructure came in
+  via `src/lib.cyr`'s explicit list OR via the pre-fix
+  auto-prepend. With auto-prepend disabled and individual
+  test files pulling in only `src/sha256.cyr` (not the full
+  `src/lib.cyr`), the dispatch-target functions resolved as
+  `error: undefined function 'sha_ni_available' (will crash
+  at runtime)` and the hash_data tests aborted partway.
+  Pulling sha_ni in directly from sha256.cyr matches the
+  module's documented dispatch contract and restores the
+  individual test harnesses.
+
+### Changed
+
+- **`cyrius.cyml [package].cyrius`** pinned `5.6.42` →
+  `5.7.48`. Catches up across the 5.7.x cycle's syscall
+  portability narrative (per-arch table dispatch, `sys_*`
+  wrappers, `_SC_ARITY` arity checks) and the late
+  refactor-pass / advanced-TS work.
+- **`cyrius.cyml [deps.agnosys]`** tag `1.0.3` → `1.0.4`.
+  agnosys 1.0.4 ships per-arch peer files self-gated with
+  `#ifdef CYRIUS_ARCH_X86 / AARCH64` so the sigil-bundled
+  `lib/agnosys.cyr` carries both arch's syscall surfaces;
+  sigil consumers (phylax 1.1.x next) pick the arch-correct
+  path from their own predefines.
+- **`.github/workflows/ci.yml`** env `CYRIUS_VERSION` bumped
+  `5.6.42` → `5.7.48` so CI installs the matching toolchain.
+- **`VERSION`** + **`cyrius.cyml [package].version`** bumped
+  `2.9.4` → `2.9.5`.
+- **18 src/* and tests/tcyr/* files reformatted** for the
+  cyrius 5.7.x continuation-line indent rule. No semantic
+  change; `cyrius fmt --check` was a no-op against the 5.6.42
+  rule and would have diff'd against the new rule on first
+  5.7.48 run.
+
+### Verified
+
+- `CYRIUS_DCE=1 cyrius build programs/smoke.cyr build/sigil`
+  (x86_64) — clean, **0 duplicate-fn warnings** (was 374
+  pre-fix).
+- `cyrius build --aarch64 programs/smoke.cyr build/sigil-aarch64`
+  — produces a well-formed `ELF 64-bit LSB executable, ARM
+  aarch64`. 11 `syscall arity mismatch` warnings remain; 9
+  are pre-existing cc5_aarch64 false-positives in
+  `lib/syscalls_aarch64_linux.cyr`'s at-family wrappers
+  (reproducible against a 4-line empty cyrius program; see
+  cyrius CHANGELOG `_SC_ARITY` entries for prior fixes in
+  the same family). The remaining 2 are likely the same
+  class hitting sigil-side calls; tracked as a cyrius-side
+  hygiene item, does not block this release.
+- **23 test files / 617 assertions pass** (was a pre-fix
+  state of 5 files crashing partway after the auto-prepend
+  was disabled — `crypto.tcyr`, `hkdf.tcyr`, `security.tcyr`,
+  `sigil.tcyr`, `verify.tcyr` aborted at the first
+  `hash_data()` call site). All restored once
+  `src/sha256.cyr` started pulling in the SHA-NI dispatch.
+- `cyrius bench tests/bcyr/*.bcyr` — all benches run; no
+  regressions vs 2.9.4 baseline (mldsa65_sign 4.91ms,
+  mldsa65_verify 2.23ms, hkdf_extract 1µs).
+- `cyrius distlib` — `dist/sigil.cyr` regenerated at
+  **8781 lines (v2.9.5)**.
+- 3 fuzz harnesses build + survive 100-iteration runs:
+  `fuzz_ed25519`, `fuzz_integrity`, `fuzz_revocation`.
+- Security scan: clean.
+
+### Notes — pre-existing lint warnings surface on 5.7.x
+
+Cyrius 5.7.x's `cyrlint` adds checks for line length (>120
+chars), forward-referencing global var initializers, and
+fn naming conventions in test harnesses; the existing 2.9.4
+tree has 35 such warnings (long-line style + a benign
+`var jsonl` / `var buf` / `var c` conflation in
+`src/policy.cyr` where `cyrlint` mistakes function-local
+vars for globals because two `fn`s in the same file share
+local-var names). Sigil's CI does not gate on `cyrlint` (the
+workflow has no Lint step), so these don't block the release.
+Will be batched into a follow-up cleanup pass that also
+considers wiring fmt/lint gates into the workflow to match
+agnosys's pattern.
+
 ## [2.9.4] — 2026-04-27
 
 ### Changed — Build output renamed to align with package convention
