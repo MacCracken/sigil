@@ -64,6 +64,322 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`SIGIL_BATCH_PARALLEL` cannot be default-on** until cyrius
   raises the fixup-table cap (filed).
 
+### Merged from `main` (2026-05-01)
+
+- 2.9.2 → 2.9.5 picked up via `git merge main`. SHA-NI probe +
+  compress (2.9.2/2.9.3), build-output rename (2.9.4), cyrius
+  5.7.48 + agnosys 1.0.4 toolchain bump (2.9.5). Cyrius pin on
+  the 3.0 branch advances `5.5.35` → `5.7.48`. Conflicts: cyrius
+  pin in `cyrius.cyml`, CI `CYRIUS_VERSION`, and CHANGELOG
+  Unreleased section — all resolved in favour of main's modern
+  toolchain. The 3.0 scope tracker's "cyrius pin" note is now
+  superseded; current dispatch is 5.7.48.
+- **Material code merges, no conflict:** SHA-NI module
+  (`src/sha_ni.cyr`) added to 3.0 from main; `[lib].modules`
+  manifest header fix; per-arch agnosys 1.0.4 syscall wrappers;
+  18 src/test files reformatted for 5.7.x continuation-indent
+  rule; `src/sha256.cyr` now `include`s `src/sha_ni.cyr`
+  directly per the dispatch contract.
+
+## [2.9.5] — 2026-04-30
+
+**Toolchain + dep refresh: cyrius 5.6.42 → 5.7.48, agnosys
+1.0.3 → 1.0.4, plus a structural fix to `cyrius.cyml` that
+unblocks 5.7.x's auto-deps prepend.** The agnosys bump pulls
+in the aarch64 portability sweep landed in agnosys 1.0.4
+(per-arch `src/syscall_*_linux.cyr` peer files; raw-syscall
+migration to `sys_*` wrappers). Sigil itself remains a
+crypto + trust library; no API change.
+
+### Fixed
+
+- **`[lib].modules` section header** added to `cyrius.cyml`.
+  Pre-fix the `modules = [...]` table sat directly under
+  `[build]` (whose preceding line was `defines = [...]`), so
+  TOML scoped it as `[build].modules`. Cyrius 5.7.x treats
+  `[build].modules` as an auto-prepend list — every src/ file
+  was inlined into the temp before the entry source, then
+  `src/lib.cyr`'s explicit `include` directives pulled them
+  in a second time. Result on 5.7.48: 374 `duplicate fn`
+  warnings on every `cyrius build` (374 = total fn count
+  across the library, since every fn was redefined). The
+  byte-identical fix is a one-line `[lib]` section header
+  before `modules = [...]`. This is the same lesson agnosys
+  learned at 1.0.1 ("76% binary size reduction"); sigil's
+  manifest layout pre-dates it. With the fix, the duplicate
+  count drops to **0**.
+- **`src/sha256.cyr` now `include "src/sha_ni.cyr"`.**
+  `sha256_transform()` dispatches via `sha_ni_available()`
+  / `sha256_transform_ni()` (the SHA-NI hardware path landed
+  in 2.9.3); previously the dispatch infrastructure came in
+  via `src/lib.cyr`'s explicit list OR via the pre-fix
+  auto-prepend. With auto-prepend disabled and individual
+  test files pulling in only `src/sha256.cyr` (not the full
+  `src/lib.cyr`), the dispatch-target functions resolved as
+  `error: undefined function 'sha_ni_available' (will crash
+  at runtime)` and the hash_data tests aborted partway.
+  Pulling sha_ni in directly from sha256.cyr matches the
+  module's documented dispatch contract and restores the
+  individual test harnesses.
+
+### Changed
+
+- **`cyrius.cyml [package].cyrius`** pinned `5.6.42` →
+  `5.7.48`. Catches up across the 5.7.x cycle's syscall
+  portability narrative (per-arch table dispatch, `sys_*`
+  wrappers, `_SC_ARITY` arity checks) and the late
+  refactor-pass / advanced-TS work.
+- **`cyrius.cyml [deps.agnosys]`** tag `1.0.3` → `1.0.4`.
+  agnosys 1.0.4 ships per-arch peer files self-gated with
+  `#ifdef CYRIUS_ARCH_X86 / AARCH64` so the sigil-bundled
+  `lib/agnosys.cyr` carries both arch's syscall surfaces;
+  sigil consumers (phylax 1.1.x next) pick the arch-correct
+  path from their own predefines.
+- **`.github/workflows/ci.yml`** env `CYRIUS_VERSION` bumped
+  `5.6.42` → `5.7.48` so CI installs the matching toolchain.
+- **`VERSION`** + **`cyrius.cyml [package].version`** bumped
+  `2.9.4` → `2.9.5`.
+- **18 src/* and tests/tcyr/* files reformatted** for the
+  cyrius 5.7.x continuation-line indent rule. No semantic
+  change; `cyrius fmt --check` was a no-op against the 5.6.42
+  rule and would have diff'd against the new rule on first
+  5.7.48 run.
+
+### Verified
+
+- `CYRIUS_DCE=1 cyrius build programs/smoke.cyr build/sigil`
+  (x86_64) — clean, **0 duplicate-fn warnings** (was 374
+  pre-fix).
+- `cyrius build --aarch64 programs/smoke.cyr build/sigil-aarch64`
+  — produces a well-formed `ELF 64-bit LSB executable, ARM
+  aarch64`. 11 `syscall arity mismatch` warnings remain; 9
+  are pre-existing cc5_aarch64 false-positives in
+  `lib/syscalls_aarch64_linux.cyr`'s at-family wrappers
+  (reproducible against a 4-line empty cyrius program; see
+  cyrius CHANGELOG `_SC_ARITY` entries for prior fixes in
+  the same family). The remaining 2 are likely the same
+  class hitting sigil-side calls; tracked as a cyrius-side
+  hygiene item, does not block this release.
+- **23 test files / 617 assertions pass** (was a pre-fix
+  state of 5 files crashing partway after the auto-prepend
+  was disabled — `crypto.tcyr`, `hkdf.tcyr`, `security.tcyr`,
+  `sigil.tcyr`, `verify.tcyr` aborted at the first
+  `hash_data()` call site). All restored once
+  `src/sha256.cyr` started pulling in the SHA-NI dispatch.
+- `cyrius bench tests/bcyr/*.bcyr` — all benches run; no
+  regressions vs 2.9.4 baseline (mldsa65_sign 4.91ms,
+  mldsa65_verify 2.23ms, hkdf_extract 1µs).
+- `cyrius distlib` — `dist/sigil.cyr` regenerated at
+  **8781 lines (v2.9.5)**.
+- 3 fuzz harnesses build + survive 100-iteration runs:
+  `fuzz_ed25519`, `fuzz_integrity`, `fuzz_revocation`.
+- Security scan: clean.
+
+### Notes — pre-existing lint warnings surface on 5.7.x
+
+Cyrius 5.7.x's `cyrlint` adds checks for line length (>120
+chars), forward-referencing global var initializers, and
+fn naming conventions in test harnesses; the existing 2.9.4
+tree has 35 such warnings (long-line style + a benign
+`var jsonl` / `var buf` / `var c` conflation in
+`src/policy.cyr` where `cyrlint` mistakes function-local
+vars for globals because two `fn`s in the same file share
+local-var names). Sigil's CI does not gate on `cyrlint` (the
+workflow has no Lint step), so these don't block the release.
+Will be batched into a follow-up cleanup pass that also
+considers wiring fmt/lint gates into the workflow to match
+agnosys's pattern.
+
+## [2.9.4] — 2026-04-27
+
+### Changed — Build output renamed to align with package convention
+
+- **`[build].output`**: `build/sigil-smoke` → `build/sigil`. The
+  smoke-test program (still defined with `SIGIL_SMOKE`, still entry-pointed
+  at `programs/smoke.cyr`) is now produced at the canonical
+  `build/<package>` path that the genesis boot pipeline's
+  `--iso-check` expects. Unblocks ISO assembly (sigil was the lone
+  miss in an otherwise 25-of-26-ready boot chain).
+- **`dist/sigil.cyr`** regenerated to carry the bumped version.
+
+### Notes — roadmap left in the manifest
+
+A `[build]` comment block in `cyrius.cyml` documents the next two
+steps for sigil's boot-side artifact: a future patch will replace the
+smoke-test build with a real library probe (no `SIGIL_SMOKE` define);
+later still, the boot's `--iso-check` will look at `dist/sigil.cyr`
+directly once that path has been hardened in test. The eventual
+endgame is sigil folded into the Cyrius stdlib, like sandhi (5.7.0)
+and mabda (3.4.19).
+
+No source / behavior changes in 2.9.4. Crypto code, dispatcher
+routing, and SHA-NI hot path are byte-identical to 2.9.3.
+
+## [2.9.3] — 2026-04-25
+
+Lands the byte-encoded SHA-NI compress that 2.9.2 staged the probe
+for. `sha256_transform_ni` is now a real one-block compress derived
+verbatim from the Linux kernel's `arch/x86/crypto/sha256_ni_asm.S`
+(BSD/GPLv2 → GPL leg under sigil's GPL-3.0). On SHA-NI-capable
+x86_64 hosts, sigil's SHA-256 dispatcher routes through the hardware
+path; on hosts without the extension, the software FIPS 180-4 path
+remains the implementation.
+
+Bench numbers on the dev host (Cyrius 5.6.41) — software vs NI:
+
+| input | software | SHA-NI | speedup |
+| ----- | -------- | ------ | ------- |
+| 64 B  | 10 µs    | 470 ns | ~21×    |
+| 1 KB  | 88 µs    |  2 µs  | ~44×    |
+| 64 KB | 5.32 ms  | 157 µs | ~34×    |
+
+This closes out the SHA-256 hot-path entry from the roadmap. sit's
+`status-100files` and `add-1MB` paths (the ones that motivated the
+work) pick up the win automatically through the dispatcher.
+
+### Added
+
+- **Real `sha256_transform_ni` body in `src/sha_ni.cyr`.** Replaces
+  the 2.9.2 `-1` stub with a SHA-NI single-block compress. The
+  function packs sigil's 8-byte-per-h_i ctx layout into a contiguous
+  packed-dword state buffer at module-global scratch, runs the
+  kernel's 16-iteration ping-pong loop (PSHUFB byte-swap, SHA256RNDS2
+  pairs interleaved with SHA256MSG1/MSG2 schedule updates), then
+  unpacks back to ctx with zero-extending 64-bit stores so the
+  software path's `store64` invariant survives. State, K table, and
+  PSHUFFLE_BYTE_FLIP_MASK live in module-global aligned scratch
+  initialized lazily on first call (`_sha_ni_init`). The K constants
+  are embedded directly rather than read from `sha256.cyr`'s table
+  so this module has no init-order dependency.
+- **`_sha_ni_align16` helper.** `alloc()` is 8-byte-aligned but
+  PSHUFB and PADDD with m128 operands raise #GP on misaligned
+  addresses. The helper rounds an alloc'd pointer up to a 16-byte
+  boundary; init over-allocates each scratch buffer by 16 bytes and
+  uses the aligned slot.
+- **Cross-path test ring in `tests/tcyr/sha_ni.tcyr`.** FIPS 180-4
+  vectors (empty, "abc", 56-byte two-block, 1KB, 64KB) routed
+  through the dispatcher with `_sha_ni_cache` forced to 0 (software)
+  pin the software path's correctness. Cross-path equality at 56B /
+  1KB / 64KB hashes each input twice (once with `_sha_ni_cache=0`,
+  once with `_sha_ni_cache=1`) and asserts byte-equal digests —
+  catches any opcode-encoding regression deterministically. Test
+  also includes `lib/ct.cyr` and `lib/keccak.cyr` so the stdlib
+  symbols sigil's chain references are resolved (was an oversight).
+- **`tests/bcyr/sigil.bcyr` SHA-256 throughput rows** at 64B / 1KB
+  / 64KB for both software and NI paths. Captured in
+  `benches/history.csv` under the `v2.9.3` label.
+- **`docs/development/issues/2026-04-25-sha-ni-compress-design.md`.**
+  Pre-implementation design doc covering instruction semantics, the
+  state-layout impedance between sigil's ctx and SHA-NI's XMM
+  registers, the kernel-derived 16-iteration loop structure, and
+  the encoding plan. Lives under `docs/development/issues/` per the
+  project convention for in-flight design notes.
+
+### Changed
+
+- **`sha256_transform_ni` return contract.** Was `-1` (no-op
+  fall-through to software) in 2.9.2; now `0` (hashed in hardware).
+  The dispatcher in `sha256_transform` already handled both return
+  values, so callers see no surface change — only behavior change
+  is faster digests on SHA-NI hosts.
+
+### Removed
+
+- **SHA-256 hot-path roadmap entry.** Shipped, moves to this entry.
+
+## [2.9.2] — 2026-04-25
+
+Lays the SHA-NI hardware-acceleration foundation surfaced by sit
+v0.6.4's perf review (2026-04-25). Sigil's current SHA-256 tops out
+at ~12 MB/s on 64KB inputs versus ~1 GB/s on x86_64 SHA-NI hardware
+— ~80x headroom — and is the dominant cost in sit's `status-100files`
+and `add-1MB` flows. This release ships the CPUID probe + dispatch
+wire-point so the byte-encoded SHA-NI compress can land in 2.9.3 as
+a drop-in replacement for the stubbed `sha256_transform_ni` body
+without touching the dispatcher or the public surface.
+
+The split (foundation in 2.9.2, compress in 2.9.3) keeps the
+risky-encoding step contained: a wrong opcode in a SHA-256 transform
+produces silent wrong-hash digests, exactly the failure mode the
+"Sigil IS the trust boundary" constraint forbids. Shipping the probe
+ahead of the compress lets consumers (sit, daimon, kavach) pick up
+the dispatch infrastructure now and the throughput win on the next
+patch without a second wave of integration churn.
+
+### Added
+
+- **`src/sha_ni.cyr` — SHA-NI CPUID probe + dispatch entry point.**
+  `sha_ni_available()` runs CPUID leaf 7 sub-leaf 0 and returns 1
+  when EBX bit 29 (SHA extensions) is set, 0 otherwise. The probe
+  result is cached in `_sha_ni_cache` (sentinel = 2 means uncached),
+  matching `_aes_ni_cache` discipline so the CPUID instruction is
+  paid exactly once per process. `sha256_transform_ni(ctx)` is a
+  sentinel stub in 2.9.2: it returns `-1` to signal "not implemented"
+  so the dispatcher in `sha256_transform` falls through to the
+  software FIPS 180-4 path on every host. 2.9.3 replaces the stub
+  body with the byte-encoded Intel SHA-NI sequence (load ABEF/CDGH
+  state, byte-swap message dwords via PSHUFB, 16 message-schedule
+  iterations × 4 rounds via SHA256RNDS2/MSG1/MSG2, store result).
+- **`tests/tcyr/sha_ni.tcyr` — probe contract + dispatcher
+  regression test.** Confirms `sha_ni_available()` returns 0 or 1
+  (not the uncached sentinel 2) and is stable across calls; locks
+  in the 2.9.2 stub contract that `sha256_transform_ni` returns -1;
+  cross-checks `sha256("abc", 3, ...)` through the dispatcher
+  matches the FIPS 180-4 `ba7816bf...f20015ad` vector to verify the
+  new wire-point in `sha256_transform` doesn't regress the software
+  path.
+
+### Changed
+
+- **`src/sha256.cyr:172` — `sha256_transform` dispatch wire-point.**
+  Adds an `if (sha_ni_available() == 1) { if (sha256_transform_ni(ctx) == 0) { return 0; } }`
+  prelude. With the 2.9.2 stub returning -1 unconditionally, the
+  software path runs on every host — measured no regression
+  (existing 605 → 609 tests, all passing). When 2.9.3 replaces the
+  stub body, the dispatcher needs no change to pick up the
+  hardware path.
+- **`src/lib.cyr` and `cyrius.cyml` modules list — `src/sha_ni.cyr`
+  added before `src/sha256.cyr`.** Same dependency-order pattern as
+  `src/aes_ni.cyr` → `src/aes_gcm.cyr`. The dist bundle stays
+  self-contained.
+- **`docs/development/roadmap.md` — SHA-256 hot-path entry added
+  under Road to v3.0 / Sigil-internal.** Records the sit v0.6.4
+  source attribution, the 12 MB/s → 1 GB/s headroom, the
+  cyrius 5.5.22+ inline-asm gate now being clear, and the staged
+  delivery plan (foundation 2.9.2 / compress 2.9.3).
+- **`VERSION` and `cyrius.cyml` 2.9.1 → 2.9.2.**
+- **`cyrius.cyml` cyrius pin 5.5.30 → 5.6.40.** The pin had drifted
+  out of sync with the actively-installed toolchain (`cyrius --version`
+  reports 5.6.40); refreshing `lib/` via `cyrius deps` confirmed all
+  17 vendored stdlib modules now match the 5.6.40 install file-by-
+  file. `lib/alloc.cyr` picks up the v5.6.34 heap-grow rounding fix
+  (round to next 1MB boundary instead of stepping by exactly
+  0x100000) that prevents SIGSEGV on `alloc(>1MB)` near the brk
+  grow-point. The pin bump is documentation: `cyrius deps` already
+  uses whatever toolchain is on PATH, but the pin advertises what
+  the codebase has been validated against. 5.6.40 supersedes 5.5.30
+  with the cumulative 5.5.31..5.6.40 stdlib + frontend deltas.
+- **`cyrius.cyml` `[deps] stdlib` adds `"bench"`.** Previously
+  `lib/bench.cyr` was tracked in git but missing from the deps list,
+  so `cyrius deps` wouldn't repopulate it after a clean. The bench
+  harness (`tests/bcyr/sigil.bcyr`) includes it directly. Adding to
+  the deps list keeps `lib/` rebuildable from a clean state.
+
+### Notes for consumers
+
+- **No public-surface change.** Existing `sha256()`, `hash_data()`,
+  `hash_file()` calls continue to behave identically; the probe is
+  internal. Consumers don't need to update import sites.
+- **No throughput delta in 2.9.2.** sit's `status-100files` and
+  `add-1MB` flows are still software-bound until 2.9.3 lands the
+  compress. The release surfaces the foundation early so 2.9.3 is
+  a focused crypto-correctness patch with the integration already
+  exercised.
+- **3.0 compatibility.** The 3.0 branch will pick this up via a
+  main → 3.0 merge. The dispatch wire-point is orthogonal to the
+  3.0 PQC + parallel-batch-verify scope, so no merge conflicts
+  expected.
+
 ## [2.9.1] — 2026-04-21
 
 Activates the AES-NI hardware dispatch staged in 2.9.0, now that

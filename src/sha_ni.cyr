@@ -1,0 +1,499 @@
+# sha_ni.cyr — SHA-NI hardware-acceleration dispatch.
+#
+# Lays the CPUID-probe + dispatch infrastructure for the Intel SHA
+# extensions (SHA256RNDS2 / SHA256MSG1 / SHA256MSG2) and ships a
+# byte-encoded single-block SHA-256 compress that `sha256_transform`
+# (in src/sha256.cyr) routes to when `sha_ni_available()` returns 1.
+#
+# History:
+#   2.9.2 — probe live, compress was a -1 stub.
+#   2.9.3 — compress shipped; cross-path tested against the FIPS
+#           180-4 software path on every input the test suite
+#           exercises (empty, "abc", 56-byte two-block vector,
+#           1KB, 64KB).
+#
+# Design and sourcing notes live in
+# `docs/development/issues/2026-04-25-sha-ni-compress-design.md`.
+# The compress sequence below is byte-for-byte derived from the
+# Linux kernel's arch/x86/crypto/sha256_ni_asm.S (Intel
+# Corporation, dual BSD/GPLv2 — Sigil is GPL-3.0 so the GPL leg
+# applies). State-pack/unpack at the function boundaries adapts
+# the kernel's 4-dword digest layout to sigil's 8-byte-per-h_i
+# context layout (see design doc §"State-layout impedance").
+#
+# Detection reference (Intel SDM Vol 2A §3.2):
+#   CPUID leaf 7, sub-leaf 0 → EBX bit 29 = SHA extensions
+#
+# SHA-NI opcode reference (Intel SDM Vol 2A §3.2, §5):
+#   SHA256RNDS2 xmm1, xmm2/m128, <XMM0>     0F 38 CB /r
+#       Two SHA-256 rounds. K+W in implicit XMM0.
+#       xmm1=CDGH input; xmm2=ABEF input; xmm1=new ABEF output.
+#   SHA256MSG1  xmm1, xmm2/m128             0F 38 CC /r
+#       xmm1 = xmm1 + sigma0(window from xmm1[1..3] || xmm2[0]).
+#   SHA256MSG2  xmm1, xmm2/m128             0F 38 CD /r
+#       xmm1 = xmm1 + sigma1(window built from xmm1 + xmm2).
+
+# _sha_ni_cache: 2 = uncached, 0 = unavailable, 1 = available.
+# Same sentinel discipline as _aes_ni_cache; one CPUID probe
+# per process.
+var _sha_ni_cache = 2;
+var _sha_ni_probe_out = 0;      # 8-byte scratch for the probe's *out param
+
+fn sha_ni_available() {
+    if (_sha_ni_cache != 2) { return _sha_ni_cache; }
+    if (_sha_ni_probe_out == 0) { _sha_ni_probe_out = alloc(8); }
+    store64(_sha_ni_probe_out, 0);
+    _sha_ni_cpuid_probe(_sha_ni_probe_out);
+    var ebx = load64(_sha_ni_probe_out);
+    # EBX bit 29 = SHA (Intel SDM Vol 2A §3.2 CPUID leaf 7 sub-leaf 0).
+    if ((ebx & (1 << 29)) != 0) {
+        _sha_ni_cache = 1;
+    } else {
+        _sha_ni_cache = 0;
+    }
+    return _sha_ni_cache;
+}
+
+# _sha_ni_cpuid_probe — write CPUID leaf 7 sub-leaf 0 EBX to *out.
+# Caller-supplied pointer keeps the CPUID-clobbered registers'
+# lifetime confined to the asm block; reload via load64 after.
+fn _sha_ni_cpuid_probe(out) {
+    #ifdef CYRIUS_ARCH_X86
+    asm {
+        # Param out = [rbp-8]. Load into rdi.
+        0x48; 0x8B; 0x7D; 0xF8;        # mov rdi, [rbp-8]
+        0x53;                          # push rbx (callee-saved; CPUID clobbers it)
+        0xB8; 0x07; 0x00; 0x00; 0x00;  # mov eax, 7   (leaf 7)
+        0x31; 0xC9;                    # xor ecx, ecx (sub-leaf 0)
+        0x0F; 0xA2;                    # cpuid
+        0x48; 0x89; 0x1F;              # mov [rdi], rbx  ; *out = ebx
+        0x5B;                          # pop rbx
+    }
+    #endif
+    return 0;
+}
+
+# ================================================================
+# Module-global scratch buffers (lazy init on first transform).
+#
+#   _sha_ni_buf — 80 bytes:
+#                   +0..31  packed state in/out (8 dwords)
+#                   +32..47 ABEF_save (kernel xmm9 spilled to mem)
+#                   +48..63 CDGH_save (kernel xmm10 spilled to mem)
+#                   +64..79 PSHUFFLE_BYTE_FLIP_MASK
+#   _sha_ni_K   — 256 bytes: 64 packed dwords of the K constants
+#
+# Bswap mask is embedded in _sha_ni_buf rather than a separate
+# allocation so `_sha_ni_compress_one` has only 3 parameters
+# (`ctx`, `buf`, `kbuf`). cc5 spills 3 params reliably to
+# [rbp-8], [rbp-16], [rbp-24] (proven by `aes_ni.cyr` since
+# 2.9.1); cc5.5.30 may spill a 4th param differently from cc5.6.x,
+# so we stay at 3 to keep the build portable across the toolchain
+# versions sigil's CI matrix uses.
+#
+# alloc() is 8-byte aligned but PSHUFB / PADDD with an m128
+# operand both require the memory address to be 16-aligned or
+# they raise #GP. Each buffer is over-allocated by 16 bytes and
+# aligned via `_sha_ni_align16`.
+# ================================================================
+
+var _sha_ni_buf = 0;
+var _sha_ni_K = 0;
+
+# _sha_ni_pack_k_word — write K[i] as 4 little-endian bytes at dst+0..3.
+fn _sha_ni_pack_k_word(dst, k) {
+    store8(dst + 0, k & 0xFF);
+    store8(dst + 1, (k >> 8) & 0xFF);
+    store8(dst + 2, (k >> 16) & 0xFF);
+    store8(dst + 3, (k >> 24) & 0xFF);
+    return 0;
+}
+
+# _sha_ni_align16 — round addr up to a 16-byte boundary. The bump
+# allocator is 8-byte aligned, but PSHUFB / PADDD with an m128
+# operand both require the memory address to be 16-aligned or
+# they raise #GP. Caller over-allocates by 16 bytes and aligns
+# the returned base.
+fn _sha_ni_align16(addr) {
+    var off = addr & 15;
+    if (off == 0) { return addr; }
+    return addr + (16 - off);
+}
+
+fn _sha_ni_init() {
+    if (_sha_ni_buf != 0) { return 0; }
+
+    _sha_ni_buf = _sha_ni_align16(alloc(80 + 16));
+    _sha_ni_K   = _sha_ni_align16(alloc(256 + 16));
+
+    # PSHUFFLE_BYTE_FLIP_MASK at buf+64..79 — reverses bytes within
+    # each 32-bit dword. Matches the kernel constant
+    # 0x0c0d0e0f08090a0b0405060700010203.
+    store8(_sha_ni_buf + 64, 0x03); store8(_sha_ni_buf + 65, 0x02);
+    store8(_sha_ni_buf + 66, 0x01); store8(_sha_ni_buf + 67, 0x00);
+    store8(_sha_ni_buf + 68, 0x07); store8(_sha_ni_buf + 69, 0x06);
+    store8(_sha_ni_buf + 70, 0x05); store8(_sha_ni_buf + 71, 0x04);
+    store8(_sha_ni_buf + 72, 0x0B); store8(_sha_ni_buf + 73, 0x0A);
+    store8(_sha_ni_buf + 74, 0x09); store8(_sha_ni_buf + 75, 0x08);
+    store8(_sha_ni_buf + 76, 0x0F); store8(_sha_ni_buf + 77, 0x0E);
+    store8(_sha_ni_buf + 78, 0x0D); store8(_sha_ni_buf + 79, 0x0C);
+
+    # K constants from FIPS 180-4 §4.2.2 — packed 64×4-byte LE dwords.
+    # Embedded directly rather than read from sha256.cyr's _sha256_K
+    # so this module has no init-order dependency on sha256.cyr.
+    _sha_ni_pack_k_word(_sha_ni_K + 0,   0x428a2f98);
+    _sha_ni_pack_k_word(_sha_ni_K + 4,   0x71374491);
+    _sha_ni_pack_k_word(_sha_ni_K + 8,   0xb5c0fbcf);
+    _sha_ni_pack_k_word(_sha_ni_K + 12,  0xe9b5dba5);
+    _sha_ni_pack_k_word(_sha_ni_K + 16,  0x3956c25b);
+    _sha_ni_pack_k_word(_sha_ni_K + 20,  0x59f111f1);
+    _sha_ni_pack_k_word(_sha_ni_K + 24,  0x923f82a4);
+    _sha_ni_pack_k_word(_sha_ni_K + 28,  0xab1c5ed5);
+    _sha_ni_pack_k_word(_sha_ni_K + 32,  0xd807aa98);
+    _sha_ni_pack_k_word(_sha_ni_K + 36,  0x12835b01);
+    _sha_ni_pack_k_word(_sha_ni_K + 40,  0x243185be);
+    _sha_ni_pack_k_word(_sha_ni_K + 44,  0x550c7dc3);
+    _sha_ni_pack_k_word(_sha_ni_K + 48,  0x72be5d74);
+    _sha_ni_pack_k_word(_sha_ni_K + 52,  0x80deb1fe);
+    _sha_ni_pack_k_word(_sha_ni_K + 56,  0x9bdc06a7);
+    _sha_ni_pack_k_word(_sha_ni_K + 60,  0xc19bf174);
+    _sha_ni_pack_k_word(_sha_ni_K + 64,  0xe49b69c1);
+    _sha_ni_pack_k_word(_sha_ni_K + 68,  0xefbe4786);
+    _sha_ni_pack_k_word(_sha_ni_K + 72,  0x0fc19dc6);
+    _sha_ni_pack_k_word(_sha_ni_K + 76,  0x240ca1cc);
+    _sha_ni_pack_k_word(_sha_ni_K + 80,  0x2de92c6f);
+    _sha_ni_pack_k_word(_sha_ni_K + 84,  0x4a7484aa);
+    _sha_ni_pack_k_word(_sha_ni_K + 88,  0x5cb0a9dc);
+    _sha_ni_pack_k_word(_sha_ni_K + 92,  0x76f988da);
+    _sha_ni_pack_k_word(_sha_ni_K + 96,  0x983e5152);
+    _sha_ni_pack_k_word(_sha_ni_K + 100, 0xa831c66d);
+    _sha_ni_pack_k_word(_sha_ni_K + 104, 0xb00327c8);
+    _sha_ni_pack_k_word(_sha_ni_K + 108, 0xbf597fc7);
+    _sha_ni_pack_k_word(_sha_ni_K + 112, 0xc6e00bf3);
+    _sha_ni_pack_k_word(_sha_ni_K + 116, 0xd5a79147);
+    _sha_ni_pack_k_word(_sha_ni_K + 120, 0x06ca6351);
+    _sha_ni_pack_k_word(_sha_ni_K + 124, 0x14292967);
+    _sha_ni_pack_k_word(_sha_ni_K + 128, 0x27b70a85);
+    _sha_ni_pack_k_word(_sha_ni_K + 132, 0x2e1b2138);
+    _sha_ni_pack_k_word(_sha_ni_K + 136, 0x4d2c6dfc);
+    _sha_ni_pack_k_word(_sha_ni_K + 140, 0x53380d13);
+    _sha_ni_pack_k_word(_sha_ni_K + 144, 0x650a7354);
+    _sha_ni_pack_k_word(_sha_ni_K + 148, 0x766a0abb);
+    _sha_ni_pack_k_word(_sha_ni_K + 152, 0x81c2c92e);
+    _sha_ni_pack_k_word(_sha_ni_K + 156, 0x92722c85);
+    _sha_ni_pack_k_word(_sha_ni_K + 160, 0xa2bfe8a1);
+    _sha_ni_pack_k_word(_sha_ni_K + 164, 0xa81a664b);
+    _sha_ni_pack_k_word(_sha_ni_K + 168, 0xc24b8b70);
+    _sha_ni_pack_k_word(_sha_ni_K + 172, 0xc76c51a3);
+    _sha_ni_pack_k_word(_sha_ni_K + 176, 0xd192e819);
+    _sha_ni_pack_k_word(_sha_ni_K + 180, 0xd6990624);
+    _sha_ni_pack_k_word(_sha_ni_K + 184, 0xf40e3585);
+    _sha_ni_pack_k_word(_sha_ni_K + 188, 0x106aa070);
+    _sha_ni_pack_k_word(_sha_ni_K + 192, 0x19a4c116);
+    _sha_ni_pack_k_word(_sha_ni_K + 196, 0x1e376c08);
+    _sha_ni_pack_k_word(_sha_ni_K + 200, 0x2748774c);
+    _sha_ni_pack_k_word(_sha_ni_K + 204, 0x34b0bcb5);
+    _sha_ni_pack_k_word(_sha_ni_K + 208, 0x391c0cb3);
+    _sha_ni_pack_k_word(_sha_ni_K + 212, 0x4ed8aa4a);
+    _sha_ni_pack_k_word(_sha_ni_K + 216, 0x5b9cca4f);
+    _sha_ni_pack_k_word(_sha_ni_K + 220, 0x682e6ff3);
+    _sha_ni_pack_k_word(_sha_ni_K + 224, 0x748f82ee);
+    _sha_ni_pack_k_word(_sha_ni_K + 228, 0x78a5636f);
+    _sha_ni_pack_k_word(_sha_ni_K + 232, 0x84c87814);
+    _sha_ni_pack_k_word(_sha_ni_K + 236, 0x8cc70208);
+    _sha_ni_pack_k_word(_sha_ni_K + 240, 0x90befffa);
+    _sha_ni_pack_k_word(_sha_ni_K + 244, 0xa4506ceb);
+    _sha_ni_pack_k_word(_sha_ni_K + 248, 0xbef9a3f7);
+    _sha_ni_pack_k_word(_sha_ni_K + 252, 0xc67178f2);
+    return 0;
+}
+
+# ================================================================
+# _sha_ni_compress_one — single-block SHA-NI compress.
+#
+# Parameters arrive on the stack at:
+#   [rbp-8]  ctx     — 144-byte SHA-256 context (h0..h7 at +0,
+#                       block buffer at +64)
+#   [rbp-16] buf     — 80-byte module global. Layout:
+#                        +0..31  packed state in/out
+#                        +32..47 ABEF_save
+#                        +48..63 CDGH_save
+#                        +64..79 PSHUFFLE_BYTE_FLIP_MASK
+#   [rbp-24] kbuf    — 256-byte packed K table
+#
+# 3 params (rather than 4) so the [rbp-N] spill convention is the
+# one cc5 has used reliably for asm-block functions since 2.9.1
+# (`aes_ni.cyr`'s 3-param `aes256_encrypt_block_ni`); cc5.5.30 may
+# spill a 4th param into a register rather than the stack, which
+# breaks the `mov ..., [rbp-32]` form.
+#
+# Register usage inside the asm block:
+#   rdi = ctx, rsi = buf, rcx = kbuf, rdx = scalar tmp
+#   xmm0 = MSG, xmm1 = STATE0 (ABEF), xmm2 = STATE1 (CDGH),
+#   xmm3 = MSGTMP0, xmm4 = MSGTMP1, xmm5 = MSGTMP2, xmm6 = MSGTMP3,
+#   xmm7 = MSGTMP4 (palignr scratch)
+#
+# All XMM registers are caller-saved in System V x86-64 — clobber
+# is safe because the asm block is straight-line with no calls
+# and Cyrius does not expect XMM state across the block.
+# ================================================================
+fn _sha_ni_compress_one(ctx, buf, kbuf) {
+    #ifdef CYRIUS_ARCH_X86
+    asm {
+        # ── Param loads ───────────────────────────────────────────
+        0x48; 0x8B; 0x7D; 0xF8;    # mov rdi, [rbp-8]   (ctx)
+        0x48; 0x8B; 0x75; 0xF0;    # mov rsi, [rbp-16]  (buf)
+        0x48; 0x8B; 0x4D; 0xE8;    # mov rcx, [rbp-24]  (kbuf)
+
+        # ── Pack ctx h0..h7 (8 sparse 64-bit slots, low 32 bits each)
+        #    into scratch[0..31] (8 packed little-endian dwords).
+        #    Each pair is `mov edx, [rdi+8i]` + `mov [rsi+4i], edx`.
+        0x8B; 0x57; 0x00; 0x89; 0x56; 0x00;
+        0x8B; 0x57; 0x08; 0x89; 0x56; 0x04;
+        0x8B; 0x57; 0x10; 0x89; 0x56; 0x08;
+        0x8B; 0x57; 0x18; 0x89; 0x56; 0x0C;
+        0x8B; 0x57; 0x20; 0x89; 0x56; 0x10;
+        0x8B; 0x57; 0x28; 0x89; 0x56; 0x14;
+        0x8B; 0x57; 0x30; 0x89; 0x56; 0x18;
+        0x8B; 0x57; 0x38; 0x89; 0x56; 0x1C;
+
+        # ── State setup: load packed ABCD/EFGH, permute to ABEF/CDGH ─
+        0xF3; 0x0F; 0x6F; 0x4E; 0x00;          # movdqu xmm1, [rsi+0]   STATE0=ABCD
+        0xF3; 0x0F; 0x6F; 0x56; 0x10;          # movdqu xmm2, [rsi+16]  STATE1=EFGH
+        0x66; 0x0F; 0x70; 0xC9; 0xB1;          # pshufd xmm1, xmm1, 0xB1   →[b,a,d,c]
+        0x66; 0x0F; 0x70; 0xD2; 0x1B;          # pshufd xmm2, xmm2, 0x1B   →[h,g,f,e]
+        0x66; 0x0F; 0x6F; 0xF9;                # movdqa xmm7, xmm1     save pre-palignr
+        0x66; 0x0F; 0x3A; 0x0F; 0xCA; 0x08;    # palignr xmm1, xmm2, 8 STATE0=ABEF=[f,e,b,a]
+        0x66; 0x0F; 0x3A; 0x0E; 0xD7; 0xF0;    # pblendw xmm2, xmm7,F0 STATE1=CDGH=[h,g,d,c]
+
+        # ── Save ABEF/CDGH for the post-loop add ──────────────────
+        0xF3; 0x0F; 0x7F; 0x4E; 0x20;          # movdqu [rsi+32], xmm1  (ABEF_save)
+        0xF3; 0x0F; 0x7F; 0x56; 0x30;          # movdqu [rsi+48], xmm2  (CDGH_save)
+
+        # ── Iter 0 — Rounds 0..3 — load MSGTMP0 = W[0..3] ─────────
+        0xF3; 0x0F; 0x6F; 0x47; 0x40;          # movdqu xmm0, [rdi+64]
+        0x66; 0x0F; 0x38; 0x00; 0x46; 0x40;    # pshufb xmm0, [rsi+64]
+        0x66; 0x0F; 0x6F; 0xD8;                # movdqa xmm3, xmm0      MSGTMP0
+        0x66; 0x0F; 0xFE; 0x41; 0x00;          # paddd  xmm0, [rcx+0]
+        0x0F; 0x38; 0xCB; 0xD1;                # sha256rnds2 xmm2, xmm1
+        0x66; 0x0F; 0x70; 0xC0; 0x0E;          # pshufd xmm0, xmm0, 0x0E
+        0x0F; 0x38; 0xCB; 0xCA;                # sha256rnds2 xmm1, xmm2
+
+        # ── Iter 1 — Rounds 4..7 — load MSGTMP1 = W[4..7] ─────────
+        0xF3; 0x0F; 0x6F; 0x47; 0x50;          # movdqu xmm0, [rdi+80]
+        0x66; 0x0F; 0x38; 0x00; 0x46; 0x40;    # pshufb xmm0, [rsi+64]
+        0x66; 0x0F; 0x6F; 0xE0;                # movdqa xmm4, xmm0      MSGTMP1
+        0x66; 0x0F; 0xFE; 0x41; 0x10;          # paddd  xmm0, [rcx+16]
+        0x0F; 0x38; 0xCB; 0xD1;                # sha256rnds2 xmm2, xmm1
+        0x66; 0x0F; 0x70; 0xC0; 0x0E;          # pshufd xmm0, xmm0, 0x0E
+        0x0F; 0x38; 0xCB; 0xCA;                # sha256rnds2 xmm1, xmm2
+        0x0F; 0x38; 0xCC; 0xDC;                # sha256msg1 xmm3, xmm4   MSGTMP0+=σ0
+
+        # ── Iter 2 — Rounds 8..11 — load MSGTMP2 = W[8..11] ───────
+        0xF3; 0x0F; 0x6F; 0x47; 0x60;          # movdqu xmm0, [rdi+96]
+        0x66; 0x0F; 0x38; 0x00; 0x46; 0x40;    # pshufb xmm0, [rsi+64]
+        0x66; 0x0F; 0x6F; 0xE8;                # movdqa xmm5, xmm0      MSGTMP2
+        0x66; 0x0F; 0xFE; 0x41; 0x20;          # paddd  xmm0, [rcx+32]
+        0x0F; 0x38; 0xCB; 0xD1;                # sha256rnds2 xmm2, xmm1
+        0x66; 0x0F; 0x70; 0xC0; 0x0E;          # pshufd xmm0, xmm0, 0x0E
+        0x0F; 0x38; 0xCB; 0xCA;                # sha256rnds2 xmm1, xmm2
+        0x0F; 0x38; 0xCC; 0xE5;                # sha256msg1 xmm4, xmm5   MSGTMP1+=σ0
+
+        # ── Iter 3 — Rounds 12..15 — load MSGTMP3 = W[12..15];
+        #    also compute MSGTMP0 = W[16..19] for iter 4. ──────────
+        0xF3; 0x0F; 0x6F; 0x47; 0x70;          # movdqu xmm0, [rdi+112]
+        0x66; 0x0F; 0x38; 0x00; 0x46; 0x40;    # pshufb xmm0, [rsi+64]
+        0x66; 0x0F; 0x6F; 0xF0;                # movdqa xmm6, xmm0      MSGTMP3
+        0x66; 0x0F; 0xFE; 0x41; 0x30;          # paddd  xmm0, [rcx+48]
+        0x0F; 0x38; 0xCB; 0xD1;                # sha256rnds2 xmm2, xmm1
+        0x66; 0x0F; 0x6F; 0xFE;                # movdqa xmm7, xmm6      tmp ← MSGTMP3
+        0x66; 0x0F; 0x3A; 0x0F; 0xFD; 0x04;    # palignr xmm7, xmm5, 4  W[9..12]
+        0x66; 0x0F; 0xFE; 0xDF;                # paddd  xmm3, xmm7      MSGTMP0 += W[9..12]
+        0x0F; 0x38; 0xCD; 0xDE;                # sha256msg2 xmm3, xmm6  MSGTMP0 = W[16..19]
+        0x66; 0x0F; 0x70; 0xC0; 0x0E;          # pshufd xmm0, xmm0, 0x0E
+        0x0F; 0x38; 0xCB; 0xCA;                # sha256rnds2 xmm1, xmm2
+        0x0F; 0x38; 0xCC; 0xEE;                # sha256msg1 xmm5, xmm6   MSGTMP2+=σ0
+
+        # ── Iter 4 — Rounds 16..19 — MSGTMP0 already W[16..19];
+        #    compute MSGTMP1 = W[20..23] ────────────────────────────
+        0x66; 0x0F; 0x6F; 0xC3;                # movdqa xmm0, xmm3
+        0x66; 0x0F; 0xFE; 0x41; 0x40;          # paddd  xmm0, [rcx+64]
+        0x0F; 0x38; 0xCB; 0xD1;                # sha256rnds2 xmm2, xmm1
+        0x66; 0x0F; 0x6F; 0xFB;                # movdqa xmm7, xmm3
+        0x66; 0x0F; 0x3A; 0x0F; 0xFE; 0x04;    # palignr xmm7, xmm6, 4
+        0x66; 0x0F; 0xFE; 0xE7;                # paddd  xmm4, xmm7
+        0x0F; 0x38; 0xCD; 0xE3;                # sha256msg2 xmm4, xmm3   MSGTMP1=W[20..23]
+        0x66; 0x0F; 0x70; 0xC0; 0x0E;          # pshufd xmm0, xmm0, 0x0E
+        0x0F; 0x38; 0xCB; 0xCA;                # sha256rnds2 xmm1, xmm2
+        0x0F; 0x38; 0xCC; 0xF3;                # sha256msg1 xmm6, xmm3
+
+        # ── Iter 5 — Rounds 20..23 — compute MSGTMP2 = W[24..27] ──
+        0x66; 0x0F; 0x6F; 0xC4;                # movdqa xmm0, xmm4
+        0x66; 0x0F; 0xFE; 0x41; 0x50;          # paddd  xmm0, [rcx+80]
+        0x0F; 0x38; 0xCB; 0xD1;
+        0x66; 0x0F; 0x6F; 0xFC;                # movdqa xmm7, xmm4
+        0x66; 0x0F; 0x3A; 0x0F; 0xFB; 0x04;    # palignr xmm7, xmm3, 4
+        0x66; 0x0F; 0xFE; 0xEF;                # paddd  xmm5, xmm7
+        0x0F; 0x38; 0xCD; 0xEC;                # sha256msg2 xmm5, xmm4
+        0x66; 0x0F; 0x70; 0xC0; 0x0E;
+        0x0F; 0x38; 0xCB; 0xCA;
+        0x0F; 0x38; 0xCC; 0xDC;                # sha256msg1 xmm3, xmm4
+
+        # ── Iter 6 — Rounds 24..27 — compute MSGTMP3 = W[28..31] ──
+        0x66; 0x0F; 0x6F; 0xC5;                # movdqa xmm0, xmm5
+        0x66; 0x0F; 0xFE; 0x41; 0x60;          # paddd  xmm0, [rcx+96]
+        0x0F; 0x38; 0xCB; 0xD1;
+        0x66; 0x0F; 0x6F; 0xFD;                # movdqa xmm7, xmm5
+        0x66; 0x0F; 0x3A; 0x0F; 0xFC; 0x04;    # palignr xmm7, xmm4, 4
+        0x66; 0x0F; 0xFE; 0xF7;                # paddd  xmm6, xmm7
+        0x0F; 0x38; 0xCD; 0xF5;                # sha256msg2 xmm6, xmm5
+        0x66; 0x0F; 0x70; 0xC0; 0x0E;
+        0x0F; 0x38; 0xCB; 0xCA;
+        0x0F; 0x38; 0xCC; 0xE5;                # sha256msg1 xmm4, xmm5
+
+        # ── Iter 7 — Rounds 28..31 — compute MSGTMP0 = W[32..35] ──
+        0x66; 0x0F; 0x6F; 0xC6;                # movdqa xmm0, xmm6
+        0x66; 0x0F; 0xFE; 0x41; 0x70;          # paddd  xmm0, [rcx+112]
+        0x0F; 0x38; 0xCB; 0xD1;
+        0x66; 0x0F; 0x6F; 0xFE;                # movdqa xmm7, xmm6
+        0x66; 0x0F; 0x3A; 0x0F; 0xFD; 0x04;    # palignr xmm7, xmm5, 4
+        0x66; 0x0F; 0xFE; 0xDF;                # paddd  xmm3, xmm7
+        0x0F; 0x38; 0xCD; 0xDE;                # sha256msg2 xmm3, xmm6
+        0x66; 0x0F; 0x70; 0xC0; 0x0E;
+        0x0F; 0x38; 0xCB; 0xCA;
+        0x0F; 0x38; 0xCC; 0xEE;                # sha256msg1 xmm5, xmm6
+
+        # ── Iter 8 — Rounds 32..35 — disp32 K offset 128 onward ──
+        0x66; 0x0F; 0x6F; 0xC3;                # movdqa xmm0, xmm3
+        0x66; 0x0F; 0xFE; 0x81; 0x80; 0x00; 0x00; 0x00;  # paddd xmm0, [rcx+128]
+        0x0F; 0x38; 0xCB; 0xD1;
+        0x66; 0x0F; 0x6F; 0xFB;                # movdqa xmm7, xmm3
+        0x66; 0x0F; 0x3A; 0x0F; 0xFE; 0x04;    # palignr xmm7, xmm6, 4
+        0x66; 0x0F; 0xFE; 0xE7;                # paddd  xmm4, xmm7
+        0x0F; 0x38; 0xCD; 0xE3;                # sha256msg2 xmm4, xmm3
+        0x66; 0x0F; 0x70; 0xC0; 0x0E;
+        0x0F; 0x38; 0xCB; 0xCA;
+        0x0F; 0x38; 0xCC; 0xF3;                # sha256msg1 xmm6, xmm3
+
+        # ── Iter 9 — Rounds 36..39 ──────────────────────────────
+        0x66; 0x0F; 0x6F; 0xC4;
+        0x66; 0x0F; 0xFE; 0x81; 0x90; 0x00; 0x00; 0x00;  # [rcx+144]
+        0x0F; 0x38; 0xCB; 0xD1;
+        0x66; 0x0F; 0x6F; 0xFC;
+        0x66; 0x0F; 0x3A; 0x0F; 0xFB; 0x04;
+        0x66; 0x0F; 0xFE; 0xEF;
+        0x0F; 0x38; 0xCD; 0xEC;
+        0x66; 0x0F; 0x70; 0xC0; 0x0E;
+        0x0F; 0x38; 0xCB; 0xCA;
+        0x0F; 0x38; 0xCC; 0xDC;
+
+        # ── Iter 10 — Rounds 40..43 ─────────────────────────────
+        0x66; 0x0F; 0x6F; 0xC5;
+        0x66; 0x0F; 0xFE; 0x81; 0xA0; 0x00; 0x00; 0x00;  # [rcx+160]
+        0x0F; 0x38; 0xCB; 0xD1;
+        0x66; 0x0F; 0x6F; 0xFD;
+        0x66; 0x0F; 0x3A; 0x0F; 0xFC; 0x04;
+        0x66; 0x0F; 0xFE; 0xF7;
+        0x0F; 0x38; 0xCD; 0xF5;
+        0x66; 0x0F; 0x70; 0xC0; 0x0E;
+        0x0F; 0x38; 0xCB; 0xCA;
+        0x0F; 0x38; 0xCC; 0xE5;
+
+        # ── Iter 11 — Rounds 44..47 ─────────────────────────────
+        0x66; 0x0F; 0x6F; 0xC6;
+        0x66; 0x0F; 0xFE; 0x81; 0xB0; 0x00; 0x00; 0x00;  # [rcx+176]
+        0x0F; 0x38; 0xCB; 0xD1;
+        0x66; 0x0F; 0x6F; 0xFE;
+        0x66; 0x0F; 0x3A; 0x0F; 0xFD; 0x04;
+        0x66; 0x0F; 0xFE; 0xDF;
+        0x0F; 0x38; 0xCD; 0xDE;
+        0x66; 0x0F; 0x70; 0xC0; 0x0E;
+        0x0F; 0x38; 0xCB; 0xCA;
+        0x0F; 0x38; 0xCC; 0xEE;
+
+        # ── Iter 12 — Rounds 48..51 ─────────────────────────────
+        0x66; 0x0F; 0x6F; 0xC3;
+        0x66; 0x0F; 0xFE; 0x81; 0xC0; 0x00; 0x00; 0x00;  # [rcx+192]
+        0x0F; 0x38; 0xCB; 0xD1;
+        0x66; 0x0F; 0x6F; 0xFB;
+        0x66; 0x0F; 0x3A; 0x0F; 0xFE; 0x04;
+        0x66; 0x0F; 0xFE; 0xE7;
+        0x0F; 0x38; 0xCD; 0xE3;
+        0x66; 0x0F; 0x70; 0xC0; 0x0E;
+        0x0F; 0x38; 0xCB; 0xCA;
+        0x0F; 0x38; 0xCC; 0xF3;
+
+        # ── Iter 13 — Rounds 52..55 — drop sha256msg1 (no longer
+        #    needed: msg1 precomputes for iter+3 = 16, out of range) ─
+        0x66; 0x0F; 0x6F; 0xC4;
+        0x66; 0x0F; 0xFE; 0x81; 0xD0; 0x00; 0x00; 0x00;  # [rcx+208]
+        0x0F; 0x38; 0xCB; 0xD1;
+        0x66; 0x0F; 0x6F; 0xFC;
+        0x66; 0x0F; 0x3A; 0x0F; 0xFB; 0x04;
+        0x66; 0x0F; 0xFE; 0xEF;
+        0x0F; 0x38; 0xCD; 0xEC;
+        0x66; 0x0F; 0x70; 0xC0; 0x0E;
+        0x0F; 0x38; 0xCB; 0xCA;
+
+        # ── Iter 14 — Rounds 56..59 ─────────────────────────────
+        0x66; 0x0F; 0x6F; 0xC5;
+        0x66; 0x0F; 0xFE; 0x81; 0xE0; 0x00; 0x00; 0x00;  # [rcx+224]
+        0x0F; 0x38; 0xCB; 0xD1;
+        0x66; 0x0F; 0x6F; 0xFD;
+        0x66; 0x0F; 0x3A; 0x0F; 0xFC; 0x04;
+        0x66; 0x0F; 0xFE; 0xF7;
+        0x0F; 0x38; 0xCD; 0xF5;
+        0x66; 0x0F; 0x70; 0xC0; 0x0E;
+        0x0F; 0x38; 0xCB; 0xCA;
+
+        # ── Iter 15 — Rounds 60..63 — drop ALL schedule work ───
+        0x66; 0x0F; 0x6F; 0xC6;
+        0x66; 0x0F; 0xFE; 0x81; 0xF0; 0x00; 0x00; 0x00;  # [rcx+240]
+        0x0F; 0x38; 0xCB; 0xD1;
+        0x66; 0x0F; 0x70; 0xC0; 0x0E;
+        0x0F; 0x38; 0xCB; 0xCA;
+
+        # ── Final add: STATE0 += ABEF_save; STATE1 += CDGH_save ──
+        0x66; 0x0F; 0xFE; 0x4E; 0x20;          # paddd xmm1, [rsi+32]
+        0x66; 0x0F; 0xFE; 0x56; 0x30;          # paddd xmm2, [rsi+48]
+
+        # ── Reverse state setup: ABEF/CDGH → ABCD/EFGH packed ───
+        0x66; 0x0F; 0x70; 0xC9; 0x1B;          # pshufd xmm1, xmm1, 0x1B → [A,B,E,F]
+        0x66; 0x0F; 0x70; 0xD2; 0xB1;          # pshufd xmm2, xmm2, 0xB1 → [G,H,C,D]
+        0x66; 0x0F; 0x6F; 0xF9;                # movdqa xmm7, xmm1
+        0x66; 0x0F; 0x3A; 0x0E; 0xCA; 0xF0;    # pblendw xmm1, xmm2, 0xF0 → [A,B,C,D]
+        0x66; 0x0F; 0x3A; 0x0F; 0xD7; 0x08;    # palignr xmm2, xmm7, 8   → [E,F,G,H]
+        0xF3; 0x0F; 0x7F; 0x4E; 0x00;          # movdqu [rsi+0],  xmm1
+        0xF3; 0x0F; 0x7F; 0x56; 0x10;          # movdqu [rsi+16], xmm2
+
+        # ── Unpack scratch packed dwords back to ctx h0..h7 with
+        #    zero-extending 64-bit stores so the high 32 bits of
+        #    each ctx slot stay zero (sha256.cyr's invariant). ────
+        0x8B; 0x56; 0x00; 0x48; 0x89; 0x57; 0x00;
+        0x8B; 0x56; 0x04; 0x48; 0x89; 0x57; 0x08;
+        0x8B; 0x56; 0x08; 0x48; 0x89; 0x57; 0x10;
+        0x8B; 0x56; 0x0C; 0x48; 0x89; 0x57; 0x18;
+        0x8B; 0x56; 0x10; 0x48; 0x89; 0x57; 0x20;
+        0x8B; 0x56; 0x14; 0x48; 0x89; 0x57; 0x28;
+        0x8B; 0x56; 0x18; 0x48; 0x89; 0x57; 0x30;
+        0x8B; 0x56; 0x1C; 0x48; 0x89; 0x57; 0x38;
+    }
+    #endif
+    return 0;
+}
+
+# sha256_transform_ni — SHA-NI single-block compression (live in 2.9.3).
+#
+# Caller contract:
+#   - ctx points to a 144-byte SHA-256 context (h0..h7 at +0,
+#     buf at +64)
+#   - returns 0 on success (compressed in hardware)
+#
+# `sha256_transform`'s dispatcher in src/sha256.cyr falls through
+# to the FIPS 180-4 software path on hosts where the CPUID probe
+# returns 0; this entry point is only invoked when SHA-NI is live.
+fn sha256_transform_ni(ctx) {
+    if (_sha_ni_buf == 0) { _sha_ni_init(); }
+    _sha_ni_compress_one(ctx, _sha_ni_buf, _sha_ni_K);
+    return 0;
+}

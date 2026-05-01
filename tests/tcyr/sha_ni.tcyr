@@ -1,0 +1,211 @@
+# sha_ni.tcyr — SHA-NI probe + dispatcher tests.
+#
+# Three concentric rings of coverage:
+#
+#   1. Probe contract — `sha_ni_available()` returns 0 or 1 (never
+#      the uncached sentinel 2) and is idempotent.
+#
+#   2. Software-path FIPS 180-4 vectors through the dispatcher,
+#      with `_sha_ni_cache` forced to 0 so the NI branch never
+#      runs. These pin the software path's correctness independent
+#      of host CPU and verify the dispatcher's wire-up doesn't
+#      regress when the NI branch is bypassed.
+#
+#   3. Cross-path equality — for hosts that report SHA-NI, hash
+#      each FIPS input twice (once with `_sha_ni_cache=0`, once
+#      with `_sha_ni_cache=1`) and assert byte-equal digests. In
+#      2.9.2 the NI branch falls through to software regardless
+#      because `sha256_transform_ni` returns -1, so this passes
+#      vacuously — the assertion exists so that the moment 2.9.3
+#      flips the stub to a real compress, divergence is caught
+#      deterministically.
+#
+# `sha256_transform_ni` stub-contract test: 2.9.2 expects -1
+# ("not implemented"); 2.9.3 expects 0 ("compressed in hardware").
+# Toggle the assertion when Bite C lands the asm.
+
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fmt.cyr"
+include "lib/json.cyr"
+include "lib/sakshi.cyr"
+include "lib/chrono.cyr"
+include "lib/ct.cyr"
+include "lib/keccak.cyr"
+
+include "src/types.cyr"
+include "src/error.cyr"
+include "src/sha_ni.cyr"
+include "src/sha256.cyr"
+include "src/hex.cyr"
+
+fn bytes_eq(a, b, n) {
+    var i = 0;
+    while (i < n) {
+        if ((load8(a + i) & 0xFF) != (load8(b + i) & 0xFF)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# Fill `buf` with `len` bytes of `value`. memset analogue with an
+# explicit loop so the test stays self-contained.
+fn fill_bytes(buf, value, len) {
+    var i = 0;
+    while (i < len) {
+        store8(buf + i, value & 0xFF);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Hash `data[0..len]` and compare its hex digest to `expected`.
+fn check_sha256(label, data, len, expected) {
+    var got = sha256_hex(data, len);
+    assert_streq(got, expected, label);
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+
+    # ============================================================
+    # Ring 1 — probe contract
+    # ============================================================
+    test_group("sha_ni_available probe contract");
+
+    var probe = sha_ni_available();
+    assert_eq(probe == 0 || probe == 1, 1, "probe returns 0 or 1");
+    assert_eq(sha_ni_available(), probe, "probe is idempotent");
+
+    # Stash the natural host probe — Ring 3 needs this BEFORE we
+    # start force-overriding _sha_ni_cache below.
+    var host_supports_ni = probe;
+
+    # ============================================================
+    # sha256_transform_ni return contract — only meaningful on
+    # SHA-NI-capable hosts. On a host without the extension the
+    # function would execute SHA256RNDS2/MSG1/MSG2 directly and
+    # raise #UD, so the test gates on probe.
+    # ============================================================
+    test_group("sha256_transform_ni return contract");
+
+    if (host_supports_ni == 1) {
+        var ctx = sha256_init();
+        var rc = sha256_transform_ni(ctx);
+        assert_eq(rc, 0, "sha256_transform_ni returns 0 on success");
+        fl_free(ctx);
+    }
+
+    # ============================================================
+    # Ring 2 — software-path FIPS 180-4 vectors through dispatcher
+    # Force _sha_ni_cache=0 so sha256_transform always takes the
+    # software branch regardless of host CPU.
+    # ============================================================
+    test_group("FIPS 180-4 vectors via software path");
+    _sha_ni_cache = 0;
+
+    # Empty string.
+    var empty = alloc(1);   # 0-byte alloc unsafe; alloc 1 and pass len=0
+    check_sha256("SHA-256(\"\") software",
+    empty, 0,
+    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+
+    # "abc" — single-block, 3 bytes.
+    var abc = alloc(3);
+    store8(abc + 0, 0x61);
+    store8(abc + 1, 0x62);
+    store8(abc + 2, 0x63);
+    check_sha256("SHA-256(\"abc\") software",
+    abc, 3,
+    "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+
+    # FIPS 180-4 56-byte two-block vector:
+    # "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"
+    var v56 = alloc(56);
+    var s56 = "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq";
+    var i = 0;
+    while (i < 56) {
+        store8(v56 + i, load8(s56 + i) & 0xFF);
+        i = i + 1;
+    }
+    check_sha256("SHA-256(56-byte two-block) software",
+    v56, 56,
+    "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1");
+
+    # 1 KB of 0x61 ('a') — exercises the multi-block update path.
+    var k1 = alloc(1024);
+    fill_bytes(k1, 0x61, 1024);
+    check_sha256("SHA-256(1KB of 'a') software",
+    k1, 1024,
+    "2edc986847e209b4016e141a6dc8716d3207350f416969382d431539bf292e4a");
+
+    # 64 KB of 0x61 — large-input throughput surface; the input
+    # most representative of sit's hash_file_as_blob hot path.
+    var k64 = alloc(65536);
+    fill_bytes(k64, 0x61, 65536);
+    check_sha256("SHA-256(64KB of 'a') software",
+    k64, 65536,
+    "bf718b6f653bebc184e1479f1935b8da974d701b893afcf49e701f3e2f9f9c5a");
+
+    # ============================================================
+    # Ring 3 — cross-path equality (NI vs software)
+    # In 2.9.2 the NI branch falls through (`sha256_transform_ni`
+    # returns -1), so this passes vacuously. From 2.9.3 onward it
+    # cross-checks the byte-encoded SHA-NI compress against the
+    # software reference on every input. Skip on hosts without
+    # SHA-NI — running the assertion still matches by construction
+    # but the test name would be misleading.
+    # ============================================================
+    test_group("cross-path NI vs software equality");
+
+    if (host_supports_ni == 1) {
+        # Reusable digest buffers.
+        var dsw = alloc(32);
+        var dni = alloc(32);
+
+        # Single-block "abc" — narrows whether a bug is in the
+        # single-block compress or only triggers on multi-block.
+        _sha_ni_cache = 1;
+        sha256(abc, 3, dni);
+        var dni_hex = hex_encode(dni, 32);
+        assert_streq(dni_hex,
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        "single-block NI \"abc\"");
+
+        # 56-byte two-block vector.
+        _sha_ni_cache = 0;
+        sha256(v56, 56, dsw);
+        _sha_ni_cache = 1;
+        sha256(v56, 56, dni);
+        assert_eq(bytes_eq(dsw, dni, 32), 1, "cross-path 56B equal");
+
+        # 1 KB.
+        _sha_ni_cache = 0;
+        sha256(k1, 1024, dsw);
+        _sha_ni_cache = 1;
+        sha256(k1, 1024, dni);
+        assert_eq(bytes_eq(dsw, dni, 32), 1, "cross-path 1KB equal");
+
+        # 64 KB.
+        _sha_ni_cache = 0;
+        sha256(k64, 65536, dsw);
+        _sha_ni_cache = 1;
+        sha256(k64, 65536, dni);
+        assert_eq(bytes_eq(dsw, dni, 32), 1, "cross-path 64KB equal");
+    }
+
+    # Restore the natural cache state for any later test stages.
+    _sha_ni_cache = host_supports_ni;
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

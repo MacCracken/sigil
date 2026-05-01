@@ -201,7 +201,7 @@ fn _aes_add_round_key(rk, round) {
     var i = 0;
     while (i < 16) {
         store8(_aes_state + i,
-               (load8(_aes_state + i) ^ load8(rk + off + i)) & 0xFF);
+        (load8(_aes_state + i) ^ load8(rk + off + i)) & 0xFF);
         i = i + 1;
     }
     return 0;
@@ -458,9 +458,9 @@ fn _be32_store(buf, v) {
 
 fn _be32_load(buf) {
     return ((load8(buf + 0) & 0xFF) << 24)
-         | ((load8(buf + 1) & 0xFF) << 16)
-         | ((load8(buf + 2) & 0xFF) <<  8)
-         | ((load8(buf + 3) & 0xFF)      );
+    | ((load8(buf + 1) & 0xFF) << 16)
+    | ((load8(buf + 2) & 0xFF) <<  8)
+    | ((load8(buf + 3) & 0xFF)      );
 }
 
 # ================================================================
@@ -479,7 +479,7 @@ fn _aes_gcm_ctr_xor(round_keys, counter, src, dst, len) {
         var i = 0;
         while (i < chunk) {
             store8(dst + pos + i,
-                   (load8(src + pos + i) ^ load8(&ks + i)) & 0xFF);
+            (load8(src + pos + i) ^ load8(&ks + i)) & 0xFF);
             i = i + 1;
         }
         # Increment low 32 bits, big-endian, in place.

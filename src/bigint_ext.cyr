@@ -16,14 +16,14 @@ fn u256_load_le(dst, src) {
     var i = 0;
     while (i < 4) {
         store64(dst + i * 8,
-            (load8(src + i*8) & 0xFF)
-            | ((load8(src + i*8 + 1) & 0xFF) << 8)
-            | ((load8(src + i*8 + 2) & 0xFF) << 16)
-            | ((load8(src + i*8 + 3) & 0xFF) << 24)
-            | ((load8(src + i*8 + 4) & 0xFF) << 32)
-            | ((load8(src + i*8 + 5) & 0xFF) << 40)
-            | ((load8(src + i*8 + 6) & 0xFF) << 48)
-            | ((load8(src + i*8 + 7) & 0xFF) << 56));
+        (load8(src + i*8) & 0xFF)
+        | ((load8(src + i*8 + 1) & 0xFF) << 8)
+        | ((load8(src + i*8 + 2) & 0xFF) << 16)
+        | ((load8(src + i*8 + 3) & 0xFF) << 24)
+        | ((load8(src + i*8 + 4) & 0xFF) << 32)
+        | ((load8(src + i*8 + 5) & 0xFF) << 40)
+        | ((load8(src + i*8 + 6) & 0xFF) << 48)
+        | ((load8(src + i*8 + 7) & 0xFF) << 56));
         i = i + 1;
     }
     return 0;

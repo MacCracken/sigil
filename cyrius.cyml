@@ -1,16 +1,22 @@
 [package]
 name = "sigil"
-version = "2.9.1"
+version = "2.9.5"
 description = "Sigil — system-wide trust verification for AGNOS. Ed25519, SHA-256/512, HMAC, HKDF, AES-256-GCM, integrity, audit."
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/sigil"
 language = "cyrius"
-cyrius = "5.5.35"
+cyrius = "5.7.48"
 
 [build]
 entry = "programs/smoke.cyr"
-output = "build/sigil-smoke"
+output = "build/sigil"
 defines = ["SIGIL_SMOKE"]
+# NOTE (2.9.4): smoke-test program currently produced at build/sigil so
+# the genesis boot pipeline's --iso-check (which expects build/<package>)
+# finds the artifact. A future patch will replace this with a real
+# library-probe build that doesn't define SIGIL_SMOKE; later still, the
+# boot will look at dist/sigil.cyr (source bundle, sigil's actual
+# consumer-facing artifact) once that path has been hardened in test.
 
 # `modules` declares the src/ files `cyrius distlib` concatenates
 # into `dist/sigil.cyr`. Order matches src/lib.cyr's includes —
@@ -28,9 +34,18 @@ defines = ["SIGIL_SMOKE"]
 # include via `src/lib.cyr` against a sibling checkout, which pulls
 # agnosys as a proper dep. `dist/sigil.cyr` is the self-contained
 # crypto + trust engine core.
+#
+# IMPORTANT: keep `modules` under `[lib]`, NOT `[build]`. 5.7.x
+# treats `[build].modules` as an auto-prepend list and inlines
+# every src/ file into the temp before the entry source — which
+# then re-includes them via `src/lib.cyr`'s include directives,
+# producing 374 duplicate-fn warnings. Same lesson agnosys
+# learned at 1.0.1 ("76% binary size reduction").
+[lib]
 modules = [
     "src/types.cyr",
     "src/error.cyr",
+    "src/sha_ni.cyr",
     "src/sha256.cyr",
     "src/hex.cyr",
     "src/ct.cyr",
@@ -57,7 +72,7 @@ modules = [
 ]
 
 [deps]
-stdlib = ["syscalls", "alloc", "freelist", "assert", "str", "string", "vec", "hashmap", "io", "fmt", "json", "chrono", "bigint", "tagged", "process", "fs"]
+stdlib = ["syscalls", "alloc", "freelist", "assert", "str", "string", "vec", "hashmap", "io", "fmt", "json", "chrono", "bigint", "tagged", "process", "fs", "bench"]
 
 # Sakshi is not yet folded into the Cyrius stdlib distribution (2.0.0 pending).
 # Pin to the published tag via git until the toolchain vendors it.
@@ -72,5 +87,5 @@ modules = ["dist/sakshi.cyr"]
 # the consumer (sigil) is responsible for the stdlib surface above.
 [deps.agnosys]
 git = "https://github.com/MacCracken/agnosys.git"
-tag = "1.0.0"
+tag = "1.0.4"
 modules = ["dist/agnosys.cyr"]

@@ -183,49 +183,49 @@ fn main() {
 
     # ed25519-only branch.
     assert_eq(
-        sigil_verify_hybrid(msg_a, 16, ed_sig, ed_pk, 0, 0, SIG_ALG_ED25519),
-        1,
-        "hybrid: ed25519-only verifies"
+    sigil_verify_hybrid(msg_a, 16, ed_sig, ed_pk, 0, 0, SIG_ALG_ED25519),
+    1,
+    "hybrid: ed25519-only verifies"
     );
 
     # ml-dsa-only branch uses the sig_a + pk_a pair from earlier.
     assert_eq(
-        sigil_verify_hybrid(msg_a, 16, 0, 0, sig_a, pk_a, SIG_ALG_ML_DSA_65),
-        1,
-        "hybrid: ml-dsa-only verifies"
+    sigil_verify_hybrid(msg_a, 16, 0, 0, sig_a, pk_a, SIG_ALG_ML_DSA_65),
+    1,
+    "hybrid: ml-dsa-only verifies"
     );
 
     # Hybrid requires both — happy path.
     assert_eq(
-        sigil_verify_hybrid(msg_a, 16, ed_sig, ed_pk, sig_a, pk_a, SIG_ALG_HYBRID),
-        1,
-        "hybrid: both valid → pass"
+    sigil_verify_hybrid(msg_a, 16, ed_sig, ed_pk, sig_a, pk_a, SIG_ALG_HYBRID),
+    1,
+    "hybrid: both valid → pass"
     );
 
     # Hybrid fails if either half is bad.
     # Bad ed25519: flip one bit in ed_sig.
     store8(ed_sig, (load8(ed_sig) & 0xFF) ^ 0x01);
     assert_eq(
-        sigil_verify_hybrid(msg_a, 16, ed_sig, ed_pk, sig_a, pk_a, SIG_ALG_HYBRID),
-        0,
-        "hybrid: tampered ed25519 → fail"
+    sigil_verify_hybrid(msg_a, 16, ed_sig, ed_pk, sig_a, pk_a, SIG_ALG_HYBRID),
+    0,
+    "hybrid: tampered ed25519 → fail"
     );
     store8(ed_sig, (load8(ed_sig) & 0xFF) ^ 0x01);  # restore
 
     # Bad ml-dsa: flip one bit in sig_a.
     store8(sig_a, (load8(sig_a) & 0xFF) ^ 0x01);
     assert_eq(
-        sigil_verify_hybrid(msg_a, 16, ed_sig, ed_pk, sig_a, pk_a, SIG_ALG_HYBRID),
-        0,
-        "hybrid: tampered ml-dsa → fail"
+    sigil_verify_hybrid(msg_a, 16, ed_sig, ed_pk, sig_a, pk_a, SIG_ALG_HYBRID),
+    0,
+    "hybrid: tampered ml-dsa → fail"
     );
     store8(sig_a, (load8(sig_a) & 0xFF) ^ 0x01);  # restore
 
     # Unknown algorithm fails closed.
     assert_eq(
-        sigil_verify_hybrid(msg_a, 16, ed_sig, ed_pk, sig_a, pk_a, 99),
-        0,
-        "hybrid: unknown algorithm fails closed"
+    sigil_verify_hybrid(msg_a, 16, ed_sig, ed_pk, sig_a, pk_a, 99),
+    0,
+    "hybrid: unknown algorithm fails closed"
     );
 
     return assert_summary();
