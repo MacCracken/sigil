@@ -44,23 +44,25 @@ fn main() {
     # TrustLevel enum + ordering
     # ============================================================
     test_group("TrustLevel");
+    # 3.0 removed TRUST_COMMUNITY (was = 2). Numeric slot 2 is now
+    # unassigned — trust_level_rank(2) returns 0 and trust_level_name(2)
+    # returns "unknown" per the safe-degraded-default policy.
     assert_eq(TRUST_SYSTEM_CORE, 0, "system_core = 0");
     assert_eq(TRUST_VERIFIED, 1, "verified = 1");
-    assert_eq(TRUST_COMMUNITY, 2, "community = 2");
-    assert_eq(TRUST_UNVERIFIED, 3, "unverified = 3");
+    assert_eq(TRUST_UNVERIFIED, 3, "unverified = 3 (gap at 2)");
     assert_eq(TRUST_REVOKED, 4, "revoked = 4");
 
     # Rank: higher = more trusted
     assert_eq(trust_level_rank(TRUST_SYSTEM_CORE), 4, "system_core rank 4");
     assert_eq(trust_level_rank(TRUST_VERIFIED), 3, "verified rank 3");
-    assert_eq(trust_level_rank(TRUST_COMMUNITY), 2, "community rank 2");
     assert_eq(trust_level_rank(TRUST_UNVERIFIED), 1, "unverified rank 1");
     assert_eq(trust_level_rank(TRUST_REVOKED), 0, "revoked rank 0");
+    # Legacy value 2 (former TRUST_COMMUNITY) decodes as rank 0 (default)
+    assert_eq(trust_level_rank(2), 0, "legacy community value → rank 0");
 
-    # Ordering: system_core > verified > community > unverified > revoked
+    # Ordering: system_core > verified > unverified > revoked
     assert(trust_level_ge(TRUST_SYSTEM_CORE, TRUST_VERIFIED) == 1, "core >= verified");
-    assert(trust_level_ge(TRUST_VERIFIED, TRUST_COMMUNITY) == 1, "verified >= community");
-    assert(trust_level_ge(TRUST_COMMUNITY, TRUST_UNVERIFIED) == 1, "community >= unverified");
+    assert(trust_level_ge(TRUST_VERIFIED, TRUST_UNVERIFIED) == 1, "verified >= unverified");
     assert(trust_level_ge(TRUST_UNVERIFIED, TRUST_REVOKED) == 1, "unverified >= revoked");
     assert(trust_level_ge(TRUST_REVOKED, TRUST_SYSTEM_CORE) == 0, "revoked < system_core");
     assert(trust_level_ge(TRUST_VERIFIED, TRUST_VERIFIED) == 1, "verified >= verified");
@@ -68,9 +70,10 @@ fn main() {
     # Display
     assert_streq(trust_level_name(TRUST_SYSTEM_CORE), "SystemCore", "core name");
     assert_streq(trust_level_name(TRUST_VERIFIED), "Verified", "verified name");
-    assert_streq(trust_level_name(TRUST_COMMUNITY), "Community", "community name");
     assert_streq(trust_level_name(TRUST_UNVERIFIED), "Unverified", "unverified name");
     assert_streq(trust_level_name(TRUST_REVOKED), "Revoked", "revoked name");
+    # Legacy value 2 displays as "unknown"
+    assert_streq(trust_level_name(2), "unknown", "legacy community value → unknown");
 
     # ============================================================
     # TrustEnforcement enum
@@ -117,8 +120,8 @@ fn main() {
     var p2 = trust_policy_new();
     policy_set_enforcement(p2, ENFORCE_PERMISSIVE);
     assert_eq(policy_enforcement(p2), ENFORCE_PERMISSIVE, "set permissive");
-    policy_set_min_trust(p2, TRUST_COMMUNITY);
-    assert_eq(policy_min_trust(p2), TRUST_COMMUNITY, "set community");
+    policy_set_min_trust(p2, TRUST_UNVERIFIED);
+    assert_eq(policy_min_trust(p2), TRUST_UNVERIFIED, "set unverified");
     policy_set_allow_unsigned(p2, 1);
     assert_eq(policy_allow_unsigned(p2), 1, "set unsigned");
     policy_set_verify_on_boot(p2, 0);

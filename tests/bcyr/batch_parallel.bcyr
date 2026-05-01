@@ -1,0 +1,127 @@
+# batch_parallel.bcyr — sv_verify_batch scaling curve
+#
+# Measures sv_verify_batch wall time at counts {1, 4, 16, 64}.
+# Before the 3.0 parallel fan-out lands, per-call time scales
+# linearly with count (dominated by ed25519_verify at ~8.4ms per
+# artifact). After fan-out lands, large counts should see
+# near-linear speedup proportional to worker count, with small
+# counts unchanged (below the parallel threshold).
+#
+# Lives in its own .bcyr file to stay under the 1 MB preprocessor
+# cap (CLAUDE.md quirk #8) — sigil.bcyr already includes mldsa
+# and is near the limit.
+
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fmt.cyr"
+include "lib/string.cyr"
+include "lib/json.cyr"
+include "lib/sakshi.cyr"
+include "lib/chrono.cyr"
+include "lib/bench.cyr"
+include "lib/bigint.cyr"
+include "lib/thread.cyr"
+
+include "src/types.cyr"
+include "src/error.cyr"
+include "src/sha256.cyr"
+include "src/hex.cyr"
+include "lib/ct.cyr"
+include "src/ct.cyr"
+include "src/hmac.cyr"
+include "src/sha512.cyr"
+include "src/bigint_ext.cyr"
+include "src/ed25519.cyr"
+include "src/trust.cyr"
+include "src/integrity.cyr"
+include "src/policy.cyr"
+include "src/audit.cyr"
+include "src/verify.cyr"
+
+fn main() {
+    alloc_init();
+    ed25519_init();
+
+    var sk[64];
+    var pk[32];
+    var kid = generate_keypair(&sk, &pk);
+    var pk_hex = hex_encode(&pk, 32);
+    var kr = keyring_new("/tmp/sigil_bv_bench_keys");
+    var kv = key_version_new(kid, pk_hex);
+    kv_set_secret_key(kv, &sk);
+    keyring_add_key(kr, kv);
+    var policy = trust_policy_new();
+    var sv = sigil_verifier_new(kr, policy);
+
+    # One signed artifact shared across rounds. Same per-call
+    # verify cost as N distinct files, without N file setups.
+    var path = "/tmp/sigil_bv_bench_artifact.bin";
+    var fd = file_open(path, 577, 420);
+    file_write(fd, "bench-artifact", 14);
+    file_close(fd);
+    sv_sign_artifact(sv, path, &sk, kid, ARTIFACT_SYSTEM_BINARY);
+
+    # Max-size packed buffer; smaller batches reuse a prefix.
+    var max = 64;
+    var artifacts = alloc(max * 16);
+    var bi = 0;
+    while (bi < max) {
+        store64(artifacts + bi * 16, path);
+        store64(artifacts + bi * 16 + 8, ARTIFACT_SYSTEM_BINARY);
+        bi = bi + 1;
+    }
+
+    var benches = vec_new();
+
+    var b1 = bench_new("sv_verify_batch_1");
+    var ri = 0;
+    while (ri < 5) {
+        bench_batch_start(b1);
+        sv_verify_batch(sv, artifacts, 1);
+        bench_batch_stop(b1, 1);
+        ri = ri + 1;
+    }
+    vec_push(benches, b1);
+
+    var b4 = bench_new("sv_verify_batch_4");
+    ri = 0;
+    while (ri < 5) {
+        bench_batch_start(b4);
+        sv_verify_batch(sv, artifacts, 4);
+        bench_batch_stop(b4, 1);
+        ri = ri + 1;
+    }
+    vec_push(benches, b4);
+
+    var b16 = bench_new("sv_verify_batch_16");
+    ri = 0;
+    while (ri < 5) {
+        bench_batch_start(b16);
+        sv_verify_batch(sv, artifacts, 16);
+        bench_batch_stop(b16, 1);
+        ri = ri + 1;
+    }
+    vec_push(benches, b16);
+
+    var b64 = bench_new("sv_verify_batch_64");
+    ri = 0;
+    while (ri < 3) {
+        bench_batch_start(b64);
+        sv_verify_batch(sv, artifacts, 64);
+        bench_batch_stop(b64, 1);
+        ri = ri + 1;
+    }
+    vec_push(benches, b64);
+
+    syscall(1, 1, "=== sv_verify_batch scaling ===\n", 32);
+    bench_report_all(benches);
+    return 0;
+}
+
+var r = main();
+syscall(60, r);

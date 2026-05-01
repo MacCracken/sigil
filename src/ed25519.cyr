@@ -510,49 +510,55 @@ fn ed25519_init() {
 # Scalar reduce: 64-byte hash -> 32-byte scalar mod L
 # ================================================================
 
-var _scr_lo = 0;
-var _scr_hi = 0;
-var _scr_prod = 0;
+# R = 2^256 mod L — read-only constant, init-once. Safe to share
+# across threads because it's never mutated after init.
 var _scr_r256 = 0;
 var _scr_inited = 0;
 
 fn sc_reduce(out, s64) {
     # Reduce 512-bit value mod L using: val = hi*2^256 + lo ≡ hi*R + lo (mod L)
     # where R = 2^256 mod L. Iterate until hi == 0.
+    #
+    # Scratch is stack-local (3.0 re-test: cc5 5.5.32 preserves
+    # pointer-to-local across the nested u256_* calls in this
+    # body, so the pre-3.0 globals-for-scratch workaround is no
+    # longer needed here). `lo`, `hi`, `prod` live only for the
+    # lifetime of the call — trivially per-thread by construction.
     if (_scr_inited == 0) {
-        _scr_lo = alloc(32);
-        _scr_hi = alloc(32);
-        _scr_prod = alloc(64);
         _scr_r256 = u256_from_hex("0ffffffffffffffffffffffffffffffec6ef5bf4737dcf70d6ec31748d98951d");
         _scr_inited = 1;
     }
 
+    var lo[32];
+    var hi[32];
+    var prod[64];
+
     # Load 64-byte input as two u256 (little-endian).
-    u256_load_le(_scr_lo, s64);
-    u256_load_le(_scr_hi, s64 + 32);
+    u256_load_le(&lo, s64);
+    u256_load_le(&hi, s64 + 32);
 
     # Iteratively reduce: lo = lo + hi*R, split result, repeat until hi == 0
-    while (u256_is_zero(_scr_hi) == 0) {
-        u256_mul_full(_scr_prod, _scr_hi, _scr_r256);
+    while (u256_is_zero(&hi) == 0) {
+        u256_mul_full(&prod, &hi, _scr_r256);
         # new_hi = product high 256 bits
-        store64(_scr_hi, load64(_scr_prod + 32));
-        store64(_scr_hi + 8, load64(_scr_prod + 40));
-        store64(_scr_hi + 16, load64(_scr_prod + 48));
-        store64(_scr_hi + 24, load64(_scr_prod + 56));
+        store64(&hi, load64(&prod + 32));
+        store64(&hi + 8, load64(&prod + 40));
+        store64(&hi + 16, load64(&prod + 48));
+        store64(&hi + 24, load64(&prod + 56));
         # new_lo = old_lo + product_lo (carry propagates to hi)
-        var carry = u256_add(_scr_lo, _scr_lo, _scr_prod);
+        var carry = u256_add(&lo, &lo, &prod);
         if (carry > 0) {
             # Add carry to hi limb 0, propagate manually
-            var h0 = load64(_scr_hi) + 1;
-            store64(_scr_hi, h0);
+            var h0 = load64(&hi) + 1;
+            store64(&hi, h0);
             if (h0 == 0) {
-                var h1 = load64(_scr_hi + 8) + 1;
-                store64(_scr_hi + 8, h1);
+                var h1 = load64(&hi + 8) + 1;
+                store64(&hi + 8, h1);
                 if (h1 == 0) {
-                    var h2 = load64(_scr_hi + 16) + 1;
-                    store64(_scr_hi + 16, h2);
+                    var h2 = load64(&hi + 16) + 1;
+                    store64(&hi + 16, h2);
                     if (h2 == 0) {
-                        store64(_scr_hi + 24, load64(_scr_hi + 24) + 1);
+                        store64(&hi + 24, load64(&hi + 24) + 1);
                     }
                 }
             }
@@ -560,11 +566,11 @@ fn sc_reduce(out, s64) {
     }
 
     # Final reduction mod L
-    while (u256_cmp(_scr_lo, _ed_L) >= 0) {
-        u256_sub(_scr_lo, _scr_lo, _ed_L);
+    while (u256_cmp(&lo, _ed_L) >= 0) {
+        u256_sub(&lo, &lo, _ed_L);
     }
 
-    u256_copy(out, _scr_lo);
+    u256_copy(out, &lo);
     return 0;
 }
 

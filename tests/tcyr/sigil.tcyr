@@ -369,9 +369,9 @@ fn main() {
     # ============================================================
     test_group("audit file");
     var alog2 = audit_log_new();
-    alog_record(alog2, audit_artifact_verified("/test", ARTIFACT_CONFIG, TRUST_COMMUNITY, 1, "hash1"));
+    alog_record(alog2, audit_artifact_verified("/test", ARTIFACT_CONFIG, TRUST_VERIFIED, 1, "hash1"));
     var apath = "/tmp/sigil_test_audit.jsonl";
-    var aresult = alog_append_to_file(alog2, apath);
+    var aresult = alog_save(alog2, apath);
     assert_eq(aresult, ERR_NONE, "append ok");
 
     # Verify file was written
@@ -391,10 +391,10 @@ fn main() {
     alog_record(alog3, audit_revocation_added("key_bad", "hash_bad", "compromised"));
     var lpath = "/tmp/sigil_audit_roundtrip.jsonl";
     syscall(87, lpath);   # best-effort pre-cleanup
-    alog_append_to_file(alog3, lpath);
+    alog_save(alog3, lpath);
 
     var alog_reload = audit_log_new();
-    var n_loaded = alog_load_from_file(alog_reload, lpath);
+    var n_loaded = alog_load(alog_reload, lpath);
     assert_eq(n_loaded, 3, "loaded 3 events");
     assert_eq(alog_len(alog_reload), 3, "log holds 3 events");
 
@@ -412,7 +412,7 @@ fn main() {
 
     # Empty / missing file is not an error
     var alog_empty = audit_log_new();
-    var n_missing = alog_load_from_file(alog_empty, "/tmp/sigil_does_not_exist_xyz.jsonl");
+    var n_missing = alog_load(alog_empty, "/tmp/sigil_does_not_exist_xyz.jsonl");
     assert_eq(n_missing, 0 - 1, "missing file returns -1");
     assert_eq(alog_len(alog_empty), 0, "missing file adds nothing");
 

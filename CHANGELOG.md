@@ -5,6 +5,125 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.0] — 2026-05-01
+
+**The 3.0 line lands.** Closes the 2.x cycle's accumulated
+breaking-change cleanups and ships parallel batch verify
+infrastructure as the foundation for the 3.1 throughput rewrite.
+The 2.9.2..2.9.5 work that landed on `main` during the 3.0 branch's
+development (SHA-NI hot path, AES-NI activation, agnosys 1.0.4
+aarch64 portability, the `[lib].modules` manifest fix) is folded
+into this release via the 2026-05-01 merge.
+
+Migration notes for downstream consumers (daimon, kavach, ark,
+aegis, phylax, mela, stiva, argonaut, takumi):
+
+- **`TRUST_COMMUNITY` enum variant removed.** Numeric slot 2 is
+  intentionally unassigned so any persisted state keyed on values
+  3/4 round-trips identically pre/post-3.0. Consumers who were
+  using `TRUST_COMMUNITY` (audit found one inactive reference, an
+  argonaut vendored bundle frozen at sigil v2.0.1) should pick
+  `TRUST_VERIFIED` or define their own enum value outside sigil's
+  type.
+- **`alog_append_to_file` → `alog_save`** and
+  **`alog_load_from_file` → `alog_load`.** Pure rename to align
+  with the `rl_save` / `crl_save` / `sv_save_trust_store`
+  vocabulary. No behaviour change. Module-header migration notes
+  retained in `src/audit.cyr` for one cycle.
+- **`-D SIGIL_BATCH_PARALLEL` cmdline flag removed.** The parallel
+  path is now the default behaviour at
+  `count >= _SIGIL_BATCH_PARALLEL_THRESHOLD` (= 4). Consumers who
+  were passing the flag should remove it; the build will still
+  succeed but the flag is a no-op.
+- **Cyrius minimum pin: 5.7.48.** The 5.5.x and 5.6.x lines are
+  no longer supported. Consumers tracking sigil HEAD should bump
+  their own toolchain pins to match.
+
+Security: a fresh internal audit
+(`docs/audit/2026-05-01-audit.md`) re-verified all 12 findings
+from the 2026-04-13 v2.0.1 audit as fixed and surveyed every
+crypto module added during the 2.x → 3.0 cycle. Zero
+CRITICAL/HIGH findings; one MEDIUM (thread-safety on module-global
+crypto scratch — currently mitigated by the parallel-batch mutex,
+slated for the 3.1 alloc-free rewrite); two LOW; three INFO.
+
+### Added
+
+- **Parallel `sv_verify_batch`**, default-on at
+  `count >= _SIGIL_BATCH_PARALLEL_THRESHOLD` (= 4). Ships the
+  worker-pool spawn/join/shard machinery, a 4-worker default pool,
+  the threshold-gated serial fast path for small counts, and a
+  shared `_sigil_batch_mutex` that serialises `sv_verify_artifact`
+  calls across workers. Correctness is identical to the serial
+  path (228/228 tests in `tests/tcyr/batch_parallel.tcyr`, sizes
+  0/1/4/32, mixed signed/unknown/revoked, determinism across
+  repeat runs). **No throughput win in 3.0** — measured
+  0.96×–1.04× vs serial because the mutex wraps the full
+  `sv_verify_artifact` call, including the dominant `ed25519_verify`
+  (~6.4 ms/artifact under SHA-NI). Actual speedup defers to 3.1's
+  alloc-free verify-hot-path rewrite (tracked in
+  `docs/development/roadmap.md` § Road to v3.1).
+- **`tests/tcyr/batch_parallel.tcyr`** (228 assertions) —
+  correctness guard for `sv_verify_batch` asserting the batch
+  result matches a serial reference run per-artifact (passed,
+  trust_level, content hash) across mixed-archetype inputs; plus
+  determinism across repeat calls.
+- **`tests/bcyr/batch_parallel.bcyr`** — scaling-curve benchmark
+  for `sv_verify_batch` at counts 1/4/16/64. Separate from
+  `tests/bcyr/sigil.bcyr` because the full sigil+mldsa+verify
+  include set hits the 1 MB preprocessor cap (CLAUDE.md quirk #8).
+
+### Changed
+
+- **`src/lib.cyr`** unconditionally `include`s `lib/thread.cyr`.
+  The 5.5.x-era `#ifdef SIGIL_BATCH_PARALLEL` gate around the
+  threading include is gone; the cyrius 16384 fixup-table cap
+  was raised in 5.5.37 (per
+  `docs/development/issues/archive/2026-04-22-cyrius-fixup-cap-raises.md`,
+  now resolved) and 5.7.48 builds clean with the threading
+  primitives always pulled in. The `-D SIGIL_BATCH_PARALLEL`
+  cmdline opt-in is removed in this release — the parallel path
+  is the default behaviour.
+- **`src/verify.cyr`** parallel-fan-out body and `_batch_worker`
+  fn / `_sigil_batch_mutex` globals are no longer wrapped in
+  `#ifdef SIGIL_BATCH_PARALLEL`.
+- **Cyrius pin** → `5.7.48` (was `5.5.30` on `main` pre-merge,
+  through 5.5.32 / 5.5.35 during 3.0 bring-up). Pin is the
+  minimum-compatible floor; active toolchain dispatches to whatever
+  `cyriusly current` reports.
+- **Sub-3.0 breaking changes:** `TRUST_COMMUNITY` enum variant
+  removed (numeric slot 2 intentionally unassigned for
+  persisted-state compatibility); `alog_append_to_file` →
+  `alog_save`, `alog_load_from_file` → `alog_load` (vocabulary
+  alignment with `rl_save` / `crl_save` / `sv_save_trust_store`).
+
+### Known limitations
+
+- **Parallel batch verify is correctness-only in 3.0.** Workers
+  serialise on the full-call mutex because `sv_verify_artifact`'s
+  downstream chain hits cyrius's non-thread-safe `alloc` /
+  `vec_push` / `map_get` (CLAUDE.md quirk #7). The infrastructure
+  is in place; throughput wins land in 3.1 once
+  `sv_verify_artifact` is rewritten to accept caller-provided
+  scratch.
+
+### Merged from `main` (2026-05-01)
+
+- 2.9.2 → 2.9.5 picked up via `git merge main`. SHA-NI probe +
+  compress (2.9.2/2.9.3), build-output rename (2.9.4), cyrius
+  5.7.48 + agnosys 1.0.4 toolchain bump (2.9.5). Cyrius pin on
+  the 3.0 branch advances `5.5.35` → `5.7.48`. Conflicts: cyrius
+  pin in `cyrius.cyml`, CI `CYRIUS_VERSION`, and CHANGELOG
+  Unreleased section — all resolved in favour of main's modern
+  toolchain. The 3.0 scope tracker's "cyrius pin" note is now
+  superseded; current dispatch is 5.7.48.
+- **Material code merges, no conflict:** SHA-NI module
+  (`src/sha_ni.cyr`) added to 3.0 from main; `[lib].modules`
+  manifest header fix; per-arch agnosys 1.0.4 syscall wrappers;
+  18 src/test files reformatted for 5.7.x continuation-indent
+  rule; `src/sha256.cyr` now `include`s `src/sha_ni.cyr`
+  directly per the dispatch contract.
+
 ## [2.9.5] — 2026-04-30
 
 **Toolchain + dep refresh: cyrius 5.6.42 → 5.7.48, agnosys
@@ -192,7 +311,7 @@ work) pick up the win automatically through the dispatcher.
 - **`tests/bcyr/sigil.bcyr` SHA-256 throughput rows** at 64B / 1KB
   / 64KB for both software and NI paths. Captured in
   `benches/history.csv` under the `v2.9.3` label.
-- **`docs/development/issues/2026-04-25-sha-ni-compress-design.md`.**
+- **`docs/development/issues/archive/2026-04-25-sha-ni-compress-design.md`.**
   Pre-implementation design doc covering instruction semantics, the
   state-layout impedance between sigil's ctx and SHA-NI's XMM
   registers, the kernel-derived 16-iteration loop structure, and

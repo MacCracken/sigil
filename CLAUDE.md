@@ -142,7 +142,7 @@ Run a closeout pass before tagging x.Y.0 or x.0.0. Ship as the last patch of the
 - **Runtime feature detection** over compile-time gating (follow libro pattern)
 - **Target size** — compiled binary contribution should be small and measurable
 
-## Known Cyrius Compiler Quirks (5.5.30)
+## Known Cyrius Compiler Quirks (5.5.32)
 
 Most cc3-era workarounds documented in earlier sigil versions are
 now resolved under cc5. Quirks still worth knowing:
@@ -185,6 +185,29 @@ now resolved under cc5. Quirks still worth knowing:
    the AES-NI dispatch and re-test; if any residual silent-
    discard remains it's a separate fixup/CP bug not covered by
    the alignment patch.
+7. **Stdlib thread-safety (5.5.31/32)** — atomics + race-free
+   mutex are available (`lib/atomic.cyr`, `lib/thread.cyr`);
+   `string.cyr` is safe by construction. **But:** `alloc`,
+   `hashmap`, and `vec` are NOT thread-safe. A multi-threaded
+   sigil path (e.g. parallel `sv_verify_batch` fan-out) must
+   either pre-allocate all per-worker scratch in the main
+   thread before spawn, or mutex-wrap every call into
+   containers shared across workers. Alloc-from-worker with no
+   mutex will corrupt the bump pointer. Prefer the
+   pre-allocate-upfront pattern — it sidesteps the whole
+   problem and the verify hot path only reads read-only
+   globals (fixed-base comb, round-key tables).
+8. **Preprocessor output cap: 1 MB** — cc5's `preprocess_out`
+   buffer is 1,048,576 bytes (`src/frontend/lex.cyr:1436`
+   checks `op > 1048576`). The full sigil+stdlib+agnosys+mldsa
+   expansion sits right at the cap: `-D SIGIL_PQC` cmdline
+   works (squeaks under by ~1 KB), but a `#define SIGIL_PQC 1`
+   at the top of `src/lib.cyr` overflows by 1020 bytes —
+   moving an equivalent definition from the cmdline into
+   source costs extra expansion bytes in the IFDEF pass.
+   PQC therefore stays a cmdline-opt-in for the 3.0 cycle.
+   When cyrius raises this buffer (or adds a flag to select a
+   larger one), revisit default-on.
 
 ### Resolved under cc5 (stop treating as bugs)
 

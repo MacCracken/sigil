@@ -210,7 +210,7 @@ fn crl_apply_to(c, rl) {
 # Deliberate format choice: one JSON object per line, newline-
 # separated. Cyrius' lib/json.cyr parses a single object at a time
 # and has no array support, so JSONL is the cleanest round-trip
-# format and matches `alog_append_to_file`.  Rust's `to_json()`
+# format and matches `alog_save`.  Rust's `to_json()`
 # produced a JSON array; JSONL is trivially convertible with
 # `jq -s`.
 #
