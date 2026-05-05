@@ -1,11 +1,11 @@
 [package]
 name = "sigil"
-version = "3.0.0"
+version = "3.0.1"
 description = "Sigil — system-wide trust verification for AGNOS. Ed25519, SHA-256/512, HMAC, HKDF, AES-256-GCM, integrity, audit."
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/sigil"
 language = "cyrius"
-cyrius = "5.7.48"
+cyrius = "5.8.64"
 
 [build]
 entry = "programs/smoke.cyr"
@@ -78,7 +78,7 @@ stdlib = ["syscalls", "alloc", "freelist", "assert", "str", "string", "vec", "ha
 # Pin to the published tag via git until the toolchain vendors it.
 [deps.sakshi]
 git = "https://github.com/MacCracken/sakshi.git"
-tag = "2.0.0"
+tag = "2.2.3"
 modules = ["dist/sakshi.cyr"]
 
 # Agnosys provides the AGNOS kernel interfaces sigil needs for trust

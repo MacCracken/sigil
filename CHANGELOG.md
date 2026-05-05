@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.1] — 2026-05-05
+
+### Changed
+
+- `cyrius` pin bumped 5.7.48 → 5.8.64 ahead of the cyrius v5.8.65
+  stdlib foldin. Sigil is on the foldin manifest; this patch is
+  the prerequisite for cyrius's `[deps].sigil.tag` to point at
+  3.0.1 in the foldin slot.
+- `[deps.sakshi].tag` bumped 2.0.0 → 2.2.3 (latest).
+  `[deps.agnosys]` stays at 1.0.4 (transitive via mabda which
+  holds at 2.5.0; not on the v5.8.65 foldin manifest).
+- No source changes — pure pin + version bump.
+
+### Verified
+
+- `cyrius test`: **76 + 24 = 100** asserts pass against cyrius
+  5.8.64 with sakshi 2.2.3 resolved.
+- `cyrius fmt --check`: clean across all source.
+- `dist/sigil.cyr` rebuilt at 8916 lines.
+
 ## [3.0.0] — 2026-05-01
 
 **The 3.0 line lands.** Closes the 2.x cycle's accumulated
