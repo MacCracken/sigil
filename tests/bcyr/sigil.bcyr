@@ -343,7 +343,7 @@ fn main() {
         bench_batch_start(b10);
         var bi = 0;
         while (bi < 10000) {
-            ct_eq_32(ca, cb);
+            ct_eq_bytes(ca, cb, 32);
             bi = bi + 1;
         }
         bench_batch_stop(b10, 10000);

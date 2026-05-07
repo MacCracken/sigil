@@ -41,9 +41,10 @@ include "src/sha256.cyr"
 include "src/hex.cyr"
 # src/ct.cyr retired at sigil 3.0.2 — `ct_eq` lifted to cyrius
 # stdlib's `lib/ct.cyr` as `ct_eq_bytes_lens(a, a_len, b, b_len)`
-# (cyrius v5.9.20). Callers below now use the upstream symbol.
-# `ct_eq_32` had zero internal call sites; consumers wanting a
-# 32-byte fixed compare can write `ct_eq_bytes(a, b, 32)`.
+# (cyrius v5.9.20). Callers below use the upstream symbol.
+# `ct_eq_32` callers (programs/smoke.cyr, tests/bcyr/sigil.bcyr)
+# migrated to `ct_eq_bytes(a, b, 32)` — cyrius stdlib's fixed-
+# length form covers the same shape.
 include "src/hmac.cyr"
 include "src/hkdf.cyr"
 include "src/aes_ni.cyr"
