@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.1.0] — 2026-05-06
+
+**Version-label correction for the 3.0.2 surface change.** 3.0.2
+removed `src/ct.cyr` and with it the public symbols `ct_eq` and
+`ct_eq_32` from `dist/sigil.cyr`, and was tagged as a patch. That
+was the wrong label — removing public symbols is a minor bump,
+not a patch. 3.1.0 retags the same content with the correct
+SemVer level. No code change relative to 3.0.2.
+
+### Changed
+
+- VERSION 3.0.2 → 3.1.0.
+- `cyrius.cyml` `version` 3.0.2 → 3.1.0.
+
 ## [3.0.2] — 2026-05-06
 
 **ct_eq retired in favor of cyrius stdlib `ct_eq_bytes_lens`**.
