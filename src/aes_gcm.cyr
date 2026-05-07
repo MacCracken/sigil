@@ -10,7 +10,8 @@
 #     x^128 + x^7 + x^2 + x + 1, bit-by-bit multiply (constant-time).
 #   - GCM encrypt / decrypt over 12-byte (96-bit) IVs — the RFC
 #     fast-path. Arbitrary-length IVs deferred to a follow-up.
-#   - Tag: 128-bit, constant-time compared via sigil's ct_eq.
+#   - Tag: 128-bit, constant-time compared via cyrius stdlib's
+#     `ct_eq_bytes_lens` (was sigil's hand-rolled `ct_eq` pre-3.0.2).
 #
 # Security floor (matches CLAUDE.md § Security Hardening):
 #   - AES block encrypt dispatches to AES-NI when available
@@ -647,9 +648,13 @@ fn aes_gcm_decrypt(key, iv, aad, aad_len, ct, ct_len, tag, pt_out) {
         i = i + 1;
     }
 
-    # Constant-time tag compare. ct_eq loops the full length even
-    # on first mismatch — no early exit on secret data.
-    var ok = ct_eq(&expected_tag, 16, tag, 16);
+    # Constant-time tag compare. ct_eq_bytes_lens loops the full
+    # length even on first mismatch — no early exit on secret data.
+    # Lengths equal-by-construction (both 16 = poly1305 tag); could
+    # equivalently call ct_eq_bytes(_, _, 16) since the dual-length
+    # form's mismatch-fast-path is unreachable here. Kept dual-length
+    # for symmetry with the v5.9.20 sigil 3.0.2 migration shape.
+    var ok = ct_eq_bytes_lens(&expected_tag, 16, tag, 16);
 
     # Decrypt via CTR starting at inc32(J0) — we perform the CTR
     # pass unconditionally to keep the work profile flat across

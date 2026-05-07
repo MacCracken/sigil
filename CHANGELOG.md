@@ -5,6 +5,54 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.2] — 2026-05-06
+
+**ct_eq retired in favor of cyrius stdlib `ct_eq_bytes_lens`**.
+Paired with cyrius v5.9.20's lift of the canonical XOR-accumulate
+into `lib/ct.cyr`. Patch release — no sigil API change; internal
+refactor only.
+
+### Changed
+
+- `cyrius` pin bumped 5.8.64 → 5.9.20 (required for the new
+  `ct_eq_bytes_lens` symbol).
+- All five internal `ct_eq` call sites migrated to
+  `ct_eq_bytes_lens` (one identifier rename, identical semantics):
+  `src/integrity.cyr` (×2 — file hash compares), `src/aes_gcm.cyr`
+  (poly1305 tag verify), `src/ed25519.cyr` (signature R-component
+  compare), `src/verify.cyr` (artifact hash compare).
+- `src/aes_gcm.cyr` doc comment refreshed to name the upstream
+  helper.
+
+### Removed
+
+- **`src/ct.cyr`**: the file that defined sigil's hand-rolled
+  `ct_eq(a, a_len, b, b_len)` and `ct_eq_32(a, b)`. Both are gone.
+  `ct_eq_32` had zero internal call sites; consumers wanting a
+  32-byte fixed compare can write `ct_eq_bytes(a, b, 32)` against
+  the upstream stdlib (cyrius v5.9.18+).
+- `cyrius.cyml [lib].modules`: dropped `"src/ct.cyr"`.
+- `src/lib.cyr`: dropped `include "src/ct.cyr"`. Replaced with a
+  comment crumb pointing at the migration.
+
+### Verified
+
+- All sigil tcyr tests touching the migrated paths still pass:
+  `aes_gcm.tcyr` (15/15), `ed25519.tcyr` (20/20),
+  `verify.tcyr` (48/48).
+- `cyrius distlib` rebuilds `dist/sigil.cyr` cleanly (8893 lines,
+  316 KB; pre-3.0.2 dist excluded the now-deleted `src/ct.cyr`'s
+  ~30 LOC). No `ct_eq` symbol present in the bundle.
+
+### Upstream context
+
+agnosys 1.1.2 filed the gap at cyrius v5.9.14 ship
+(`agnosys/docs/development/issues/2026-05-06-cyrius-ct-eq-bytes-stdlib.md`).
+cyrius v5.9.18 added the single-length `ct_eq_bytes(a, b, n)`
+core; cyrius v5.9.20 added the dual-length companion + this
+sigil patch retires the duplication. Three downstream sites
+collapse to one stdlib helper.
+
 ## [3.0.1] — 2026-05-05
 
 ### Changed

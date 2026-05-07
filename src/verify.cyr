@@ -397,7 +397,7 @@ fn sv_verify_package(sv, path, expected_hash) {
     var actual = artifact_content_hash(artifact);
     var matches = 0;
     if (actual != 0) {
-        if (ct_eq(actual, strlen(actual), expected_hash, strlen(expected_hash)) == 1) {
+        if (ct_eq_bytes_lens(actual, strlen(actual), expected_hash, strlen(expected_hash)) == 1) {
             matches = 1;
         }
     }

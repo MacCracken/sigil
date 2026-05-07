@@ -164,7 +164,7 @@ fn iv_verify_file(v, path) {
             var h = hash_file(path);
             if (h == 0) { return MSTATUS_FILE_NOT_FOUND; }
             var expected = load64(m + 8);
-            if (ct_eq(h, strlen(h), expected, strlen(expected)) == 1) {
+            if (ct_eq_bytes_lens(h, strlen(h), expected, strlen(expected)) == 1) {
                 return MSTATUS_VERIFIED;
             }
             return MSTATUS_MISMATCH;
@@ -196,7 +196,7 @@ fn iv_verify_all(v) {
             vec_push(load64(report + 24), rm);
         } else {
             var expected = load64(m + 8);
-            if (ct_eq(h, strlen(h), expected, strlen(expected)) == 1) {
+            if (ct_eq_bytes_lens(h, strlen(h), expected, strlen(expected)) == 1) {
                 verified = verified + 1;
                 store64(m + 16, MSTATUS_VERIFIED);
             } else {

@@ -771,7 +771,7 @@ fn ed25519_verify(pk, msg, msg_len, sig) {
 
     ge_to_bytes(_ver_R_bytes, R_check);
 
-    return ct_eq(_ver_R_bytes, 32, _ver_sig, 32);
+    return ct_eq_bytes_lens(_ver_R_bytes, 32, _ver_sig, 32);
 }
 
 # ================================================================
