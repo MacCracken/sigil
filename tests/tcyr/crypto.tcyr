@@ -19,7 +19,6 @@ include "src/error.cyr"
 include "src/sha256.cyr"
 include "src/hex.cyr"
 include "lib/ct.cyr"
-include "src/ct.cyr"
 include "src/hmac.cyr"
 
 fn main() {
@@ -99,11 +98,11 @@ fn main() {
     # Constant-time comparison
     # ============================================================
     test_group("constant_time_eq");
-    assert_eq(ct_eq("abcd", 4, "abcd", 4), 1, "equal");
-    assert_eq(ct_eq("abcd", 4, "abce", 4), 0, "differ last");
-    assert_eq(ct_eq("abcd", 4, "xbcd", 4), 0, "differ first");
-    assert_eq(ct_eq("abc", 3, "abcd", 4), 0, "diff length");
-    assert_eq(ct_eq("", 0, "", 0), 1, "both empty");
+    assert_eq(ct_eq_bytes_lens("abcd", 4, "abcd", 4), 1, "equal");
+    assert_eq(ct_eq_bytes_lens("abcd", 4, "abce", 4), 0, "differ last");
+    assert_eq(ct_eq_bytes_lens("abcd", 4, "xbcd", 4), 0, "differ first");
+    assert_eq(ct_eq_bytes_lens("abc", 3, "abcd", 4), 0, "diff length");
+    assert_eq(ct_eq_bytes_lens("", 0, "", 0), 1, "both empty");
 
     # ============================================================
     # HMAC-SHA256 — RFC 4231 test vector 1

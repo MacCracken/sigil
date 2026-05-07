@@ -44,7 +44,9 @@ follows the referenced standard:
 - **SHA-256** (hashing) — FIPS 180-4, `src/sha256.cyr`
 - **SHA-512** (Ed25519 hash) — FIPS 180-4, `src/sha512.cyr`
 - **HMAC-SHA256** — RFC 2104, `src/hmac.cyr`
-- **Constant-time comparison** — bitwise-OR accumulation, `src/ct.cyr`
+- **Constant-time comparison** — bitwise-OR accumulation,
+  cyrius stdlib's `lib/ct.cyr` (`ct_eq_bytes` / `ct_eq_bytes_lens`;
+  was sigil's `src/ct.cyr` pre-3.0.2)
 - **Cryptographic RNG** — `/dev/urandom` with short-read validation,
   `tpm_random` in `src/tpm.cyr` and `generate_keypair` in `src/trust.cyr`
 

@@ -18,7 +18,6 @@ include "src/error.cyr"
 include "src/sha256.cyr"
 include "src/hex.cyr"
 include "lib/ct.cyr"
-include "src/ct.cyr"
 include "src/sha512.cyr"
 
 fn main() {
@@ -41,7 +40,7 @@ fn main() {
     sha512_update(ctx, "c", 1);
     var d2[64];
     sha512_finalize(ctx, &d2);
-    assert(ct_eq(&d, 64, &d2, 64) == 1, "streaming == oneshot");
+    assert(ct_eq_bytes_lens(&d, 64, &d2, 64) == 1, "streaming == oneshot");
 
     return assert_summary();
 }
