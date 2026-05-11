@@ -2,8 +2,6 @@
 /build/
 
 # Cyrius deps cache (symlinked by `cyrius deps` to ~/.cyrius/deps/...)
-/lib/sakshi.cyr
-/lib/agnosys.cyr
 
 # Editor
 .idea/
@@ -24,3 +22,8 @@ Thumbs.db
 
 # Claude
 .claude/
+
+# `lib/` is populated by `cyrius deps` from cyrius.cyml [deps] — a
+# build artifact, not source. Never commit; never replace with a
+# symlink to a cyrius checkout (see CLAUDE.md "Dependency wiring").
+/lib/
