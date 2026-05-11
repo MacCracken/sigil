@@ -11,7 +11,7 @@
 #   +32  revoked_by    (C-string ptr)
 #   +40  revoked_after (epoch seconds, 0 = unconditional)
 
-fn revocation_entry_new(key_id, content_hash, reason, revoked_by) {
+fn revocation_entry_new(key_id, content_hash, reason, revoked_by): i64 {
     var e = fl_alloc(48);
     store64(e, key_id);
     store64(e + 8, content_hash);
@@ -22,13 +22,13 @@ fn revocation_entry_new(key_id, content_hash, reason, revoked_by) {
     return e;
 }
 
-fn rev_key_id(e) { return load64(e); }
-fn rev_content_hash(e) { return load64(e + 8); }
-fn rev_reason(e) { return load64(e + 16); }
-fn rev_at(e) { return load64(e + 24); }
-fn rev_by(e) { return load64(e + 32); }
-fn rev_after(e) { return load64(e + 40); }
-fn rev_set_after(e, v) { store64(e + 40, v); return e; }
+fn rev_key_id(e): i64 { return load64(e); }
+fn rev_content_hash(e): i64 { return load64(e + 8); }
+fn rev_reason(e): i64 { return load64(e + 16); }
+fn rev_at(e): i64 { return load64(e + 24); }
+fn rev_by(e): i64 { return load64(e + 32); }
+fn rev_after(e): i64 { return load64(e + 40); }
+fn rev_set_after(e, v): i64 { store64(e + 40, v); return e; }
 
 # ================================================================
 # RevocationList (24 bytes)
@@ -38,7 +38,7 @@ fn rev_set_after(e, v) { store64(e + 40, v); return e; }
 #   +8   revoked_keys  (hashmap key_id -> 1)
 #   +16  revoked_hashes (hashmap content_hash -> 1)
 
-fn revocation_list_new() {
+fn revocation_list_new(): i64 {
     var rl = fl_alloc(24);
     store64(rl, vec_new());
     store64(rl + 8, map_new());
@@ -46,7 +46,7 @@ fn revocation_list_new() {
     return rl;
 }
 
-fn rl_add(rl, entry) {
+fn rl_add(rl, entry): i64 {
     var kid = load64(entry);
     var chash = load64(entry + 8);
     if (kid == 0) {
@@ -62,11 +62,11 @@ fn rl_add(rl, entry) {
     return ERR_NONE;
 }
 
-fn rl_is_key_revoked(rl, key_id) {
+fn rl_is_key_revoked(rl, key_id): i64 {
     return rl_is_key_revoked_at(rl, key_id, 0);
 }
 
-fn rl_is_key_revoked_at(rl, key_id, at) {
+fn rl_is_key_revoked_at(rl, key_id, at): i64 {
     var keys = load64(rl + 8);
     if (map_get(keys, key_id) == 0) { return 0; }
     if (at == 0) { return 1; }
@@ -89,11 +89,11 @@ fn rl_is_key_revoked_at(rl, key_id, at) {
     return 0;
 }
 
-fn rl_is_artifact_revoked(rl, content_hash) {
+fn rl_is_artifact_revoked(rl, content_hash): i64 {
     return rl_is_artifact_revoked_at(rl, content_hash, 0);
 }
 
-fn rl_is_artifact_revoked_at(rl, content_hash, at) {
+fn rl_is_artifact_revoked_at(rl, content_hash, at): i64 {
     var hashes = load64(rl + 16);
     if (map_get(hashes, content_hash) == 0) { return 0; }
     if (at == 0) { return 1; }
@@ -115,10 +115,10 @@ fn rl_is_artifact_revoked_at(rl, content_hash, at) {
     return 0;
 }
 
-fn rl_len(rl) { return vec_len(load64(rl)); }
-fn rl_is_empty(rl) { if (rl_len(rl) == 0) { return 1; } return 0; }
+fn rl_len(rl): i64 { return vec_len(load64(rl)); }
+fn rl_is_empty(rl): i64 { if (rl_len(rl) == 0) { return 1; } return 0; }
 
-fn rl_merge(rl, other) {
+fn rl_merge(rl, other): i64 {
     var other_entries = load64(other);
     var olen = vec_len(other_entries);
     var added = 0;
@@ -160,7 +160,7 @@ fn rl_merge(rl, other) {
 #   +24  next_update (epoch seconds, 0 = none)
 #   +32  entries     (vec of RevocationEntry ptrs)
 
-fn crl_new(version, issuer) {
+fn crl_new(version, issuer): i64 {
     var c = fl_alloc(40);
     store64(c, version);
     store64(c + 8, issuer);
@@ -170,27 +170,27 @@ fn crl_new(version, issuer) {
     return c;
 }
 
-fn crl_version(c) { return load64(c); }
-fn crl_issuer(c) { return load64(c + 8); }
-fn crl_issued_at(c) { return load64(c + 16); }
-fn crl_next_update(c) { return load64(c + 24); }
-fn crl_entries(c) { return load64(c + 32); }
+fn crl_version(c): i64 { return load64(c); }
+fn crl_issuer(c): i64 { return load64(c + 8); }
+fn crl_issued_at(c): i64 { return load64(c + 16); }
+fn crl_next_update(c): i64 { return load64(c + 24); }
+fn crl_entries(c): i64 { return load64(c + 32); }
 
-fn crl_set_next_update(c, v) { store64(c + 24, v); return c; }
+fn crl_set_next_update(c, v): i64 { store64(c + 24, v); return c; }
 
-fn crl_add_entry(c, entry) {
+fn crl_add_entry(c, entry): i64 {
     vec_push(load64(c + 32), entry);
     return c;
 }
 
-fn crl_is_stale(c) {
+fn crl_is_stale(c): i64 {
     var next = load64(c + 24);
     if (next == 0) { return 0; }
     if (clock_epoch_secs() > next) { return 1; }
     return 0;
 }
 
-fn crl_apply_to(c, rl) {
+fn crl_apply_to(c, rl): i64 {
     var entries = load64(c + 32);
     var elen = vec_len(entries);
     var added = 0;
@@ -222,7 +222,7 @@ fn crl_apply_to(c, rl) {
 # str_builder. Escapes `"`, `\`, and control chars 0x00-0x1F
 # per RFC 8259. Without this, a reason like `key "foo" compromised`
 # would produce invalid JSON that the parser choked on.
-fn _json_escape_cstr(sb, s) {
+fn _json_escape_cstr(sb, s): i64 {
     var n = strlen(s);
     var i = 0;
     while (i < n) {
@@ -252,7 +252,7 @@ fn _json_escape_cstr(sb, s) {
 }
 
 # Internal: emit one entry as a JSONL line into a str_builder.
-fn _rev_entry_to_jsonl(sb, e) {
+fn _rev_entry_to_jsonl(sb, e): i64 {
     str_builder_add_cstr(sb, "{\"key_id\":");
     if (rev_key_id(e) != 0) {
         str_builder_add_cstr(sb, "\"");
@@ -283,7 +283,7 @@ fn _rev_entry_to_jsonl(sb, e) {
 
 # Serialize a RevocationList to a JSONL C-string. Caller owns the
 # returned pointer (alloc'd). Returns 0 on OOM (not expected).
-fn rl_to_jsonl(rl) {
+fn rl_to_jsonl(rl): i64 {
     var sb = str_builder_new();
     var entries = load64(rl);
     var elen = vec_len(entries);
@@ -306,7 +306,7 @@ fn rl_to_jsonl(rl) {
 # Sets *out_ptr to 0 and returns pos unchanged if not a quoted str.
 var _rj_out_ptr = 0;
 
-fn _rj_parse_string(data, pos, end) {
+fn _rj_parse_string(data, pos, end): i64 {
     _rj_out_ptr = 0;
     if (pos >= end) { return pos; }
     if ((load8(data + pos) & 0xFF) != 34) { return pos; }
@@ -380,7 +380,7 @@ fn _rj_parse_string(data, pos, end) {
 
 # Parse a single JSONL entry line into a fresh RevocationEntry.
 # Returns entry ptr, or 0 on malformed input.
-fn _rev_entry_from_jsonl(line, llen) {
+fn _rev_entry_from_jsonl(line, llen): i64 {
     # Six fields: key_id, content_hash, reason, revoked_at,
     # revoked_by, revoked_after.  Walk the line in order, matching
     # on the known key names. Tolerant to reordering that survives a
@@ -472,9 +472,9 @@ fn _rev_entry_from_jsonl(line, llen) {
 # writer always round-trips cleanly.
 var _rl_load_bad = 0;
 
-fn rl_load_bad_count() { return _rl_load_bad; }
+fn rl_load_bad_count(): i64 { return _rl_load_bad; }
 
-fn rl_from_jsonl(content, content_len) {
+fn rl_from_jsonl(content, content_len): i64 {
     _rl_load_bad = 0;
     var rl = revocation_list_new();
     var pos = 0;
@@ -499,14 +499,14 @@ fn rl_from_jsonl(content, content_len) {
 }
 
 # File wrappers — idiomatic "save/load via path" shortcuts.
-fn rl_save(rl, path) {
+fn rl_save(rl, path): i64 {
     var jsonl = rl_to_jsonl(rl);
     var n = file_write_all(path, jsonl, strlen(jsonl));
     if (n < 0) { return ERR_IO; }
     return ERR_NONE;
 }
 
-fn rl_load(path) {
+fn rl_load(path): i64 {
     var buf = alloc(65536);
     var n = file_read_all(path, buf, 65536);
     if (n < 0) { return 0; }
@@ -518,7 +518,7 @@ fn rl_load(path) {
 # entries in the same format as rl_to_jsonl.
 # ================================================================
 
-fn crl_to_jsonl(c) {
+fn crl_to_jsonl(c): i64 {
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "{\"version\":");
     str_builder_add_int(sb, crl_version(c));
@@ -545,7 +545,7 @@ fn crl_to_jsonl(c) {
 
 # Parse the CRL header line. Returns new Crl struct with the entries
 # vec initialized empty. Returns 0 on failure.
-fn _crl_parse_header(line, llen) {
+fn _crl_parse_header(line, llen): i64 {
     var version = 0;
     var issuer = 0;
     var issued_at = 0;
@@ -609,7 +609,7 @@ fn _crl_parse_header(line, llen) {
 
 # Parse CRL from JSONL content. First line = header, subsequent
 # lines = revocation entries.
-fn crl_from_jsonl(content, content_len) {
+fn crl_from_jsonl(content, content_len): i64 {
     # Extract first line
     var hend = 0;
     while (hend < content_len) {
@@ -637,14 +637,14 @@ fn crl_from_jsonl(content, content_len) {
     return c;
 }
 
-fn crl_save(c, path) {
+fn crl_save(c, path): i64 {
     var jsonl = crl_to_jsonl(c);
     var n = file_write_all(path, jsonl, strlen(jsonl));
     if (n < 0) { return ERR_IO; }
     return ERR_NONE;
 }
 
-fn crl_load(path) {
+fn crl_load(path): i64 {
     var buf = alloc(65536);
     var n = file_read_all(path, buf, 65536);
     if (n < 0) { return 0; }

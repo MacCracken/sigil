@@ -66,6 +66,22 @@ been removed in 3.0. The remaining upstream blocker:
 
 ### 3.1 work items
 
+- [ ] **[P1] Migrate NI-dispatch fns off hardcoded `[rbp-N]`
+      parameter loads.** Tracked under
+      [`issues/2026-05-10-cyrius-510-asm-stack-frame-drift-breaks-ni-paths.md`](issues/2026-05-10-cyrius-510-asm-stack-frame-drift-breaks-ni-paths.md).
+      Filed by majra 2026-05-10 against cyrius 5.10.34. Affects
+      `aes256_encrypt_block_ni`, `sha256_transform_ni`, and the
+      ed25519-NI surface; downstream bisect: sigil 2.9.0 = pass,
+      2.9.1–3.0.1 = SIGILL on the ed25519 path, 3.1.0 = SIGILL on
+      aes-gcm too. Blocks every downstream consumer from picking up
+      the 2.9.x crypto-pillar perf wins (363× AES, 21–44× SHA) under
+      any modern cyrius — majra 2.4.2 had to hold sigil at 2.9.0 to
+      ship. Lowest-risk fix: load parameters into module-level
+      globals before the asm block instead of decoding `[rbp-N]` byte
+      literals. **Ship this before the alloc-free rewrite below** —
+      parallel-batch speedups are moot if the serial NI hot paths
+      SIGILL under the toolchain consumers are actually running.
+
 - [ ] **Alloc-free verify hot path (Option 1 rewrite).** Rewrite
       `sv_verify_artifact` and its call chain to accept caller-
       provided scratch instead of allocating internally:

@@ -8,15 +8,15 @@
 #   +0   key_id       (C-string ptr)
 #   +8   path_prefix  (C-string ptr)
 
-fn key_pin_new(key_id, path_prefix) {
+fn key_pin_new(key_id, path_prefix): i64 {
     var kp = fl_alloc(16);
     store64(kp, key_id);
     store64(kp + 8, path_prefix);
     return kp;
 }
 
-fn kpin_key_id(kp) { return load64(kp); }
-fn kpin_prefix(kp) { return load64(kp + 8); }
+fn kpin_key_id(kp): i64 { return load64(kp); }
+fn kpin_prefix(kp): i64 { return load64(kp + 8); }
 
 # ================================================================
 # ComplianceReport (56 bytes)
@@ -30,7 +30,7 @@ fn kpin_prefix(kp) { return load64(kp + 8); }
 #   +40  revoked_list     (vec)
 #   +48  pin_violations   (vec)
 
-fn compliance_report_new() {
+fn compliance_report_new(): i64 {
     var cr = fl_alloc(56);
     store64(cr, 0);
     store64(cr + 8, 0);
@@ -42,13 +42,13 @@ fn compliance_report_new() {
     return cr;
 }
 
-fn creport_total(cr) { return load64(cr); }
-fn creport_compliant_count(cr) { return load64(cr + 8); }
-fn creport_is_compliant(cr) {
+fn creport_total(cr): i64 { return load64(cr); }
+fn creport_compliant_count(cr): i64 { return load64(cr + 8); }
+fn creport_is_compliant(cr): i64 {
     if (load64(cr + 8) == load64(cr)) { return 1; }
     return 0;
 }
-fn creport_violation_count(cr) {
+fn creport_violation_count(cr): i64 {
     return load64(cr) - load64(cr + 8);
 }
 
@@ -64,7 +64,7 @@ fn creport_violation_count(cr) {
 #   +40  key_pins      (vec of KeyPin)
 #   +48  audit_log     (AuditLog ptr)
 
-fn sigil_verifier_new(keyring, policy) {
+fn sigil_verifier_new(keyring, policy): i64 {
     var sv = fl_alloc(56);
     store64(sv, keyring);
     store64(sv + 8, policy);
@@ -76,24 +76,24 @@ fn sigil_verifier_new(keyring, policy) {
     return sv;
 }
 
-fn sv_keyring(sv) { return load64(sv); }
-fn sv_policy(sv) { return load64(sv + 8); }
-fn sv_revocations(sv) { return load64(sv + 16); }
-fn sv_integrity(sv) { return load64(sv + 24); }
-fn sv_trust_store(sv) { return load64(sv + 32); }
-fn sv_key_pins(sv) { return load64(sv + 40); }
-fn sv_audit_log(sv) { return load64(sv + 48); }
+fn sv_keyring(sv): i64 { return load64(sv); }
+fn sv_policy(sv): i64 { return load64(sv + 8); }
+fn sv_revocations(sv): i64 { return load64(sv + 16); }
+fn sv_integrity(sv): i64 { return load64(sv + 24); }
+fn sv_trust_store(sv): i64 { return load64(sv + 32); }
+fn sv_key_pins(sv): i64 { return load64(sv + 40); }
+fn sv_audit_log(sv): i64 { return load64(sv + 48); }
 
 # ================================================================
 # Key pin management
 # ================================================================
 
-fn sv_add_key_pin(sv, pin) {
+fn sv_add_key_pin(sv, pin): i64 {
     vec_push(load64(sv + 40), pin);
     return sv;
 }
 
-fn sv_remove_key_pins(sv, path_prefix) {
+fn sv_remove_key_pins(sv, path_prefix): i64 {
     var pins = load64(sv + 40);
     var plen = vec_len(pins);
     var removed = 0;
@@ -110,7 +110,7 @@ fn sv_remove_key_pins(sv, path_prefix) {
 }
 
 # Check if key is authorized for path (no pin = any key OK)
-fn _sv_key_authorized(sv, path, signer_key_id) {
+fn _sv_key_authorized(sv, path, signer_key_id): i64 {
     var pins = load64(sv + 40);
     var plen = vec_len(pins);
     var has_matching_pin = 0;
@@ -143,7 +143,7 @@ fn _sv_key_authorized(sv, path, signer_key_id) {
 # Register artifacts in trust store
 # ================================================================
 
-fn sv_register_trusted(sv, artifact) {
+fn sv_register_trusted(sv, artifact): i64 {
     # Downgrade SystemCore to Verified (only register_system_core allows SystemCore)
     if (artifact_trust_level(artifact) == TRUST_SYSTEM_CORE) {
         artifact_set_trust_level(artifact, TRUST_VERIFIED);
@@ -153,7 +153,7 @@ fn sv_register_trusted(sv, artifact) {
     return sv;
 }
 
-fn sv_register_system_core(sv, artifact) {
+fn sv_register_system_core(sv, artifact): i64 {
     artifact_set_trust_level(artifact, TRUST_SYSTEM_CORE);
     var chash = artifact_content_hash(artifact);
     map_set(load64(sv + 32), chash, artifact);
@@ -164,7 +164,7 @@ fn sv_register_system_core(sv, artifact) {
 # Sign an artifact and register it
 # ================================================================
 
-fn sv_sign_artifact(sv, path, secret_key, key_id, artifact_type) {
+fn sv_sign_artifact(sv, path, secret_key, key_id, artifact_type): i64 {
     var chash = hash_file(path);
     if (chash == 0) { return 0; }
 
@@ -187,7 +187,7 @@ fn sv_sign_artifact(sv, path, secret_key, key_id, artifact_type) {
 # Verify an artifact
 # ================================================================
 
-fn sv_verify_artifact(sv, path, artifact_type) {
+fn sv_verify_artifact(sv, path, artifact_type): i64 {
     var policy = load64(sv + 8);
     var chash = hash_file(path);
     if (chash == 0) {
@@ -348,7 +348,7 @@ fn sv_verify_artifact(sv, path, artifact_type) {
 # Convenience: verify agent binary
 # ================================================================
 
-fn sv_verify_agent(sv, path) {
+fn sv_verify_agent(sv, path): i64 {
     var policy = load64(sv + 8);
     var vr = sv_verify_artifact(sv, path, ARTIFACT_AGENT_BINARY);
 
@@ -389,7 +389,7 @@ fn sv_verify_agent(sv, path) {
 # (argonaut/ark) enforce it themselves before calling in.
 # ================================================================
 
-fn sv_verify_package(sv, path, expected_hash) {
+fn sv_verify_package(sv, path, expected_hash): i64 {
     var vr = sv_verify_artifact(sv, path, ARTIFACT_PACKAGE);
     if (expected_hash == 0) { return vr; }
 
@@ -414,7 +414,7 @@ fn sv_verify_package(sv, path, expected_hash) {
 # Revocation management
 # ================================================================
 
-fn sv_add_revocation(sv, entry) {
+fn sv_add_revocation(sv, entry): i64 {
     var rl = load64(sv + 16);
     var result = rl_add(rl, entry);
     if (result == ERR_NONE) {
@@ -424,7 +424,7 @@ fn sv_add_revocation(sv, entry) {
     return result;
 }
 
-fn sv_check_revocation(sv, key_id, content_hash) {
+fn sv_check_revocation(sv, key_id, content_hash): i64 {
     var rl = load64(sv + 16);
     if (key_id != 0) {
         if (rl_is_key_revoked(rl, key_id) == 1) { return 1; }
@@ -435,7 +435,7 @@ fn sv_check_revocation(sv, key_id, content_hash) {
     return 0;
 }
 
-fn sv_revocation_count(sv) {
+fn sv_revocation_count(sv): i64 {
     return rl_len(load64(sv + 16));
 }
 
@@ -443,14 +443,14 @@ fn sv_revocation_count(sv) {
 # Trust store queries
 # ================================================================
 
-fn sv_trust_level_for(sv, content_hash) {
+fn sv_trust_level_for(sv, content_hash): i64 {
     var store = load64(sv + 32);
     var artifact = map_get(store, content_hash);
     if (artifact == 0) { return TRUST_UNVERIFIED; }
     return artifact_trust_level(artifact);
 }
 
-fn sv_stats(sv) {
+fn sv_stats(sv): i64 {
     var store = load64(sv + 32);
     var s = sigil_stats_new();
     var keys = map_keys(store);
@@ -480,7 +480,7 @@ fn sv_stats(sv) {
 # Compliance report
 # ================================================================
 
-fn sv_compliance_report(sv) {
+fn sv_compliance_report(sv): i64 {
     var cr = compliance_report_new();
     var store = load64(sv + 32);
     var policy = load64(sv + 8);
@@ -536,17 +536,17 @@ fn sv_compliance_report(sv) {
 # change was invisible to a subsequent diff. Snapshotting a level
 # plus path byvalue gives a real before/after view.
 
-fn _snap_entry_new(trust_level, path) {
+fn _snap_entry_new(trust_level, path): i64 {
     var se = fl_alloc(16);
     store64(se, trust_level);
     store64(se + 8, path);
     return se;
 }
 
-fn snap_entry_trust_level(se) { return load64(se); }
-fn snap_entry_path(se) { return load64(se + 8); }
+fn snap_entry_trust_level(se): i64 { return load64(se); }
+fn snap_entry_path(se): i64 { return load64(se + 8); }
 
-fn sv_snapshot_trust_store(sv) {
+fn sv_snapshot_trust_store(sv): i64 {
     var store = load64(sv + 32);
     var keys = map_keys(store);
     var snap = map_new();
@@ -576,7 +576,7 @@ fn sv_snapshot_trust_store(sv) {
 # For a "changed" record, both old and new are set and differ.
 # For "added", old = -1. For "removed", new = -1.
 
-fn artifact_change_new(content_hash, path, old_tl, new_tl) {
+fn artifact_change_new(content_hash, path, old_tl, new_tl): i64 {
     var ac = fl_alloc(32);
     store64(ac, content_hash);
     store64(ac + 8, path);
@@ -585,16 +585,16 @@ fn artifact_change_new(content_hash, path, old_tl, new_tl) {
     return ac;
 }
 
-fn ac_content_hash(ac) { return load64(ac); }
-fn ac_path(ac) { return load64(ac + 8); }
-fn ac_old_trust_level(ac) { return load64(ac + 16); }
-fn ac_new_trust_level(ac) { return load64(ac + 24); }
+fn ac_content_hash(ac): i64 { return load64(ac); }
+fn ac_path(ac): i64 { return load64(ac + 8); }
+fn ac_old_trust_level(ac): i64 { return load64(ac + 16); }
+fn ac_new_trust_level(ac): i64 { return load64(ac + 24); }
 
 # TrustStoreDiff (24 bytes): added, removed, changed (all vecs of ArtifactChange ptrs).
 # BREAKING vs 2.4.x: vecs previously held raw TrustedArtifact pointers;
 # they now hold ArtifactChange records so callers can see both sides
 # of a trust-level transition, not just the current side.
-fn trust_store_diff_new() {
+fn trust_store_diff_new(): i64 {
     var d = fl_alloc(24);
     store64(d, vec_new());     # added   (ArtifactChange where old_tl = -1)
     store64(d + 8, vec_new()); # removed (ArtifactChange where new_tl = -1)
@@ -602,10 +602,10 @@ fn trust_store_diff_new() {
     return d;
 }
 
-fn tsdiff_added(d) { return load64(d); }
-fn tsdiff_removed(d) { return load64(d + 8); }
-fn tsdiff_changed(d) { return load64(d + 16); }
-fn tsdiff_is_empty(d) {
+fn tsdiff_added(d): i64 { return load64(d); }
+fn tsdiff_removed(d): i64 { return load64(d + 8); }
+fn tsdiff_changed(d): i64 { return load64(d + 16); }
+fn tsdiff_is_empty(d): i64 {
     if (vec_len(load64(d)) == 0) {
         if (vec_len(load64(d + 8)) == 0) {
             if (vec_len(load64(d + 16)) == 0) { return 1; }
@@ -614,7 +614,7 @@ fn tsdiff_is_empty(d) {
     return 0;
 }
 
-fn sv_diff_trust_store(sv, old_snap) {
+fn sv_diff_trust_store(sv, old_snap): i64 {
     var diff = trust_store_diff_new();
     var store = load64(sv + 32);
     var current_keys = map_keys(store);
@@ -694,7 +694,7 @@ fn sv_diff_trust_store(sv, old_snap) {
 # as json_write_escaped in trust.cyr.
 # ================================================================
 
-fn sv_load_trust_store(sv, path) {
+fn sv_load_trust_store(sv, path): i64 {
     var buf = alloc(65536);
     var n = file_read_all(path, buf, 65536);
     if (n <= 0) { return 0; }
@@ -788,7 +788,7 @@ fn sv_load_trust_store(sv, path) {
     return loaded;
 }
 
-fn sv_save_trust_store(sv, path) {
+fn sv_save_trust_store(sv, path): i64 {
     var store = load64(sv + 32);
     var keys = map_keys(store);
     var klen = vec_len(keys);
@@ -863,7 +863,7 @@ var _SIGIL_BATCH_WORKERS = 4;
 #   +24  end_idx
 #   +32  result_slots (base of `count * 8` pointer array)
 #   +40  mutex
-fn _batch_worker(arg) {
+fn _batch_worker(arg): i64 {
     var sv = load64(arg);
     var artifacts = load64(arg + 8);
     var start = load64(arg + 16);
@@ -883,7 +883,7 @@ fn _batch_worker(arg) {
     return 0;
 }
 
-fn sv_verify_batch(sv, artifacts, count) {
+fn sv_verify_batch(sv, artifacts, count): i64 {
     if (count >= _SIGIL_BATCH_PARALLEL_THRESHOLD) {
         if (_sigil_batch_mutex == 0) {
             _sigil_batch_mutex = mutex_new();
@@ -948,7 +948,7 @@ fn sv_verify_batch(sv, artifacts, count) {
 # Boot chain verification
 # ================================================================
 
-fn sv_verify_boot_chain(sv, components) {
+fn sv_verify_boot_chain(sv, components): i64 {
     var policy = load64(sv + 8);
     if (policy_verify_on_boot(policy) == 0) {
         return integrity_report_new();

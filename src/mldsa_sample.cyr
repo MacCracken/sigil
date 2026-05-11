@@ -35,7 +35,7 @@ var _mldsa_sample_absorb = 0;       # 80 bytes, seed (<=64) + nonce (2) scratch
 var _mldsa_sample_buf128 = 0;       # 5 × 168 + 2 bytes (uniform)
 var _mldsa_sample_buf256 = 0;       # 5 × 136 bytes (eta + gamma1 + challenge)
 
-fn _mldsa_sample_init() {
+fn _mldsa_sample_init(): i64 {
     if (_mldsa_sample_inited == 1) { return 0; }
     _mldsa_sample_state = alloc(200);
     _mldsa_sample_absorb = alloc(80);
@@ -53,7 +53,7 @@ fn _mldsa_sample_init() {
 # buffer is zeroed first so back-to-back sampling calls don't
 # carry over residue.
 
-fn _mldsa_shake128_stream_init(seed, seedlen, nonce) {
+fn _mldsa_shake128_stream_init(seed, seedlen, nonce): i64 {
     memset(_mldsa_sample_state, 0, 200);
     memcpy(_mldsa_sample_absorb, seed, seedlen);
     store8(_mldsa_sample_absorb + seedlen, nonce & 0xFF);
@@ -62,7 +62,7 @@ fn _mldsa_shake128_stream_init(seed, seedlen, nonce) {
     return 0;
 }
 
-fn _mldsa_shake256_stream_init(seed, seedlen, nonce) {
+fn _mldsa_shake256_stream_init(seed, seedlen, nonce): i64 {
     memset(_mldsa_sample_state, 0, 200);
     memcpy(_mldsa_sample_absorb, seed, seedlen);
     store8(_mldsa_sample_absorb + seedlen, nonce & 0xFF);
@@ -74,7 +74,7 @@ fn _mldsa_shake256_stream_init(seed, seedlen, nonce) {
 # Squeeze `nblocks` × `rate` bytes into `out`, permuting the state
 # between blocks. After the last squeeze, state is left ready for
 # one more block (i.e. the f1600 call is eager).
-fn _mldsa_shake_squeeze_blocks(out, nblocks, rate) {
+fn _mldsa_shake_squeeze_blocks(out, nblocks, rate): i64 {
     var b = 0;
     while (b < nblocks) {
         var i = 0;
@@ -96,7 +96,7 @@ fn _mldsa_shake_squeeze_blocks(out, nblocks, rate) {
 # bytes; acceptance probability Q / 2^23 ≈ 0.999 so 5 blocks of
 # SHAKE-128 (= 840 B) are almost always enough for 256 coeffs.
 
-fn mldsa_rej_uniform(a, len, buf, buflen) {
+fn mldsa_rej_uniform(a, len, buf, buflen): i64 {
     var ctr = 0;
     var pos = 0;
     while (ctr < len) {
@@ -121,7 +121,7 @@ fn mldsa_rej_uniform(a, len, buf, buflen) {
 # `4 - nibble`, nibbles in [9, 15] reject. Acceptance per nibble
 # is 9/16. η=4 path only; η=2 rejection tables are not ML-DSA-65.
 
-fn mldsa_rej_eta(a, len, buf, buflen) {
+fn mldsa_rej_eta(a, len, buf, buflen): i64 {
     var ctr = 0;
     var pos = 0;
     while (ctr < len) {
@@ -164,7 +164,7 @@ var _mldsa_pu_off = 0;
 var _mldsa_pu_buflen = 0;
 var _mldsa_pu_a = 0;
 
-fn mldsa_poly_uniform(a, seed, nonce) {
+fn mldsa_poly_uniform(a, seed, nonce): i64 {
     _mldsa_sample_init();
     _mldsa_pu_a = a;
     _mldsa_shake128_stream_init(seed, MLDSA_SEEDBYTES, nonce);
@@ -205,7 +205,7 @@ fn mldsa_poly_uniform(a, seed, nonce) {
 var _mldsa_pe_ctr = 0;
 var _mldsa_pe_a = 0;
 
-fn mldsa_poly_uniform_eta(a, seed, nonce) {
+fn mldsa_poly_uniform_eta(a, seed, nonce): i64 {
     _mldsa_sample_init();
     _mldsa_pe_a = a;
     _mldsa_shake256_stream_init(seed, MLDSA_CRHBYTES, nonce);
@@ -235,7 +235,7 @@ fn mldsa_poly_uniform_eta(a, seed, nonce) {
 # with coefficients in [1 − γ1, γ1]. No rejection; the unpack
 # is exact.
 
-fn mldsa_poly_uniform_gamma1(a, seed, nonce) {
+fn mldsa_poly_uniform_gamma1(a, seed, nonce): i64 {
     _mldsa_sample_init();
     _mldsa_shake256_stream_init(seed, MLDSA_CRHBYTES, nonce);
     _mldsa_shake_squeeze_blocks(_mldsa_sample_buf256, 5, 136);
@@ -256,7 +256,7 @@ var _mldsa_ch_pos = 0;
 var _mldsa_ch_signs = 0;
 var _mldsa_ch_i = 0;
 
-fn mldsa_poly_challenge(c, seed) {
+fn mldsa_poly_challenge(c, seed): i64 {
     _mldsa_sample_init();
     _mldsa_ch_c = c;
     # Absorb c̃ via the stream wrapper with nonce=0 would append two
@@ -313,7 +313,7 @@ fn mldsa_poly_challenge(c, seed) {
 
 # ExpandA: matrix mat[i][j] = SHAKE-128(ρ ‖ (i<<8)|j) sampled into
 # [0, Q). Total K·L = 30 polys.
-fn mldsa_polyvec_matrix_expand(mat, rho) {
+fn mldsa_polyvec_matrix_expand(mat, rho): i64 {
     var i = 0;
     while (i < MLDSA65_K) {
         var j = 0;
@@ -333,7 +333,7 @@ fn mldsa_polyvec_matrix_expand(mat, rho) {
 }
 
 # ExpandS → s1 (L polys, nonces 0..L-1)
-fn mldsa_polyvecl_uniform_eta(v, seed, nonce_base) {
+fn mldsa_polyvecl_uniform_eta(v, seed, nonce_base): i64 {
     var i = 0;
     while (i < MLDSA65_L) {
         mldsa_poly_uniform_eta(v + i * 2048, seed, nonce_base + i);
@@ -343,7 +343,7 @@ fn mldsa_polyvecl_uniform_eta(v, seed, nonce_base) {
 }
 
 # ExpandS → s2 (K polys, nonces L..L+K-1)
-fn mldsa_polyveck_uniform_eta(v, seed, nonce_base) {
+fn mldsa_polyveck_uniform_eta(v, seed, nonce_base): i64 {
     var i = 0;
     while (i < MLDSA65_K) {
         mldsa_poly_uniform_eta(v + i * 2048, seed, nonce_base + i);
@@ -353,7 +353,7 @@ fn mldsa_polyveck_uniform_eta(v, seed, nonce_base) {
 }
 
 # ExpandMask: sign-time mask y (L polys), nonces L·κ + ℓ.
-fn mldsa_polyvecl_uniform_gamma1(v, seed, nonce_base) {
+fn mldsa_polyvecl_uniform_gamma1(v, seed, nonce_base): i64 {
     var i = 0;
     while (i < MLDSA65_L) {
         mldsa_poly_uniform_gamma1(v + i * 2048, seed, nonce_base + i);

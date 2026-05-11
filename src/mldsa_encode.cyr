@@ -27,7 +27,7 @@
 # polyt1_pack / polyt1_unpack (10 bits/coeff, 320 bytes per poly)
 # ================================================================
 
-fn _mldsa_polyt1_pack(r, a) {
+fn _mldsa_polyt1_pack(r, a): i64 {
     var i = 0;
     while (i < 256 / 4) {
         var c0 = load64(a + (4 * i + 0) * 8);
@@ -44,7 +44,7 @@ fn _mldsa_polyt1_pack(r, a) {
     return 0;
 }
 
-fn _mldsa_polyt1_unpack(r, a) {
+fn _mldsa_polyt1_unpack(r, a): i64 {
     var i = 0;
     while (i < 256 / 4) {
         var b0 = load8(a + 5 * i + 0) & 0xFF;
@@ -67,7 +67,7 @@ fn _mldsa_polyt1_unpack(r, a) {
 # Coefficients land in (−2^{D−1}, 2^{D−1}]. Packed as
 # 2^{D−1} − c so the stored value is non-negative.
 
-fn _mldsa_polyt0_pack(r, a) {
+fn _mldsa_polyt0_pack(r, a): i64 {
     var bias = 1 << (MLDSA_D - 1);
     var i = 0;
     while (i < 256 / 8) {
@@ -97,7 +97,7 @@ fn _mldsa_polyt0_pack(r, a) {
     return 0;
 }
 
-fn _mldsa_polyt0_unpack(r, a) {
+fn _mldsa_polyt0_unpack(r, a): i64 {
     var bias = 1 << (MLDSA_D - 1);
     var i = 0;
     while (i < 256 / 8) {
@@ -140,7 +140,7 @@ fn _mldsa_polyt0_unpack(r, a) {
 # ================================================================
 # Store η − c as a 4-bit value; two coefficients per byte.
 
-fn _mldsa_polyeta_pack(r, a) {
+fn _mldsa_polyeta_pack(r, a): i64 {
     var i = 0;
     while (i < 256 / 2) {
         var t0 = MLDSA65_ETA - load64(a + (2 * i + 0) * 8);
@@ -151,7 +151,7 @@ fn _mldsa_polyeta_pack(r, a) {
     return 0;
 }
 
-fn _mldsa_polyeta_unpack(r, a) {
+fn _mldsa_polyeta_unpack(r, a): i64 {
     var i = 0;
     while (i < 256 / 2) {
         var b = load8(a + i) & 0xFF;
@@ -166,7 +166,7 @@ fn _mldsa_polyeta_unpack(r, a) {
 # polyz_pack / polyz_unpack (γ1 = 2^19, 20 bits/coeff, 640 bytes)
 # ================================================================
 
-fn _mldsa_polyz_pack(r, a) {
+fn _mldsa_polyz_pack(r, a): i64 {
     var i = 0;
     while (i < 256 / 2) {
         var t0 = MLDSA65_GAMMA1 - load64(a + (2 * i + 0) * 8);
@@ -181,7 +181,7 @@ fn _mldsa_polyz_pack(r, a) {
     return 0;
 }
 
-fn _mldsa_polyz_unpack(r, a) {
+fn _mldsa_polyz_unpack(r, a): i64 {
     var i = 0;
     while (i < 256 / 2) {
         var b0 = load8(a + 5 * i + 0) & 0xFF;
@@ -204,7 +204,7 @@ fn _mldsa_polyz_unpack(r, a) {
 # No unpack — w1 only packs for the challenge-hash step. Input
 # coefficients are standard representatives in [0, 15].
 
-fn _mldsa_polyw1_pack(r, a) {
+fn _mldsa_polyw1_pack(r, a): i64 {
     var i = 0;
     while (i < 256 / 2) {
         var c0 = load64(a + (2 * i + 0) * 8);
@@ -215,7 +215,7 @@ fn _mldsa_polyw1_pack(r, a) {
     return 0;
 }
 
-fn mldsa_polyveck_pack_w1(r, v) {
+fn mldsa_polyveck_pack_w1(r, v): i64 {
     var i = 0;
     while (i < MLDSA65_K) {
         _mldsa_polyw1_pack(r + i * MLDSA65_POLYW1_PACKEDBYTES, v + i * 2048);
@@ -229,7 +229,7 @@ fn mldsa_polyveck_pack_w1(r, v) {
 # ================================================================
 
 # pk = ρ (32 B) || t1 (K · 320 = 1920 B)
-fn mldsa_pack_pk(pk, rho, t1) {
+fn mldsa_pack_pk(pk, rho, t1): i64 {
     memcpy(pk, rho, MLDSA_SEEDBYTES);
     var i = 0;
     while (i < MLDSA65_K) {
@@ -242,7 +242,7 @@ fn mldsa_pack_pk(pk, rho, t1) {
     return 0;
 }
 
-fn mldsa_unpack_pk(rho, t1, pk) {
+fn mldsa_unpack_pk(rho, t1, pk): i64 {
     memcpy(rho, pk, MLDSA_SEEDBYTES);
     var i = 0;
     while (i < MLDSA65_K) {
@@ -256,7 +256,7 @@ fn mldsa_unpack_pk(rho, t1, pk) {
 }
 
 # sk = ρ (32) || K (32) || tr (64) || s1 (L·128) || s2 (K·128) || t0 (K·416)
-fn mldsa_pack_sk(sk, rho, key, tr, t0, s1, s2) {
+fn mldsa_pack_sk(sk, rho, key, tr, t0, s1, s2): i64 {
     var off = 0;
     memcpy(sk + off, rho, MLDSA_SEEDBYTES);
     off = off + MLDSA_SEEDBYTES;
@@ -284,7 +284,7 @@ fn mldsa_pack_sk(sk, rho, key, tr, t0, s1, s2) {
     return 0;
 }
 
-fn mldsa_unpack_sk(rho, key, tr, t0, s1, s2, sk) {
+fn mldsa_unpack_sk(rho, key, tr, t0, s1, s2, sk): i64 {
     var off = 0;
     memcpy(rho, sk + off, MLDSA_SEEDBYTES);
     off = off + MLDSA_SEEDBYTES;
@@ -318,7 +318,7 @@ fn mldsa_unpack_sk(rho, key, tr, t0, s1, s2, sk) {
 # hold the cumulative count of non-zero coefficients after each
 # poly i. Strong unforgeability requires strictly-increasing
 # indices within each poly and zero-bytes in unused tail slots.
-fn mldsa_pack_sig(sig, c, z, h) {
+fn mldsa_pack_sig(sig, c, z, h): i64 {
     var off = 0;
     memcpy(sig + off, c, MLDSA65_CTILDEBYTES);
     off = off + MLDSA65_CTILDEBYTES;
@@ -349,7 +349,7 @@ fn mldsa_pack_sig(sig, c, z, h) {
 
 # Returns 0 on success, 1 on malformed signature. Zeros `h` on
 # the way in so unused coefficient positions are explicitly zero.
-fn mldsa_unpack_sig(c, z, h, sig) {
+fn mldsa_unpack_sig(c, z, h, sig): i64 {
     var off = 0;
     memcpy(c, sig + off, MLDSA65_CTILDEBYTES);
     off = off + MLDSA65_CTILDEBYTES;

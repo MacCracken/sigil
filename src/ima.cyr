@@ -19,7 +19,7 @@
 #   +8   measurement_cnt  (i64)
 #   +16  policy_loaded    (i64, 0 or 1)
 
-fn sigil_ima_snapshot_new(active, count, policy) {
+fn sigil_ima_snapshot_new(active, count, policy): i64 {
     var s = fl_alloc(24);
     store64(s, active);
     store64(s + 8, count);
@@ -27,9 +27,9 @@ fn sigil_ima_snapshot_new(active, count, policy) {
     return s;
 }
 
-fn sigil_ima_active(s) { return load64(s); }
-fn sigil_ima_count(s) { return load64(s + 8); }
-fn sigil_ima_policy(s) { return load64(s + 16); }
+fn sigil_ima_active(s): i64 { return load64(s); }
+fn sigil_ima_count(s): i64 { return load64(s + 8); }
+fn sigil_ima_policy(s): i64 { return load64(s + 16); }
 
 # ================================================================
 # sigil_ima_snapshot — query current kernel IMA state
@@ -40,7 +40,7 @@ fn sigil_ima_policy(s) { return load64(s + 16); }
 # that through.
 # ================================================================
 
-fn sigil_ima_snapshot() {
+fn sigil_ima_snapshot(): i64 {
     var res = ima_get_status();
     if (is_err_result(res) == 1) {
         return sigil_ima_snapshot_new(0, 0, 0);
@@ -56,21 +56,21 @@ fn sigil_ima_snapshot() {
 # Convenience predicates — avoid allocating a snapshot when the
 # caller only wants one field.
 
-fn sigil_ima_available() {
+fn sigil_ima_available(): i64 {
     var s = sigil_ima_snapshot();
     var v = sigil_ima_active(s);
     fl_free(s);
     return v;
 }
 
-fn sigil_ima_measurement_count() {
+fn sigil_ima_measurement_count(): i64 {
     var s = sigil_ima_snapshot();
     var v = sigil_ima_count(s);
     fl_free(s);
     return v;
 }
 
-fn sigil_ima_policy_loaded() {
+fn sigil_ima_policy_loaded(): i64 {
     var s = sigil_ima_snapshot();
     var v = sigil_ima_policy(s);
     fl_free(s);

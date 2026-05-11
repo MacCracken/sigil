@@ -50,7 +50,7 @@ var _mldsa_ws_ctilde2 = 0;      # CTILDEBYTES (verify's recomputed c̃)
 var _mldsa_sv_state = 0;        # 200 bytes
 var _mldsa_sv_pos = 0;
 
-fn _mldsa_ws_init() {
+fn _mldsa_ws_init(): i64 {
     if (_mldsa_ws_inited == 1) { return 0; }
     _mldsa_ws_mat = alloc(MLDSA65_K * MLDSA65_L * 256 * 8);
     _mldsa_ws_s1 = alloc(MLDSA65_L * 256 * 8);
@@ -88,13 +88,13 @@ fn _mldsa_ws_init() {
 # exposing an init/absorb/finalize/squeeze chain on the
 # stdlib-internal `_keccak_f1600` primitive.
 
-fn _mldsa_sv_init() {
+fn _mldsa_sv_init(): i64 {
     memset(_mldsa_sv_state, 0, 200);
     _mldsa_sv_pos = 0;
     return 0;
 }
 
-fn _mldsa_sv_absorb(data, datalen) {
+fn _mldsa_sv_absorb(data, datalen): i64 {
     var i = 0;
     while (i < datalen) {
         store8(
@@ -111,7 +111,7 @@ fn _mldsa_sv_absorb(data, datalen) {
     return 0;
 }
 
-fn _mldsa_sv_finalize() {
+fn _mldsa_sv_finalize(): i64 {
     store8(
     _mldsa_sv_state + _mldsa_sv_pos,
     load8(_mldsa_sv_state + _mldsa_sv_pos) ^ 0x1F
@@ -122,7 +122,7 @@ fn _mldsa_sv_finalize() {
     return 0;
 }
 
-fn _mldsa_sv_squeeze(out, outlen) {
+fn _mldsa_sv_squeeze(out, outlen): i64 {
     var out_pos = 0;
     while (out_pos < outlen) {
         if (_mldsa_sv_pos == 136) {
@@ -161,7 +161,7 @@ fn _mldsa_sv_squeeze(out, outlen) {
 #   6. tr = SHAKE-256(pk, 64 bytes).
 #   7. Pack pk = rho ‖ t1, sk = rho ‖ key ‖ tr ‖ s1 ‖ s2 ‖ t0.
 
-fn mldsa65_keypair_from_seed(seed, pk, sk) {
+fn mldsa65_keypair_from_seed(seed, pk, sk): i64 {
     _mldsa_ws_init();
 
     # Expand seed into (rho, rhoprime, key). Input = seed ‖ K ‖ L.
@@ -210,7 +210,7 @@ fn mldsa65_keypair_from_seed(seed, pk, sk) {
 # Convenience: generate keypair from /dev/urandom. Returns 1 on
 # success, 0 if entropy gather fails (partial reads, EOF, etc.)
 # — matches ed25519_keypair_from_random's ABI.
-fn mldsa65_keypair(pk, sk) {
+fn mldsa65_keypair(pk, sk): i64 {
     secret var seed[32];
     memset(&seed, 0, MLDSA_SEEDBYTES);
     var fd = file_open("/dev/urandom", 0, 0);
@@ -253,7 +253,7 @@ var _mldsa_sign_nonce = 0;
 var _mldsa_sign_sig = 0;
 var _mldsa_sign_sk = 0;
 
-fn mldsa65_sign(sig, msg, msglen, sk) {
+fn mldsa65_sign(sig, msg, msglen, sk): i64 {
     _mldsa_ws_init();
     _mldsa_sign_sig = sig;
     _mldsa_sign_sk = sk;
@@ -371,7 +371,7 @@ fn mldsa65_sign(sig, msg, msglen, sk) {
 # `crypto_sign_verify_internal` (int returning 0/−1 from the C
 # ref; we flip to 0/1 to match sigil's other boolean returns).
 
-fn mldsa65_verify(sig, msg, msglen, pk) {
+fn mldsa65_verify(sig, msg, msglen, pk): i64 {
     _mldsa_ws_init();
 
     # Unpack pk and sig. A malformed sig fails early.
@@ -453,7 +453,7 @@ fn mldsa65_verify(sig, msg, msglen, pk) {
 # lives in src/verify.cyr and calls this entry point once it has
 # established that the artifact is present and the signer keys
 # are known.
-fn sigil_verify_hybrid(msg, msg_len, ed_sig, ed_pk, mldsa_sig, mldsa_pk, required_alg) {
+fn sigil_verify_hybrid(msg, msg_len, ed_sig, ed_pk, mldsa_sig, mldsa_pk, required_alg): i64 {
     if (required_alg == SIG_ALG_ED25519) {
         return ed25519_verify(ed_pk, msg, msg_len, ed_sig);
     }

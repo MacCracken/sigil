@@ -34,7 +34,7 @@
 var _aes_ni_cache = 2;
 var _aes_ni_probe_out = 0;      # 8-byte scratch for the probe's *out param
 
-fn aes_ni_available() {
+fn aes_ni_available(): i64 {
     if (_aes_ni_cache != 2) { return _aes_ni_cache; }
     if (_aes_ni_probe_out == 0) { _aes_ni_probe_out = alloc(8); }
     store64(_aes_ni_probe_out, 0);
@@ -53,7 +53,7 @@ fn aes_ni_available() {
 # Takes a caller-supplied pointer to keep the CPUID-clobbered
 # registers' lifetime confined to the inline-asm block; the caller
 # reloads via load64 after the call returns.
-fn _aes_ni_cpuid_probe(out) {
+fn _aes_ni_cpuid_probe(out): i64 {
     #ifdef CYRIUS_ARCH_X86
     asm {
         # Param out = [rbp-8]. Load into rdi.
@@ -81,7 +81,7 @@ fn _aes_ni_cpuid_probe(out) {
 # Status: reaches the CPU's AESENC machinery correctly when called
 # directly inside a single-compilation-unit build. Not wired into
 # aes_gcm_encrypt in 2.9.0 (see module header).
-fn aes256_encrypt_block_ni(round_keys, in_block, out_block) {
+fn aes256_encrypt_block_ni(round_keys, in_block, out_block): i64 {
     #ifdef CYRIUS_ARCH_X86
     asm {
         # Params: round_keys=[rbp-8], in_block=[rbp-16], out_block=[rbp-24]

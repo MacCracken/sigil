@@ -4,7 +4,7 @@
 # Hex encode: bytes -> lowercase hex C-string
 # ================================================================
 
-fn hex_encode(bytes, len) {
+fn hex_encode(bytes, len): i64 {
     var out = alloc(len * 2 + 1);
     var i = 0;
     while (i < len) {
@@ -25,14 +25,14 @@ fn hex_encode(bytes, len) {
 # Hex decode: hex C-string + length -> raw bytes
 # ================================================================
 
-fn _hex_nibble(c) {
+fn _hex_nibble(c): i64 {
     if (c >= 48) { if (c <= 57) { return c - 48; } }
     if (c >= 97) { if (c <= 102) { return c - 87; } }
     if (c >= 65) { if (c <= 70) { return c - 55; } }
     return (0 - 1);
 }
 
-fn _hex_is_valid_char(c) {
+fn _hex_is_valid_char(c): i64 {
     if (c >= 48) { if (c <= 57) { return 1; } }
     if (c >= 97) { if (c <= 102) { return 1; } }
     if (c >= 65) { if (c <= 70) { return 1; } }
@@ -40,7 +40,7 @@ fn _hex_is_valid_char(c) {
 }
 
 # Returns 1 if hex_str is a valid even-length hex C-string of hex_len chars.
-fn hex_is_valid(hex_str, hex_len) {
+fn hex_is_valid(hex_str, hex_len): i64 {
     if (hex_len == 0) { return 0; }
     if ((hex_len & 1) == 1) { return 0; }
     var i = 0;
@@ -53,7 +53,7 @@ fn hex_is_valid(hex_str, hex_len) {
 
 # Decode hex to bytes. Returns 0 (null) on invalid input
 # (odd length, non-hex char). Caller MUST null-check.
-fn hex_decode(hex_str, hex_len) {
+fn hex_decode(hex_str, hex_len): i64 {
     if ((hex_len & 1) == 1) { return 0; }
     var blen = hex_len / 2;
     if (blen == 0) { return 0; }
@@ -74,13 +74,13 @@ fn hex_decode(hex_str, hex_len) {
 # Convenience: hash bytes to hex string
 # ================================================================
 
-fn sha256_hex(data, len) {
+fn sha256_hex(data, len): i64 {
     var digest[32];
     sha256(data, len, &digest);
     return hex_encode(&digest, 32);
 }
 
-fn sha512_hex(data, len) {
+fn sha512_hex(data, len): i64 {
     var digest[64];
     sha512(data, len, &digest);
     return hex_encode(&digest, 64);

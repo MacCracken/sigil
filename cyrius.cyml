@@ -1,11 +1,11 @@
 [package]
 name = "sigil"
-version = "3.1.0"
+version = "${file:VERSION}"
 description = "Sigil — system-wide trust verification for AGNOS. Ed25519, SHA-256/512, HMAC, HKDF, AES-256-GCM, integrity, audit."
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/sigil"
 language = "cyrius"
-cyrius = "5.9.20"
+cyrius = "5.11.4"
 
 [build]
 entry = "programs/smoke.cyr"

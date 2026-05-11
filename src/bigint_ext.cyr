@@ -12,7 +12,7 @@
 # ================================================================
 
 # Load 32 little-endian bytes from src into dst as four i64 limbs.
-fn u256_load_le(dst, src) {
+fn u256_load_le(dst, src): i64 {
     var i = 0;
     while (i < 4) {
         store64(dst + i * 8,
@@ -30,7 +30,7 @@ fn u256_load_le(dst, src) {
 }
 
 # Store src (four i64 limbs) as 32 little-endian bytes at dst.
-fn u256_store_le(dst, src) {
+fn u256_store_le(dst, src): i64 {
     var i = 0;
     while (i < 4) {
         var v = load64(src + i * 8);
@@ -54,7 +54,7 @@ fn u256_store_le(dst, src) {
 var _m64_lo = 0;
 var _m64_hi = 0;
 
-fn _mul64_full(a, b) {
+fn _mul64_full(a, b): i64 {
     var mask32 = 0xFFFFFFFF;
     var aL = a & mask32;
     var aH = (a >> 32) & mask32;
@@ -86,7 +86,7 @@ var _mf_c1 = 0;
 var _mf_carry = 0;
 var _mf_hi = 0;
 
-fn u256_mul_full(out, a, b) {
+fn u256_mul_full(out, a, b): i64 {
     memset(out, 0, 64);
     var sbit = 1 << 63;
     var i = 0;
@@ -139,7 +139,7 @@ var _mod_lowp = 0;
 var _mod_r = 0;
 var _mod_extra = 0;
 
-fn _init_ed_p() {
+fn _init_ed_p(): i64 {
     if (_ed_p_inited == 1) { return 0; }
     _ed_p = u256_from_hex("7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffed");
     _mod_prod = alloc(64);
@@ -153,7 +153,7 @@ fn _init_ed_p() {
     return 0;
 }
 
-fn u512_mod_p(out, val) {
+fn u512_mod_p(out, val): i64 {
     _init_ed_p();
 
     store64(_mod_aH, load64(val + 32));
@@ -196,21 +196,21 @@ fn u512_mod_p(out, val) {
 # Field arithmetic mod p
 # ================================================================
 
-fn fp_add(r, a, b) {
+fn fp_add(r, a, b): i64 {
     _init_ed_p();
     u256_add(r, a, b);
     if (u256_cmp(r, _ed_p) >= 0) { u256_sub(r, r, _ed_p); }
     return 0;
 }
 
-fn fp_sub(r, a, b) {
+fn fp_sub(r, a, b): i64 {
     _init_ed_p();
     var borrow = u256_sub(r, a, b);
     if (borrow > 0) { u256_add(r, r, _ed_p); }
     return 0;
 }
 
-fn fp_neg(r, a) {
+fn fp_neg(r, a): i64 {
     _init_ed_p();
     if (u256_is_zero(a) == 1) {
         u256_copy(r, a);
@@ -222,14 +222,14 @@ fn fp_neg(r, a) {
 
 var _fp_mul_product = 0;
 
-fn fp_mul(r, a, b) {
+fn fp_mul(r, a, b): i64 {
     if (_fp_mul_product == 0) { _fp_mul_product = alloc(64); }
     u256_mul_full(_fp_mul_product, a, b);
     u512_mod_p(r, _fp_mul_product);
     return 0;
 }
 
-fn fp_sq(r, a) {
+fn fp_sq(r, a): i64 {
     return fp_mul(r, a, a);
 }
 
@@ -245,7 +245,7 @@ var _fp_pow_exp = 0;
 var _fp_pow_i = 0;
 var _fp_pow_inited = 0;
 
-fn fp_pow(r, base, exp) {
+fn fp_pow(r, base, exp): i64 {
     _init_ed_p();
     if (_fp_pow_inited == 0) {
         _fp_pow_tmp = alloc(32);
@@ -297,7 +297,7 @@ var _fpi_n = 0;
 var _fpi_i = 0;
 var _fpi_inited = 0;
 
-fn _fpi_sq_n(buf, n) {
+fn _fpi_sq_n(buf, n): i64 {
     # In-place square `buf` n times. Params are saved to globals
     # because Cyrius clobbers locals across nested fp_sq → fp_mul calls.
     _fpi_buf = buf;
@@ -310,7 +310,7 @@ fn _fpi_sq_n(buf, n) {
     return 0;
 }
 
-fn fp_inv(r, a) {
+fn fp_inv(r, a): i64 {
     _init_ed_p();
     if (_fpi_inited == 0) {
         _fpi_t0 = alloc(32);

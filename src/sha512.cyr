@@ -10,35 +10,35 @@ var _sha512_K = 0;
 var _sha512_W = 0;
 var _sha512_inited = 0;
 
-fn _sha512_rotr(x, n) {
+fn _sha512_rotr(x, n): i64 {
     return (x >> n) | (x << (64 - n));
 }
 
-fn sha512_ch(x, y, z) {
+fn sha512_ch(x, y, z): i64 {
     return (x & y) ^ ((x ^ 0xFFFFFFFFFFFFFFFF) & z);
 }
 
-fn sha512_maj(x, y, z) {
+fn sha512_maj(x, y, z): i64 {
     return (x & y) ^ (x & z) ^ (y & z);
 }
 
-fn sha512_bsig0(x) {
+fn sha512_bsig0(x): i64 {
     return _sha512_rotr(x, 28) ^ _sha512_rotr(x, 34) ^ _sha512_rotr(x, 39);
 }
 
-fn sha512_bsig1(x) {
+fn sha512_bsig1(x): i64 {
     return _sha512_rotr(x, 14) ^ _sha512_rotr(x, 18) ^ _sha512_rotr(x, 41);
 }
 
-fn sha512_ssig0(x) {
+fn sha512_ssig0(x): i64 {
     return _sha512_rotr(x, 1) ^ _sha512_rotr(x, 8) ^ (x >> 7);
 }
 
-fn sha512_ssig1(x) {
+fn sha512_ssig1(x): i64 {
     return _sha512_rotr(x, 19) ^ _sha512_rotr(x, 61) ^ (x >> 6);
 }
 
-fn sha512_global_init() {
+fn sha512_global_init(): i64 {
     if (_sha512_inited == 1) { return 0; }
 
     _sha512_K = alloc(640);
@@ -137,7 +137,7 @@ fn sha512_global_init() {
 #   +192  buf_len (8 bytes)
 #   +200  total_len (8 bytes)
 
-fn sha512_init() {
+fn sha512_init(): i64 {
     sha512_global_init();
     var ctx = fl_alloc(208);
     store64(ctx, 0x6a09e667f3bcc908);
@@ -171,7 +171,7 @@ var _s5_t2 = 0;
 var _s5_ctx = 0;
 var _s5_i = 0;
 
-fn sha512_transform(ctx) {
+fn sha512_transform(ctx): i64 {
     _s5_ctx = ctx;
     var buf = ctx + 64;
 
@@ -248,7 +248,7 @@ fn sha512_transform(ctx) {
 # SHA-512 update
 # ================================================================
 
-fn sha512_update(ctx, data, len) {
+fn sha512_update(ctx, data, len): i64 {
     var buf_len = load64(ctx + 192);
     var total = load64(ctx + 200);
     total = total + len;
@@ -287,7 +287,7 @@ fn sha512_update(ctx, data, len) {
 # SHA-512 finalize — produce 64-byte digest
 # ================================================================
 
-fn sha512_finalize(ctx, out) {
+fn sha512_finalize(ctx, out): i64 {
     var buf_len = load64(ctx + 192);
     var total_bits = load64(ctx + 200) * 8;
 
@@ -335,7 +335,7 @@ fn sha512_finalize(ctx, out) {
 # Convenience — hash data in one shot
 # ================================================================
 
-fn sha512(data, len, out) {
+fn sha512(data, len, out): i64 {
     var ctx = sha512_init();
     sha512_update(ctx, data, len);
     sha512_finalize(ctx, out);

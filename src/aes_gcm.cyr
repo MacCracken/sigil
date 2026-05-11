@@ -64,22 +64,22 @@ var _aes_inited = 0;
 #   row d: 70 3e b5 66 48 03 f6 0e 61 35 57 b9 86 c1 1d 9e
 #   row e: e1 f8 98 11 69 d9 8e 94 9b 1e 87 e9 ce 55 28 df
 #   row f: 8c a1 89 0d bf e6 42 68 41 99 2d 0f b0 54 bb 16
-fn _aes_sbox_hex() {
+fn _aes_sbox_hex(): i64 {
     return "637c777bf26b6fc53001672bfed7ab76ca82c97dfa5947f0add4a2af9ca472c0b7fd9326363ff7cc34a5e5f171d8311504c723c31896059a071280e2eb27b27509832c1a1b6e5aa0523bd6b329e32f8453d100ed20fcb15b6acbbe394a4c58cfd0efaafb434d338545f9027f503c9fa851a3408f929d38f5bcb6da2110fff3d2cd0c13ec5f974417c4a77e3d645d197360814fdc222a908846eeb814de5e0bdbe0323a0a4906245cc2d3ac629195e479e7c8376d8dd54ea96c56f4ea657aae08ba78252e1ca6b4c6e8dd741f4bbd8b8a703eb5664803f60e613557b986c11d9ee1f8981169d98e949b1e87e9ce5528df8ca1890dbfe6426841992d0fb054bb16";
 }
 
 # rcon[0..10] as hex: rcon[0] is padding (8d), never used.
-fn _aes_rcon_hex() {
+fn _aes_rcon_hex(): i64 {
     return "8d01020408102040801b36";
 }
 
-fn _aes_decode_nibble(c) {
+fn _aes_decode_nibble(c): i64 {
     if (c >= 48) { if (c <= 57) { return c - 48; } }
     if (c >= 97) { if (c <= 102) { return c - 87; } }
     return 0;
 }
 
-fn _aes_decode_hex(buf, hex_str, byte_len) {
+fn _aes_decode_hex(buf, hex_str, byte_len): i64 {
     var i = 0;
     while (i < byte_len) {
         var hi = _aes_decode_nibble(load8(hex_str + i * 2) & 0xFF);
@@ -90,7 +90,7 @@ fn _aes_decode_hex(buf, hex_str, byte_len) {
     return 0;
 }
 
-fn aes_gcm_global_init() {
+fn aes_gcm_global_init(): i64 {
     if (_aes_inited == 1) { return 0; }
     _aes_sbox = alloc(256);
     _aes_rcon = alloc(16);
@@ -100,7 +100,7 @@ fn aes_gcm_global_init() {
     return 0;
 }
 
-fn _aes_sub(b) {
+fn _aes_sub(b): i64 {
     return load8(_aes_sbox + (b & 0xFF)) & 0xFF;
 }
 
@@ -109,7 +109,7 @@ fn _aes_sub(b) {
 # (x^8 + x^4 + x^3 + x + 1). FIPS 197 § 4.2.1.
 # ================================================================
 
-fn _aes_xtime(b) {
+fn _aes_xtime(b): i64 {
     var shifted = (b << 1) & 0xFF;
     if ((b & 0x80) != 0) {
         return (shifted ^ 0x1b) & 0xFF;
@@ -122,7 +122,7 @@ fn _aes_xtime(b) {
 # FIPS 197 § 5.2 algorithm. Nk=8, Nr=14, total expanded size = 4*4*(Nr+1)=240.
 # ================================================================
 
-fn aes256_key_expand(key, round_keys) {
+fn aes256_key_expand(key, round_keys): i64 {
     aes_gcm_global_init();
     # First 32 bytes of the expanded key = raw key material.
     memcpy(round_keys, key, 32);
@@ -189,7 +189,7 @@ var _aes_state = 0;
 var _aes_tmp = 0;
 var _aes_state_inited = 0;
 
-fn _aes_state_init() {
+fn _aes_state_init(): i64 {
     if (_aes_state_inited == 1) { return 0; }
     _aes_state = alloc(16);
     _aes_tmp = alloc(16);
@@ -197,7 +197,7 @@ fn _aes_state_init() {
     return 0;
 }
 
-fn _aes_add_round_key(rk, round) {
+fn _aes_add_round_key(rk, round): i64 {
     var off = round * 16;
     var i = 0;
     while (i < 16) {
@@ -208,7 +208,7 @@ fn _aes_add_round_key(rk, round) {
     return 0;
 }
 
-fn _aes_sub_bytes() {
+fn _aes_sub_bytes(): i64 {
     var i = 0;
     while (i < 16) {
         store8(_aes_state + i, _aes_sub(load8(_aes_state + i) & 0xFF));
@@ -217,7 +217,7 @@ fn _aes_sub_bytes() {
     return 0;
 }
 
-fn _aes_shift_rows() {
+fn _aes_shift_rows(): i64 {
     # State in column-major order: s[c,r] at _aes_state[c*4 + r].
     # ShiftRows rotates row r left by r columns: row 0 unchanged,
     # row 1 rotated by 1, row 2 by 2, row 3 by 3.
@@ -251,7 +251,7 @@ fn _aes_shift_rows() {
     return 0;
 }
 
-fn _aes_mix_columns() {
+fn _aes_mix_columns(): i64 {
     # MixColumns transforms each column independently.
     # s'[0,c] = 2·s[0,c] ^ 3·s[1,c] ^ s[2,c] ^ s[3,c]
     # s'[1,c] = s[0,c] ^ 2·s[1,c] ^ 3·s[2,c] ^ s[3,c]
@@ -284,7 +284,7 @@ fn _aes_mix_columns() {
     return 0;
 }
 
-fn aes256_encrypt_block(round_keys, in_block, out_block) {
+fn aes256_encrypt_block(round_keys, in_block, out_block): i64 {
     # AES-NI dispatch. The PXOR / AESENC memory-operand forms used
     # by aes256_encrypt_block_ni require the round_keys pointer to
     # be 16-byte aligned (#GP otherwise). Cyrius 5.5.21 guarantees
@@ -346,7 +346,7 @@ fn aes256_encrypt_block(round_keys, in_block, out_block) {
 # The reduction polynomial R in the bit-reversed GCM convention
 # becomes 0xE1000...00 as the MSByte after a right-shift on V.
 
-fn _ghash_shift_right_and_reduce(v) {
+fn _ghash_shift_right_and_reduce(v): i64 {
     # v is a 16-byte little-endian-of-bytes / big-endian-of-bits
     # block. Shift the whole block right by 1 bit, with carry
     # propagating from byte 0 → byte 1 → ... → byte 15.
@@ -367,7 +367,7 @@ fn _ghash_shift_right_and_reduce(v) {
     return 0;
 }
 
-fn _ghash_xor_16(dst, src) {
+fn _ghash_xor_16(dst, src): i64 {
     var i = 0;
     while (i < 16) {
         store8(dst + i, (load8(dst + i) ^ load8(src + i)) & 0xFF);
@@ -380,7 +380,7 @@ fn _ghash_xor_16(dst, src) {
 # X: 16 bytes (input, read-only). H: 16 bytes (hash subkey, read-only).
 # z: 16 bytes (output, caller-provided, will be overwritten).
 # Uses a local 16-byte scratch for V that is zeroized on return.
-fn _ghash_mul(z, x, h) {
+fn _ghash_mul(z, x, h): i64 {
     var v[16];
     memcpy(&v, h, 16);
     memset(z, 0, 16);
@@ -408,7 +408,7 @@ fn _ghash_mul(z, x, h) {
 # the running tag. Caller supplies the 16-byte output buffer `y`
 # initialized to zeros (for the outer GHASH call) or to the
 # running accumulator.
-fn _ghash_update(y, h, data, len) {
+fn _ghash_update(y, h, data, len): i64 {
     var block[16];
     var pos = 0;
     while (pos + 16 <= len) {
@@ -437,7 +437,7 @@ fn _ghash_update(y, h, data, len) {
 # Big-endian 64-bit store — used for GHASH length block
 # ================================================================
 
-fn _be64_store(buf, v) {
+fn _be64_store(buf, v): i64 {
     store8(buf + 0, (v >> 56) & 0xFF);
     store8(buf + 1, (v >> 48) & 0xFF);
     store8(buf + 2, (v >> 40) & 0xFF);
@@ -449,7 +449,7 @@ fn _be64_store(buf, v) {
     return 0;
 }
 
-fn _be32_store(buf, v) {
+fn _be32_store(buf, v): i64 {
     store8(buf + 0, (v >> 24) & 0xFF);
     store8(buf + 1, (v >> 16) & 0xFF);
     store8(buf + 2, (v >>  8) & 0xFF);
@@ -457,7 +457,7 @@ fn _be32_store(buf, v) {
     return 0;
 }
 
-fn _be32_load(buf) {
+fn _be32_load(buf): i64 {
     return ((load8(buf + 0) & 0xFF) << 24)
     | ((load8(buf + 1) & 0xFF) << 16)
     | ((load8(buf + 2) & 0xFF) <<  8)
@@ -470,7 +470,7 @@ fn _be32_load(buf) {
 # between blocks (big-endian).
 # ================================================================
 
-fn _aes_gcm_ctr_xor(round_keys, counter, src, dst, len) {
+fn _aes_gcm_ctr_xor(round_keys, counter, src, dst, len): i64 {
     var ks[16];
     var pos = 0;
     while (pos < len) {
@@ -508,7 +508,7 @@ fn _aes_gcm_ctr_xor(round_keys, counter, src, dst, len) {
 #
 # Security: round-key buffer and H are zeroized before free.
 
-fn aes_gcm_encrypt(key, iv, aad, aad_len, pt, pt_len, ct_out, tag_out) {
+fn aes_gcm_encrypt(key, iv, aad, aad_len, pt, pt_len, ct_out, tag_out): i64 {
     if (aad_len < 0) { return (0 - 1); }
     if (pt_len < 0) { return (0 - 1); }
 
@@ -600,7 +600,7 @@ fn aes_gcm_encrypt(key, iv, aad, aad_len, pt, pt_len, ct_out, tag_out) {
 # AEAD contract: plaintext MUST NOT be released until the tag is
 # verified. We compute & verify the tag first, then derive pt.
 
-fn aes_gcm_decrypt(key, iv, aad, aad_len, ct, ct_len, tag, pt_out) {
+fn aes_gcm_decrypt(key, iv, aad, aad_len, ct, ct_len, tag, pt_out): i64 {
     if (aad_len < 0) { return ERR_INVALID_INPUT; }
     if (ct_len < 0) { return ERR_INVALID_INPUT; }
 

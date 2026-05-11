@@ -12,7 +12,7 @@ enum AuditEventType {
     AUDIT_CHAIN_VALIDATED = 4;
 }
 
-fn audit_event_name(t) {
+fn audit_event_name(t): i64 {
     if (t == AUDIT_ARTIFACT_VERIFIED) { return "artifact_verified"; }
     if (t == AUDIT_ARTIFACT_SIGNED) { return "artifact_signed"; }
     if (t == AUDIT_REVOCATION_ADDED) { return "revocation_added"; }
@@ -23,7 +23,7 @@ fn audit_event_name(t) {
 
 # Inverse of audit_event_name. Returns the AUDIT_* constant for a
 # known name, or -1 if the string does not match any known event.
-fn audit_event_type_from_name(name) {
+fn audit_event_type_from_name(name): i64 {
     if (streq(name, "artifact_verified") == 1) { return AUDIT_ARTIFACT_VERIFIED; }
     if (streq(name, "artifact_signed") == 1) { return AUDIT_ARTIFACT_SIGNED; }
     if (streq(name, "revocation_added") == 1) { return AUDIT_REVOCATION_ADDED; }
@@ -46,7 +46,7 @@ fn audit_event_type_from_name(name) {
 #   +48  key_id        (C-string ptr, 0 = n/a)
 #   +56  timestamp     (epoch seconds)
 
-fn audit_event_new(event_type) {
+fn audit_event_new(event_type): i64 {
     var e = fl_alloc(64);
     store64(e, event_type);
     store64(e + 8, 0);
@@ -59,27 +59,27 @@ fn audit_event_new(event_type) {
     return e;
 }
 
-fn ae_type(e) { return load64(e); }
-fn ae_path(e) { return load64(e + 8); }
-fn ae_artifact_type(e) { return load64(e + 16); }
-fn ae_trust_level(e) { return load64(e + 24); }
-fn ae_passed(e) { return load64(e + 32); }
-fn ae_content_hash(e) { return load64(e + 40); }
-fn ae_key_id(e) { return load64(e + 48); }
-fn ae_timestamp(e) { return load64(e + 56); }
+fn ae_type(e): i64 { return load64(e); }
+fn ae_path(e): i64 { return load64(e + 8); }
+fn ae_artifact_type(e): i64 { return load64(e + 16); }
+fn ae_trust_level(e): i64 { return load64(e + 24); }
+fn ae_passed(e): i64 { return load64(e + 32); }
+fn ae_content_hash(e): i64 { return load64(e + 40); }
+fn ae_key_id(e): i64 { return load64(e + 48); }
+fn ae_timestamp(e): i64 { return load64(e + 56); }
 
-fn ae_set_path(e, v) { store64(e + 8, v); return e; }
-fn ae_set_artifact_type(e, v) { store64(e + 16, v); return e; }
-fn ae_set_trust_level(e, v) { store64(e + 24, v); return e; }
-fn ae_set_passed(e, v) { store64(e + 32, v); return e; }
-fn ae_set_content_hash(e, v) { store64(e + 40, v); return e; }
-fn ae_set_key_id(e, v) { store64(e + 48, v); return e; }
+fn ae_set_path(e, v): i64 { store64(e + 8, v); return e; }
+fn ae_set_artifact_type(e, v): i64 { store64(e + 16, v); return e; }
+fn ae_set_trust_level(e, v): i64 { store64(e + 24, v); return e; }
+fn ae_set_passed(e, v): i64 { store64(e + 32, v); return e; }
+fn ae_set_content_hash(e, v): i64 { store64(e + 40, v); return e; }
+fn ae_set_key_id(e, v): i64 { store64(e + 48, v); return e; }
 
 # ================================================================
 # Convenience constructors
 # ================================================================
 
-fn audit_artifact_verified(path, atype, tlevel, passed, chash) {
+fn audit_artifact_verified(path, atype, tlevel, passed, chash): i64 {
     var e = audit_event_new(AUDIT_ARTIFACT_VERIFIED);
     ae_set_path(e, path);
     ae_set_artifact_type(e, atype);
@@ -89,7 +89,7 @@ fn audit_artifact_verified(path, atype, tlevel, passed, chash) {
     return e;
 }
 
-fn audit_artifact_signed(path, atype, key_id, chash) {
+fn audit_artifact_signed(path, atype, key_id, chash): i64 {
     var e = audit_event_new(AUDIT_ARTIFACT_SIGNED);
     ae_set_path(e, path);
     ae_set_artifact_type(e, atype);
@@ -98,14 +98,14 @@ fn audit_artifact_signed(path, atype, key_id, chash) {
     return e;
 }
 
-fn audit_revocation_added(key_id, chash, reason) {
+fn audit_revocation_added(key_id, chash, reason): i64 {
     var e = audit_event_new(AUDIT_REVOCATION_ADDED);
     ae_set_key_id(e, key_id);
     ae_set_content_hash(e, chash);
     return e;
 }
 
-fn audit_key_rotated(old_kid, new_kid) {
+fn audit_key_rotated(old_kid, new_kid): i64 {
     var e = audit_event_new(AUDIT_KEY_ROTATED);
     ae_set_key_id(e, old_kid);
     ae_set_content_hash(e, new_kid);  # reuse field for new key id
@@ -118,22 +118,22 @@ fn audit_key_rotated(old_kid, new_kid) {
 # Layout:
 #   +0   events  (vec of AuditEvent ptrs)
 
-fn audit_log_new() {
+fn audit_log_new(): i64 {
     var log = fl_alloc(8);
     store64(log, vec_new());
     return log;
 }
 
-fn alog_record(log, event) {
+fn alog_record(log, event): i64 {
     vec_push(load64(log), event);
     return log;
 }
 
-fn alog_events(log) { return load64(log); }
-fn alog_len(log) { return vec_len(load64(log)); }
-fn alog_is_empty(log) { if (alog_len(log) == 0) { return 1; } return 0; }
+fn alog_events(log): i64 { return load64(log); }
+fn alog_len(log): i64 { return vec_len(load64(log)); }
+fn alog_is_empty(log): i64 { if (alog_len(log) == 0) { return 1; } return 0; }
 
-fn alog_clear(log) {
+fn alog_clear(log): i64 {
     store64(log, vec_new());
     return log;
 }
@@ -143,7 +143,7 @@ fn alog_clear(log) {
 # crl_save / sv_save_trust_store vocabulary. Still O_APPEND under
 # the hood — the name reflects the contract (persist to disk),
 # not the write mode.
-fn alog_save(log, path) {
+fn alog_save(log, path): i64 {
     var fd = file_open(path, 1089, 420);  # O_WRONLY|O_CREAT|O_APPEND, 0644
     if (fd < 0) { return ERR_IO; }
     var events = load64(log);
@@ -187,7 +187,7 @@ fn alog_save(log, path) {
     return ERR_NONE;
 }
 
-fn _alog_write_str(dst, src) {
+fn _alog_write_str(dst, src): i64 {
     var len = strlen(src);
     memcpy(dst, src, len);
     return len;
@@ -209,7 +209,7 @@ fn _alog_write_str(dst, src) {
 # Returns the number of events loaded, or -1 on IO failure.
 # ================================================================
 
-fn _alog_parse_one_line(log, line, llen) {
+fn _alog_parse_one_line(log, line, llen): i64 {
     var etype = 0 - 1;
     var apath = 0;
     var kid = 0;
@@ -295,7 +295,7 @@ fn _alog_parse_one_line(log, line, llen) {
     return 1;
 }
 
-fn alog_load(log, path) {
+fn alog_load(log, path): i64 {
     var buf = alloc(65536);
     var n = file_read_all(path, buf, 65536);
     if (n < 0) { return (0 - 1); }
@@ -321,7 +321,7 @@ fn alog_load(log, path) {
 # Global to survive nested calls
 var _alog_int_buf = 0;
 
-fn _alog_write_int(dst, val) {
+fn _alog_write_int(dst, val): i64 {
     if (_alog_int_buf == 0) { _alog_int_buf = alloc(24); }
     # Manual int-to-string into global buffer
     var v = val;

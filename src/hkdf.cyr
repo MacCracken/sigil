@@ -37,7 +37,7 @@
 # prk_out : caller-provided 32-byte output buffer; receives the PRK
 # Returns 0 on success, non-zero on input-validation failure.
 
-fn hkdf_extract(salt, salt_len, ikm, ikm_len, prk_out) {
+fn hkdf_extract(salt, salt_len, ikm, ikm_len, prk_out): i64 {
     if (salt_len < 0) { return (0 - 1); }
     if (ikm_len < 0) { return (0 - 1); }
 
@@ -84,7 +84,7 @@ var _hkdf_out_len = 0;
 var _hkdf_produced = 0;
 var _hkdf_counter = 0;
 
-fn hkdf_expand(prk, prk_len, info, info_len, out, out_len) {
+fn hkdf_expand(prk, prk_len, info, info_len, out, out_len): i64 {
     if (prk_len < 0) { return (0 - 1); }
     if (info_len < 0) { return (0 - 1); }
     if (out_len < 0) { return (0 - 1); }
@@ -177,7 +177,7 @@ fn hkdf_expand(prk, prk_len, info, info_len, out, out_len) {
 #  -1   on negative-length input
 #  -2   on out_len > 255*32
 
-fn hkdf(salt, salt_len, ikm, ikm_len, info, info_len, out, out_len) {
+fn hkdf(salt, salt_len, ikm, ikm_len, info, info_len, out, out_len): i64 {
     # PRK is key material. `secret var` handles zeroization on
     # every return path (both rc1 error and rc2 success/error).
     secret var prk[32];

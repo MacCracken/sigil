@@ -30,14 +30,14 @@ var _ed25519_inited = 0;
 # +64:  Z (32 bytes)
 # +96:  T (32 bytes)
 
-fn ge_alloc() { return alloc(128); }
+fn ge_alloc(): i64 { return alloc(128); }
 
-fn ge_x(p) { return p; }
-fn ge_y(p) { return p + 32; }
-fn ge_z(p) { return p + 64; }
-fn ge_t(p) { return p + 96; }
+fn ge_x(p): i64 { return p; }
+fn ge_y(p): i64 { return p + 32; }
+fn ge_z(p): i64 { return p + 64; }
+fn ge_t(p): i64 { return p + 96; }
 
-fn ge_identity(p) {
+fn ge_identity(p): i64 {
     # Identity: (0, 1, 1, 0)
     var z = u256_from(0);
     var o = u256_from(1);
@@ -48,7 +48,7 @@ fn ge_identity(p) {
     return 0;
 }
 
-fn ge_copy(dst, src) {
+fn ge_copy(dst, src): i64 {
     memcpy(dst, src, 128);
     return 0;
 }
@@ -71,7 +71,7 @@ var _ga_G = 0;
 var _ga_H2 = 0;
 var _ga_inited = 0;
 
-fn _ge_init_temps() {
+fn _ge_init_temps(): i64 {
     if (_ga_inited == 1) { return 0; }
     _ga_t1 = alloc(32); _ga_t2 = alloc(32);
     _ga_A = alloc(32); _ga_B2 = alloc(32);
@@ -82,7 +82,7 @@ fn _ge_init_temps() {
     return 0;
 }
 
-fn ge_add(r, p, q) {
+fn ge_add(r, p, q): i64 {
     _ge_init_temps();
     # A = (Y1-X1)*(Y2-X2)
     fp_sub(_ga_t1, ge_y(p), ge_x(p));
@@ -131,7 +131,7 @@ var _gd_H = 0;
 var _gd_t = 0;
 var _gd_inited = 0;
 
-fn _ge_init_dbl() {
+fn _ge_init_dbl(): i64 {
     if (_gd_inited == 1) { return 0; }
     _gd_A = alloc(32); _gd_B = alloc(32);
     _gd_C = alloc(32); _gd_D = alloc(32);
@@ -142,7 +142,7 @@ fn _ge_init_dbl() {
     return 0;
 }
 
-fn ge_double(r, p) {
+fn ge_double(r, p): i64 {
     _ge_init_dbl();
     fp_sq(_gd_A, ge_x(p));
     fp_sq(_gd_B, ge_y(p));
@@ -187,7 +187,7 @@ var _gsm_bit = 0;
 # If bit == 1: dst := src.  If bit == 0: dst unchanged.
 # Per-limb select via stdlib ct_select (lib/ct.cyr) — identical
 # mask-xor arithmetic, single audit surface across the codebase.
-fn ge_cmov(dst, src, bit) {
+fn ge_cmov(dst, src, bit): i64 {
     var i = 0;
     while (i < 128) {
         var d = load64(dst + i);
@@ -198,7 +198,7 @@ fn ge_cmov(dst, src, bit) {
     return 0;
 }
 
-fn ge_scalarmult(r, s, p) {
+fn ge_scalarmult(r, s, p): i64 {
     if (_gsm_q == 0) { _gsm_q = alloc(128); _gsm_tmp = alloc(128); }
     _gsm_r = r;
     _gsm_s = s;
@@ -241,7 +241,7 @@ var _gts_k = 0;
 # Branchless: sets dst := row[digit] in constant time. Iterates all
 # 16 entries and cmoves the one whose index equals digit. Memory
 # access pattern does not depend on digit.
-fn _ge_table_select(dst, row, digit) {
+fn _ge_table_select(dst, row, digit): i64 {
     _gts_dst = dst;
     _gts_row = row;
     _gts_digit = digit;
@@ -269,7 +269,7 @@ var _gsb_tmp = 0;
 var _gsb_i = 0;
 var _gsb_digit = 0;
 
-fn ge_scalarmult_base(r, s) {
+fn ge_scalarmult_base(r, s): i64 {
     if (_gsb_sel == 0) {
         _gsb_sel = alloc(128);
         _gsb_tmp = alloc(128);
@@ -309,7 +309,7 @@ var _bt_k = 0;
 var _bt_base_i = 0;
 var _bt_row = 0;
 
-fn _build_ed_B_table() {
+fn _build_ed_B_table(): i64 {
     _ed_B_table = alloc(131072);   # 64 * 16 * 128
     _bt_base_i = alloc(128);
 
@@ -349,7 +349,7 @@ var _gcomp_recip = 0;
 var _gcomp_x = 0;
 var _gcomp_y = 0;
 
-fn ge_to_bytes(out, p) {
+fn ge_to_bytes(out, p): i64 {
     if (_gcomp_recip == 0) {
         _gcomp_recip = alloc(32);
         _gcomp_x = alloc(32);
@@ -392,7 +392,7 @@ var _gdc_p_out = 0;
 var _gdc_exp = 0;
 var _gdc_inited = 0;
 
-fn ge_from_bytes(p, s) {
+fn ge_from_bytes(p, s): i64 {
     ed25519_init();
     if (_gdc_inited == 0) {
         _gdc_u = alloc(32); _gdc_v = alloc(32); _gdc_y2 = alloc(32);
@@ -461,7 +461,7 @@ fn ge_from_bytes(p, s) {
 # Ed25519 initialization
 # ================================================================
 
-fn ed25519_init() {
+fn ed25519_init(): i64 {
     if (_ed25519_inited == 1) { return 0; }
     _init_ed_p();
 
@@ -515,7 +515,7 @@ fn ed25519_init() {
 var _scr_r256 = 0;
 var _scr_inited = 0;
 
-fn sc_reduce(out, s64) {
+fn sc_reduce(out, s64): i64 {
     # Reduce 512-bit value mod L using: val = hi*2^256 + lo ≡ hi*R + lo (mod L)
     # where R = 2^256 mod L. Iterate until hi == 0.
     #
@@ -580,7 +580,7 @@ fn sc_reduce(out, s64) {
 
 var _scma_prod = 0;
 
-fn sc_muladd(out, a, b, c) {
+fn sc_muladd(out, a, b, c): i64 {
     if (_scma_prod == 0) { _scma_prod = alloc(64); }
     u256_mul_full(_scma_prod, a, b);
 
@@ -601,7 +601,7 @@ fn sc_muladd(out, a, b, c) {
 var _kp_hash = 0;
 var _kp_scalar = 0;
 
-fn ed25519_keypair(seed, sk_out, pk_out) {
+fn ed25519_keypair(seed, sk_out, pk_out): i64 {
     ed25519_init();
     if (_kp_hash == 0) { _kp_hash = alloc(64); _kp_scalar = alloc(32); }
     sha512(seed, 32, _kp_hash);
@@ -643,7 +643,7 @@ var _sign_r_scalar = 0;
 var _sign_h_scalar = 0;
 var _sign_a_scalar = 0;
 
-fn ed25519_sign(sk, msg, msg_len, sig_out) {
+fn ed25519_sign(sk, msg, msg_len, sig_out): i64 {
     ed25519_init();
     if (_sign_az == 0) {
         _sign_az = alloc(64);
@@ -720,7 +720,7 @@ var _ver_h_scalar = 0;
 var _ver_S_scalar = 0;
 var _ver_R_bytes = 0;
 
-fn ed25519_verify(pk, msg, msg_len, sig) {
+fn ed25519_verify(pk, msg, msg_len, sig): i64 {
     ed25519_init();
     if (_ver_hram == 0) {
         _ver_hram = alloc(64);
@@ -778,7 +778,7 @@ fn ed25519_verify(pk, msg, msg_len, sig) {
 # Generate random keypair
 # ================================================================
 
-fn ed25519_generate_keypair(sk_out, pk_out) {
+fn ed25519_generate_keypair(sk_out, pk_out): i64 {
     # The prior implementation had two silent-failure paths:
     #   * no check of file_open's return value — fd=-1 would then
     #     be passed to file_read, leaving the stack-allocated seed

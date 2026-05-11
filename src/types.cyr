@@ -11,7 +11,7 @@ enum SignatureAlgorithm {
     SIG_ALG_HYBRID = 2;
 }
 
-fn sig_alg_name(alg) {
+fn sig_alg_name(alg): i64 {
     if (alg == SIG_ALG_ED25519) { return "Ed25519"; }
     if (alg == SIG_ALG_ML_DSA_65) { return "ML-DSA-65"; }
     if (alg == SIG_ALG_HYBRID) { return "Hybrid(Ed25519+ML-DSA-65)"; }
@@ -27,7 +27,7 @@ enum HashAlgorithm {
     HASH_ALG_SHA512 = 1;
 }
 
-fn hash_alg_name(alg) {
+fn hash_alg_name(alg): i64 {
     if (alg == HASH_ALG_SHA256) { return "SHA-256"; }
     if (alg == HASH_ALG_SHA512) { return "SHA-512"; }
     return "unknown";
@@ -55,7 +55,7 @@ enum TrustLevel {
     TRUST_REVOKED = 4;
 }
 
-fn trust_level_rank(level) {
+fn trust_level_rank(level): i64 {
     if (level == TRUST_SYSTEM_CORE) { return 4; }
     if (level == TRUST_VERIFIED) { return 3; }
     if (level == TRUST_UNVERIFIED) { return 1; }
@@ -63,12 +63,12 @@ fn trust_level_rank(level) {
     return 0;
 }
 
-fn trust_level_ge(a, b) {
+fn trust_level_ge(a, b): i64 {
     if (trust_level_rank(a) >= trust_level_rank(b)) { return 1; }
     return 0;
 }
 
-fn trust_level_name(level) {
+fn trust_level_name(level): i64 {
     if (level == TRUST_SYSTEM_CORE) { return "SystemCore"; }
     if (level == TRUST_VERIFIED) { return "Verified"; }
     if (level == TRUST_UNVERIFIED) { return "Unverified"; }
@@ -86,7 +86,7 @@ enum TrustEnforcement {
     ENFORCE_AUDIT_ONLY = 2;
 }
 
-fn enforcement_name(mode) {
+fn enforcement_name(mode): i64 {
     if (mode == ENFORCE_STRICT) { return "Strict"; }
     if (mode == ENFORCE_PERMISSIVE) { return "Permissive"; }
     if (mode == ENFORCE_AUDIT_ONLY) { return "AuditOnly"; }
@@ -105,7 +105,7 @@ enum ArtifactType {
     ARTIFACT_BOOT_COMPONENT = 4;
 }
 
-fn artifact_type_name(t) {
+fn artifact_type_name(t): i64 {
     if (t == ARTIFACT_AGENT_BINARY) { return "AgentBinary"; }
     if (t == ARTIFACT_SYSTEM_BINARY) { return "SystemBinary"; }
     if (t == ARTIFACT_CONFIG) { return "Config"; }
@@ -134,7 +134,7 @@ fn artifact_type_name(t) {
 # (requires both Ed25519 and ML-DSA-65 signatures to verify) or
 # SIG_ALG_ML_DSA_65 (PQC-only, future state).
 
-fn trust_policy_new() {
+fn trust_policy_new(): i64 {
     var p = fl_alloc(72);
     store64(p, ENFORCE_STRICT);
     store64(p + 8, TRUST_VERIFIED);
@@ -148,25 +148,25 @@ fn trust_policy_new() {
     return p;
 }
 
-fn policy_enforcement(p) { return load64(p); }
-fn policy_min_trust(p) { return load64(p + 8); }
-fn policy_allow_unsigned(p) { return load64(p + 16); }
-fn policy_verify_on_boot(p) { return load64(p + 24); }
-fn policy_verify_on_install(p) { return load64(p + 32); }
-fn policy_verify_on_execute(p) { return load64(p + 40); }
-fn policy_revocation_check(p) { return load64(p + 48); }
-fn policy_hash_alg(p) { return load64(p + 56); }
-fn policy_required_sig_alg(p) { return load64(p + 64); }
+fn policy_enforcement(p): i64 { return load64(p); }
+fn policy_min_trust(p): i64 { return load64(p + 8); }
+fn policy_allow_unsigned(p): i64 { return load64(p + 16); }
+fn policy_verify_on_boot(p): i64 { return load64(p + 24); }
+fn policy_verify_on_install(p): i64 { return load64(p + 32); }
+fn policy_verify_on_execute(p): i64 { return load64(p + 40); }
+fn policy_revocation_check(p): i64 { return load64(p + 48); }
+fn policy_hash_alg(p): i64 { return load64(p + 56); }
+fn policy_required_sig_alg(p): i64 { return load64(p + 64); }
 
-fn policy_set_enforcement(p, v) { store64(p, v); return p; }
-fn policy_set_min_trust(p, v) { store64(p + 8, v); return p; }
-fn policy_set_allow_unsigned(p, v) { store64(p + 16, v); return p; }
-fn policy_set_verify_on_boot(p, v) { store64(p + 24, v); return p; }
-fn policy_set_verify_on_install(p, v) { store64(p + 32, v); return p; }
-fn policy_set_verify_on_execute(p, v) { store64(p + 40, v); return p; }
-fn policy_set_revocation_check(p, v) { store64(p + 48, v); return p; }
-fn policy_set_hash_alg(p, v) { store64(p + 56, v); return p; }
-fn policy_set_required_sig_alg(p, v) { store64(p + 64, v); return p; }
+fn policy_set_enforcement(p, v): i64 { store64(p, v); return p; }
+fn policy_set_min_trust(p, v): i64 { store64(p + 8, v); return p; }
+fn policy_set_allow_unsigned(p, v): i64 { store64(p + 16, v); return p; }
+fn policy_set_verify_on_boot(p, v): i64 { store64(p + 24, v); return p; }
+fn policy_set_verify_on_install(p, v): i64 { store64(p + 32, v); return p; }
+fn policy_set_verify_on_execute(p, v): i64 { store64(p + 40, v); return p; }
+fn policy_set_revocation_check(p, v): i64 { store64(p + 48, v); return p; }
+fn policy_set_hash_alg(p, v): i64 { store64(p + 56, v); return p; }
+fn policy_set_required_sig_alg(p, v): i64 { store64(p + 64, v); return p; }
 
 # ================================================================
 # TrustCheck (24 bytes)
@@ -176,7 +176,7 @@ fn policy_set_required_sig_alg(p, v) { store64(p + 64, v); return p; }
 #   +8   passed   (i64, 0 or 1)
 #   +16  detail   (C-string pointer)
 
-fn trust_check_new(name, passed, detail) {
+fn trust_check_new(name, passed, detail): i64 {
     var tc = fl_alloc(24);
     store64(tc, name);
     store64(tc + 8, passed);
@@ -184,9 +184,9 @@ fn trust_check_new(name, passed, detail) {
     return tc;
 }
 
-fn check_name(tc) { return load64(tc); }
-fn check_passed(tc) { return load64(tc + 8); }
-fn check_detail(tc) { return load64(tc + 16); }
+fn check_name(tc): i64 { return load64(tc); }
+fn check_passed(tc): i64 { return load64(tc + 8); }
+fn check_detail(tc): i64 { return load64(tc + 16); }
 
 # ================================================================
 # TrustedArtifact (48 bytes)
@@ -206,7 +206,7 @@ fn check_detail(tc) { return load64(tc + 16); }
 #   verified_at — written by sv_sign_artifact, never read.
 #   metadata — never populated.
 
-fn trusted_artifact_new(path, artifact_type, content_hash) {
+fn trusted_artifact_new(path, artifact_type, content_hash): i64 {
     var a = fl_alloc(48);
     store64(a, path);
     store64(a + 8, artifact_type);
@@ -217,18 +217,18 @@ fn trusted_artifact_new(path, artifact_type, content_hash) {
     return a;
 }
 
-fn artifact_path(a) { return load64(a); }
-fn artifact_type(a) { return load64(a + 8); }
-fn artifact_content_hash(a) { return load64(a + 16); }
-fn artifact_signature(a) { return load64(a + 24); }
-fn artifact_signer_key_id(a) { return load64(a + 32); }
-fn artifact_trust_level(a) { return load64(a + 40); }
+fn artifact_path(a): i64 { return load64(a); }
+fn artifact_type(a): i64 { return load64(a + 8); }
+fn artifact_content_hash(a): i64 { return load64(a + 16); }
+fn artifact_signature(a): i64 { return load64(a + 24); }
+fn artifact_signer_key_id(a): i64 { return load64(a + 32); }
+fn artifact_trust_level(a): i64 { return load64(a + 40); }
 
 # Ed25519 signatures are always 64 bytes; `sig_len` parameter from
 # the pre-2.6.0 signature was always 64 at every call site. Dropped.
-fn artifact_set_signature(a, sig) { store64(a + 24, sig); return a; }
-fn artifact_set_signer(a, key_id) { store64(a + 32, key_id); return a; }
-fn artifact_set_trust_level(a, level) { store64(a + 40, level); return a; }
+fn artifact_set_signature(a, sig): i64 { store64(a + 24, sig); return a; }
+fn artifact_set_signer(a, key_id): i64 { store64(a + 32, key_id); return a; }
+fn artifact_set_trust_level(a, level): i64 { store64(a + 40, level); return a; }
 
 # ================================================================
 # VerificationResult (32 bytes)
@@ -239,7 +239,7 @@ fn artifact_set_trust_level(a, level) { store64(a + 40, level); return a; }
 #   +16  checks       (vec of TrustCheck pointers)
 #   +24  verified_at  (i64, epoch seconds)
 
-fn verification_result_new(artifact, passed, verified_at) {
+fn verification_result_new(artifact, passed, verified_at): i64 {
     var vr = fl_alloc(32);
     store64(vr, artifact);
     store64(vr + 8, passed);
@@ -248,19 +248,19 @@ fn verification_result_new(artifact, passed, verified_at) {
     return vr;
 }
 
-fn vresult_artifact(vr) { return load64(vr); }
-fn vresult_passed(vr) { return load64(vr + 8); }
-fn vresult_checks(vr) { return load64(vr + 16); }
+fn vresult_artifact(vr): i64 { return load64(vr); }
+fn vresult_passed(vr): i64 { return load64(vr + 8); }
+fn vresult_checks(vr): i64 { return load64(vr + 16); }
 # vresult_verified_at getter removed in 2.6.0. The field stays in
 # the struct (constructor takes it) for API symmetry, but no caller
 # reads it. Re-introduce when reporting code actually uses it.
 
-fn vresult_add_check(vr, tc) {
+fn vresult_add_check(vr, tc): i64 {
     vec_push(load64(vr + 16), tc);
     return vr;
 }
 
-fn vresult_set_passed(vr, passed) {
+fn vresult_set_passed(vr, passed): i64 {
     store64(vr + 8, passed);
     return vr;
 }
@@ -274,7 +274,7 @@ fn vresult_set_passed(vr, passed) {
 #   +16  revoked_count     (i64)
 #   +24  trust_level_counts (hashmap pointer)
 
-fn sigil_stats_new() {
+fn sigil_stats_new(): i64 {
     var s = fl_alloc(32);
     store64(s, 0);
     store64(s + 8, 0);
@@ -283,6 +283,6 @@ fn sigil_stats_new() {
     return s;
 }
 
-fn stats_total(s) { return load64(s); }
-fn stats_verified(s) { return load64(s + 8); }
-fn stats_revoked(s) { return load64(s + 16); }
+fn stats_total(s): i64 { return load64(s); }
+fn stats_verified(s): i64 { return load64(s + 8); }
+fn stats_revoked(s): i64 { return load64(s + 16); }

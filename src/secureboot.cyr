@@ -17,7 +17,7 @@
 # where mokutil fails, this is SB_NOT_SUPPORTED.
 # ================================================================
 
-fn sigil_sb_state() {
+fn sigil_sb_state(): i64 {
     var res = secureboot_detect_state();
     if (is_err_result(res) == 1) {
         return SB_NOT_SUPPORTED;
@@ -28,11 +28,11 @@ fn sigil_sb_state() {
 # 1 iff Secure Boot is actively enforcing (SB_ENABLED).
 # SB_SETUP_MODE (keys can still be enrolled) and SB_DISABLED both
 # return 0 — sigil must not treat either as a trusted boot chain.
-fn sigil_sb_enforcing() {
+fn sigil_sb_enforcing(): i64 {
     return secureboot_is_enforcing(sigil_sb_state());
 }
 
 # Human-readable state (static C-string, do not free).
-fn sigil_sb_state_name() {
+fn sigil_sb_state_name(): i64 {
     return secureboot_state_str(sigil_sb_state());
 }

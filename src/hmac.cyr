@@ -23,7 +23,7 @@
 # HMAC-SHA256
 # ================================================================
 
-fn hmac_sha256(key, key_len, msg, msg_len, out) {
+fn hmac_sha256(key, key_len, msg, msg_len, out): i64 {
     # Step 1: Derive K' (64 bytes). `secret var` guarantees the
     # buffer is zeroed on function exit (Cyrius 5.3.5+). The init
     # memset below is retained for program correctness — the

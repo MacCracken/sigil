@@ -31,7 +31,7 @@
 var _mldsa_p2r_a1 = 0;      # output high part
 var _mldsa_p2r_a0 = 0;      # output low part (balanced)
 
-fn mldsa_power2round(a) {
+fn mldsa_power2round(a): i64 {
     # Standard trick: add 2^{D-1}-1 before the right-shift so
     # the shift rounds to nearest instead of toward zero. Input
     # is non-negative so the logical >> matches arithmetic >>.
@@ -61,7 +61,7 @@ fn mldsa_power2round(a) {
 var _mldsa_dec_a1 = 0;      # high bits (w1 in the spec)
 var _mldsa_dec_a0 = 0;      # low bits (balanced, w0)
 
-fn mldsa_decompose(a) {
+fn mldsa_decompose(a): i64 {
     var a1 = (a + 127) >> 7;
     a1 = (a1 * 1025 + (1 << 21)) >> 22;
     a1 = a1 & 15;
@@ -77,12 +77,12 @@ fn mldsa_decompose(a) {
 }
 
 # Convenience accessors — HighBits / LowBits in FIPS 204 notation.
-fn mldsa_high_bits(a) {
+fn mldsa_high_bits(a): i64 {
     mldsa_decompose(a);
     return _mldsa_dec_a1;
 }
 
-fn mldsa_low_bits(a) {
+fn mldsa_low_bits(a): i64 {
     mldsa_decompose(a);
     return _mldsa_dec_a0;
 }
@@ -98,7 +98,7 @@ fn mldsa_low_bits(a) {
 # signal is already encoded in the output. No timing surface
 # beyond what the caller already publishes.
 
-fn mldsa_make_hint(a0, a1) {
+fn mldsa_make_hint(a0, a1): i64 {
     if (a0 > MLDSA65_GAMMA2) { return 1; }
     if (a0 < 0 - MLDSA65_GAMMA2) { return 1; }
     if (a0 == 0 - MLDSA65_GAMMA2) {
@@ -118,7 +118,7 @@ fn mldsa_make_hint(a0, a1) {
 # on the sign of a0. Wrap-around uses the same `& 15` mask as
 # the decompose step so a1 stays in [0, 15].
 
-fn mldsa_use_hint(a, hint) {
+fn mldsa_use_hint(a, hint): i64 {
     mldsa_decompose(a);
     var a1 = _mldsa_dec_a1;
     var a0 = _mldsa_dec_a0;
@@ -132,7 +132,7 @@ fn mldsa_use_hint(a, hint) {
 # ================================================================
 
 # a1[i], a0[i] = power2round(a[i])
-fn mldsa_poly_power2round(a1, a0, a) {
+fn mldsa_poly_power2round(a1, a0, a): i64 {
     var i = 0;
     while (i < 256) {
         mldsa_power2round(load64(a + i * 8));
@@ -144,7 +144,7 @@ fn mldsa_poly_power2round(a1, a0, a) {
 }
 
 # a1[i], a0[i] = decompose(a[i])
-fn mldsa_poly_decompose(a1, a0, a) {
+fn mldsa_poly_decompose(a1, a0, a): i64 {
     var i = 0;
     while (i < 256) {
         mldsa_decompose(load64(a + i * 8));
@@ -156,7 +156,7 @@ fn mldsa_poly_decompose(a1, a0, a) {
 }
 
 # h[i] = make_hint(a0[i], a1[i]); returns total hint weight s.
-fn mldsa_poly_make_hint(h, a0, a1) {
+fn mldsa_poly_make_hint(h, a0, a1): i64 {
     var s = 0;
     var i = 0;
     while (i < 256) {
@@ -169,7 +169,7 @@ fn mldsa_poly_make_hint(h, a0, a1) {
 }
 
 # r[i] = use_hint(a[i], h[i])
-fn mldsa_poly_use_hint(r, a, h) {
+fn mldsa_poly_use_hint(r, a, h): i64 {
     var i = 0;
     while (i < 256) {
         store64(r + i * 8, mldsa_use_hint(load64(a + i * 8), load64(h + i * 8)));
@@ -182,7 +182,7 @@ fn mldsa_poly_use_hint(r, a, h) {
 # Polyveck wrappers (K = 6 lanes)
 # ================================================================
 
-fn mldsa_polyveck_power2round(v1, v0, v) {
+fn mldsa_polyveck_power2round(v1, v0, v): i64 {
     var i = 0;
     while (i < MLDSA65_K) {
         mldsa_poly_power2round(v1 + i * 2048, v0 + i * 2048, v + i * 2048);
@@ -191,7 +191,7 @@ fn mldsa_polyveck_power2round(v1, v0, v) {
     return 0;
 }
 
-fn mldsa_polyveck_decompose(v1, v0, v) {
+fn mldsa_polyveck_decompose(v1, v0, v): i64 {
     var i = 0;
     while (i < MLDSA65_K) {
         mldsa_poly_decompose(v1 + i * 2048, v0 + i * 2048, v + i * 2048);
@@ -201,7 +201,7 @@ fn mldsa_polyveck_decompose(v1, v0, v) {
 }
 
 # h[i][j] = make_hint(v0[i][j], v1[i][j]); returns total weight.
-fn mldsa_polyveck_make_hint(h, v0, v1) {
+fn mldsa_polyveck_make_hint(h, v0, v1): i64 {
     var s = 0;
     var i = 0;
     while (i < MLDSA65_K) {
@@ -211,7 +211,7 @@ fn mldsa_polyveck_make_hint(h, v0, v1) {
     return s;
 }
 
-fn mldsa_polyveck_use_hint(w, u, h) {
+fn mldsa_polyveck_use_hint(w, u, h): i64 {
     var i = 0;
     while (i < MLDSA65_K) {
         mldsa_poly_use_hint(w + i * 2048, u + i * 2048, h + i * 2048);

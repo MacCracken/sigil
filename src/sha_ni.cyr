@@ -39,7 +39,7 @@
 var _sha_ni_cache = 2;
 var _sha_ni_probe_out = 0;      # 8-byte scratch for the probe's *out param
 
-fn sha_ni_available() {
+fn sha_ni_available(): i64 {
     if (_sha_ni_cache != 2) { return _sha_ni_cache; }
     if (_sha_ni_probe_out == 0) { _sha_ni_probe_out = alloc(8); }
     store64(_sha_ni_probe_out, 0);
@@ -57,7 +57,7 @@ fn sha_ni_available() {
 # _sha_ni_cpuid_probe — write CPUID leaf 7 sub-leaf 0 EBX to *out.
 # Caller-supplied pointer keeps the CPUID-clobbered registers'
 # lifetime confined to the asm block; reload via load64 after.
-fn _sha_ni_cpuid_probe(out) {
+fn _sha_ni_cpuid_probe(out): i64 {
     #ifdef CYRIUS_ARCH_X86
     asm {
         # Param out = [rbp-8]. Load into rdi.
@@ -101,7 +101,7 @@ var _sha_ni_buf = 0;
 var _sha_ni_K = 0;
 
 # _sha_ni_pack_k_word — write K[i] as 4 little-endian bytes at dst+0..3.
-fn _sha_ni_pack_k_word(dst, k) {
+fn _sha_ni_pack_k_word(dst, k): i64 {
     store8(dst + 0, k & 0xFF);
     store8(dst + 1, (k >> 8) & 0xFF);
     store8(dst + 2, (k >> 16) & 0xFF);
@@ -114,13 +114,13 @@ fn _sha_ni_pack_k_word(dst, k) {
 # operand both require the memory address to be 16-aligned or
 # they raise #GP. Caller over-allocates by 16 bytes and aligns
 # the returned base.
-fn _sha_ni_align16(addr) {
+fn _sha_ni_align16(addr): i64 {
     var off = addr & 15;
     if (off == 0) { return addr; }
     return addr + (16 - off);
 }
 
-fn _sha_ni_init() {
+fn _sha_ni_init(): i64 {
     if (_sha_ni_buf != 0) { return 0; }
 
     _sha_ni_buf = _sha_ni_align16(alloc(80 + 16));
@@ -237,7 +237,7 @@ fn _sha_ni_init() {
 # is safe because the asm block is straight-line with no calls
 # and Cyrius does not expect XMM state across the block.
 # ================================================================
-fn _sha_ni_compress_one(ctx, buf, kbuf) {
+fn _sha_ni_compress_one(ctx, buf, kbuf): i64 {
     #ifdef CYRIUS_ARCH_X86
     asm {
         # ── Param loads ───────────────────────────────────────────
@@ -492,7 +492,7 @@ fn _sha_ni_compress_one(ctx, buf, kbuf) {
 # `sha256_transform`'s dispatcher in src/sha256.cyr falls through
 # to the FIPS 180-4 software path on hosts where the CPUID probe
 # returns 0; this entry point is only invoked when SHA-NI is live.
-fn sha256_transform_ni(ctx) {
+fn sha256_transform_ni(ctx): i64 {
     if (_sha_ni_buf == 0) { _sha_ni_init(); }
     _sha_ni_compress_one(ctx, _sha_ni_buf, _sha_ni_K);
     return 0;

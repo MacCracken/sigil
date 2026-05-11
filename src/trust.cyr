@@ -11,7 +11,7 @@ enum KeyRole {
     KEY_ROLE_PUBLISHER = 2;
 }
 
-fn key_role_name(role) {
+fn key_role_name(role): i64 {
     if (role == KEY_ROLE_ROOT) { return "Root"; }
     if (role == KEY_ROLE_INTERMEDIATE) { return "Intermediate"; }
     if (role == KEY_ROLE_PUBLISHER) { return "Publisher"; }
@@ -35,7 +35,7 @@ fn key_role_name(role) {
 #   +80  secret_key      (ptr to 32 raw bytes, 0 = none, for HMAC signing)
 #   +88  allowed_types   (vec of ARTIFACT_* i64s, 0 = all types allowed)
 
-fn key_version_new(key_id, public_key_hex) {
+fn key_version_new(key_id, public_key_hex): i64 {
     var kv = fl_alloc(96);
     store64(kv, key_id);
     store64(kv + 8, clock_epoch_secs());
@@ -52,43 +52,43 @@ fn key_version_new(key_id, public_key_hex) {
     return kv;
 }
 
-fn kv_key_id(kv) { return load64(kv); }
-fn kv_valid_from(kv) { return load64(kv + 8); }
-fn kv_valid_until(kv) { return load64(kv + 16); }
-fn kv_public_key_hex(kv) { return load64(kv + 24); }
-fn kv_role(kv) { return load64(kv + 32); }
-fn kv_issued_by(kv) { return load64(kv + 40); }
-fn kv_pub_name(kv) { return load64(kv + 64); }
-fn kv_pub_contact(kv) { return load64(kv + 72); }
-fn kv_secret_key(kv) { return load64(kv + 80); }
+fn kv_key_id(kv): i64 { return load64(kv); }
+fn kv_valid_from(kv): i64 { return load64(kv + 8); }
+fn kv_valid_until(kv): i64 { return load64(kv + 16); }
+fn kv_public_key_hex(kv): i64 { return load64(kv + 24); }
+fn kv_role(kv): i64 { return load64(kv + 32); }
+fn kv_issued_by(kv): i64 { return load64(kv + 40); }
+fn kv_pub_name(kv): i64 { return load64(kv + 64); }
+fn kv_pub_contact(kv): i64 { return load64(kv + 72); }
+fn kv_secret_key(kv): i64 { return load64(kv + 80); }
 
-fn kv_set_valid_from(kv, v) { store64(kv + 8, v); return kv; }
-fn kv_set_valid_until(kv, v) { store64(kv + 16, v); return kv; }
-fn kv_set_role(kv, r) { store64(kv + 32, r); return kv; }
-fn kv_set_issued_by(kv, v) { store64(kv + 40, v); return kv; }
-fn kv_set_pub_name(kv, v) { store64(kv + 64, v); return kv; }
-fn kv_set_pub_contact(kv, v) { store64(kv + 72, v); return kv; }
-fn kv_set_secret_key(kv, sk) { store64(kv + 80, sk); return kv; }
+fn kv_set_valid_from(kv, v): i64 { store64(kv + 8, v); return kv; }
+fn kv_set_valid_until(kv, v): i64 { store64(kv + 16, v); return kv; }
+fn kv_set_role(kv, r): i64 { store64(kv + 32, r); return kv; }
+fn kv_set_issued_by(kv, v): i64 { store64(kv + 40, v); return kv; }
+fn kv_set_pub_name(kv, v): i64 { store64(kv + 64, v); return kv; }
+fn kv_set_pub_contact(kv, v): i64 { store64(kv + 72, v); return kv; }
+fn kv_set_secret_key(kv, sk): i64 { store64(kv + 80, sk); return kv; }
 
 # Allowed-artifact-type restriction. An unset (0) list means "this key
 # is authorized for every ArtifactType" — the Rust `KeyMetadata`
 # default. A non-empty list restricts the key to signing only those
 # artifact types; any other type fails verification with a dedicated
 # "allowed_type" check, independent of the signature itself.
-fn kv_allowed_types(kv) { return load64(kv + 88); }
+fn kv_allowed_types(kv): i64 { return load64(kv + 88); }
 
-fn kv_add_allowed_type(kv, artifact_type) {
+fn kv_add_allowed_type(kv, artifact_type): i64 {
     var v = load64(kv + 88);
     if (v == 0) { v = vec_new(); store64(kv + 88, v); }
     vec_push(v, artifact_type);
     return kv;
 }
 
-fn kv_clear_allowed_types(kv) { store64(kv + 88, 0); return kv; }
+fn kv_clear_allowed_types(kv): i64 { store64(kv + 88, 0); return kv; }
 
 # Is this key authorized to sign artifacts of `artifact_type`?
 # Unrestricted key (no allowed_types list or empty list) → 1.
-fn kv_is_type_allowed(kv, artifact_type) {
+fn kv_is_type_allowed(kv, artifact_type): i64 {
     var v = load64(kv + 88);
     if (v == 0) { return 1; }
     var n = vec_len(v);
@@ -101,7 +101,7 @@ fn kv_is_type_allowed(kv, artifact_type) {
     return 0;
 }
 
-fn kv_is_valid_at(kv, when) {
+fn kv_is_valid_at(kv, when): i64 {
     if (when < load64(kv + 8)) { return 0; }
     var until = load64(kv + 16);
     if (until != 0) {
@@ -117,14 +117,14 @@ fn kv_is_valid_at(kv, when) {
 #   +0   keys_map   (hashmap: key_id -> vec of KeyVersion)
 #   +8   keys_dir   (C-string ptr)
 
-fn keyring_new(keys_dir) {
+fn keyring_new(keys_dir): i64 {
     var kr = fl_alloc(16);
     store64(kr, map_new());
     store64(kr + 8, keys_dir);
     return kr;
 }
 
-fn keyring_add_key(kr, kv) {
+fn keyring_add_key(kr, kv): i64 {
     var m = load64(kr);
     var kid = kv_key_id(kv);
     var existing = map_get(m, kid);
@@ -138,7 +138,7 @@ fn keyring_add_key(kr, kv) {
     return kr;
 }
 
-fn keyring_get_current(kr, key_id) {
+fn keyring_get_current(kr, key_id): i64 {
     var m = load64(kr);
     var versions = map_get(m, key_id);
     if (versions == 0) { return 0; }
@@ -154,18 +154,18 @@ fn keyring_get_current(kr, key_id) {
     return 0;
 }
 
-fn keyring_get_all_versions(kr, key_id) {
+fn keyring_get_all_versions(kr, key_id): i64 {
     var m = load64(kr);
     var versions = map_get(m, key_id);
     return versions;
 }
 
-fn keyring_len(kr) {
+fn keyring_len(kr): i64 {
     var m = load64(kr);
     return map_count(m);
 }
 
-fn keyring_find_by_role(kr, role) {
+fn keyring_find_by_role(kr, role): i64 {
     var result = vec_new();
     var m = load64(kr);
     var keys = map_keys(m);
@@ -188,13 +188,13 @@ fn keyring_find_by_role(kr, role) {
     return result;
 }
 
-fn keyring_is_empty(kr) {
+fn keyring_is_empty(kr): i64 {
     if (keyring_len(kr) == 0) { return 1; }
     return 0;
 }
 
 # Get key valid at a specific time
-fn keyring_get_key_valid_at(kr, key_id, when) {
+fn keyring_get_key_valid_at(kr, key_id, when): i64 {
     var m = load64(kr);
     var versions = map_get(m, key_id);
     if (versions == 0) { return 0; }
@@ -209,13 +209,13 @@ fn keyring_get_key_valid_at(kr, key_id, when) {
 }
 
 # Get all key IDs in the keyring
-fn keyring_key_ids(kr) {
+fn keyring_key_ids(kr): i64 {
     var m = load64(kr);
     return map_keys(m);
 }
 
 # Find keys by publisher name (case-sensitive substring match)
-fn keyring_find_by_publisher(kr, name) {
+fn keyring_find_by_publisher(kr, name): i64 {
     var result = vec_new();
     var m = load64(kr);
     var keys = map_keys(m);
@@ -250,7 +250,7 @@ fn keyring_find_by_publisher(kr, name) {
 }
 
 # Rotate key: create new version with overlap period
-fn keyring_rotate_key(kr, key_id, new_pk_hex, overlap_until) {
+fn keyring_rotate_key(kr, key_id, new_pk_hex, overlap_until): i64 {
     var new_kv = key_version_new(key_id, new_pk_hex);
     # Set the old key's valid_until to overlap_until
     var m = load64(kr);
@@ -267,7 +267,7 @@ fn keyring_rotate_key(kr, key_id, new_pk_hex, overlap_until) {
 }
 
 # Get trust chain from key to root (following issued_by links)
-fn keyring_get_chain(kr, key_id) {
+fn keyring_get_chain(kr, key_id): i64 {
     var chain = vec_new();
     var current_id = key_id;
     var max_depth = 10;
@@ -287,7 +287,7 @@ fn keyring_get_chain(kr, key_id) {
 }
 
 # Validate chain: verify each key was issued by its parent
-fn keyring_validate_chain(kr, key_id) {
+fn keyring_validate_chain(kr, key_id): i64 {
     var chain = keyring_get_chain(kr, key_id);
     var clen = vec_len(chain);
     if (clen == 0) { return 0; }
@@ -301,7 +301,7 @@ fn keyring_validate_chain(kr, key_id) {
 #   - non-empty, max 64 chars
 #   - only [A-Za-z0-9_-] (no '/', '.', or control bytes)
 # Returns 1 if safe, 0 otherwise. Prevents path traversal in keyring_save.
-fn _is_safe_key_id(kid) {
+fn _is_safe_key_id(kid): i64 {
     if (kid == 0) { return 0; }
     var klen = strlen(kid);
     if (klen == 0) { return 0; }
@@ -324,7 +324,7 @@ fn _is_safe_key_id(kid) {
 # Save keyring to JSON files in keys_dir.
 # Returns count of key versions written. Skips any key_id that
 # fails _is_safe_key_id or whose full path exceeds 255 bytes.
-fn keyring_save(kr) {
+fn keyring_save(kr): i64 {
     var keys_dir = load64(kr + 8);
     if (keys_dir == 0) { return 0; }
     var m = load64(kr);
@@ -393,7 +393,7 @@ fn keyring_save(kr) {
 # `"`, `\`, and control bytes < 0x20. Non-ASCII bytes pass through
 # verbatim (sigil stores UTF-8 path/hex content). Used by persistence
 # paths to prevent JSON injection from tampered field values.
-fn json_write_escaped(fd, s, slen) {
+fn json_write_escaped(fd, s, slen): i64 {
     if (s == 0) { return 0; }
     var i = 0;
     var chunk_start = 0;
@@ -443,7 +443,7 @@ fn json_write_escaped(fd, s, slen) {
 # Hash functions
 # ================================================================
 
-fn hash_data(data, len) {
+fn hash_data(data, len): i64 {
     return sha256_hex(data, len);
 }
 
@@ -451,12 +451,12 @@ fn hash_data(data, len) {
 # HASH_ALG_SHA256 (default, 32-byte digest) or HASH_ALG_SHA512
 # (64-byte digest). Unknown algorithm defaults to SHA-256 rather
 # than returning 0 — a trust engine must never silently skip hashing.
-fn hash_data_with(data, len, algorithm) {
+fn hash_data_with(data, len, algorithm): i64 {
     if (algorithm == HASH_ALG_SHA512) { return sha512_hex(data, len); }
     return sha256_hex(data, len);
 }
 
-fn hash_file(path) {
+fn hash_file(path): i64 {
     var fd = file_open(path, 0, 0);
     if (fd < 0) { return 0; }
     var ctx = sha256_init();
@@ -477,7 +477,7 @@ fn hash_file(path) {
 # on-disk content). Returns hex C-string, or 0 on file open failure.
 # Unknown algorithm falls back to SHA-256 — trust engine must never
 # silently skip hashing.
-fn hash_file_with(path, algorithm) {
+fn hash_file_with(path, algorithm): i64 {
     if (algorithm != HASH_ALG_SHA512) { return hash_file(path); }
     var fd = file_open(path, 0, 0);
     if (fd < 0) { return 0; }
@@ -499,14 +499,14 @@ fn hash_file_with(path, algorithm) {
 # Signing / verification (Ed25519)
 # ================================================================
 
-fn sign_data(data, len, secret_key) {
+fn sign_data(data, len, secret_key): i64 {
     # secret_key is 64 bytes (seed || pk) from ed25519_keypair
     var sig = alloc(64);
     ed25519_sign(secret_key, data, len, sig);
     return sig;
 }
 
-fn verify_data(data, len, sig, public_key) {
+fn verify_data(data, len, sig, public_key): i64 {
     # public_key is 32 bytes
     return ed25519_verify(public_key, data, len, sig);
 }
@@ -515,7 +515,7 @@ fn verify_data(data, len, sig, public_key) {
 # Key generation (Ed25519)
 # ================================================================
 
-fn generate_keypair(sk_out, pk_out) {
+fn generate_keypair(sk_out, pk_out): i64 {
     # sk_out: 64 bytes (seed || pk), pk_out: 32 bytes
     # Returns key_id (C-string) on success, 0 on entropy failure.
     # `secret var` zeroizes seed on every return (Cyrius 5.3.5+).
@@ -548,7 +548,7 @@ fn generate_keypair(sk_out, pk_out) {
 # Key zeroization
 # ================================================================
 
-fn zeroize_key(key_buf, len) {
+fn zeroize_key(key_buf, len): i64 {
     memset(key_buf, 0, len);
     return 0;
 }

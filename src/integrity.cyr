@@ -12,7 +12,7 @@ enum MeasurementStatus {
     MSTATUS_ERROR = 4;
 }
 
-fn mstatus_name(s) {
+fn mstatus_name(s): i64 {
     if (s == MSTATUS_PENDING) { return "Pending"; }
     if (s == MSTATUS_VERIFIED) { return "Verified"; }
     if (s == MSTATUS_MISMATCH) { return "Mismatch"; }
@@ -34,7 +34,7 @@ fn mstatus_name(s) {
 # variable during iv_verify_all and never re-read after the status
 # decision.
 
-fn measurement_new(path, expected_hash) {
+fn measurement_new(path, expected_hash): i64 {
     var m = fl_alloc(24);
     store64(m, path);
     store64(m + 8, expected_hash);
@@ -42,9 +42,9 @@ fn measurement_new(path, expected_hash) {
     return m;
 }
 
-fn meas_path(m) { return load64(m); }
-fn meas_expected(m) { return load64(m + 8); }
-fn meas_status(m) { return load64(m + 16); }
+fn meas_path(m): i64 { return load64(m); }
+fn meas_expected(m): i64 { return load64(m + 8); }
+fn meas_status(m): i64 { return load64(m + 16); }
 
 # ================================================================
 # IntegrityPolicy (24 bytes)
@@ -54,7 +54,7 @@ fn meas_status(m) { return load64(m + 16); }
 #   +8   check_interval (seconds)
 #   +16  enforce        (i64, 0 or 1)
 
-fn integrity_policy_new() {
+fn integrity_policy_new(): i64 {
     var p = fl_alloc(24);
     store64(p, vec_new());
     store64(p + 8, 300);
@@ -62,19 +62,19 @@ fn integrity_policy_new() {
     return p;
 }
 
-fn ipolicy_check_interval(p) { return load64(p + 8); }
-fn ipolicy_enforce(p) { return load64(p + 16); }
+fn ipolicy_check_interval(p): i64 { return load64(p + 8); }
+fn ipolicy_enforce(p): i64 { return load64(p + 16); }
 
-fn ipolicy_set_enforce(p, v) { store64(p + 16, v); return p; }
-fn ipolicy_set_interval(p, v) { store64(p + 8, v); return p; }
+fn ipolicy_set_enforce(p, v): i64 { store64(p + 16, v); return p; }
+fn ipolicy_set_interval(p, v): i64 { store64(p + 8, v); return p; }
 
-fn ipolicy_add(p, path, expected_hash) {
+fn ipolicy_add(p, path, expected_hash): i64 {
     var m = measurement_new(path, expected_hash);
     vec_push(load64(p), m);
     return p;
 }
 
-fn ipolicy_remove(p, path) {
+fn ipolicy_remove(p, path): i64 {
     var measurements = load64(p);
     var mlen = vec_len(measurements);
     var i = 0;
@@ -101,7 +101,7 @@ fn ipolicy_remove(p, path) {
 # Dropped in 2.6.0: checked_at — no read path. Callers can
 # clock_epoch_secs() themselves at report time.
 
-fn integrity_report_new() {
+fn integrity_report_new(): i64 {
     var r = fl_alloc(32);
     store64(r, 0);
     store64(r + 8, 0);
@@ -110,12 +110,12 @@ fn integrity_report_new() {
     return r;
 }
 
-fn ireport_total(r) { return load64(r); }
-fn ireport_verified(r) { return load64(r + 8); }
-fn ireport_mismatches(r) { return load64(r + 16); }
-fn ireport_errors(r) { return load64(r + 24); }
+fn ireport_total(r): i64 { return load64(r); }
+fn ireport_verified(r): i64 { return load64(r + 8); }
+fn ireport_mismatches(r): i64 { return load64(r + 16); }
+fn ireport_errors(r): i64 { return load64(r + 24); }
 
-fn ireport_is_clean(r) {
+fn ireport_is_clean(r): i64 {
     if (vec_len(load64(r + 16)) == 0) {
         if (vec_len(load64(r + 24)) == 0) {
             return 1;
@@ -132,7 +132,7 @@ fn ireport_is_clean(r) {
 #   +8   last_report  (IntegrityReport ptr, 0 = none)
 #   +16  callback     (fn ptr, 0 = none)
 
-fn integrity_verifier_new(policy) {
+fn integrity_verifier_new(policy): i64 {
     var v = fl_alloc(24);
     store64(v, policy);
     store64(v + 8, 0);
@@ -140,20 +140,20 @@ fn integrity_verifier_new(policy) {
     return v;
 }
 
-fn iv_policy(v) { return load64(v); }
-fn iv_last_report(v) { return load64(v + 8); }
+fn iv_policy(v): i64 { return load64(v); }
+fn iv_last_report(v): i64 { return load64(v + 8); }
 
-fn iv_set_callback(v, cb) { store64(v + 16, cb); return v; }
-fn iv_clear_callback(v) { store64(v + 16, 0); return v; }
+fn iv_set_callback(v, cb): i64 { store64(v + 16, cb); return v; }
+fn iv_clear_callback(v): i64 { store64(v + 16, 0); return v; }
 
-fn iv_set_policy(v, policy) {
+fn iv_set_policy(v, policy): i64 {
     store64(v, policy);
     store64(v + 8, 0);
     return v;
 }
 
 # Verify a single file against policy
-fn iv_verify_file(v, path) {
+fn iv_verify_file(v, path): i64 {
     var policy = load64(v);
     var measurements = load64(policy);
     var mlen = vec_len(measurements);
@@ -175,7 +175,7 @@ fn iv_verify_file(v, path) {
 }
 
 # Verify all files in policy
-fn iv_verify_all(v) {
+fn iv_verify_all(v): i64 {
     var policy = load64(v);
     var measurements = load64(policy);
     var mlen = vec_len(measurements);
@@ -213,7 +213,7 @@ fn iv_verify_all(v) {
 }
 
 # Add baseline: hash file and add to policy
-fn iv_add_baseline(v, path) {
+fn iv_add_baseline(v, path): i64 {
     var h = hash_file(path);
     if (h == 0) { return 0; }
     var policy = load64(v);
@@ -223,7 +223,7 @@ fn iv_add_baseline(v, path) {
 }
 
 # Remove baseline
-fn iv_remove_baseline(v, path) {
+fn iv_remove_baseline(v, path): i64 {
     var policy = load64(v);
     var removed = ipolicy_remove(policy, path);
     if (removed == 1) { store64(v + 8, 0); }
@@ -231,7 +231,7 @@ fn iv_remove_baseline(v, path) {
 }
 
 # Get tampered files from last report
-fn iv_tampered_files(v) {
+fn iv_tampered_files(v): i64 {
     var report = load64(v + 8);
     if (report == 0) { return vec_new(); }
     return load64(report + 16);
@@ -245,27 +245,27 @@ fn iv_tampered_files(v) {
 #
 # Dropped in 2.6.0: exported_at — no read path.
 
-fn integrity_snapshot_new() {
+fn integrity_snapshot_new(): i64 {
     var s = fl_alloc(8);
     store64(s, vec_new());
     return s;
 }
 
-fn isnap_entries(s) { return load64(s); }
+fn isnap_entries(s): i64 { return load64(s); }
 
 # BaselineEntry (16 bytes): path + expected_hash
-fn baseline_entry_new(path, expected_hash) {
+fn baseline_entry_new(path, expected_hash): i64 {
     var e = fl_alloc(16);
     store64(e, path);
     store64(e + 8, expected_hash);
     return e;
 }
 
-fn bentry_path(e) { return load64(e); }
-fn bentry_hash(e) { return load64(e + 8); }
+fn bentry_path(e): i64 { return load64(e); }
+fn bentry_hash(e): i64 { return load64(e + 8); }
 
 # Export current baseline as snapshot
-fn iv_export_baseline(v) {
+fn iv_export_baseline(v): i64 {
     var policy = load64(v);
     var measurements = load64(policy);
     var snap = integrity_snapshot_new();
@@ -282,7 +282,7 @@ fn iv_export_baseline(v) {
 }
 
 # Import snapshot, replacing current policy measurements
-fn iv_import_baseline(v, snap) {
+fn iv_import_baseline(v, snap): i64 {
     var policy = load64(v);
     var interval = ipolicy_check_interval(policy);
     var enforce = ipolicy_enforce(policy);

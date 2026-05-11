@@ -42,7 +42,7 @@ var MLDSA_QINV = 58728449;              # Q * QINV ≡ -1 (mod 2^32)
 #     which is equivalent here because `a - t*Q` is always an
 #     exact multiple of 2^32 by Montgomery construction.
 
-fn mldsa_montgomery_reduce(a) {
+fn mldsa_montgomery_reduce(a): i64 {
     # Step 1: t_low = low 32 bits of a * QINV (unsigned view).
     var t_raw = a * MLDSA_QINV;
     var t_low = t_raw & 0xFFFFFFFF;
@@ -88,7 +88,7 @@ fn mldsa_montgomery_reduce(a) {
 #     OR folds into the logical-shift result.
 # No data-dependent branch; all straight-line arithmetic.
 
-fn mldsa_reduce32(a) {
+fn mldsa_reduce32(a): i64 {
     var x = a + (1 << 22);
     var logical = x >> 23;
     var sign = (x >> 63) & 1;
@@ -110,7 +110,7 @@ fn mldsa_reduce32(a) {
 # addend. No data-dependent branch — the sign-bit extraction and
 # multiply are straight-line arithmetic.
 
-fn mldsa_caddq(a) {
+fn mldsa_caddq(a): i64 {
     var neg = (a >> 63) & 1;
     return a + neg * MLDSA_Q;
 }
@@ -121,6 +121,6 @@ fn mldsa_caddq(a) {
 # Convenience wrapper = caddq ∘ reduce32. Used at pack boundaries
 # where the coefficient must be the unique in-range representative.
 
-fn mldsa_freeze(a) {
+fn mldsa_freeze(a): i64 {
     return mldsa_caddq(mldsa_reduce32(a));
 }
