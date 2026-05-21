@@ -94,13 +94,21 @@ jobs:
         # allow line-length` annotation, drop the exemption here
         # and add the inline allow next to each literal.
         run: |
+          # `cyrius lint` exits with code 1 when a file has any
+          # warnings. Under GitHub Actions' default `bash -e`,
+          # the command-substitution assignment would terminate
+          # the step the moment we hit aes_gcm.cyr / mldsa_ntt.cyr
+          # (both carry the exempted line-length warnings), before
+          # the case-branch logic has a chance to classify the
+          # output. The trailing `|| true` neutralises the exit
+          # code so we can inspect the stdout/stderr ourselves.
           fail=0
           for f in src/*.cyr programs/*.cyr; do
             case "$f" in
               src/aes_gcm.cyr|src/mldsa_ntt.cyr)
                 # Allow only line-length warnings from these files;
                 # any other warning class still fails the gate.
-                out=$(cyrius lint "$f" 2>&1)
+                out=$(cyrius lint "$f" 2>&1 || true)
                 echo "$out"
                 non_length=$(echo "$out" | grep -E '^\s*warn ' | grep -v 'line exceeds 120' || true)
                 if [ -n "$non_length" ]; then
@@ -108,7 +116,7 @@ jobs:
                 fi
                 ;;
               *)
-                out=$(cyrius lint "$f" 2>&1)
+                out=$(cyrius lint "$f" 2>&1 || true)
                 echo "$out"
                 if echo "$out" | grep -qE '^\s*warn '; then
                   echo "lint: warnings in $f"; fail=1
