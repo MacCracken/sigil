@@ -28,11 +28,22 @@
 #   MOVDQU [rdx], xmm0             F3 0F 7F 02
 
 # _aes_ni_cache: 2 = uncached, 0 = unavailable (software path), 1 = available.
-# First call to aes_ni_available() runs the CPUID probe and caches
-# the result; subsequent calls return the cached value. The probe
+# First call to aes_ni_available() runs the CPUID probe AND the
+# FIPS 197 §C.3 self-test; on either gate failure the cache pins to
+# 0 and sigil silently falls through to the software path. The probe
 # is a serializing instruction so we want to pay it exactly once.
 var _aes_ni_cache = 2;
 var _aes_ni_probe_out = 0;      # 8-byte scratch for the probe's *out param
+
+# Self-test scratch — module-level so `var rk[240]` lands on a
+# 16-byte boundary (CLAUDE.md quirk #6). Required because the
+# `pxor xmm0, [rdi]` / `aesenc xmm0, [rdi+disp]` opcodes in
+# aes256_encrypt_block_ni take m128 operands and #GP on unaligned
+# addresses. Local-stack `var rk[240]` carries no alignment guarantee.
+var _aes_ni_st_key[32];
+var _aes_ni_st_rk[240];
+var _aes_ni_st_pt[16];
+var _aes_ni_st_ct[16];
 
 fn aes_ni_available(): i64 {
     if (_aes_ni_cache != 2) { return _aes_ni_cache; }
@@ -41,7 +52,24 @@ fn aes_ni_available(): i64 {
     _aes_ni_cpuid_probe(_aes_ni_probe_out);
     var ecx = load64(_aes_ni_probe_out);
     # ECX bit 25 = AES-NI (Intel SDM Vol 2A §3.2 CPUID leaf 1).
-    if ((ecx & (1 << 25)) != 0) {
+    if ((ecx & (1 << 25)) == 0) {
+        _aes_ni_cache = 0;
+        return 0;
+    }
+    # Defense-in-depth: confirm the NI asm path produces FIPS 197 §C.3
+    # output before going live. Catches the class of bug documented in
+    # docs/development/issues/2026-05-10-cyrius-510-asm-stack-frame-
+    # drift-breaks-ni-paths.md — hardcoded `[rbp-N]` parameter loads
+    # coupling to a cyrius prologue layout that drifts across toolchain
+    # versions. If the prologue ever shifts so that aes256_encrypt_block_ni
+    # reads garbage from the wrong stack slot, the dispatcher would have
+    # historically gone live on a broken NI path. Now it silently
+    # downgrades to software. Catches wrong-output cases (asm reads a
+    # mis-spilled pointer, executes against unrelated memory, produces
+    # nonsense). Does NOT catch SIGILL (no cyrius signal-handling
+    # primitive); for that, see the upstream cyrius ask filed alongside
+    # this fix (asm-block global-symbol pseudo for [rip+global] loads).
+    if (_aes_ni_self_test() == 0) {
         _aes_ni_cache = 1;
     } else {
         _aes_ni_cache = 0;
@@ -117,4 +145,52 @@ fn aes256_encrypt_block_ni(round_keys, in_block, out_block): i64 {
     }
     #endif
     return 0;
+}
+
+# _aes_ni_self_test — run AES-NI against FIPS 197 §C.3 and compare
+# the resulting ciphertext to the spec's published expected output.
+# Returns 0 if the NI path produced the right ciphertext (NI is
+# safe to enable), non-zero if the bytes diverged (downgrade to
+# software). Constant-time compare (OR-accumulating, no early exit).
+#
+# Forward references `aes256_key_expand` from `src/aes_gcm.cyr`,
+# which is included after this module in `src/lib.cyr`. Cyrius's
+# symbol resolution is per-translation-unit, so by the time this
+# fn executes at runtime, `aes256_key_expand` is fully registered.
+#
+# FIPS 197 §C.3 AES-256 vector:
+#   Key:       000102…1F                              (32 bytes)
+#   Plaintext: 00112233445566778899AABBCCDDEEFF       (16 bytes)
+#   Expected:  8EA2B7CA516745BFEAFC49904B496089       (16 bytes)
+fn _aes_ni_self_test(): i64 {
+    var i = 0;
+    while (i < 32) { store8(&_aes_ni_st_key + i, i); i = i + 1; }
+    i = 0;
+    while (i < 16) { store8(&_aes_ni_st_pt + i, (i * 17) & 0xFF); i = i + 1; }
+    i = 0;
+    while (i < 16) { store8(&_aes_ni_st_ct + i, 0xA5); i = i + 1; }   # sentinel
+    i = 0;
+    while (i < 240) { store8(&_aes_ni_st_rk + i, 0); i = i + 1; }
+
+    aes256_key_expand(&_aes_ni_st_key, &_aes_ni_st_rk);
+    aes256_encrypt_block_ni(&_aes_ni_st_rk, &_aes_ni_st_pt, &_aes_ni_st_ct);
+
+    var diff = 0;
+    diff = diff | ((load8(&_aes_ni_st_ct +  0) ^ 0x8E) & 0xFF);
+    diff = diff | ((load8(&_aes_ni_st_ct +  1) ^ 0xA2) & 0xFF);
+    diff = diff | ((load8(&_aes_ni_st_ct +  2) ^ 0xB7) & 0xFF);
+    diff = diff | ((load8(&_aes_ni_st_ct +  3) ^ 0xCA) & 0xFF);
+    diff = diff | ((load8(&_aes_ni_st_ct +  4) ^ 0x51) & 0xFF);
+    diff = diff | ((load8(&_aes_ni_st_ct +  5) ^ 0x67) & 0xFF);
+    diff = diff | ((load8(&_aes_ni_st_ct +  6) ^ 0x45) & 0xFF);
+    diff = diff | ((load8(&_aes_ni_st_ct +  7) ^ 0xBF) & 0xFF);
+    diff = diff | ((load8(&_aes_ni_st_ct +  8) ^ 0xEA) & 0xFF);
+    diff = diff | ((load8(&_aes_ni_st_ct +  9) ^ 0xFC) & 0xFF);
+    diff = diff | ((load8(&_aes_ni_st_ct + 10) ^ 0x49) & 0xFF);
+    diff = diff | ((load8(&_aes_ni_st_ct + 11) ^ 0x90) & 0xFF);
+    diff = diff | ((load8(&_aes_ni_st_ct + 12) ^ 0x4B) & 0xFF);
+    diff = diff | ((load8(&_aes_ni_st_ct + 13) ^ 0x49) & 0xFF);
+    diff = diff | ((load8(&_aes_ni_st_ct + 14) ^ 0x60) & 0xFF);
+    diff = diff | ((load8(&_aes_ni_st_ct + 15) ^ 0x89) & 0xFF);
+    return diff;
 }

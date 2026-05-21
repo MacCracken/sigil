@@ -76,6 +76,19 @@ fn main() {
     alloc_init();
 
     # ============================================================
+    # Self-test gate (3.2.0): sha_ni_available now requires both
+    # the CPUID bit AND a FIPS 180-4 §B.1 "abc" self-test pass.
+    # On SHA-NI hosts the self-test must return 0 (match); on non-
+    # NI hosts the CPUID gate short-circuits so the self-test
+    # itself never runs — only assert when probe returned live.
+    # ============================================================
+    test_group("sha_ni self-test gate");
+    var probe_pre = sha_ni_available();
+    if (probe_pre == 1) {
+        assert_eq(_sha_ni_self_test(), 0, "self-test matches FIPS 180-4 §B.1");
+    }
+
+    # ============================================================
     # Ring 1 — probe contract
     # ============================================================
     test_group("sha_ni_available probe contract");

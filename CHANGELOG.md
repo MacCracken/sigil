@@ -5,6 +5,63 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] — 3.2.0 in progress
+
+The 3.2.0 batch tracker lives in
+[`docs/development/3.2-scope.md`](docs/development/3.2-scope.md);
+items below land as they ship. The first item is the NI defense-
+in-depth gate; remaining batch items (alloc-free verify rewrite,
+three-way bench, cyrlint cleanup, downstream re-test sweep) follow
+in subsequent commits and roll up here.
+
+### Added
+
+- **NI self-test gate (`aes_ni_self_test` /
+  `sha_ni_self_test`).** `aes_ni_available()` and
+  `sha_ni_available()` now require BOTH a positive CPUID probe
+  AND a known-vector self-test pass before the cache pins to 1.
+  On mismatch the cache pins to 0 and sigil silently falls
+  through to the software path. Catches the class of bug
+  documented in [`docs/development/issues/2026-05-10-cyrius-510-asm-stack-frame-drift-breaks-ni-paths.md`](docs/development/issues/2026-05-10-cyrius-510-asm-stack-frame-drift-breaks-ni-paths.md)
+  — hardcoded `[rbp-N]` parameter loads in the NI asm blocks
+  coupling to a cyrius prologue layout that drifts across
+  toolchain versions. Production traffic never goes live on a
+  broken NI dispatcher; the worst case is a silent perf regression
+  to the software path. Vectors used:
+  - AES-NI: FIPS 197 §C.3 — key `00..1F`, plaintext
+    `00112233445566778899AABBCCDDEEFF` →
+    `8EA2B7CA516745BFEAFC49904B496089`.
+  - SHA-NI: FIPS 180-4 §B.1 — `"abc"` →
+    `BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD`.
+
+  Constant-time OR-accumulating compare (no early exit) on both
+  vectors. Self-test runs ONCE per process at first
+  `aes_ni_available()` / `sha_ni_available()` call; subsequent
+  calls return the cached result with zero overhead.
+
+  Coverage: `tests/tcyr/aes_ni.tcyr` 5/5 (was 4/4) and
+  `tests/tcyr/sha_ni.tcyr` 13/13 (was 12/12) — each gains a
+  `<module> self-test gate` group that asserts the direct self-
+  test fn returns 0 on AES-NI / SHA-NI hosts.
+
+  Benchmark on the dev host (Intel x86_64, cyrius 6.0.1):
+  `aes256_encrypt_block` 20 ns avg, `sha256_1kb_ni` 2 µs avg,
+  `sha256_64kb_ni` 164 µs avg, `aes_gcm_encrypt_1kb` 731 µs avg —
+  all within noise vs the 3.1.2 numbers. Self-test cost is one-
+  time at startup; per-call hot path is unchanged. Recorded in
+  `benches/history.csv` under label `v3.2.0-ni-selftest`.
+
+  **What this does NOT catch:** the SIGILL failure mode (asm
+  reads an unmapped pointer from a mis-spilled `[rbp-N]` slot).
+  Catching SIGILL needs cyrius signal-handling, which doesn't
+  exist. The structural fix — migrating the NI asm blocks off
+  hardcoded `[rbp-N]` byte literals entirely — is blocked on
+  cyrius shipping an asm-block global-symbol pseudo, requested
+  upstream in
+  [`cyrius/docs/development/issues/2026-05-21-asm-block-global-symbol-pseudo.md`](https://github.com/MacCracken/cyrius/blob/main/docs/development/issues/2026-05-21-asm-block-global-symbol-pseudo.md).
+  See the issue file for the migration plan once that pseudo
+  lands.
+
 ## [3.1.2] — 2026-05-21
 
 ### Changed

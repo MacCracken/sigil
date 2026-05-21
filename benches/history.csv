@@ -118,3 +118,8 @@ timestamp,label,benchmark,estimate,unit
 2026-04-25T00:00:00Z,v2.9.3,sha256_1kb_ni,2.0,µs
 2026-04-25T00:00:00Z,v2.9.3,sha256_64kb_sw,5318,µs
 2026-04-25T00:00:00Z,v2.9.3,sha256_64kb_ni,157,µs
+2026-05-21T00:00:00Z,v3.2.0-ni-selftest,sha256_64b_ni,471,ns
+2026-05-21T00:00:00Z,v3.2.0-ni-selftest,sha256_1kb_ni,2.0,µs
+2026-05-21T00:00:00Z,v3.2.0-ni-selftest,sha256_64kb_ni,164,µs
+2026-05-21T00:00:00Z,v3.2.0-ni-selftest,aes256_encrypt_block,20,ns
+2026-05-21T00:00:00Z,v3.2.0-ni-selftest,aes_gcm_encrypt_1kb,731,µs

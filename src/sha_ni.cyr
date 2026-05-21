@@ -35,9 +35,20 @@
 
 # _sha_ni_cache: 2 = uncached, 0 = unavailable, 1 = available.
 # Same sentinel discipline as _aes_ni_cache; one CPUID probe
-# per process.
+# per process. The "available" gate now requires BOTH the CPUID
+# bit AND the FIPS 180-4 "abc" self-test passing — defense-in-
+# depth against cyrius prologue drift breaking the `[rbp-N]`
+# parameter loads inside `_sha_ni_compress_one`.
 var _sha_ni_cache = 2;
 var _sha_ni_probe_out = 0;      # 8-byte scratch for the probe's *out param
+
+# Self-test scratch — module-level so the 144-byte ctx and the
+# expected-digest slots live in BSS rather than on the stack. ctx
+# is touched by `_sha_ni_compress_one` via `movdqu` loads/stores
+# only (no alignment requirement on ctx itself), but keeping the
+# buffer at module scope avoids per-call zeroization cost in the
+# happy path.
+var _sha_ni_st_ctx[144];
 
 fn sha_ni_available(): i64 {
     if (_sha_ni_cache != 2) { return _sha_ni_cache; }
@@ -46,7 +57,18 @@ fn sha_ni_available(): i64 {
     _sha_ni_cpuid_probe(_sha_ni_probe_out);
     var ebx = load64(_sha_ni_probe_out);
     # EBX bit 29 = SHA (Intel SDM Vol 2A §3.2 CPUID leaf 7 sub-leaf 0).
-    if ((ebx & (1 << 29)) != 0) {
+    if ((ebx & (1 << 29)) == 0) {
+        _sha_ni_cache = 0;
+        return 0;
+    }
+    # Defense-in-depth: confirm the NI compress produces the FIPS
+    # 180-4 §B.1 single-block "abc" digest before going live. Same
+    # rationale as aes_ni — catches asm-misencode caused by cyrius
+    # prologue drift breaking the `[rbp-N]` parameter loads inside
+    # `_sha_ni_compress_one`. Downgrades to the software path on
+    # mismatch. See docs/development/issues/2026-05-10-cyrius-510-
+    # asm-stack-frame-drift-breaks-ni-paths.md.
+    if (_sha_ni_self_test() == 0) {
         _sha_ni_cache = 1;
     } else {
         _sha_ni_cache = 0;
@@ -496,4 +518,71 @@ fn sha256_transform_ni(ctx): i64 {
     if (_sha_ni_buf == 0) { _sha_ni_init(); }
     _sha_ni_compress_one(ctx, _sha_ni_buf, _sha_ni_K);
     return 0;
+}
+
+# _sha_ni_self_test — run SHA-NI against the FIPS 180-4 §B.1 single-
+# block "abc" example and compare the resulting state to the spec's
+# published digest. Returns 0 on match (NI safe to enable), non-zero
+# on mismatch (downgrade to software). Constant-time compare (OR-
+# accumulating, no early exit).
+#
+# Calls `_sha_ni_compress_one` directly rather than going through
+# `sha256_transform`'s dispatcher (which would call back into
+# `sha_ni_available` → infinite recursion through this very fn).
+# `_sha_ni_init` is idempotent so the K-table + bswap-mask setup
+# costs nothing on the second-and-later probe.
+#
+# FIPS 180-4 §B.1 SHA-256 example:
+#   Msg:     "abc"                        (3 bytes, single block)
+#   Digest:  BA7816BF 8F01CFEA 414140DE 5DAE2223
+#            B00361A3 96177A9C B410FF61 F20015AD
+#
+# Ctx layout (per src/sha256.cyr): h0..h7 at +0..+63 (8 slots × 8B,
+# low 32 bits hold the dword), block buf at +64..+127, buf_len at
+# +128, total_len at +136.
+fn _sha_ni_self_test(): i64 {
+    if (_sha_ni_buf == 0) { _sha_ni_init(); }
+
+    # Zero ctx slots.
+    var i = 0;
+    while (i < 144) { store8(&_sha_ni_st_ctx + i, 0); i = i + 1; }
+
+    # FIPS 180-4 §5.3.3 initial hash values for SHA-256.
+    store64(&_sha_ni_st_ctx +  0, 0x6a09e667);
+    store64(&_sha_ni_st_ctx +  8, 0xbb67ae85);
+    store64(&_sha_ni_st_ctx + 16, 0x3c6ef372);
+    store64(&_sha_ni_st_ctx + 24, 0xa54ff53a);
+    store64(&_sha_ni_st_ctx + 32, 0x510e527f);
+    store64(&_sha_ni_st_ctx + 40, 0x9b05688c);
+    store64(&_sha_ni_st_ctx + 48, 0x1f83d9ab);
+    store64(&_sha_ni_st_ctx + 56, 0x5be0cd19);
+
+    # Padded "abc" block at +64..+127:
+    #   bytes 0..2 = 'a','b','c'
+    #   byte 3     = 0x80 (padding terminator per FIPS 180-4 §5.1.1)
+    #   bytes 4..62 = zeros
+    #   bytes 56..63 = length-in-bits big-endian (3 * 8 = 24 = 0x18)
+    store8(&_sha_ni_st_ctx + 64, 0x61);
+    store8(&_sha_ni_st_ctx + 65, 0x62);
+    store8(&_sha_ni_st_ctx + 66, 0x63);
+    store8(&_sha_ni_st_ctx + 67, 0x80);
+    store8(&_sha_ni_st_ctx + 127, 0x18);
+
+    _sha_ni_compress_one(&_sha_ni_st_ctx, _sha_ni_buf, _sha_ni_K);
+
+    # Compare h0..h7 to FIPS 180-4 §B.1 expected digest. The high 32
+    # bits of each 64-bit slot are guaranteed zero by the asm's
+    # zero-extending 64-bit stores at unpack time (see line 472 of
+    # this file), so a `& 0xFFFFFFFF` mask is sufficient for the
+    # XOR-accumulate compare.
+    var diff = 0;
+    diff = diff | ((load64(&_sha_ni_st_ctx +  0) ^ 0xba7816bf) & 0xFFFFFFFF);
+    diff = diff | ((load64(&_sha_ni_st_ctx +  8) ^ 0x8f01cfea) & 0xFFFFFFFF);
+    diff = diff | ((load64(&_sha_ni_st_ctx + 16) ^ 0x414140de) & 0xFFFFFFFF);
+    diff = diff | ((load64(&_sha_ni_st_ctx + 24) ^ 0x5dae2223) & 0xFFFFFFFF);
+    diff = diff | ((load64(&_sha_ni_st_ctx + 32) ^ 0xb00361a3) & 0xFFFFFFFF);
+    diff = diff | ((load64(&_sha_ni_st_ctx + 40) ^ 0x96177a9c) & 0xFFFFFFFF);
+    diff = diff | ((load64(&_sha_ni_st_ctx + 48) ^ 0xb410ff61) & 0xFFFFFFFF);
+    diff = diff | ((load64(&_sha_ni_st_ctx + 56) ^ 0xf20015ad) & 0xFFFFFFFF);
+    return diff;
 }

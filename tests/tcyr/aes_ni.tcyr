@@ -59,6 +59,22 @@ fn bytes_eq(a, b, n) {
 fn main() {
     alloc_init();
 
+    # ============================================================
+    # Self-test gate (3.2.0): aes_ni_available now requires both
+    # the CPUID bit AND a FIPS 197 §C.3 self-test pass. On AES-NI
+    # hosts the self-test must return 0 (match); on non-NI hosts
+    # the function is unreachable through aes_ni_available because
+    # the CPUID gate short-circuits, so we only assert on hosts
+    # where the CPUID probe ran live.
+    # ============================================================
+    test_group("aes_ni self-test gate");
+    var probe_pre = aes_ni_available();
+    if (probe_pre == 1) {
+        # The cache landed at 1, which means _aes_ni_self_test()
+        # already returned 0 once. Confirm direct invocation matches.
+        assert_eq(_aes_ni_self_test(), 0, "self-test matches FIPS 197 §C.3");
+    }
+
     test_group("aes_ni_available");
 
     var first = aes_ni_available();
