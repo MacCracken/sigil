@@ -21,6 +21,7 @@ include "lib/tagged.cyr"
 include "lib/process.cyr"
 include "lib/ct.cyr"
 include "lib/keccak.cyr"
+include "lib/slice.cyr"
 
 # Threading primitives — used by the parallel batch verify path
 # in `src/verify.cyr`. The 5.5.x-era fixup-cap gate (quirk #5,

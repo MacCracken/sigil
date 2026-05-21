@@ -5,6 +5,50 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.1.2] — 2026-05-21
+
+### Changed
+
+- **Cyrius toolchain bumped 5.11.4 → 6.0.1.** Picks up cycc 6.x
+  (UEFI fn-call UD2 emit fix, two stdlib-resolution path bugs
+  resolved). `cyrius.cyml` `cyrius` pin and CI's
+  `CYRIUS_VERSION` env both moved together so build and CI
+  agree on a single toolchain.
+- **`sakshi` pin 2.2.3 → 2.2.5.** Picks up sakshi's own
+  cyrius-6.0.1 toolchain bump and CI/release repairs. No
+  sakshi surface change consumed by sigil.
+- **`agnosys` pin 1.0.4 → 1.2.7.** Picks up agnosys's
+  multi-profile distlib (core / security / storage / trust /
+  system) plus the cycc 6.0.1 language-annotation pass. Sigil
+  continues to consume the full `dist/agnosys.cyr` bundle —
+  the multi-profile split is forward-compatible.
+
+### Added
+
+- `slice` added to `[deps] stdlib` in `cyrius.cyml`, and
+  `include "lib/slice.cyr"` added to `src/lib.cyr`. Required
+  because agnosys 1.2.7's bundled dist now uses first-class
+  `slice<T>` / `[T]` subscripts (cycc 5.8.10+), which expand
+  to `_slice_idx_get_W` helpers defined only in
+  `lib/slice.cyr`. Without it the smoke build fails with
+  `slice subscript requires include "lib/slice.cyr" : undef`
+  at `lib/agnosys.cyr:5434`.
+
+### Notes
+
+- `cyrius.lock` is maintained by hand for the two non-stdlib
+  bundles (`lib/sakshi.cyr`, `lib/agnosys.cyr`). Cyrius 6.0.1
+  inherits the v5.11.8 file-copy-not-symlink dep strategy but
+  `cmd_deps_lock` in `cbt/deps.cyr` still gates on `readlink`,
+  so `cyrius deps` writes an empty lockfile on every run.
+  Same workaround used by yukti; agnosys side-steps it by
+  `.gitignore`-ing `lib/` entirely (sigil already does too —
+  the lockfile is the only on-disk record of resolved dep
+  hashes here). Treat as a known cyrius bug, not a sigil
+  regression.
+- `dist/sigil.cyr` regenerated via `cyrius distlib` at v3.1.2
+  (8893 lines, unchanged).
+
 ## [3.1.1] — 2026-05-11
 
 ### Changed

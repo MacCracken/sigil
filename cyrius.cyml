@@ -5,7 +5,7 @@ description = "Sigil — system-wide trust verification for AGNOS. Ed25519, SHA-
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/sigil"
 language = "cyrius"
-cyrius = "5.11.4"
+cyrius = "6.0.1"
 
 [build]
 entry = "programs/smoke.cyr"
@@ -71,13 +71,13 @@ modules = [
 ]
 
 [deps]
-stdlib = ["syscalls", "alloc", "freelist", "assert", "str", "string", "vec", "hashmap", "io", "fmt", "json", "chrono", "bigint", "tagged", "process", "fs", "bench"]
+stdlib = ["syscalls", "alloc", "freelist", "assert", "str", "string", "vec", "hashmap", "io", "fmt", "json", "chrono", "bigint", "tagged", "process", "fs", "bench", "slice"]
 
 # Sakshi is not yet folded into the Cyrius stdlib distribution (2.0.0 pending).
 # Pin to the published tag via git until the toolchain vendors it.
 [deps.sakshi]
 git = "https://github.com/MacCracken/sakshi.git"
-tag = "2.2.3"
+tag = "2.2.5"
 modules = ["dist/sakshi.cyr"]
 
 # Agnosys provides the AGNOS kernel interfaces sigil needs for trust
@@ -86,5 +86,5 @@ modules = ["dist/sakshi.cyr"]
 # the consumer (sigil) is responsible for the stdlib surface above.
 [deps.agnosys]
 git = "https://github.com/MacCracken/agnosys.git"
-tag = "1.0.4"
+tag = "1.2.7"
 modules = ["dist/agnosys.cyr"]
