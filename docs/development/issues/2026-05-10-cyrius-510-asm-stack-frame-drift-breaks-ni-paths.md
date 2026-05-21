@@ -11,7 +11,20 @@ crypto surface under any cyrius ≥ 5.5 toolchain. Pinning a
 post-2.9.0 sigil with a modern cyrius is currently a non-starter
 for downstream consumers; majra 2.4.2 had to hold sigil at 2.9.0
 to ship at all.
-**Status:** open.
+**Status:** open — does **not** repro under cyrius 6.0.1 native
+x86_64 (sigil 3.1.2 ship-cut: 24/24 `.tcyr` green including
+`aes_ni.tcyr` 4/4, `aes_gcm.tcyr` 15/15, `ed25519.tcyr` 20/20),
+but the **structural defect remains**: `src/aes_ni.cyr:60,88-90`
+and `src/sha_ni.cyr:64,244-246` still hardcode `mov rdi,
+[rbp-8]` / `mov rsi, [rbp-16]` / `mov rdx, [rbp-24]` as byte
+literals. The 5.10.x prologue drift that caused SIGILL is
+implicitly silenced under cyrius 6.0.x's frame layout, but a
+future cyrius prologue change can re-break it identically.
+Defense-in-depth structural fix is queued for **3.2.0** —
+migrate the three-parameter NI dispatch sites to module-level
+globals (pattern matches `_aes_ni_cache` / `_sha_ni_cache`),
+producing a cyrius-stable ABI regardless of frame-layout drift.
+See `docs/development/3.2-scope.md`.
 
 ## Summary
 

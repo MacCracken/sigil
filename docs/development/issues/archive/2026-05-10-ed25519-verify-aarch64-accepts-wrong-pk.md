@@ -11,7 +11,13 @@ qemu-user 11.0.0-1 on x86_64 Linux. Native x86_64 path is clean.
 **Severity:** **P1** for any consumer that uses sigil to verify a
 trust boundary on aarch64 — a verify that accepts wrong keys
 breaks the auth property the function exists to provide.
-**Status:** open.
+**Status:** **resolved (2026-05-21)** under cyrius 6.0.1 + sigil
+3.1.2. Cyrius 6.0.0/6.0.1's aarch64 codegen overhaul (the cc6 cut
+that landed the "REAL TYPE SYSTEM" annotation pass plus the two
+stdlib-resolution path bug fixes) appears to have folded out the
+constant-fold this issue's hypothesis #2 predicted. See "Resolution
+verification" footer at the bottom of this file for the 2026-05-21
+repro run.
 
 ## Summary
 
@@ -171,3 +177,45 @@ arch — so the bug doesn't escape into cross-arch trust paths).
 - **libro** `proof_verify_signed` — by extension, every
   consumer that calls libro's signed-proof verify on aarch64
   inherits the false-positive class.
+
+## Resolution verification (2026-05-21)
+
+Repro from § "Direct sigil call" above, re-run against the
+3.1.2 ship-cut (cyrius 5.11.4 → 6.0.1 bump, sakshi 2.2.3 →
+2.2.5, agnosys 1.0.4 → 1.2.7, vendored lib refresh):
+
+```
+$ cyrius build --aarch64 --no-deps /tmp/ed25519_aarch_repro.cyr \
+    /tmp/ed25519_aarch_repro
+compile ... [aarch64] OK
+$ qemu-aarch64 /tmp/ed25519_aarch_repro
+1            # verify with right pk
+0            # verify with wrong pk  ← FIXED
+EXIT=0
+```
+
+Both halves now report the expected values: right-pk verify
+returns 1, wrong-pk verify returns 0. Hypothesis #2 (cc5 aarch64
+`constant_time_eq_*` codegen constant-folding to 0=equal) was the
+load-bearing speculation; cycc 6's backend pass appears to have
+broken that constant-fold pattern. Native x86_64 verify continued
+to behave correctly across the same versions, so no regression
+was introduced by the bump.
+
+Downstream consumers (argonaut, libro) can drop the aarch64
+"known-failure" gate on the `audit-ext-sign-ed25519` /
+`wrong-vk-rejected` assertion under cyrius ≥ 6.0.1 + sigil ≥
+3.1.2.
+
+**Action items closed by this resolution:**
+
+- The "Road to v3.1" P1 row for this issue (roadmap.md)
+  collapses to a single-line "shipped under cyrius 6.0.1"
+  historical note.
+- Argonaut 1.5.4's "best-effort, non-blocking aarch64 CI"
+  documentation can promote the aarch64 cross-build to a
+  blocking gate when it bumps to sigil ≥ 3.1.2.
+
+If the bug recurs against a future toolchain or hardware
+(real-silicon aarch64, not qemu-user), re-open with the new
+cyrius pin and a fresh repro.

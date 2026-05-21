@@ -7,7 +7,17 @@
 **Sigil versions affected:** 3.1.1 (only version exercised post-bump; 2.9.5 was the last-known-good phylax pin pre-1.1.1)
 **Sigil last-known-good (phylax-side):** 2.9.5
 **Severity:** **P2** — investigation. Sigil-side fault is *one of three candidate root causes* and the least likely per the phylax-side analysis; the more likely causes are cc5 register-spill or 5.10.x stdlib-layout drift in TLSH-side code. Filed in sigil's queue so the 3.x cycle's downstream-impact tracking is complete, not because sigil is confirmed at fault.
-**Status:** open — investigation.
+**Status:** open — investigation. **Re-test against sigil 3.1.2
++ cyrius 6.0.1 prompted (2026-05-21).** The 3.1.2 ship-cut moves
+sigil to cyrius 6.0.1, which independently resolved the sibling
+P1 [`archive/2026-05-10-ed25519-verify-aarch64-accepts-wrong-pk.md`](archive/2026-05-10-ed25519-verify-aarch64-accepts-wrong-pk.md)
+and silenced the sibling P1 [`2026-05-10-cyrius-510-asm-stack-frame-drift-breaks-ni-paths.md`](2026-05-10-cyrius-510-asm-stack-frame-drift-breaks-ni-paths.md)
+on native x86_64. Phylax-side bisect against the new pin
+(cyrius 6.0.1 + sigil 3.1.2) should now run before sigil-side
+work is queued — if the segfault no longer reproduces, this
+file archives with a "no sigil-side action — toolchain pass
+folded it out" footer; if it persists, sigil-side investigation
+goes into the 3.2.x backlog.
 **Upstream filing (phylax-side, canonical):** [phylax/docs/development/issues/2026-05-11-tlsh-distance-segfault.md](https://github.com/MacCracken/phylax/blob/main/docs/development/issues/2026-05-11-tlsh-distance-segfault.md)
 
 ## Why this is in sigil's queue (not just phylax's)

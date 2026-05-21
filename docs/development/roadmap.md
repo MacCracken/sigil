@@ -2,9 +2,10 @@
 
 Forward-looking work only. For shipped items and version history
 see [CHANGELOG.md](../../CHANGELOG.md). The 2.x cycle's originally
-scoped plan is complete; the in-flight 3.0 cycle's working scope
-sits in [`3.0-scope.md`](3.0-scope.md) (folded into CHANGELOG once
-3.0.0 tags).
+scoped plan is complete; the 3.0 cycle's working scope sits in
+[`3.0-scope.md`](3.0-scope.md); the 3.2 cycle's working scope sits
+in [`3.2-scope.md`](3.2-scope.md) and the TEE-attestation sub-arc
+in [`3.2-tee-arc.md`](3.2-tee-arc.md).
 
 ## Shipped — foundation for 3.0
 
@@ -41,87 +42,107 @@ Briefly:
   `alog_append_to_file` → `alog_save`, `alog_load_from_file` →
   `alog_load`.
 
-## Road to v3.1
+## Shipped — 3.1.x line
 
-v3.1 is defined by **making parallel batch verify actually fast**.
-The 3.0 landing shipped the spawn / join / shard / mutex
-infrastructure but the mutex wraps the full `sv_verify_artifact`
-call chain because its downstream hits `alloc` / `vec_push` /
-`map_get`, none of which are thread-safe under cyrius (CLAUDE.md
-quirk #7). Measured 0.96× – 1.04× vs serial — correctness
-preserved, no throughput win. Real parallelism on the dominant
-`ed25519_verify` (~6.4 ms per artifact under SHA-NI) requires
-lifting the allocations out of the worker body.
+The 3.1 cycle re-scoped from its originally-planned "alloc-free
+verify hot path" rewrite into a stdlib-modernisation arc as
+cyrius advanced through 5.10.x → 5.11.x → 6.0.x. The hot-path
+rewrite carries forward to 3.2.0 (see below).
 
-**Cyrius toolchain status:** sigil is currently pinned to
-**5.7.48**. The fixup-table cap raise (filed 2026-04-22, shipped
-in cyrius 5.5.37) is in and the parallel-batch gate has already
-been removed in 3.0. The remaining upstream blocker:
+- **3.1.0 (2026-05-06)** — SemVer-label correction for 3.0.2's
+  removal of `src/ct.cyr` and the public `ct_eq` / `ct_eq_32`
+  symbols (correctly a minor bump, not a patch). No code delta
+  vs 3.0.2.
+- **3.1.1 (2026-05-11)** — stdlib annotation pass: every public
+  fn in `src/*.cyr` carries a `: i64` return-type annotation
+  matching cyrius's v5.11.x annotation arc. Parse-only, zero
+  runtime / codegen change. Cyrius pin bumped 5.9.20 → 5.11.4.
+- **3.1.2 (2026-05-21)** — cyrius pin bumped 5.11.4 → 6.0.1
+  (cc6 stdlib-resolution path bug fixes + UEFI fn-call UD2
+  emit fix); sakshi 2.2.3 → 2.2.5; agnosys 1.0.4 → 1.2.7
+  (multi-profile distlib); `lib/slice.cyr` added to the stdlib
+  set (agnosys 1.2.7 uses first-class slice subscripts). CI
+  `CYRIUS_VERSION` env synced to the new pin. The 3.1.2 ship
+  implicitly resolved the open argonaut/libro aarch64
+  ed25519-verify P1
+  ([`issues/archive/2026-05-10-ed25519-verify-aarch64-accepts-wrong-pk.md`](issues/archive/2026-05-10-ed25519-verify-aarch64-accepts-wrong-pk.md))
+  and silenced the x86_64 surface of the majra NI `[rbp-N]`
+  drift P1 — the structural fix for the latter carries forward
+  to 3.2.0 as defense-in-depth.
 
-- Stdlib thread-safety on `alloc` / `vec` / `hashmap` — cyrius
-  5.5.32 deferred the design (per-thread arena vs full spinlock
-  vs CAS-bump-ptr were all in flight). Current status unknown
-  post-5.7.48 — needs an upstream check before the 3.1 rewrite
-  starts.
+## Road to v3.2
 
-### 3.1 work items
+**Working scope:** [`3.2-scope.md`](3.2-scope.md). **Cyrius pin:**
+**6.0.1** (synced across `cyrius.cyml` and CI during the 3.1.2
+ship-cut). cc6's annotation pass + stdlib-resolution fixes are
+the load-bearing toolchain features for the cycle.
 
-- [ ] **[P1] Migrate NI-dispatch fns off hardcoded `[rbp-N]`
-      parameter loads.** Tracked under
-      [`issues/2026-05-10-cyrius-510-asm-stack-frame-drift-breaks-ni-paths.md`](issues/2026-05-10-cyrius-510-asm-stack-frame-drift-breaks-ni-paths.md).
-      Filed by majra 2026-05-10 against cyrius 5.10.34. Affects
-      `aes256_encrypt_block_ni`, `sha256_transform_ni`, and the
-      ed25519-NI surface; downstream bisect: sigil 2.9.0 = pass,
-      2.9.1–3.0.1 = SIGILL on the ed25519 path, 3.1.0 = SIGILL on
-      aes-gcm too. Blocks every downstream consumer from picking up
-      the 2.9.x crypto-pillar perf wins (363× AES, 21–44× SHA) under
-      any modern cyrius — majra 2.4.2 had to hold sigil at 2.9.0 to
-      ship. Lowest-risk fix: load parameters into module-level
-      globals before the asm block instead of decoding `[rbp-N]` byte
-      literals. **Ship this before the alloc-free rewrite below** —
-      parallel-batch speedups are moot if the serial NI hot paths
-      SIGILL under the toolchain consumers are actually running.
+3.2 splits into a tight 3.2.0 batch followed by an independent
+patch series (3.2.x TEE attestation arc). Sequencing rationale:
+3.2.0 closes out the 3.1 carry-over and the silenced-but-
+structural NI bug; the TEE arc opens once the foundation is
+clean.
 
-- [ ] **[P2] Investigate phylax `tlsh_distance(h, h)` SIGSEGV under
-      cyrius 5.10.44 + sigil 3.1.1.** Tracked under
-      [`issues/2026-05-11-tlsh-distance-segfault-phylax.md`](issues/2026-05-11-tlsh-distance-segfault-phylax.md).
-      Filed by phylax 2026-05-11 at the 1.1.1 ship-cut. phylax's TLSH
-      (`src/hashing.cyr`) calls into sigil for partial hashing; the
-      crash showed up post-bump from sigil 2.9.5 → 3.1.1 paired with
-      cyrius 5.7.48 → 5.10.44. Phylax-side analysis lists three
-      candidate root causes (cc5 register-spill, 5.10.x stdlib layout
-      drift, sigil 3.x interaction); the sigil-side candidate is
-      flagged as least likely but listed here so the 3.x cycle's
-      downstream-impact tracking is complete. **Likely folds into the
-      P1 above** — if the bisect lands on the SHA-NI path
-      (`sha256_transform_ni`), the fix is the same module-level-globals
-      migration. If a phylax-side bisect (cyrius 5.7.48 → 5.10.44 +
-      sigil 2.9.5 → 3.1.1) clears sigil entirely, archive the issue
-      with a "no sigil-side action" footer. No sigil-side work owed
-      until the phylax-side bisect runs.
+### 3.2.0 batch — defense + hot-path
 
-- [ ] **Alloc-free verify hot path (Option 1 rewrite).** Rewrite
-      `sv_verify_artifact` and its call chain to accept caller-
-      provided scratch instead of allocating internally:
-      - `hash_file` returns a caller-provided hex buffer rather
-        than `alloc`-ing one per call
-      - `hex_decode` writes into a caller-provided 32-byte buffer
-      - `trust_check_new` + `vresult_add_check` → replace the
-        per-check vec with a bounded fixed-size check array on
-        `verification_result` (≤ 6 standard checks; size with
-        headroom)
-      - `verification_result_new` → in-place construction into a
-        pre-allocated output slot
-      - `map_get` on the trust store — document read-only-is-safe
-        contract, or wrap in an rwlock
-      Expected wins: 3× + speedup at 4 workers, lower per-artifact
-      latency, cleaner thread-safety story, smaller attack
-      surface.
+Scope and closeout criteria in [`3.2-scope.md`](3.2-scope.md).
+Headline items:
 
-- [ ] **Three-way bench.** Serial / 3.0 mutex-wrap parallel /
-      3.1 alloc-free parallel comparison published in
-      `tests/bcyr/batch_parallel.bcyr` output, with CSV row added
-      to `benches/history.csv`.
+- **NI dispatch parameters off the stack frame.** Migrate the
+  hardcoded `[rbp-N]` parameter loads in `src/aes_ni.cyr` and
+  `src/sha_ni.cyr` to module-level globals. Defense-in-depth
+  for [`issues/2026-05-10-cyrius-510-asm-stack-frame-drift-breaks-ni-paths.md`](issues/2026-05-10-cyrius-510-asm-stack-frame-drift-breaks-ni-paths.md)
+  — the bug currently does not reproduce under cyrius 6.0.1
+  (24/24 tests pass on 3.1.2) but the structural defect
+  remains.
+
+- **Alloc-free `sv_verify_artifact` rewrite.** The originally-
+  scoped 3.1 work item. Lifts `alloc` / `vec_push` / `map_get`
+  out of the mutex-wrapped parallel-batch worker body so the
+  3.0 batch-verify infrastructure delivers actual throughput
+  (target: ≥ 3× at 4 workers). **Cyrius prerequisite:**
+  confirm cc6's `alloc` / `vec` / `hashmap` thread-safety
+  status before starting — quirk #7 floor was 5.5.32; cc6's
+  stdlib pass may have advanced it.
+
+- **Three-way bench.** Serial / 3.0 mutex-wrap / 3.2 alloc-
+  free comparison row added to `benches/history.csv`.
+
+- **`cyrlint` cleanup + CI gate.** Re-run against cc6's
+  expanded `cyrlint`, address surviving warnings, wire into
+  `.github/workflows/ci.yml` matching the agnosys / yukti
+  pattern.
+
+- **Downstream re-test sweep.** Re-poll phylax against the new
+  floor (cyrius 6.0.1 + sigil 3.1.2 → 3.2.0) for
+  [`issues/2026-05-11-tlsh-distance-segfault-phylax.md`](issues/2026-05-11-tlsh-distance-segfault-phylax.md).
+  Most likely toolchain-folded by the cc6 cut; needs phylax-
+  side bisect to confirm. Argonaut/libro aarch64 path also
+  needs a real-silicon confirmation to fully close out the
+  archived ed25519-verify P1.
+
+### 3.2.x sub-arc — TEE attestation
+
+Scope, sequencing, and module surface in
+[`3.2-tee-arc.md`](3.2-tee-arc.md). Origin:
+[`issues/2026-05-10-kavach-sgx-sev-tdx-attestation-modules.md`](issues/2026-05-10-kavach-sgx-sev-tdx-attestation-modules.md)
+(kavach P1, sigil-side P3 — enhancement, no current forcing
+function). The arc opens once 3.2.0 ships and tags
+independently per-bite:
+
+| Tag    | Module surface                                  | Unblocks |
+|--------|-------------------------------------------------|----------|
+| 3.2.1  | ECDSA P-256 verify                              | foundation |
+| 3.2.2  | Minimal X.509 cert-chain walker                | foundation |
+| 3.2.3  | `src/sgx.cyr` — quote parse + verify           | kavach SGX backend |
+| 3.2.4  | `src/sev_snp.cyr` — VCEK chain + report verify | kavach SEV backend |
+| 3.2.5  | `src/tdx.cyr` — TD-quote (shares SGX chain)    | kavach TDX backend |
+| 3.2.6  | `src/seal.cyr` — SGX sealing                   | kavach SGX persistence |
+
+Each bite is independently shippable. If the arc stalls (kavach
+roadmap shifts, or a higher-priority sigil item like ML-KEM-768
+jumps the queue), the incomplete arc parks cleanly at the last
+shipped minor — no half-implemented module surface in tree.
 
 ## Sigil-internal — unscheduled
 
