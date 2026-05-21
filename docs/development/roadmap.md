@@ -82,6 +82,24 @@ been removed in 3.0. The remaining upstream blocker:
       parallel-batch speedups are moot if the serial NI hot paths
       SIGILL under the toolchain consumers are actually running.
 
+- [ ] **[P2] Investigate phylax `tlsh_distance(h, h)` SIGSEGV under
+      cyrius 5.10.44 + sigil 3.1.1.** Tracked under
+      [`issues/2026-05-11-tlsh-distance-segfault-phylax.md`](issues/2026-05-11-tlsh-distance-segfault-phylax.md).
+      Filed by phylax 2026-05-11 at the 1.1.1 ship-cut. phylax's TLSH
+      (`src/hashing.cyr`) calls into sigil for partial hashing; the
+      crash showed up post-bump from sigil 2.9.5 → 3.1.1 paired with
+      cyrius 5.7.48 → 5.10.44. Phylax-side analysis lists three
+      candidate root causes (cc5 register-spill, 5.10.x stdlib layout
+      drift, sigil 3.x interaction); the sigil-side candidate is
+      flagged as least likely but listed here so the 3.x cycle's
+      downstream-impact tracking is complete. **Likely folds into the
+      P1 above** — if the bisect lands on the SHA-NI path
+      (`sha256_transform_ni`), the fix is the same module-level-globals
+      migration. If a phylax-side bisect (cyrius 5.7.48 → 5.10.44 +
+      sigil 2.9.5 → 3.1.1) clears sigil entirely, archive the issue
+      with a "no sigil-side action" footer. No sigil-side work owed
+      until the phylax-side bisect runs.
+
 - [ ] **Alloc-free verify hot path (Option 1 rewrite).** Rewrite
       `sv_verify_artifact` and its call chain to accept caller-
       provided scratch instead of allocating internally:
