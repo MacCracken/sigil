@@ -9,12 +9,83 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 The 3.2.0 batch tracker lives in
 [`docs/development/3.2-scope.md`](docs/development/3.2-scope.md);
-items below land as they ship. The first item is the NI defense-
-in-depth gate; remaining batch items (alloc-free verify rewrite,
-three-way bench, cyrlint cleanup, downstream re-test sweep) follow
+items below land as they ship. Two items shipped: the NI defense-
+in-depth gate and the alloc-free verify hot path. Remaining batch
+items (cyrlint cleanup + CI gate, downstream re-test sweep) follow
 in subsequent commits and roll up here.
 
 ### Added
+
+- **Alloc-free verify hot path
+  (`sv_verify_artifact_into(sv, path, type, scratch)` +
+  `VerifyScratch`).** The 3.0 batch-verify path serialised the
+  full `sv_verify_artifact` call inside `_sigil_batch_mutex`
+  because the body hit `alloc` / `fl_alloc` / `vec_new` /
+  `vec_push`-grow ~10× per artifact — none thread-safe under
+  cyrius (CLAUDE.md quirk #7). Measured under cyrius 5.7.48:
+  0.96x–1.04x vs serial (no win).
+
+  3.2.0 introduces a 768-byte `VerifyScratch` block that holds
+  every per-artifact intermediate inline: hash hex buffer (72 B),
+  decoded Ed25519 public-key bytes (40 B), `TrustedArtifact`
+  (48 B), `VerificationResult` (32 B), 8-slot `TrustCheck` pool
+  (192 B), pre-allocated cap-16 vec header + data (152 B), and
+  a SHA-256 streaming context (144 B). Workers receive a
+  per-artifact slot; the entire orchestrator (`hash_file_into`,
+  `hex_decode_into`, `_vresult_add_check_scratch`,
+  `sha256_init_into`) writes into the scratch without touching
+  any global allocator. `sv_verify_batch` pre-allocates one
+  contiguous `count * 768`-byte pool on the main thread before
+  spawn; per-batch allocator activity drops from ~`10 * count`
+  fl_allocs to **one** alloc.
+
+  Public API preserved: `sv_verify_artifact(sv, path, type)`
+  still allocates an internal scratch and returns the vr
+  pointer with the same accessor surface (`vresult_passed`,
+  `vresult_checks`, `vresult_artifact`, `vec_len(checks)`,
+  `check_name/passed/detail`). New helpers added alongside the
+  existing fns: `hex_decode_into`, `hash_file_into`,
+  `sha256_init_into`, `verify_scratch_new`.
+
+  **The mutex stays — and here is the honest part.** While the
+  alloc-free worker body removes the allocator-race surface,
+  the crypto modules themselves use **module-level globals**
+  for working state (`_sha_ctx`, `_sha_a..h`, `_sha_t1/t2`,
+  `_sha_i`, `_sha256_W` in `sha256.cyr`; equivalent globals in
+  `ed25519.cyr`, `aes_gcm.cyr`). This is the cyrius local-
+  clobbering workaround documented in CLAUDE.md quirk #1.
+  Concurrent workers running `sha256_transform` race on those
+  globals and produce corrupted digests, which fail signature
+  verify and surface as wrong-trust-level results. Verified
+  experimentally during 3.2.0 dev: dropping the mutex made
+  30/228 `batch_parallel.tcyr` assertions fail (parallel
+  results diverged from serial). Mutex-on → 228/228 pass.
+
+  Bench on the dev host (cyrius 6.0.1, 4-worker pool):
+  `sv_verify_batch_64` 423 ms = ~6.6 ms/artifact, essentially
+  identical to the per-artifact `sv_verify_batch_1` 6.7 ms.
+  Same throughput as 3.0's mutex-wrap. Recorded in
+  `benches/history.csv` under label `v3.2.0-allocfree`.
+
+  **What 3.2.0 actually delivers:** ~10× lower allocator
+  churn per batch, ~768-byte amortised per-artifact memory
+  footprint vs the 3.0 path's scattered fl_allocs, and a
+  cleaner foundation. Parallel-throughput target slips to
+  **3.3** pending the crypto-modules-as-per-call-scratch
+  rewrite (see `docs/development/roadmap.md` § "Towards
+  v3.3"). The honest reframing of the original 3.1 "Option 1"
+  scope: half the work landed in 3.2.0; the other half
+  (per-worker crypto state) requires moving working state out
+  of module globals in `sha256.cyr` / `ed25519.cyr` /
+  `aes_gcm.cyr` plus a cyrius local-clobbering audit at every
+  call site that currently relies on globals.
+
+  **Deprecation note (4.0 target):** the heap-allocating
+  `verification_result_new` / `trusted_artifact_new` /
+  `trust_check_new` constructors stay in tree for backward
+  compatibility but are no longer the canonical
+  construction path. 4.0 removes them in favour of inline
+  scratch-slot writes.
 
 - **NI self-test gate (`aes_ni_self_test` /
   `sha_ni_self_test`).** `aes_ni_available()` and

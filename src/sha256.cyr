@@ -143,8 +143,21 @@ fn sha256_global_init(): i64 {
 #   +136 total_len (8 bytes)
 
 fn sha256_init(): i64 {
-    sha256_global_init();
     var ctx = fl_alloc(144);
+    return sha256_init_into(ctx);
+}
+
+# Alloc-free variant of sha256_init (3.2.0). Initialises an
+# existing 144-byte context buffer with the FIPS 180-4 §5.3.3
+# initial hash values and zeroes the block buffer + counters.
+# Caller MUST size `ctx` to at least 144 bytes.
+#
+# Used by `hash_file_into` and the parallel-batch worker scratch
+# so a SHA-256 streaming hash can run without touching the
+# freelist allocator — `fl_alloc` mutates shared state and is
+# unsafe under concurrent fan-out (CLAUDE.md quirk #7).
+fn sha256_init_into(ctx): i64 {
+    sha256_global_init();
     store64(ctx, 0x6a09e667);
     store64(ctx + 8, 0xbb67ae85);
     store64(ctx + 16, 0x3c6ef372);

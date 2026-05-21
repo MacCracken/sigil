@@ -58,6 +58,22 @@ fn hex_decode(hex_str, hex_len): i64 {
     var blen = hex_len / 2;
     if (blen == 0) { return 0; }
     var out = alloc(blen);
+    if (hex_decode_into(hex_str, hex_len, out) == 0) { return 0; }
+    return out;
+}
+
+# Alloc-free variant of hex_decode (3.2.0). Writes `hex_len/2`
+# bytes into `out` and returns 1 on success, 0 if `hex_len` is
+# odd, zero, or any character is not a valid hex nibble. Caller
+# MUST size `out` to at least `hex_len / 2` bytes.
+#
+# Same input validation surface as hex_decode but no allocation —
+# safe to call from a parallel-batch worker body where the
+# bump-pointer allocator can't be touched (CLAUDE.md quirk #7).
+fn hex_decode_into(hex_str, hex_len, out): i64 {
+    if ((hex_len & 1) == 1) { return 0; }
+    var blen = hex_len / 2;
+    if (blen == 0) { return 0; }
     var i = 0;
     while (i < blen) {
         var hi = _hex_nibble(load8(hex_str + i * 2) & 0xFF);
@@ -67,7 +83,7 @@ fn hex_decode(hex_str, hex_len): i64 {
         store8(out + i, (hi << 4) | lo);
         i = i + 1;
     }
-    return out;
+    return 1;
 }
 
 # ================================================================

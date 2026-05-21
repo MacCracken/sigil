@@ -121,6 +121,51 @@ Headline items:
   needs a real-silicon confirmation to fully close out the
   archived ed25519-verify P1.
 
+## Towards v3.3 — per-worker crypto state
+
+The 3.2.0 alloc-free rewrite removed the allocator from the
+parallel-batch worker body but discovered the **deeper**
+bottleneck: every crypto module (`sha256.cyr`, `ed25519.cyr`,
+`aes_gcm.cyr`) uses module-level globals for working state as
+a cyrius local-clobbering workaround (CLAUDE.md quirk #1).
+Concurrent workers running `sha256_transform` race on
+`_sha_ctx` / `_sha_a..h` / `_sha_t1/t2` / `_sha_i` /
+`_sha256_W`; equivalent globals in the other modules.
+
+The 3.0 mutex-wrap and 3.2.0 alloc-free paths both serialise
+on `_sigil_batch_mutex` precisely because of these globals —
+verified during 3.2.0 dev (mutex-off → 30/228 batch_parallel
+fail; mutex-on → pass).
+
+**3.3 work item: lift crypto module state to per-call scratch.**
+
+- [ ] **`sha256.cyr` — per-call scratch.** Move `_sha_ctx`,
+      `_sha_a..h`, `_sha_t1/t2`, `_sha_i`, `_sha256_W` from
+      module globals into a caller-provided scratch block.
+      Audit every call site for the cyrius local-clobbering
+      pattern that originally motivated the globals (quirk #1
+      — promote-to-global was the recommended workaround).
+      cycc 6 may have improved the codegen enough that locals
+      survive; verify before declaring done.
+
+- [ ] **`ed25519.cyr` — per-call scratch.** Same shape.
+      ed25519_verify is the dominant verify-path cost
+      (~6.4 ms per artifact under SHA-NI on the dev host)
+      and the load-bearing item for parallel speedup.
+
+- [ ] **`aes_gcm.cyr` — per-call scratch.** Same shape. AES-GCM
+      isn't on the batch-verify hot path today, but the same
+      refactor closes a future parallel-encrypt scenario.
+
+- [ ] **Drop `_sigil_batch_mutex` once the three modules
+      ship.** Re-bench `sv_verify_batch_64` against the 3.2.0
+      `v3.2.0-allocfree` baseline; the target remains 3×+ at
+      4 workers. Add CSV row `v3.3-parallel-crypto`.
+
+The 3.3 cycle could open immediately after 3.2.0 tags or
+defer behind the 3.2.x TEE arc — sequencing decision deferred
+to when the arc closes.
+
 ### 3.2.x sub-arc — TEE attestation
 
 Scope, sequencing, and module surface in

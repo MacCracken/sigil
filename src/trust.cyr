@@ -473,6 +473,51 @@ fn hash_file(path): i64 {
     return hex_encode(&digest, 32);
 }
 
+# Alloc-free variant of hash_file (3.2.0). Writes a 64-character
+# lowercase SHA-256 hex digest plus a NUL terminator (65 bytes
+# total) into `hex_out`, using `ctx_buf` as a 144-byte scratch
+# SHA-256 context. Returns 1 on success, 0 if the file could not
+# be opened.
+#
+# Caller MUST size:
+#   hex_out  ≥ 65 bytes
+#   ctx_buf  ≥ 144 bytes
+#
+# Used by the parallel-batch verify worker so the per-artifact
+# hash step doesn't touch the freelist allocator (CLAUDE.md quirk
+# #7). The 4 KB file_read buffer remains a stack-local — fine for
+# concurrent workers, each thread gets its own stack.
+fn hash_file_into(path, hex_out, ctx_buf): i64 {
+    var fd = file_open(path, 0, 0);
+    if (fd < 0) { return 0; }
+    sha256_init_into(ctx_buf);
+    var buf[4096];
+    var n = file_read(fd, &buf, 4096);
+    while (n > 0) {
+        sha256_update(ctx_buf, &buf, n);
+        n = file_read(fd, &buf, 4096);
+    }
+    file_close(fd);
+    var digest[32];
+    sha256_finalize(ctx_buf, &digest);
+    # Inline hex_encode of the 32-byte digest into hex_out (lowercase,
+    # NUL-terminated). Mirrors hex.cyr's hex_encode body but writes
+    # into the caller-provided buffer instead of allocating.
+    var i = 0;
+    while (i < 32) {
+        var b = load8(&digest + i) & 0xFF;
+        var hi = (b >> 4) & 0xF;
+        var lo = b & 0xF;
+        if (hi < 10) { store8(hex_out + i * 2, 48 + hi); }
+        else { store8(hex_out + i * 2, 87 + hi); }
+        if (lo < 10) { store8(hex_out + i * 2 + 1, 48 + lo); }
+        else { store8(hex_out + i * 2 + 1, 87 + lo); }
+        i = i + 1;
+    }
+    store8(hex_out + 64, 0);
+    return 1;
+}
+
 # File hash with algorithm selection (mirror of hash_data_with for
 # on-disk content). Returns hex C-string, or 0 on file open failure.
 # Unknown algorithm falls back to SHA-256 — trust engine must never

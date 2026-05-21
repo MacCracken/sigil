@@ -1085,8 +1085,21 @@ fn sha256_global_init(): i64 {
 #   +136 total_len (8 bytes)
 
 fn sha256_init(): i64 {
-    sha256_global_init();
     var ctx = fl_alloc(144);
+    return sha256_init_into(ctx);
+}
+
+# Alloc-free variant of sha256_init (3.2.0). Initialises an
+# existing 144-byte context buffer with the FIPS 180-4 §5.3.3
+# initial hash values and zeroes the block buffer + counters.
+# Caller MUST size `ctx` to at least 144 bytes.
+#
+# Used by `hash_file_into` and the parallel-batch worker scratch
+# so a SHA-256 streaming hash can run without touching the
+# freelist allocator — `fl_alloc` mutates shared state and is
+# unsafe under concurrent fan-out (CLAUDE.md quirk #7).
+fn sha256_init_into(ctx): i64 {
+    sha256_global_init();
     store64(ctx, 0x6a09e667);
     store64(ctx + 8, 0xbb67ae85);
     store64(ctx + 16, 0x3c6ef372);
@@ -1363,6 +1376,22 @@ fn hex_decode(hex_str, hex_len): i64 {
     var blen = hex_len / 2;
     if (blen == 0) { return 0; }
     var out = alloc(blen);
+    if (hex_decode_into(hex_str, hex_len, out) == 0) { return 0; }
+    return out;
+}
+
+# Alloc-free variant of hex_decode (3.2.0). Writes `hex_len/2`
+# bytes into `out` and returns 1 on success, 0 if `hex_len` is
+# odd, zero, or any character is not a valid hex nibble. Caller
+# MUST size `out` to at least `hex_len / 2` bytes.
+#
+# Same input validation surface as hex_decode but no allocation —
+# safe to call from a parallel-batch worker body where the
+# bump-pointer allocator can't be touched (CLAUDE.md quirk #7).
+fn hex_decode_into(hex_str, hex_len, out): i64 {
+    if ((hex_len & 1) == 1) { return 0; }
+    var blen = hex_len / 2;
+    if (blen == 0) { return 0; }
     var i = 0;
     while (i < blen) {
         var hi = _hex_nibble(load8(hex_str + i * 2) & 0xFF);
@@ -1372,7 +1401,7 @@ fn hex_decode(hex_str, hex_len): i64 {
         store8(out + i, (hi << 4) | lo);
         i = i + 1;
     }
-    return out;
+    return 1;
 }
 
 # ================================================================
@@ -6760,6 +6789,51 @@ fn hash_file(path): i64 {
     return hex_encode(&digest, 32);
 }
 
+# Alloc-free variant of hash_file (3.2.0). Writes a 64-character
+# lowercase SHA-256 hex digest plus a NUL terminator (65 bytes
+# total) into `hex_out`, using `ctx_buf` as a 144-byte scratch
+# SHA-256 context. Returns 1 on success, 0 if the file could not
+# be opened.
+#
+# Caller MUST size:
+#   hex_out  ≥ 65 bytes
+#   ctx_buf  ≥ 144 bytes
+#
+# Used by the parallel-batch verify worker so the per-artifact
+# hash step doesn't touch the freelist allocator (CLAUDE.md quirk
+# #7). The 4 KB file_read buffer remains a stack-local — fine for
+# concurrent workers, each thread gets its own stack.
+fn hash_file_into(path, hex_out, ctx_buf): i64 {
+    var fd = file_open(path, 0, 0);
+    if (fd < 0) { return 0; }
+    sha256_init_into(ctx_buf);
+    var buf[4096];
+    var n = file_read(fd, &buf, 4096);
+    while (n > 0) {
+        sha256_update(ctx_buf, &buf, n);
+        n = file_read(fd, &buf, 4096);
+    }
+    file_close(fd);
+    var digest[32];
+    sha256_finalize(ctx_buf, &digest);
+    # Inline hex_encode of the 32-byte digest into hex_out (lowercase,
+    # NUL-terminated). Mirrors hex.cyr's hex_encode body but writes
+    # into the caller-provided buffer instead of allocating.
+    var i = 0;
+    while (i < 32) {
+        var b = load8(&digest + i) & 0xFF;
+        var hi = (b >> 4) & 0xF;
+        var lo = b & 0xF;
+        if (hi < 10) { store8(hex_out + i * 2, 48 + hi); }
+        else { store8(hex_out + i * 2, 87 + hi); }
+        if (lo < 10) { store8(hex_out + i * 2 + 1, 48 + lo); }
+        else { store8(hex_out + i * 2 + 1, 87 + lo); }
+        i = i + 1;
+    }
+    store8(hex_out + 64, 0);
+    return 1;
+}
+
 # File hash with algorithm selection (mirror of hash_data_with for
 # on-disk content). Returns hex C-string, or 0 on file open failure.
 # Unknown algorithm falls back to SHA-256 — trust engine must never
@@ -8158,6 +8232,102 @@ fn _alog_write_int(dst, val): i64 {
 # Combines signing, keyring, integrity, revocation, key pinning, audit.
 
 # ================================================================
+# VerifyScratch (3.2.0) — pre-allocated per-worker scratch
+# ================================================================
+# Lifts every allocation out of the verify hot path so the parallel
+# `sv_verify_batch` workers can fan out without touching the bump
+# allocator / freelist / vec-grow paths (CLAUDE.md quirk #7 —
+# alloc, vec, hashmap are NOT thread-safe under cyrius). All
+# per-artifact state lives in one 768-byte block; workers receive
+# their slot and reset state via `_verify_scratch_reset` per call.
+#
+# Layout:
+#   +0    hash_buf[72]        SHA-256 hex digest (64 chars + NUL + 7 pad)
+#   +72   pk_bytes[40]        Ed25519 decoded public key (32 + 8 pad)
+#   +112  artifact[48]        TrustedArtifact inline
+#   +160  vr_slot[32]         VerificationResult inline
+#   +192  checks_pool[192]    8 × 24 TrustCheck slots
+#   +384  check_idx (8)       next free check slot
+#   +392  vec_hdr (24)        vec struct { data, len=0, cap=16 }
+#   +416  vec_data[128]       16 × i64 (pre-allocated cap, never grows)
+#   +544  sha256_ctx[144]     SHA-256 streaming context
+#   +688  reserved/pad to 768
+#
+# Cap of 8 TrustCheck slots: `sv_verify_artifact` today emits up
+# to 7 checks per call (file_readable, trust_store, signature,
+# revocation, key_pin, allowed_type, policy). 8 slots gives one
+# slot of headroom for future check additions; past 8 the slot-
+# overflow guard pins `vr.passed = 0` and skips the vec_push
+# rather than corrupting adjacent scratch memory.
+
+var _VSC_HASH       = 0;
+var _VSC_PK         = 72;
+var _VSC_ARTIFACT   = 112;
+var _VSC_VR         = 160;
+var _VSC_CHECKS     = 192;
+var _VSC_CHECK_IDX  = 384;
+var _VSC_VEC_HDR    = 392;
+var _VSC_VEC_DATA   = 416;
+var _VSC_SHA_CTX    = 544;
+var _VSC_SIZE       = 768;
+var _VSC_MAX_CHECKS = 8;
+
+fn verify_scratch_new(): i64 {
+    var s = fl_alloc(_VSC_SIZE);
+    # Wire the inline vec_hdr to the inline vec_data.
+    store64(s + _VSC_VEC_HDR + 0, s + _VSC_VEC_DATA);   # data ptr
+    store64(s + _VSC_VEC_HDR + 8, 0);                    # len
+    store64(s + _VSC_VEC_HDR + 16, 16);                  # cap (fixed)
+    return s;
+}
+
+fn _verify_scratch_reset(s): i64 {
+    store64(s + _VSC_CHECK_IDX, 0);
+    store64(s + _VSC_VEC_HDR + 8, 0);   # vec.len = 0
+    return 0;
+}
+
+# Acquire the next TrustCheck slot from the pool and write the 3
+# fields in-place. Returns the slot pointer (24-byte block, same
+# shape as `trust_check_new`'s output). On overflow (more than
+# `_VSC_MAX_CHECKS` calls per artifact), pins the caller's
+# verification_result to passed=0 and returns 0; the caller's
+# `_vresult_add_check_scratch` short-circuits on a 0 slot so the
+# `vec_push` is skipped — no scratch corruption.
+fn _trust_check_slot(s, name, passed, detail): i64 {
+    var idx = load64(s + _VSC_CHECK_IDX);
+    if (idx >= _VSC_MAX_CHECKS) {
+        # Slot overflow — pin vr.passed to 0 as a degraded-result
+        # indicator. Real fix is to grow `_VSC_MAX_CHECKS`; this
+        # branch should never fire under the existing 7-check
+        # ceiling but exists so a future check addition can't
+        # corrupt adjacent scratch memory.
+        store64(s + _VSC_VR + 8, 0);
+        return 0;
+    }
+    var slot = s + _VSC_CHECKS + idx * 24;
+    store64(slot + 0, name);
+    store64(slot + 8, passed);
+    store64(slot + 16, detail);
+    store64(s + _VSC_CHECK_IDX, idx + 1);
+    return slot;
+}
+
+# Scratch-side equivalent of `vresult_add_check(vr, trust_check_new(...))`.
+# Skips the vec_push if `_trust_check_slot` returned 0 (overflow).
+fn _vresult_add_check_scratch(s, name, passed, detail): i64 {
+    var slot = _trust_check_slot(s, name, passed, detail);
+    if (slot != 0) {
+        # vec_push into the pre-allocated cap-16 vec — guaranteed
+        # not to grow (we cap usage at _VSC_MAX_CHECKS=6 < 16), so
+        # this never touches the allocator.
+        vec_push(s + _VSC_VEC_HDR, slot);
+    }
+    return 0;
+}
+
+
+# ================================================================
 # KeyPin (16 bytes)
 # ================================================================
 # Layout:
@@ -8343,33 +8513,108 @@ fn sv_sign_artifact(sv, path, secret_key, key_id, artifact_type): i64 {
 # Verify an artifact
 # ================================================================
 
+# Public API (3.2.0): thin wrapper that allocates a fresh
+# VerifyScratch and delegates to `sv_verify_artifact_into`. Same
+# return contract as the pre-3.2.0 path (vr ptr, caller does not
+# free), but the internal hot path no longer paths through
+# `fl_alloc(24)` × ~6, `fl_alloc(48)`, `fl_alloc(32)`, `vec_new()`,
+# `alloc(65)`, `alloc(32)` per call — those all land in the
+# single 768-byte scratch instead. The new `_into` variant is
+# the canonical implementation; this wrapper is for downstream
+# code that wants a one-shot "verify and forget the scratch" API.
+#
+# **Deprecation note (4.0 target):** the heap-allocating
+# `verification_result_new` / `trusted_artifact_new` /
+# `trust_check_new` constructors will be removed in 4.0 in favour
+# of in-place scratch-slot writes. Downstream code that currently
+# constructs `TrustCheck` / `TrustedArtifact` / `VerificationResult`
+# directly should migrate to the `_init`-into-slot pattern. See
+# `docs/development/roadmap.md` § "Towards v4.0".
 fn sv_verify_artifact(sv, path, artifact_type): i64 {
+    var s = verify_scratch_new();
+    var vr = sv_verify_artifact_into(sv, path, artifact_type, s);
+    # Audit lives on the wrapper so `_into` stays alloc-free for
+    # the parallel-batch path. Single-threaded callers (this one)
+    # incur no contention.
+    var a = vresult_artifact(vr);
+    var ae = audit_artifact_verified(path, artifact_type,
+                                     artifact_trust_level(a),
+                                     vresult_passed(vr),
+                                     artifact_content_hash(a));
+    alog_record(load64(sv + 48), ae);
+    return vr;
+}
+
+# Alloc-free verify orchestrator (3.2.0). Runs the full check
+# chain (file_readable, trust_store, signature, revocation,
+# key_pin, allowed_type, policy) writing every intermediate
+# struct into the caller-provided `scratch` block (see
+# VerifyScratch layout above). Returns a pointer to the populated
+# `verification_result` slot (scratch + _VSC_VR); same accessor
+# contract as the heap-allocated vr from the pre-3.2.0 path.
+#
+# Thread-safety: the body does not touch `alloc`, `fl_alloc`,
+# `vec_new`, or `vec` grow paths. It reads `map_get(trust_store)`,
+# which is safe under concurrent fan-out if and only if the trust
+# store is not mutated during the batch — `sv_verify_batch`
+# documents and relies on that contract.
+fn sv_verify_artifact_into(sv, path, artifact_type, scratch): i64 {
+    _verify_scratch_reset(scratch);
     var policy = load64(sv + 8);
-    var chash = hash_file(path);
-    if (chash == 0) {
-        return verification_result_new(
-        trusted_artifact_new(path, artifact_type, ""),
-        0, clock_epoch_secs()
-        );
+
+    # 1. Hash the file directly into the scratch hex slot.
+    var hash_ok = hash_file_into(path, scratch + _VSC_HASH, scratch + _VSC_SHA_CTX);
+    if (hash_ok == 0) {
+        # File unreadable — build a minimal vr in scratch with
+        # empty content hash and passed=0. Mirrors the pre-3.2.0
+        # error-path shape so callers see the same struct surface.
+        store64(scratch + _VSC_ARTIFACT + 0,  path);
+        store64(scratch + _VSC_ARTIFACT + 8,  artifact_type);
+        store64(scratch + _VSC_ARTIFACT + 16, "");
+        store64(scratch + _VSC_ARTIFACT + 24, 0);
+        store64(scratch + _VSC_ARTIFACT + 32, 0);
+        store64(scratch + _VSC_ARTIFACT + 40, TRUST_UNVERIFIED);
+        store64(scratch + _VSC_VR + 0,  scratch + _VSC_ARTIFACT);
+        store64(scratch + _VSC_VR + 8,  0);
+        store64(scratch + _VSC_VR + 16, scratch + _VSC_VEC_HDR);
+        store64(scratch + _VSC_VR + 24, clock_epoch_secs());
+        return scratch + _VSC_VR;
     }
+    var chash = scratch + _VSC_HASH;   # 64-char hex C-string + NUL
 
     var trust_level = TRUST_UNVERIFIED;
-    var vr = verification_result_new(
-    trusted_artifact_new(path, artifact_type, chash),
-    1, clock_epoch_secs()
-    );
+
+    # 2. Build TrustedArtifact in-place.
+    store64(scratch + _VSC_ARTIFACT + 0,  path);
+    store64(scratch + _VSC_ARTIFACT + 8,  artifact_type);
+    store64(scratch + _VSC_ARTIFACT + 16, chash);
+    store64(scratch + _VSC_ARTIFACT + 24, 0);
+    store64(scratch + _VSC_ARTIFACT + 32, 0);
+    store64(scratch + _VSC_ARTIFACT + 40, TRUST_UNVERIFIED);
+
+    # 3. Build VerificationResult in-place. checks field points at
+    #    the inline cap-16 vec_hdr — vec_push never grows it.
+    store64(scratch + _VSC_VR + 0,  scratch + _VSC_ARTIFACT);
+    store64(scratch + _VSC_VR + 8,  1);
+    store64(scratch + _VSC_VR + 16, scratch + _VSC_VEC_HDR);
+    store64(scratch + _VSC_VR + 24, clock_epoch_secs());
+    var vr = scratch + _VSC_VR;
 
     # Check: file readable
-    vresult_add_check(vr, trust_check_new("file_readable", 1, "File read successfully"));
+    _vresult_add_check_scratch(scratch, "file_readable", 1, "File read successfully");
 
-    # Check: trust store lookup
+    # Check: trust store lookup. `map_get` is read-only — concurrent
+    # workers in `sv_verify_batch` rely on the documented contract
+    # that no thread calls `map_set` on the trust store during a
+    # batch. Safe for the open-addressing scan; mutation would
+    # corrupt slots mid-probe.
     var store = load64(sv + 32);
     var stored = map_get(store, chash);
     if (stored != 0) {
         trust_level = artifact_trust_level(stored);
-        vresult_add_check(vr, trust_check_new("trust_store", 1, "Found in trust store"));
+        _vresult_add_check_scratch(scratch, "trust_store", 1, "Found in trust store");
     } else {
-        vresult_add_check(vr, trust_check_new("trust_store", 0, "Not in trust store"));
+        _vresult_add_check_scratch(scratch, "trust_store", 0, "Not in trust store");
     }
 
     # Check: signature verification
@@ -8385,39 +8630,40 @@ fn sv_verify_artifact(sv, path, artifact_type): i64 {
                     if (pk != 0) {
                         if (strlen(pk) != 64) {
                             trust_level = TRUST_UNVERIFIED;
-                            vresult_add_check(vr, trust_check_new("signature", 0, "Public key hex wrong length"));
+                            _vresult_add_check_scratch(scratch, "signature", 0, "Public key hex wrong length");
                         } else {
-                            var pk_bytes = hex_decode(pk, 64);
-                            if (pk_bytes == 0) {
+                            # Decode pk hex into the scratch pk_bytes slot (no alloc).
+                            var pk_ok = hex_decode_into(pk, 64, scratch + _VSC_PK);
+                            if (pk_ok == 0) {
                                 trust_level = TRUST_UNVERIFIED;
-                                vresult_add_check(vr, trust_check_new("signature", 0, "Public key hex invalid"));
+                                _vresult_add_check_scratch(scratch, "signature", 0, "Public key hex invalid");
                             } else {
-                                var valid = verify_data(chash, strlen(chash), sig, pk_bytes);
+                                var valid = verify_data(chash, strlen(chash), sig, scratch + _VSC_PK);
                                 if (valid == 1) {
                                     if (trust_level_rank(trust_level) < trust_level_rank(TRUST_VERIFIED)) {
                                         trust_level = TRUST_VERIFIED;
                                     }
-                                    vresult_add_check(vr, trust_check_new("signature", 1, "Signature valid"));
+                                    _vresult_add_check_scratch(scratch, "signature", 1, "Signature valid");
                                 } else {
                                     trust_level = TRUST_UNVERIFIED;
-                                    vresult_add_check(vr, trust_check_new("signature", 0, "Signature invalid"));
+                                    _vresult_add_check_scratch(scratch, "signature", 0, "Signature invalid");
                                 }
                             }
                         }
                     } else {
-                        vresult_add_check(vr, trust_check_new("signature", 0, "No public key for verification"));
+                        _vresult_add_check_scratch(scratch, "signature", 0, "No public key for verification");
                     }
                 } else {
-                    vresult_add_check(vr, trust_check_new("signature", 0, "Signer key not in keyring"));
+                    _vresult_add_check_scratch(scratch, "signature", 0, "Signer key not in keyring");
                 }
             } else {
-                vresult_add_check(vr, trust_check_new("signature", 0, "No signer key ID"));
+                _vresult_add_check_scratch(scratch, "signature", 0, "No signer key ID");
             }
         } else {
-            vresult_add_check(vr, trust_check_new("signature", 0, "No signature"));
+            _vresult_add_check_scratch(scratch, "signature", 0, "No signature");
         }
     } else {
-        vresult_add_check(vr, trust_check_new("signature", 0, "Not in trust store"));
+        _vresult_add_check_scratch(scratch, "signature", 0, "Not in trust store");
     }
 
     # Check: revocation
@@ -8425,37 +8671,34 @@ fn sv_verify_artifact(sv, path, artifact_type): i64 {
     var key_revoked = 0;
     var hash_revoked = rl_is_artifact_revoked(rl, chash);
     if (stored != 0) {
-        var signer = artifact_signer_key_id(stored);
-        if (signer != 0) {
-            key_revoked = rl_is_key_revoked(rl, signer);
+        var signer_r = artifact_signer_key_id(stored);
+        if (signer_r != 0) {
+            key_revoked = rl_is_key_revoked(rl, signer_r);
         }
     }
     if (key_revoked == 1) {
         trust_level = TRUST_REVOKED;
-        vresult_add_check(vr, trust_check_new("revocation", 0, "Signer key revoked"));
+        _vresult_add_check_scratch(scratch, "revocation", 0, "Signer key revoked");
     } elif (hash_revoked == 1) {
         trust_level = TRUST_REVOKED;
-        vresult_add_check(vr, trust_check_new("revocation", 0, "Content hash revoked"));
+        _vresult_add_check_scratch(scratch, "revocation", 0, "Content hash revoked");
     } else {
-        vresult_add_check(vr, trust_check_new("revocation", 1, "Not revoked"));
+        _vresult_add_check_scratch(scratch, "revocation", 1, "Not revoked");
     }
 
     # Check: key pinning
     if (stored != 0) {
-        var signer = artifact_signer_key_id(stored);
-        var authorized = _sv_key_authorized(sv, path, signer);
+        var signer_p = artifact_signer_key_id(stored);
+        var authorized = _sv_key_authorized(sv, path, signer_p);
         if (authorized == 1) {
-            vresult_add_check(vr, trust_check_new("key_pin", 1, "Key authorized"));
+            _vresult_add_check_scratch(scratch, "key_pin", 1, "Key authorized");
         } else {
-            vresult_add_check(vr, trust_check_new("key_pin", 0, "Key not authorized for path"));
+            _vresult_add_check_scratch(scratch, "key_pin", 0, "Key not authorized for path");
             trust_level = TRUST_UNVERIFIED;
         }
     }
 
-    # Check: allowed-artifact-type (Rust KeyMetadata.allowed_artifact_types).
-    # If the signer key has an explicit allow-list, the artifact_type must
-    # appear in it. Unrestricted keys (empty/null list) pass through.
-    # Rejected here → trust_level UNVERIFIED regardless of signature.
+    # Check: allowed-artifact-type
     if (stored != 0) {
         var signer_atype = artifact_signer_key_id(stored);
         if (signer_atype != 0) {
@@ -8463,9 +8706,9 @@ fn sv_verify_artifact(sv, path, artifact_type): i64 {
             var kva = keyring_get_current(kra, signer_atype);
             if (kva != 0) {
                 if (kv_is_type_allowed(kva, artifact_type) == 1) {
-                    vresult_add_check(vr, trust_check_new("allowed_type", 1, "Key authorized for artifact type"));
+                    _vresult_add_check_scratch(scratch, "allowed_type", 1, "Key authorized for artifact type");
                 } else {
-                    vresult_add_check(vr, trust_check_new("allowed_type", 0, "Key not authorized for artifact type"));
+                    _vresult_add_check_scratch(scratch, "allowed_type", 0, "Key not authorized for artifact type");
                     trust_level = TRUST_UNVERIFIED;
                 }
             }
@@ -8477,26 +8720,30 @@ fn sv_verify_artifact(sv, path, artifact_type): i64 {
     var enforcement = policy_enforcement(policy);
     var meets_min = trust_level_ge(trust_level, min_trust);
     if (meets_min == 1) {
-        vresult_add_check(vr, trust_check_new("policy", 1, "Meets minimum trust level"));
+        _vresult_add_check_scratch(scratch, "policy", 1, "Meets minimum trust level");
     } else {
         if (enforcement == ENFORCE_STRICT) {
-            vresult_add_check(vr, trust_check_new("policy", 0, "Below minimum trust level"));
+            _vresult_add_check_scratch(scratch, "policy", 0, "Below minimum trust level");
             vresult_set_passed(vr, 0);
         } elif (enforcement == ENFORCE_PERMISSIVE) {
-            vresult_add_check(vr, trust_check_new("policy", 0, "Below minimum (permissive)"));
+            _vresult_add_check_scratch(scratch, "policy", 0, "Below minimum (permissive)");
         } else {
-            vresult_add_check(vr, trust_check_new("policy", 0, "Below minimum (audit only)"));
+            _vresult_add_check_scratch(scratch, "policy", 0, "Below minimum (audit only)");
         }
     }
 
-    # Update artifact trust level
-    artifact_set_trust_level(vresult_artifact(vr), trust_level);
+    artifact_set_trust_level(scratch + _VSC_ARTIFACT, trust_level);
 
-    # Audit
-    var passed = vresult_passed(vr);
-    var ae = audit_artifact_verified(path, artifact_type, trust_level, passed, chash);
-    alog_record(load64(sv + 48), ae);
-
+    # NOTE: audit is intentionally NOT emitted here. The 3.2.0
+    # alloc-free contract requires zero allocator activity in the
+    # worker body. `audit_artifact_verified` allocates the event
+    # struct + `alog_record` may grow the audit log's vec — both
+    # would race against concurrent workers. Audit is emitted by
+    # the caller:
+    #   - `sv_verify_artifact` (wrapper) runs audit after `_into`
+    #     returns, on the same thread, no contention.
+    #   - `sv_verify_batch` runs audit on the main thread after
+    #     `thread_join`, serially walking the result slots.
     return vr;
 }
 
@@ -8991,48 +9238,86 @@ fn sv_save_trust_store(sv, path): i64 {
 # (`tests/tcyr/batch_parallel.tcyr`, `tests/bcyr/batch_parallel.bcyr`)
 # exercise it without a build flag.
 #
-# Threading safety contract:
-# - `sv_verify_artifact` calls `alloc` / `vec_push` / `map_get`,
-#   which are NOT thread-safe under cyrius (CLAUDE.md quirk #7).
-#   We serialise the full call via `_sigil_batch_mutex` so only
-#   one worker allocates / mutates containers at a time.
-# - `ed25519_verify` + SHA-256 compute themselves use stack-locals
-#   and read-only globals (fixed-base comb, round-key tables), so
-#   they run inside the mutex region just as a matter of code
-#   structure — the actual *crypto* work can't parallelise under
-#   the mutex-wrap approach. For batch sizes where the crypto
-#   dominates, the win comes from pipelining file-I/O latency
-#   across workers (SHA-256 streaming + file_read waits) while
-#   the mutex protects the bookkeeping layer.
-# - A fully-pure alloc-free verify path (the "Option 1" rewrite
-#   tracked in `docs/development/roadmap.md` § Road to v3.1) lifts
-#   this ceiling. Deferred to 3.1.
+# Threading safety contract (3.2.0):
+# - The 3.0 ship serialised the whole `sv_verify_artifact` call
+#   inside `_sigil_batch_mutex` because the call chain hit
+#   `alloc` / `vec_push` (grow) / `fl_alloc` / `vec_new`, none
+#   of which are thread-safe under cyrius (CLAUDE.md quirk #7).
+#   Measured under cyrius 5.7.48: 0.96x – 1.04x vs serial. No
+#   throughput win because the mutex covered the dominant
+#   `ed25519_verify` + `sha256_transform` work.
+# - 3.2.0 pre-allocates one `VerifyScratch` per artifact on the
+#   main thread and switches the worker body to
+#   `sv_verify_artifact_into(sv, path, type, scratch)` which is
+#   alloc-free — every per-artifact struct lives inside the
+#   scratch slot. Workers do not touch `alloc` / `fl_alloc` /
+#   `vec_new` / `vec_grow`. Single fl_alloc(count * _VSC_SIZE)
+#   pool replaces the ~10 per-call fl_allocs of the 3.0 path.
+# - **The mutex stays.** The crypto modules — `sha256_transform`,
+#   `ed25519_verify`, `aes256_*` — use MODULE-LEVEL globals for
+#   working state as a cyrius local-clobbering workaround
+#   (CLAUDE.md quirk #1: `_sha_ctx`, `_sha_a..h`, `_sha_t1/t2`,
+#   `_sha_i`, `_sha256_W`, etc.). Concurrent workers running
+#   `sha256_transform` race on those globals and produce
+#   corrupted digests, which then fail signature verify and
+#   register as wrong-trust-level in the result vr. Verified
+#   experimentally during 3.2.0 dev: mutex-off → 30/228
+#   batch_parallel tests fail; mutex-on → 228/228 pass.
+#   Per-worker crypto-state migration is queued for 3.3 (see
+#   `docs/development/roadmap.md` § "Towards v3.3" — requires
+#   moving working state to per-call scratch in sha256.cyr +
+#   ed25519.cyr + aes_gcm.cyr, plus a cyrius local-clobbering
+#   audit at each call site that currently uses globals).
+# - 3.2.0's actual win: ~10× fewer allocator calls per batch
+#   element (1 scratch-pool slot vs ~10 fl_allocs). Lower memory
+#   churn, smaller working-set for the freelist, cleaner attack
+#   surface. Throughput parity with 3.0's mutex-wrap (both
+#   ed25519+sha256 dominate; both serialise on the same mutex).
+# - `map_get` on the trust store is the only worker-side access
+#   to a shared container. Safe under the documented contract
+#   that no thread calls `map_set` on the trust store during a
+#   batch — open-addressing reads are stable on unmutated
+#   storage. The integration test populates the store before
+#   fan-out and never mutates during; downstream callers must
+#   do the same.
+# - Audit emission lifts to the main thread post-join.
+#   `audit_artifact_verified` and `alog_record` both touch the
+#   freelist + audit-log vec; emitting them serially after all
+#   workers finish keeps allocator activity strictly
+#   single-threaded.
 
 var _sigil_batch_mutex = 0;
 var _SIGIL_BATCH_PARALLEL_THRESHOLD = 4;
 var _SIGIL_BATCH_WORKERS = 4;
 
-# Worker entry. arg is a 48-byte packed record:
+# Worker entry (3.2.0 alloc-free). arg is a 48-byte packed record:
 #   +0   sv
 #   +8   artifacts (packed path/type buffer base)
 #   +16  start_idx
 #   +24  end_idx
 #   +32  result_slots (base of `count * 8` pointer array)
-#   +40  mutex
+#   +40  scratch_base (base of `count * _VSC_SIZE` scratch pool)
 fn _batch_worker(arg): i64 {
     var sv = load64(arg);
     var artifacts = load64(arg + 8);
     var start = load64(arg + 16);
     var end = load64(arg + 24);
     var slots = load64(arg + 32);
-    var mtx = load64(arg + 40);
+    var scratch_base = load64(arg + 40);
     var i = start;
     while (i < end) {
         var path = load64(artifacts + i * 16);
         var atype = load64(artifacts + i * 16 + 8);
-        mutex_lock(mtx);
-        var vr = sv_verify_artifact(sv, path, atype);
-        mutex_unlock(mtx);
+        # Each artifact gets its own scratch slot (indexed by global
+        # artifact index, not worker idx). Workers never share
+        # scratch, and per-artifact scratches are not reused, so
+        # the returned `vr` ptr stays valid for the full batch
+        # lifetime — same address-stability contract as the
+        # pre-3.2.0 fl_alloc'd vrs.
+        var my_scratch = scratch_base + i * _VSC_SIZE;
+        mutex_lock(_sigil_batch_mutex);
+        var vr = sv_verify_artifact_into(sv, path, atype, my_scratch);
+        mutex_unlock(_sigil_batch_mutex);
         store64(slots + i * 8, vr);
         i = i + 1;
     }
@@ -9041,17 +9326,34 @@ fn _batch_worker(arg): i64 {
 
 fn sv_verify_batch(sv, artifacts, count): i64 {
     if (count >= _SIGIL_BATCH_PARALLEL_THRESHOLD) {
-        if (_sigil_batch_mutex == 0) {
-            _sigil_batch_mutex = mutex_new();
-        }
+        if (_sigil_batch_mutex == 0) { _sigil_batch_mutex = mutex_new(); }
         var workers = _SIGIL_BATCH_WORKERS;
         if (count < workers) { workers = count; }
 
         # Pre-allocate everything on main thread before spawn —
-        # stdlib `alloc` is not thread-safe (CLAUDE.md quirk #7).
+        # stdlib `alloc` / `fl_alloc` is not thread-safe (CLAUDE.md
+        # quirk #7). The scratch_pool is `count * _VSC_SIZE` bytes
+        # (one scratch per artifact, not per worker, so each vr
+        # ptr stays stable for the whole batch). For count=64 →
+        # 48 KB; count=1024 → 768 KB. Memory cost vs. the 3.0
+        # heap-allocated path is comparable — same per-artifact
+        # struct surface, just in one contiguous block.
         var slots = alloc(count * 8);
         var args = alloc(workers * 48);
         var ts = alloc(workers * 8);
+        var scratch_pool = alloc(count * _VSC_SIZE);
+        var pi = 0;
+        while (pi < count) {
+            # Wire each scratch's inline vec_hdr to its inline
+            # vec_data. Per-call `_verify_scratch_reset` only zeros
+            # len / check_idx; this one-time wire-up happens here
+            # before spawn so workers never touch shared init code.
+            var s = scratch_pool + pi * _VSC_SIZE;
+            store64(s + _VSC_VEC_HDR + 0, s + _VSC_VEC_DATA);
+            store64(s + _VSC_VEC_HDR + 8, 0);
+            store64(s + _VSC_VEC_HDR + 16, 16);
+            pi = pi + 1;
+        }
 
         var per = count / workers;
         if ((count % workers) != 0) { per = per + 1; }
@@ -9067,7 +9369,7 @@ fn sv_verify_batch(sv, artifacts, count): i64 {
             store64(a + 16, pstart);
             store64(a + 24, pend);
             store64(a + 32, slots);
-            store64(a + 40, _sigil_batch_mutex);
+            store64(a + 40, scratch_pool);
             store64(ts + wi * 8, thread_create(&_batch_worker, a));
             wi = wi + 1;
         }
@@ -9076,6 +9378,25 @@ fn sv_verify_batch(sv, artifacts, count): i64 {
         while (wi < workers) {
             thread_join(load64(ts + wi * 8));
             wi = wi + 1;
+        }
+
+        # Emit audit records serially on the main thread now that
+        # all workers have completed. The audit log's allocations
+        # never race because we're back to a single-threaded
+        # context. Matches the `sv_verify_artifact` wrapper's
+        # audit-after-verify shape.
+        var ai = 0;
+        while (ai < count) {
+            var avr = load64(slots + ai * 8);
+            var apath = load64(artifacts + ai * 16);
+            var aatype = load64(artifacts + ai * 16 + 8);
+            var aart = vresult_artifact(avr);
+            var ae_b = audit_artifact_verified(apath, aatype,
+                                               artifact_trust_level(aart),
+                                               vresult_passed(avr),
+                                               artifact_content_hash(aart));
+            alog_record(load64(sv + 48), ae_b);
+            ai = ai + 1;
         }
 
         var presults = vec_new();
