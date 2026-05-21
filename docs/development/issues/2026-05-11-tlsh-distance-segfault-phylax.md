@@ -18,6 +18,19 @@ work is queued — if the segfault no longer reproduces, this
 file archives with a "no sigil-side action — toolchain pass
 folded it out" footer; if it persists, sigil-side investigation
 goes into the 3.2.x backlog.
+
+**3.2.0 sigil-side recheck (2026-05-21).** The 3.2.0 batch is
+likewise SHA-256-surface-stable: the only sha256-related delta
+is the additive `sha256_init_into(ctx)` helper (alloc-free
+variant of `sha256_init`) and the `_sha_ni_self_test` gate.
+Neither alters the SHA-256 / SHA-NI byte semantics — both are
+verified against FIPS 180-4 §B.1 in `tests/tcyr/sha_ni.tcyr`
+(13/13 green, cross-path NI vs software equality preserved).
+So a phylax-side bisect against sigil 3.1.2 OR sigil 3.2.0
+should see identical hash output. If the segfault persists
+against either pin, the sigil-side candidate is conclusively
+ruled out — the remaining candidates (cc5 register-spill,
+5.10.x stdlib drift) own the bug.
 **Upstream filing (phylax-side, canonical):** [phylax/docs/development/issues/2026-05-11-tlsh-distance-segfault.md](https://github.com/MacCracken/phylax/blob/main/docs/development/issues/2026-05-11-tlsh-distance-segfault.md)
 
 ## Why this is in sigil's queue (not just phylax's)

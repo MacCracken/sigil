@@ -5,14 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] — 3.2.0 in progress
+## [3.2.0] — 2026-05-21
 
 The 3.2.0 batch tracker lives in
-[`docs/development/3.2-scope.md`](docs/development/3.2-scope.md);
-items below land as they ship. Two items shipped: the NI defense-
-in-depth gate and the alloc-free verify hot path. Remaining batch
-items (cyrlint cleanup + CI gate, downstream re-test sweep) follow
-in subsequent commits and roll up here.
+[`docs/development/3.2-scope.md`](docs/development/3.2-scope.md).
+All four batch items landed: NI self-test gate, alloc-free
+verify hot path, `cyrlint` cleanup + CI gate, and the downstream
+re-test sweep. `secret var` ambient adoption stays as a
+ship-when-touched item, not blocking the tag.
 
 ### Added
 
@@ -86,6 +86,25 @@ in subsequent commits and roll up here.
   compatibility but are no longer the canonical
   construction path. 4.0 removes them in favour of inline
   scratch-slot writes.
+
+- **`cyrlint` cleanup + CI gate.** Cyrlint baseline against
+  `src/*.cyr` under cyrius 6.0.1 surfaced 11 warnings (down
+  from 35 under 2.9.5's 5.7.x cyrlint). Closed 9 of them in
+  the 3.2.0 ship: 7 box-drawing-character lines in
+  `src/sha_ni.cyr` replaced with ASCII separators (the unicode
+  chars were 3 bytes each — visually 69 chars but physically
+  159 bytes, tripping the >120-char rule); 2
+  multiple-consecutive-blank-line warnings in `src/trust.cyr`
+  and `src/verify.cyr` trimmed. The 2 surviving warnings
+  (`src/aes_gcm.cyr` `_aes_sbox_hex` 512-char FIPS 197 S-box;
+  `src/mldsa_ntt.cyr` `_mldsa_zetas_hex` 2048-char NTT zetas)
+  are indivisible data-table literals — exempted via a narrow
+  rule in the CI workflow's `lint:` job that allows line-
+  length warnings from those two files only; any other
+  warning class still fails the gate.
+
+  Added the `lint:` job to `.github/workflows/ci.yml`,
+  matching the agnosys / yukti `cyrlint` gate pattern.
 
 - **NI self-test gate (`aes_ni_self_test` /
   `sha_ni_self_test`).** `aes_ni_available()` and

@@ -63,6 +63,61 @@ jobs:
           echo "$pass passed, $fail failed"
           test $fail -eq 0
 
+  # ── Lint ──
+  lint:
+    name: cyrlint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Cyrius ${{ env.CYRIUS_VERSION }}
+        run: |
+          curl -sSf https://raw.githubusercontent.com/MacCracken/cyrius/main/scripts/install.sh | \
+            CYRIUS_VERSION="${CYRIUS_VERSION}" sh
+          echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
+      - name: Resolve deps
+        run: cyrius deps
+      - name: Lint src/*.cyr
+        # Treat any `warn` line as a failure, matching the agnosys
+        # / yukti pattern. Two files are exempted because they
+        # carry indivisible hex-literal lookup tables (>120 chars
+        # by intent — they encode constant data, not control
+        # flow). Splitting these into smaller chunks would require
+        # ~30 lines of init scaffolding per table for a cosmetic
+        # win; the data is unchanged across releases and bears
+        # no readability cost as a single literal.
+        #
+        # Exempted:
+        #   src/aes_gcm.cyr  — `_aes_sbox_hex` (FIPS 197 §5.1.1 S-box, 512 hex chars)
+        #   src/mldsa_ntt.cyr — `_mldsa_zetas_hex` (256 NTT twiddle factors, 2048 hex chars)
+        #
+        # If a future cyrius cyrlint adds a per-line `# cyrlint:
+        # allow line-length` annotation, drop the exemption here
+        # and add the inline allow next to each literal.
+        run: |
+          fail=0
+          for f in src/*.cyr programs/*.cyr; do
+            case "$f" in
+              src/aes_gcm.cyr|src/mldsa_ntt.cyr)
+                # Allow only line-length warnings from these files;
+                # any other warning class still fails the gate.
+                out=$(cyrius lint "$f" 2>&1)
+                echo "$out"
+                non_length=$(echo "$out" | grep -E '^\s*warn ' | grep -v 'line exceeds 120' || true)
+                if [ -n "$non_length" ]; then
+                  echo "lint: non-length warnings in $f"; fail=1
+                fi
+                ;;
+              *)
+                out=$(cyrius lint "$f" 2>&1)
+                echo "$out"
+                if echo "$out" | grep -qE '^\s*warn '; then
+                  echo "lint: warnings in $f"; fail=1
+                fi
+                ;;
+            esac
+          done
+          [ $fail -eq 0 ] || { echo "lint: warnings present"; exit 1; }
+
   # ── Benchmarks ──
   benchmarks:
     name: Benchmarks
