@@ -2,47 +2,143 @@
 
 ## Module Map
 
+Single-file compilation via `include` (Cyrius flat-library shape).
+Order in `src/lib.cyr` reflects dependency direction — primitives
+first, trust engine last.
+
 ```
 lib.cyr (entry point)
+  │
   ├── types.cyr         Enums, structs, constructors, accessors
   ├── error.cyr         SigilError codes, Result pattern
+  │
+  ├── sha_ni.cyr        SHA-256-NI hardware dispatch (runtime probe)
   ├── sha256.cyr        FIPS 180-4 SHA-256
-  ├── sha512.cyr        SHA-512 (for Ed25519)
   ├── hex.cyr           Hex encode/decode
-  ├── ct.cyr            Constant-time comparison
+  │
   ├── hmac.cyr          HMAC-SHA256 (RFC 2104)
   ├── hkdf.cyr          HKDF-SHA256 (RFC 5869)
-  ├── aes_ni.cyr        AES-NI scaffold (dormant in 2.9.0; dispatch in 2.9.1)
+  ├── aes_ni.cyr        AES-NI hardware dispatch (runtime probe)
   ├── aes_gcm.cyr       AES-256-GCM AEAD (FIPS 197 + NIST SP 800-38D)
+  │
+  ├── sha512.cyr        FIPS 180-4 SHA-512 (Ed25519 key expansion)
+  ├── sha384.cyr        FIPS 180-4 SHA-384 (P-384 ECDSA, TDX P-384)
   ├── bigint_ext.cyr    256-bit field arithmetic (mod p = 2^255-19)
-  ├── ed25519.cyr       Ed25519 (RFC 8032)
+  ├── ed25519.cyr       Ed25519 sign/verify (RFC 8032)
+  ├── ecdsa_p256.cyr    ECDSA verify on secp256r1 (FIPS 186-4)
+  ├── ecdsa_p384.cyr    ECDSA verify on secp384r1 (FIPS 186-4)
+  │
+  ├── x509.cyr          Minimal X.509 parser + chain walker
+  │                       — P-256 and P-384 SPKIs
+  │                       — ECDSA-SHA256 chain-link signatures only
+  ├── pem.cyr           RFC 4648 base64 + PEM block decoder
+  ├── sgx.cyr           Intel SGX DCAP v3 quote parse + verify
+  │                       — sgx_quote_verify_with_pck (per-piece)
+  │                       — sgx_quote_verify_full (end-to-end)
+  ├── sev_snp.cyr       AMD SEV-SNP attestation report verify
+  │                       — snp_report_verify (per-piece)
+  │                       — snp_report_verify_full (end-to-end)
+  ├── tdx.cyr           Intel TDX v4 TD-quote verify
+  │                       — dispatches on att_key_type (P-256 or P-384)
+  │                       — tdx_quote_verify_with_pck (per-piece)
+  │                       — tdx_quote_verify_full (end-to-end)
+  ├── seal.cyr          SGX sealing-key derivation (HKDF-bound)
+  │
+  ├── [SIGIL_PQC]       Opt-in ML-DSA-65 (FIPS 204) — 8 module files
+  │   ├── mldsa_params, mldsa_reduce, mldsa_ntt, mldsa_poly,
+  │   ├── mldsa_rounding, mldsa_encode, mldsa_sample, mldsa
+  │
   ├── trust.cyr         PublisherKeyring, sign/verify, key management
   ├── integrity.cyr     IntegrityVerifier, file hash measurement
   ├── policy.cyr        RevocationList, CRL
   ├── audit.cyr         AuditLog, structured events
   ├── tpm.cyr           TPM interface (runtime detection)
-  └── verify.cyr        SigilVerifier (main trust engine)
+  ├── ima.cyr           Linux IMA log verification
+  ├── secureboot.cyr    Secure Boot chain verification
+  ├── certpin.cyr       TLS cert SPKI pinning
+  └── verify.cyr        SigilVerifier (main trust engine,
+                        single + parallel-batch entry points)
 ```
 
 ## Data Flow
 
+### Trust-store / publisher verification
+
 ```
 Artifact on disk
-  → hash_file() → content_hash (SHA-256 hex)
+  → hash_file()       → content_hash (SHA-256 hex)
   → trust_store lookup → TrustedArtifact
-  → signature verification (Ed25519 or HMAC)
-  → revocation check (key + hash)
-  → key pin check (path prefix authorization)
-  → policy compliance (enforcement mode + minimum trust)
-  → VerificationResult (passed/failed + checks)
+  → signature verify  → Ed25519 (or HMAC fallback for legacy)
+  → revocation check  → key + content_hash
+  → key pin check     → path-prefix authorization
+  → policy compliance → enforcement mode + minimum trust
+  → VerificationResult (passed/failed + per-check status)
   → AuditEvent logged
 ```
 
+### TEE remote attestation (SGX / TDX / SEV-SNP)
+
+The 3.4 cycle added end-to-end orchestrators that close the
+"caller must walk the X.509 chain themselves" gap from 3.2.x.
+
+```
+SGX / TDX quote bytes              SEV-SNP report bytes (1184 B)
+  │                                  │
+  ▼                                  ▼
+sgx_quote_parse                    snp_report_parse
+tdx_quote_parse                      │
+  │                                  │
+  ▼                                  ▼
+*_quote_verify_full(quote,         snp_report_verify_full(report,
+  intel_sgx_root_der,                vcek_chain_pem, ark_root_der,
+  now_unix)                          now_unix)
+  │                                  │
+  ├─► pem_decode_certs       ◄──────┤
+  │   (qe_cert_data → PCK)           (out-of-band VCEK chain → leaf)
+  │
+  ├─► x509_parse each + root
+  ├─► drop self-issued top-of-chain (embedded root copy)
+  ├─► x509_verify_chain (anchored on caller's external root)
+  │
+  ├─► extract leaf pubkey (64 B for SGX/TDX PCK, 96 B for SNP VCEK)
+  │
+  ├─► sgx_quote_verify_with_pck      snp_report_verify
+  │     (3 internal sig checks:        (SHA-384 + P-384 ECDSA over
+  │      PCK→QE-report, AK binding,    signed body)
+  │      AK→quote-body — dispatches
+  │      on att_key_type for TDX)
+  │
+  └─► returns 1 on full success, 0 on any failure
+```
+
+### Parallel batch verify
+
+`verify.cyr:sv_verify_batch` fans the artifact list out across
+worker threads. Each worker calls into `sv_verify_artifact_into`
+with a pre-allocated artifact scratch buffer (no bump-allocator
+calls from worker bodies — see CLAUDE.md quirk #7). A
+`_sigil_batch_mutex` serialises calls into the crypto-module
+inner globals; dropping it is the v3.5 roadmap target.
+
 ## Consumers
 
-daimon, kavach, ark, aegis, phylax, mela, stiva, argonaut, and all AGNOS applications needing trust verification.
+`daimon`, `kavach`, `ark`, `aegis`, `phylax`, `mela`, `stiva`,
+`argonaut`, and any AGNOS application needing trust verification.
 
 ## Dependencies
 
-- **Cyrius stdlib**: alloc, freelist, vec, hashmap, str, io, fmt, json, sakshi, chrono, bigint
+- **Cyrius stdlib**: `alloc`, `freelist`, `vec`, `hashmap`, `str`,
+  `string`, `io`, `fs`, `fmt`, `json`, `sakshi`, `chrono`, `bigint`,
+  `tagged`, `process`, `ct`, `keccak`, `slice`, `thread`, `atomic`
+- **AGNOS kernel interfaces**: `agnosys` (bundled at 0.98.0)
 - **External**: none
+
+## Single-pass compilation notes
+
+Sigil is included by `src/lib.cyr` as a single compilation unit;
+consumers either include `src/lib.cyr` for the full surface or
+pick individual modules (e.g. `tests/tcyr/x509.tcyr` includes
+only what the test needs). The `#ifdef SIGIL_PQC` gate around
+the ML-DSA modules accommodates cyrius's 1 MB preprocessor
+output cap (CLAUDE.md quirk #8); without the flag, sigil's
+expansion stays under cap by ~70 KB.

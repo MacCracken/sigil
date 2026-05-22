@@ -21,36 +21,15 @@ see [CHANGELOG.md](../../CHANGELOG.md). Closed cycles:
 
 ## Road to v3.5 — caller-provided scratch for parallel verify
 
-(Renumbered from "Road to v3.4" when 3.4 shipped TEE completion
-ahead of the parallel-verify work. Content unchanged.)
+Drop `_sigil_batch_mutex` by threading caller-provided scratch
+through every crypto primitive. The 3.3 cleanup cycle confirmed
+that in-function `var X[N]` declarations are **static
+function-scope globals**, not per-call stack arrays (see
+`tests/tcyr/var_array_semantics.tcyr` and the CHANGELOG 3.3.0
+entry); concurrent workers therefore race on shared module state
+unless scratch is threaded through explicitly.
 
-3.3 attempted to lift per-call working state out of module
-globals so the `_sigil_batch_mutex` could drop. The
-implementation swapped explicit named globals (`_sha_a..h`,
-`_sha256_W`, `_ga_*`, `_fpi_*`, etc.) for in-function
-`var X[N]` array declarations under the hypothesis (drawn
-from CLAUDE.md quirk #1's prior wording) that cycc 6 had
-fixed local clobbering and these would be per-call stack
-arrays.
-
-The hypothesis was wrong. Cyrius's `parse_fn.cyr:2886`
-("DON'T restore VCNT — arrays inside functions are globals
-that persist") and the probe at
-`tests/tcyr/var_array_semantics.tcyr` establish that **array
-declarations inside a function are static function-scope
-globals**, not stack arrays. Storage is unchanged from the
-3.2.x named-global form; concurrent workers still race.
-Scalar `var x = ...` locals ARE per-call (the scalar
-clobbering quirk that motivated the cc3-era globals is gone
-under cc6 — that part of the refactor stuck).
-
-The 3.3 ship therefore kept the batch mutex and shipped as a
-cleanup/refactor: -190 LOC net across `sha256.cyr`,
-`sha512.cyr`, `ed25519.cyr`, `aes_gcm.cyr`, `bigint_ext.cyr`,
-`sha_ni.cyr`, `verify.cyr`. The proper mutex-drop architecture
-is queued here.
-
-### 3.5 work items (renumbered from 3.4)
+### 3.5 work items
 
 - [ ] **Caller-provided crypto scratch.** Top-level entry
       points (`sha256`, `sha512`, `ed25519_verify`,
@@ -115,7 +94,7 @@ The 3.2.x verify paths are correct but slow:
   `_p384_long_div_reduce`. Solinas word-level reduction
   drops the cost 20–50×.
 
-3.6 closes the bump-allocator-lifetime LOW findings (now six
+3.6 closes the bump-allocator-lifetime LOW findings (now seven
 across the 3.2.x + 3.4 cycles) and lands Solinas reduction for
 both curves.
 
@@ -145,8 +124,8 @@ both curves.
       former is cleaner for long-running consumers (kavach);
       the latter is simpler for one-shot use. Audit doc
       to pick the shape with input from kavach's actual call
-      patterns. Closes six LOWs across the 3.2.2, 3.2.4, and
-      3.4 cycles.
+      patterns. Closes seven LOWs across the 3.2.2, 3.2.4, 3.4.0,
+      and 3.4.1 cycles.
 
 - [ ] **Re-run the full crypto bench suite.** Capture before /
       after rows for every verify-path bench. The 3.6 ship

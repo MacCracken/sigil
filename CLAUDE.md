@@ -1,289 +1,215 @@
 # Sigil — Claude Code Instructions
 
+> **Core rule**: this file is **preferences, process, and procedures** — durable rules that change rarely. Volatile state (current version, test counts, in-flight slots, consumers, recently shipped releases) lives in [`docs/development/state.md`](docs/development/state.md), bumped every release. **Do not inline state here.**
+
 ## Project Identity
 
-**Sigil** (Latin: seal) — System-wide trust verification for AGNOS
+**Sigil** (Latin: seal) — system-wide trust verification for AGNOS.
 
 - **Type**: Flat library (single-file compilation via `include`)
 - **License**: GPL-3.0-only
-- **Language**: Cyrius (ported from Rust)
-- **Version**: SemVer, version file at `VERSION`
-- **Status**: Released (2.x), security hardening active
+- **Language**: Cyrius (toolchain pin in `cyrius.cyml [package].cyrius`)
+- **Version**: `VERSION` at project root is the source of truth — do not inline the number here
+- **Genesis repo**: [agnosticos](https://github.com/MacCracken/agnosticos)
+- **Standards**: [first-party-standards.md](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/first-party-standards.md) · [first-party-documentation.md](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/first-party-documentation.md)
+- **Shared crates**: [shared-crates.md](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/shared-crates.md)
 
-## Genesis Layer
+## Goal
 
-This project is part of **AGNOS** — an AI-native operating system. The genesis repo at `/home/macro/Repos/agnosticos` owns system-level docs, roadmap, and CI/CD.
+Sigil is the **single crypto / trust boundary** for AGNOS. It owns:
 
-- **Recipes**: `MacCracken/zugot` (Hebrew: pairs that enter the ark)
-- **Standards**: `agnosticos/docs/development/applications/first-party-standards.md`
-- **Shared crates**: `agnosticos/docs/development/applications/shared-crates.md`
-
-## What Sigil Is
-
-Sigil is the **single crypto/trust boundary** for the AGNOS operating system. It owns:
 - Ed25519 signing and verification (publisher keyring)
-- SHA-256 file integrity measurement and verification
-- HMAC-SHA256 (RFC 2104) and AES-256-GCM (NIST SP 800-38D) AEAD
+- ECDSA P-256 / P-384 verification (TEE attestation chains)
+- SHA-256 / SHA-384 / SHA-512 hashing (file integrity, signature schemes)
+- HMAC-SHA256 (RFC 2104) and HKDF-SHA256 (RFC 5869)
+- AES-256-GCM (FIPS 197 + NIST SP 800-38D) AEAD
+- ML-DSA-65 (FIPS 204) post-quantum signing (opt-in via `-D SIGIL_PQC`)
+- X.509 + PEM parsing for TEE attestation
+- TEE attestation orchestrators for Intel SGX DCAP v3, Intel TDX v4, AMD SEV-SNP
 - Trust chain: boot chain → agent binaries → configs → packages
 - Revocation list management
 - Trust levels, policies, and enforcement modes
 
-Future: PQC (ML-KEM, ML-DSA) when Cyrius implementations mature.
+## Current State
 
-## Consumers
+> Volatile state lives in [`docs/development/state.md`](docs/development/state.md) — current version, test/assertion counts, in-flight work, recently shipped releases, consumers, audit floor. Refreshed every release.
+> Historical release narrative lives in [`CHANGELOG.md`](CHANGELOG.md) (per-tag chronology).
 
-daimon, kavach, ark, aegis, phylax, mela, stiva, argonaut, and all consumer apps that need trust verification.
+This file (`CLAUDE.md`) is durable rules only.
 
-## Architecture
+## Scaffolding
 
-```
-src/
-  lib.cyr         — public API entry point (includes all modules)
-  types.cyr       — TrustLevel, TrustPolicy, TrustedArtifact, VerificationResult, enums
-  error.cyr       — SigilError codes, Result pattern
-  trust.cyr       — Ed25519 keyring, sign/verify, key rotation, hash_data
-  integrity.cyr   — File hash measurement baselines, IntegrityVerifier
-  verify.cyr      — SigilVerifier (the main trust engine)
-  chain.cyr       — Boot chain verification
-  policy.cyr      — RevocationEntry, RevocationList, CRL
-  audit.cyr       — Structured audit event logging
-  tpm.cyr         — TPM interface (when agnosys exports available)
-  ed25519.cyr     — Ed25519 implementation (RFC 8032)
-  ct.cyr          — Constant-time comparison utilities
-  aes_gcm.cyr     — AES-256-GCM AEAD (FIPS 197 + NIST SP 800-38D)
+Sigil was scaffolded as a port from Rust v1.0.0 (original Rust source removed in 2.7.0 after parity closeout). New crypto primitives go in their own module under `src/`; new consumer-facing surface goes through `src/verify.cyr`. **Do not manually create project structure** — follow the existing module layout and `src/lib.cyr` include order.
+
+## Quick Start
+
+```bash
+cyrius build programs/smoke.cyr build/sigil          # full build (smoke probe)
+for t in tests/tcyr/*.tcyr; do cyrius test "$t"; done # full test suite
+cyrius bench benches/sigil.bcyr                       # benchmarks (where applicable)
+CYRIUS_DCE=1 cyrius build ...                         # DCE release build
 ```
 
-## Development Process
+## Key Principles
+
+- **Sigil IS the trust boundary** — every crypto decision lives here. Don't push crypto choices onto consumers.
+- **Own the crypto** — Ed25519 (RFC 8032), ECDSA P-256/P-384 (FIPS 186-4), SHA-2 family (FIPS 180-4), HMAC (RFC 2104), HKDF (RFC 5869), AES-256-GCM (FIPS 197 + NIST SP 800-38D), ML-DSA-65 (FIPS 204) implemented in Cyrius, no external deps. See [`docs/sources.md`](docs/sources.md) for the citation index.
+- **Constant-time on secret data** — bitwise-OR accumulation for hash/signature/MAC compares; no early-exit branches on key material.
+- **Key zeroization** — every private key, HMAC key, PRK, and intermediate secret buffer overwritten before free. Prefer `secret var` (cyrius 5.3.5) for compiler-guaranteed zeroization on scope exit.
+- **Zero external dependencies** — Cyrius stdlib only (plus `sakshi` for tracing, plus `agnosys` for kernel interfaces).
+- **`fl_alloc` for individually-freed scratch, `alloc` for init-once tables** — never `free()` a bump-allocated block (heaps don't cross).
+- **All types JSON-serializable** — `#derive(Serialize)` on every public type for cross-process logging.
+- **Runtime feature detection** over compile-time gating — AES-NI, SHA-NI dispatchers detect at boot, not at compile time.
+- **Test after every change** — `cyrius build` then the relevant `.tcyr` file. Zero failures.
+
+## Rules (Hard Constraints)
+
+- **Read the genesis repo's CLAUDE.md first** — [agnosticos/CLAUDE.md](https://github.com/MacCracken/agnosticos/blob/main/CLAUDE.md).
+- **Do not commit or push** — the user handles all git operations.
+- **NEVER use `gh` CLI** — use `curl` against the GitHub API if needed.
+- Do not add unnecessary dependencies (close to zero).
+- Do not store private keys in plaintext.
+- Do not branch on secret data in crypto paths.
+- Do not use `sys_system()` with unsanitized input — command-injection risk. Use `exec_vec()` with explicit argv.
+- Do not trust external data (signatures, hashes, file content, keys, X.509/PEM bytes, TEE quote bytes) without validation.
+- Do not skip key zeroization — every secret buffer overwritten before free.
+- Do not skip benchmarks before claiming performance improvements.
+- Do not hardcode the toolchain version anywhere outside `cyrius.cyml [package].cyrius`.
+
+## Process
 
 ### P(-1): Scaffold Hardening (before any new features)
 
-0. Read roadmap, CHANGELOG, and open issues — know what was intended
-1. Cleanliness check: `cyrius build`, `cyrlint`, all tests pass
-2. Benchmark baseline: `cyrius bench`
-3. Internal deep review — gaps, optimizations, correctness, docs
-4. External research — vidya entry, domain completeness, crypto best practices (RFC 8032, FIPS 180-4, RFC 2104)
-5. **Security audit** — review all crypto paths, key handling, constant-time comparisons, buffer sizes, pointer validation. Run against known CVE patterns for Ed25519/SHA-256/HMAC. File findings in `docs/audit/YYYY-MM-DD-audit.md`
-6. Additional tests/benchmarks from findings
-7. Post-review benchmarks — prove the wins (compare against `benchmarks-rust-v-cyrius.md`)
-8. Documentation audit
-9. Repeat if heavy
+0. Read roadmap, CHANGELOG, and open issues — know what was intended.
+1. Cleanliness check: `cyrius build`, `cyrlint`, all tests pass.
+2. Benchmark baseline: `cyrius bench`.
+3. Internal deep review — gaps, optimizations, correctness, docs.
+4. External research — vidya entry, domain completeness, crypto best practices (relevant RFCs / FIPS).
+5. **Security audit** — review all crypto paths, key handling, constant-time comparisons, buffer sizes, pointer validation. Run against known CVE patterns for Ed25519 / SHA-256 / HMAC / AES-GCM / X.509. File findings in `docs/audit/YYYY-MM-DD-audit.md` (or `YYYY-MM-DD-<version>-audit.md` for multi-cycle days).
+6. Additional tests / benchmarks from findings.
+7. Post-review benchmarks — prove the wins.
+8. Documentation audit — see [`docs/doc-health.md`](docs/doc-health.md).
+9. Repeat if heavy.
 
 ### Work Loop (continuous)
 
-1. **P(-1)** — Research: vidya entry before implementation
-2. Work phase — implement in Cyrius, test, benchmark
-3. `cyrius build` — verify compilation
-4. `cyrius test` — run .tcyr test files
-5. `cyrius bench` — run .bcyr benchmark files
-6. Internal review — performance, memory, correctness
-7. **Security check** — any new crypto code, key material handling, or input parsing reviewed for timing side-channels, buffer safety, and zeroization
-8. Documentation — update CHANGELOG, roadmap, docs
-9. Version check — VERSION and cyrius.cyml in sync
-10. Return to step 1
+1. **P(-1)** — Research: vidya entry before implementation.
+2. Work phase — implement in Cyrius, test, benchmark.
+3. `cyrius build` — verify compilation.
+4. `cyrius test` — run the relevant `.tcyr` file(s).
+5. `cyrius bench` — run benchmarks if perf-sensitive.
+6. Internal review — performance, memory, correctness.
+7. **Security check** — any new crypto code, key-material handling, or input parsing reviewed for timing side-channels, buffer safety, and zeroization.
+8. Documentation — update CHANGELOG, roadmap, `docs/development/state.md`, any ADR the change earned.
+9. Version check — `VERSION` and `cyrius.cyml` in sync.
+10. Return to step 1.
 
 ### Security Hardening (before release)
 
 Run a dedicated security audit pass before any version release. Sigil IS the trust boundary — this is non-negotiable:
 
-1. **Input validation** — every function that accepts external data (signatures, hashes, file content, keys) validates bounds, lengths, and formats before use
-2. **Buffer safety** — every `var buf[N]` and `alloc(N)` verified: N is in BYTES, max access offset < N, no adjacent-variable overflow
-3. **Constant-time audit** — every hash/signature/MAC comparison uses bitwise OR accumulation with no early exit; no branches on secret data
-4. **Key material zeroization** — every private key, HMAC key, and intermediate secret buffer overwritten with zeros before free
-5. **Syscall review** — every `syscall()` and `sys_*()` call reviewed: arguments validated, return values checked, error paths handled
-6. **Pointer validation** — no raw pointer dereference of untrusted input without bounds checking
-7. **No command injection** — no `sys_system()` or `exec_cmd()` with unsanitized input. Use `exec_vec()` with explicit argv instead
-8. **No path traversal** — file paths from external input validated against allowed directories. No `../` escape
-9. **Known CVE check** — review Ed25519, SHA-256, HMAC implementations against current CVE databases
-10. **File findings** — all issues documented in `docs/audit/YYYY-MM-DD-audit.md` with severity, file, line, and fix
+1. **Input validation** — every function that accepts external data (signatures, hashes, file content, keys) validates bounds, lengths, and formats before use.
+2. **Buffer safety** — every `var buf[N]` and `alloc(N)` verified: N is in BYTES, max access offset < N, no adjacent-variable overflow.
+3. **Constant-time audit** — every hash / signature / MAC comparison uses bitwise OR accumulation with no early exit; no branches on secret data.
+4. **Key material zeroization** — every private key, HMAC key, and intermediate secret buffer overwritten with zeros before free.
+5. **Syscall review** — every `syscall()` and `sys_*()` call reviewed: arguments validated, return values checked, error paths handled.
+6. **Pointer validation** — no raw pointer dereference of untrusted input without bounds checking.
+7. **No command injection** — no `sys_system()` or `exec_cmd()` with unsanitized input. Use `exec_vec()` with explicit argv.
+8. **No path traversal** — file paths from external input validated against allowed directories. No `../` escape.
+9. **Known CVE check** — review Ed25519 / SHA-256 / HMAC / AES-GCM / X.509 implementations against current CVE databases.
+10. **File findings** — all issues documented in `docs/audit/YYYY-MM-DD-audit.md` with severity, file, line, and fix.
 
 Severity levels:
-- **CRITICAL** — exploitable immediately, remote or privilege escalation, key leakage, signature forgery
-- **HIGH** — exploitable with moderate effort, timing side-channel on secret data
-- **MEDIUM** — exploitable under specific conditions
-- **LOW** — defense-in-depth improvement
+
+- **CRITICAL** — exploitable immediately; remote or privilege escalation; key leakage; signature forgery.
+- **HIGH** — exploitable with moderate effort; timing side-channel on secret data.
+- **MEDIUM** — exploitable under specific conditions.
+- **LOW** — defense-in-depth improvement.
 
 ### Closeout Pass (before every minor/major bump)
 
-Run a closeout pass before tagging x.Y.0 or x.0.0. Ship as the last patch of the current minor (e.g. 0.3.5 before 0.4.0):
+Run a closeout pass before tagging `x.Y.0` or `x.0.0`. Ship as the last patch of the current minor (e.g. `0.3.5` before `0.4.0`):
 
-1. **Full test suite** — all .tcyr pass, zero failures
-2. **Benchmark baseline** — `cyrius bench`, save CSV; compare against `benchmarks-rust-v-cyrius.md`
-3. **Dead code audit** — check for unused functions, remove dead source code
-4. **Stale comment sweep** — grep for old version refs, outdated TODOs
-5. **Security re-scan** — grep for new `sys_system`, unchecked writes, non-constant-time compares, missing zeroization, buffer size mismatches
-6. **Downstream check** — all consumers (daimon, kavach, ark, aegis, phylax, mela, stiva, argonaut) still build and pass tests with the new version
-7. **CHANGELOG/roadmap sync** — all docs reflect current state, version numbers consistent
-8. **Version verify** — VERSION, cyrius.cyml, CHANGELOG header all match
-9. **Full build from clean** — `rm -rf build && cyrius deps && cyrius build` passes clean
+1. **Full test suite** — all `.tcyr` pass, zero failures.
+2. **Benchmark baseline** — `cyrius bench`, save CSV; compare against the prior closeout.
+3. **Dead code audit** — check for unused functions, remove dead source code.
+4. **Stale comment sweep** — grep for old version refs, outdated TODOs.
+5. **Security re-scan** — grep for new `sys_system`, unchecked writes, non-constant-time compares, missing zeroization, buffer size mismatches.
+6. **Downstream check** — all consumers listed in `docs/development/state.md` still build and pass tests with the new version.
+7. **CHANGELOG / roadmap / state.md sync** — all docs reflect current state, version numbers consistent.
+8. **Version verify** — `VERSION`, `cyrius.cyml`, CHANGELOG header all match.
+9. **Full build from clean** — `rm -rf build && cyrius deps && cyrius build` passes clean.
 
 ### Task Sizing
 
-- **Low/Medium**: Batch freely — multiple items per work loop cycle
-- **Large**: Small bites only — break into sub-tasks, verify each before moving to the next
-- **If unsure**: Treat as large
+- **Low / Medium**: batch freely — multiple items per work loop cycle.
+- **Large**: small bites only — break into sub-tasks, verify each before moving on.
+- **If unsure**: treat it as large.
 
 ### TDD Discipline
 
-- Write tests FIRST for new modules/features, then implement until they pass
-- Benchmarks alongside, not after — regressions vs `benches/history.csv` are a release blocker
+- Write tests **first** for new modules / features, then implement until they pass. The 3.4.0 PEM decoder and 3.4.1 `snp_report_verify_full` shipped this way — match the pattern.
+- Benchmarks alongside, not after — regressions vs `benches/history.csv` are a release blocker.
 
-## Key Design Constraints
+## Known Cyrius Compiler Quirks
 
-- **Sigil IS the trust boundary** — every crypto decision lives here
-- **Own the crypto** — Ed25519 (RFC 8032), SHA-256 (FIPS 180-4), HMAC-SHA256 (RFC 2104), AES-256-GCM (FIPS 197 + NIST SP 800-38D) implemented in Cyrius, no external deps
-- **Inherit from libro** — SHA-256, hex encode/decode, constant_time_eq, key zeroization pattern. Improve: proper HMAC (not simplified), add Ed25519 asymmetric signing
-- **Constant-time comparison** — bitwise OR accumulation for hash/signature comparison, no early exit
-- **Key material zeroization** — overwrite key buffers with zeros before free
-- **No timing side-channels** — crypto paths must not branch on secret data
-- **Zero external dependencies** — Cyrius stdlib only (plus sakshi for tracing)
-- **`fl_alloc` for structs, `alloc` for hashmaps** — freelist supports individual free; bump allocator for long-lived collections
-- **Globals for cross-call state** — Cyrius single-pass compiler clobbers locals; use globals when values must survive nested calls
-- **All types JSON-serializable** — `#derive(Serialize)` on all public types
-- **Runtime feature detection** over compile-time gating (follow libro pattern)
-- **Target size** — compiled binary contribution should be small and measurable
+Most cc3-era workarounds documented in earlier sigil versions are now resolved under cc5/cc6. Quirks still worth knowing live as numbered architecture notes under [`docs/architecture/`](docs/architecture/) so they're discoverable from the affected module's docs:
 
-## Known Cyrius Compiler Quirks (6.0.1)
+1. **`var X[N]` inside a function is a static global, not a stack-local** — confirmed by cyrius `src/frontend/parse_fn.cyr:2886` and `tests/tcyr/var_array_semantics.tcyr`. Same-function array reuse across sequential calls works iff each call fully writes the buffer before reading; concurrent threads share the array. This blocks dropping the `_sigil_batch_mutex` until 3.5 lands caller-provided scratch. Scalar `var x = ...` locals ARE per-call.
+2. **`fl_alloc` vs bump `alloc` discipline** — `fl_alloc` + `fl_free` for per-call scratch; `alloc()` for init-once tables that live the whole program. Never `free()` an `alloc()` block — separate heaps.
+3. **`var buf[N]` is N bytes, not N elements** — for 80 i64 values declare `var buf[640]`. Intentional, not a bug.
+4. **Reserved keywords as identifiers** — `match`, `in`, `default`, `shared`, `object`, `case`, `else` all reject as variable / field / fn names.
+5. **Fixup-table cap: 16384** — up from 8192 in cc3. Individual `store8` init blocks of 256+ entries can hit this; see `src/aes_gcm.cyr`'s S-box init for the workaround (decode from hex string literal).
+6. **Array globals are 16-byte-aligned (since 5.5.21)** — any `var X[N]` with N > 8 lands on a 16-byte boundary. Removes the prior SSE-load #GP shape sensitivity for AES-NI round-key globals.
+7. **Stdlib thread-safety (5.5.31/32)** — atomics + race-free mutex are available; `string.cyr` is safe by construction. **But:** `alloc`, `hashmap`, and `vec` are NOT thread-safe. Multi-threaded sigil paths must pre-allocate per-worker scratch on the main thread before spawn.
+8. **Preprocessor output cap: 1 MB** — sigil + stdlib + agnosys + mldsa expansion sits right at the cap. PQC stays a cmdline-opt-in (`-D SIGIL_PQC`) until cyrius raises this buffer.
 
-Most cc3-era workarounds documented in earlier sigil versions are
-now resolved under cc5/cc6. Quirks still worth knowing:
+## CI / Release
 
-1. **`var X[N]` inside a function is a static global, not a
-   stack-local** — confirmed by `cyrius/src/frontend/parse_fn.cyr:2886`
-   ("DON'T restore VCNT — arrays inside functions are globals
-   that persist") and by `tests/tcyr/var_array_semantics.tcyr`
-   (first call observes 0; second call observes the bytes the
-   first call wrote). Scalar `var x = ...` locals ARE per-call
-   stack frame slots; only **array** declarations are statics.
-   Operational consequences:
-   - Same-function array reuse across sequential calls works
-     iff each call fully writes the buffer before reading.
-   - Concurrent threads share the array — every concurrent
-     entry races on the same memory. This blocks dropping any
-     mutex that serialises crypto-module calls. The mutex-drop
-     for `sv_verify_batch` (queued for 3.4) requires threading
-     a caller-provided scratch buffer through every
-     sha256/sha512/ed25519/fp_* signature; in-function
-     `var X[N]` cannot substitute.
-   - The 3.3 refactor swapped explicit named globals
-     (`_sha_a`, `_sha256_W`, `_ga_*`, `_fpi_*`, etc.) for
-     in-function `var X[N]` arrays. Storage is unchanged
-     (both are statics) but the form is cleaner — locality of
-     scope, no module-level pollution. The mutex stays.
-   - cycc 6 codegen DOES preserve scalar locals across deep
-     call chains; the cc3-era promote-to-global workaround for
-     scalar clobbering is no longer needed and was removed in
-     3.3.
-2. **`fl_alloc` vs bump `alloc` discipline** — `fl_alloc` +
-   `fl_free` for per-call scratch (round keys, GCM tables).
-   `alloc()` for init-time tables that live the whole program
-   (S-box, rcon, fixed-base combs). Never call `free()` on an
-   `alloc()` block — the freelist and bump allocators are
-   separate heaps and `free` only exists on the freelist side.
-3. **`var buf[N]` is N bytes, not N elements** — for 80 i64
-   values, declare `var buf[640]`. This is intentional, not a
-   bug, but tripping on it is easy.
-4. **Reserved keywords as identifiers** — `match`, `in`,
-   `default`, `shared`, `object`, `case`, `else` all reject as
-   variable/field/fn names. Under 5.5.26 the diagnostic is
-   explicit ("expected identifier, got reserved keyword
-   '<name>' — rename the variable/field/fn"); older releases
-   printed "got unknown" and were confusing. If a rename-at-a-
-   distance diagnostic still reads unclearly, check the token
-   isn't one of these.
-5. **Fixup table cap: 16384** — up from 8192 in cc3. Individual
-   `store8` init blocks of 256+ entries will still hit this
-   (see the S-box init in `src/aes_gcm.cyr` which instead
-   decodes from a hex string literal). Split into multiple
-   compilation units if you must hand-unroll.
-6. **Array globals are 16-byte-aligned (since 5.5.21)** — any
-   `var x[N]` with `N > 8` is placed on a 16-byte boundary by
-   the x86 fixup pass. That removes the previous #GP trap on
-   SSE m128 operands (PXOR / MOVDQA / AESENC m128-form) loading
-   from round-key globals. Shape-sensitivity to "preceding
-   globals in the TU" — the workaround used in sigil 2.9.0's
-   `_aes_ni_cache = 0` staging — is no longer needed. Re-enable
-   the AES-NI dispatch and re-test; if any residual silent-
-   discard remains it's a separate fixup/CP bug not covered by
-   the alignment patch.
-7. **Stdlib thread-safety (5.5.31/32)** — atomics + race-free
-   mutex are available (`lib/atomic.cyr`, `lib/thread.cyr`);
-   `string.cyr` is safe by construction. **But:** `alloc`,
-   `hashmap`, and `vec` are NOT thread-safe. A multi-threaded
-   sigil path (e.g. parallel `sv_verify_batch` fan-out) must
-   either pre-allocate all per-worker scratch in the main
-   thread before spawn, or mutex-wrap every call into
-   containers shared across workers. Alloc-from-worker with no
-   mutex will corrupt the bump pointer. Prefer the
-   pre-allocate-upfront pattern — it sidesteps the whole
-   problem and the verify hot path only reads read-only
-   globals (fixed-base comb, round-key tables).
-8. **Preprocessor output cap: 1 MB** — cc5's `preprocess_out`
-   buffer is 1,048,576 bytes (`src/frontend/lex.cyr:1436`
-   checks `op > 1048576`). The full sigil+stdlib+agnosys+mldsa
-   expansion sits right at the cap: `-D SIGIL_PQC` cmdline
-   works (squeaks under by ~1 KB), but a `#define SIGIL_PQC 1`
-   at the top of `src/lib.cyr` overflows by 1020 bytes —
-   moving an equivalent definition from the cmdline into
-   source costs extra expansion bytes in the IFDEF pass.
-   PQC therefore stays a cmdline-opt-in for the 3.0 cycle.
-   When cyrius raises this buffer (or adds a flag to select a
-   larger one), revisit default-on.
+- **Toolchain pin**: `cyrius = "X.Y.Z"` in `cyrius.cyml [package]`. **No separate `.cyrius-toolchain` file** and no hardcoded version strings elsewhere.
+- **Dead code elimination**: release builds run with `CYRIUS_DCE=1`. Binary size is a release metric.
+- **Tag filter**: release workflow triggers on semver-only tags. Non-numeric tags do not ship.
+- **Version-verify gate**: release asserts `VERSION == cyrius.cyml version == git tag` before building.
+- **State sync**: release post-hook bumps `docs/development/state.md`. If the hook doesn't, fix the hook — don't hand-maintain state.
 
-### Resolved under cc5 (stop treating as bugs)
+## Docs
 
-- **`\r` escape sequence** — works since 4.x. Don't hand-emit
-  byte 13 with `store8(buf, 13)`.
-- **Negative literals `-1`, `-N`** — work since 3.10.3. No need
-  for `(0 - N)`.
-- **Compound assignment `+=`, `-=`, `*=`, etc.** — work since 3.10.3.
-- **Undefined functions** — cc5 still resolves them as a fall-
-  through stub that crashes at call time rather than a compile-
-  time error. The aes_gcm bring-up hit this: a stray `free(...)`
-  call (from muscle memory, no such function in sigil's world)
-  crashed at runtime with a segfault loop. When a test silently
-  "restarts main" forever, suspect an undefined-function call.
-- **256-initialized-global cap** — removed.
-- **`map_get` after `map_set` in deep call chains** — resolved.
+- [`docs/adr/`](docs/adr/) — architecture decision records. *Why did we choose X over Y?*
+- [`docs/architecture/`](docs/architecture/) — module map + non-obvious invariants. *What can't I derive from the code alone?*
+- [`docs/audit/`](docs/audit/) — per-cycle security audit reports.
+- [`docs/development/roadmap.md`](docs/development/roadmap.md) — forward-looking work + closed cycles.
+- [`docs/development/state.md`](docs/development/state.md) — **live state snapshot, refreshed every release.**
+- [`docs/doc-health.md`](docs/doc-health.md) — fresh / stale / archive ledger across the doc tree.
+- [`docs/sources.md`](docs/sources.md) — RFC / FIPS / NIST citation index for every crypto primitive.
+- [`CHANGELOG.md`](CHANGELOG.md) — source of truth for all changes.
 
-## DO NOT
-
-- **Do not commit or push** — the user handles all git operations
-- **NEVER use `gh` CLI** — use `curl` to GitHub API only
-- Do not add unnecessary dependencies (there should be close to zero)
-- Do not skip benchmarks before claiming performance improvements
-- Do not store private keys in plaintext
-- Do not branch on secret data in crypto paths
-- Do not use `sys_system()` with unsanitized input — command injection risk
-- Do not trust external data (signatures, hashes, file content, keys) without validation
-- Do not skip key zeroization — every secret buffer overwritten before free
+New quirks and constraints land in `docs/architecture/` as numbered items (`NNN-kebab-case.md`). New decisions land in `docs/adr/` using [`template.md`](docs/adr/template.md). **Never renumber either series.**
 
 ## Documentation Structure
 
 ```
 Root files (required):
-  README.md, CHANGELOG.md, CLAUDE.md, CONTRIBUTING.md, SECURITY.md, CODE_OF_CONDUCT.md, LICENSE
+  README.md, CHANGELOG.md, CLAUDE.md, CONTRIBUTING.md,
+  SECURITY.md, CODE_OF_CONDUCT.md, LICENSE,
+  VERSION, cyrius.cyml
 
-docs/ (required):
-  architecture/overview.md — module map, data flow, consumers
-  development/roadmap.md — completed, backlog, future
+docs/ (minimum):
+  adr/                      ADR series (README + template + NNNN-*.md)
+  architecture/             Module map + numbered invariants (README + NNN-*.md)
+  audit/                    Per-cycle security audits (YYYY-MM-DD-*.md)
+  development/
+    roadmap.md              Forward-looking work
+    state.md                Live state snapshot (refreshed per release)
+  doc-health.md             Whole-tree doc-currency ledger
+  sources.md                RFC / FIPS / NIST citation index
 
 docs/ (when earned):
-  adr/ — architectural decision records
-  audit/ — security audit reports (YYYY-MM-DD-audit.md)
-  guides/ — usage guides, integration patterns
-  sources.md — source citations for algorithms (Ed25519, SHA-256, etc.)
+  security/                 Threat model + security architecture (broader than SECURITY.md)
+  guides/                   Task-oriented how-tos
+  examples/                 Runnable examples
+  benchmarks.md             Perf history (current: benches/history.csv + benchmarks-rust-v-cyrius.md)
 ```
 
 ## CHANGELOG Format
 
-Follow [Keep a Changelog](https://keepachangelog.com/). Performance claims MUST include benchmark numbers. Breaking changes get a **Breaking** section with migration guide. Security fixes get a **Security** section with CVE references where applicable.
-
-## Current Status
-
-- **Ported from**: Rust v1.0.0 (149 tests, 12 benchmarks); original
-  Rust source removed in 2.7.0 after parity closeout. See the
-  2.0.0 → current CHANGELOG entries for the port audit trail.
-- **Rust benchmark baseline**: `benchmarks-rust-v-cyrius.md`
-  (archived comparison, not rebuilt per release).
-- **Version**: see `VERSION` for current.
-- **Phase**: Released, security audit workflow active.
+Follow [Keep a Changelog](https://keepachangelog.com/). Performance claims **must** include benchmark numbers. Breaking changes get a **Breaking** section with migration guide. Security fixes get a **Security** section with CVE references where applicable. Maintain an `[Unreleased]` section at the top for in-flight changes between releases.

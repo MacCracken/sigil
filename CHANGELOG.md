@@ -5,6 +5,47 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Documentation
+
+- Documentation tree restructured to match agnosticos
+  [first-party-documentation](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/first-party-documentation.md)
+  conventions:
+  - **New**: `docs/development/state.md` — live state snapshot
+    (version, test counts, consumers, audit floor); refreshed
+    every release. Replaces the volatile content previously
+    inlined in `CLAUDE.md`.
+  - **New**: `docs/adr/` — architecture decision records.
+    Seeded with `README.md`, `template.md`, and three ADRs
+    documenting the `_sigil_batch_mutex` retention (0001),
+    the ML-DSA cmdline gate (0002), and the bump-alloc-drift
+    deferral to 3.6 (0003).
+  - **New**: `docs/architecture/README.md` — ADR-sibling
+    index for non-obvious code invariants. Numbered notes
+    deferred to first grep-from-the-wild promotion.
+  - **New**: `docs/sources.md` — consolidated RFC / FIPS /
+    NIST / Intel SGX / AMD SEV-SNP citation index for every
+    crypto primitive. Required for domain crates per
+    first-party-standards.
+  - **New**: `docs/doc-health.md` — fresh / stale / archive
+    ledger across the doc tree. Refreshed in place when docs
+    are touched.
+- `CLAUDE.md` restructured to match agnosticos
+  `example_claude.md` template (durable rules only; volatile
+  state moved to `state.md`; fixed planning-doc link from
+  `applications/` → `planning/`).
+- `README.md`, `CONTRIBUTING.md`, `SECURITY.md`, and
+  `docs/architecture/overview.md` rewritten against the
+  current 3.4.1 surface (added ECDSA P-256/P-384, AES-GCM,
+  HKDF, SHA-384, ML-DSA, X.509, PEM, SGX/TDX/SEV-SNP, seal).
+- `cyrius.cyml [lib].modules` — added `src/pem.cyr` (was
+  missing; would have shipped a dist bundle without the PEM
+  decoder).
+- `docs/development/roadmap.md` — trimmed renumber breadcrumbs
+  from the 3.4 ship; bumped LOW-finding count to 7 across the
+  3.2.x and 3.4.x cycles.
+
 ## [3.4.1] — 2026-05-22
 
 SEV-SNP attestation completion. Closes the explicit gap deferred

@@ -17,6 +17,16 @@ defines = ["SIGIL_SMOKE"]
 # library-probe build that doesn't define SIGIL_SMOKE; later still, the
 # boot will look at dist/sigil.cyr (source bundle, sigil's actual
 # consumer-facing artifact) once that path has been hardened in test.
+#
+# Test layout: sigil uses the per-module integration-test pattern
+# (every module gets its own `tests/tcyr/<module>.tcyr` file with
+# self-contained assertions). There is no unified `src/test.cyr`
+# entry. Drive the suite via:
+#   for t in tests/tcyr/*.tcyr; do cyrius test "$t"; done
+# This matches agnosticos first-party-standards § Testing's
+# "Integration tests: `tests/*.tcyr` for cross-module behavior"
+# branch — sigil's per-module crypto / parser scope makes this
+# pattern cleaner than a single src/test.cyr roll-up.
 
 # `modules` declares the src/ files `cyrius distlib` concatenates
 # into `dist/sigil.cyr`. Order matches src/lib.cyr's includes —
@@ -59,6 +69,7 @@ modules = [
     "src/ecdsa_p256.cyr",
     "src/ecdsa_p384.cyr",
     "src/x509.cyr",
+    "src/pem.cyr",
     "src/sgx.cyr",
     "src/sev_snp.cyr",
     "src/tdx.cyr",
