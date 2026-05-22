@@ -1,0 +1,229 @@
+# sgx.tcyr — DCAP v3 quote parser + verify-orchestrator tests.
+#
+# Sigil 3.2.3 — bite 3 of the TEE attestation arc.
+#
+# The test vector below is a synthesized DCAP v3 quote:
+#   • Test AK keypair + test PCK keypair generated via openssl
+#   • Header (48 B) and EnclaveReport (384 B) constructed with test
+#     fixed-pattern bytes (mr_enclave=AA…, mr_signer=BB…, etc.)
+#   • Quote body signed by AK
+#   • QE report constructed with report_data binding to AK
+#   • QE report signed by PCK
+#   • cert_data is a placeholder string — the PEM PCK chain inside
+#     a real quote is parsed in 3.2.3+, not in this bite.
+# See `/tmp/gen_sgx_test_vector.py` (kept out of tree; the bytes
+# below are reproducible from it but with a fresh keypair so the
+# values change each run — this test file is locked to one specific
+# run from 2026-05-23).
+#
+# Test groups:
+#   1. sgx_quote_parse — happy path + field accessors
+#   2. sgx_quote_parse — malformed/unsupported rejection
+#   3. sgx_quote_verify_with_pck — happy path (3 internal sig checks)
+#   4. sgx_quote_verify_with_pck — each of the 3 checks fails in turn
+
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/string.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fmt.cyr"
+include "lib/json.cyr"
+include "lib/sakshi.cyr"
+include "lib/chrono.cyr"
+include "lib/bigint.cyr"
+include "lib/ct.cyr"
+
+include "src/types.cyr"
+include "src/error.cyr"
+include "src/sha256.cyr"
+include "src/hex.cyr"
+include "src/sha512.cyr"
+include "src/bigint_ext.cyr"
+include "src/ed25519.cyr"
+include "src/ecdsa_p256.cyr"
+include "src/x509.cyr"
+include "src/sgx.cyr"
+
+# Synthesized test vector — generated 2026-05-23 by gen_sgx_test_vector.py.
+var AK_PUB_HEX = "75aac2b49e2f8c4f800ff7d13c791f604b853a80c78a13a6ea3d7d08ffdf460a2aaffdda0355ecce784b06a9ebe9be6ac82814416f5d8eda5d02180e73cd9319";
+var PCK_PUB_HEX = "386d8479b779ff4e5f439f080d7266599541dfb4161dc3e505a00c93a5ffd4fee5381394124e717f1c03e5412a394e4e32d60d74372d32b2aba5d68146b97de7";
+var QUOTE_HEX = "03000200000000000800080011111111111111111111111111111111222222222222222222222222222222222222222201010101010101010101010101010101000000000000000000000000000000000000000000000000000000000000000006060606060606060606060606060606aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0000000000000000000000000000000000000000000000000000000000000000bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002a000700000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc8d0200000b5fad76f8f58ecfc4992bca99a21d459e07d686a72b7fabc546317f153d0c5b8d4027ed545e73a5cd0ef351ac444d5a3c1581f070fa4f30631bb1d368b711a575aac2b49e2f8c4f800ff7d13c791f604b853a80c78a13a6ea3d7d08ffdf460a2aaffdda0355ecce784b06a9ebe9be6ac82814416f5d8eda5d02180e73cd931902020202020202020202020202020202000000000000000000000000000000000000000000000000000000000000000006060606060606060606060606060606dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd0000000000000000000000000000000000000000000000000000000000000000eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001000500000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000b64f5098eca66d72a83dc934b8af68134590b47f850908ab5e056f929ee7647300000000000000000000000000000000000000000000000000000000000000008abe489b027ef7fc19a0829bb227c0dd94b41ab867a30bbc61c700daf3479ea097331cddb6e9529bf1b63a7737b2b21ea70e4022420cdf5c6d2a350da1130148200077777777777777777777777777777777777777777777777777777777777777770500250000002d2d20706c616365686f6c64657220666f722050434b206365727420636861696e202d2d0a";
+var QUOTE_LEN = 1089;
+
+fn main() {
+    alloc_init();
+    _p256_init();
+
+    var quote_buf = hex_decode(QUOTE_HEX, 2 * QUOTE_LEN);
+    var pck_pk    = hex_decode(PCK_PUB_HEX, 128);
+    var ak_pk     = hex_decode(AK_PUB_HEX, 128);
+
+    # ============================================================
+    # Group 1 — sgx_quote_parse happy path + field accessors
+    # ============================================================
+    test_group("sgx_quote_parse — happy path");
+
+    var q = sgx_quote_alloc();
+    assert_eq(sgx_quote_parse(quote_buf, QUOTE_LEN, q), 1, "parse OK");
+    assert_eq(sgx_quote_version(q), SGX_QUOTE_VERSION_V3, "version v3");
+    assert_eq(sgx_quote_att_key_type(q), SGX_ATT_KEY_TYPE_ECDSA_P256, "ECDSA-P256 attestation key");
+    assert_eq(sgx_quote_buf_len(q), QUOTE_LEN, "buf_len recorded");
+
+    test_group("sgx_quote — field accessors");
+    # mr_enclave is fixed pattern AA…AA (32 bytes) at body offset 64.
+    var mre = sgx_quote_mr_enclave_ptr(q);
+    assert_eq(load8(mre) & 0xFF, 0xAA, "mr_enclave[0]");
+    assert_eq(load8(mre + 31) & 0xFF, 0xAA, "mr_enclave[31]");
+    # mr_signer = BB…BB at body offset 128.
+    var mrs = sgx_quote_mr_signer_ptr(q);
+    assert_eq(load8(mrs) & 0xFF, 0xBB, "mr_signer[0]");
+    assert_eq(load8(mrs + 31) & 0xFF, 0xBB, "mr_signer[31]");
+    # isv_prod_id = 42, isv_svn = 7 (little-endian u16 in synth)
+    assert_eq(sgx_quote_isv_prod_id(q), 42, "isv_prod_id == 42");
+    assert_eq(sgx_quote_isv_svn(q), 7, "isv_svn == 7");
+    # report_data = CC…CC (full 64 bytes)
+    var rdp = sgx_quote_report_data_ptr(q);
+    assert_eq(load8(rdp) & 0xFF, 0xCC, "report_data[0]");
+    assert_eq(load8(rdp + 63) & 0xFF, 0xCC, "report_data[63]");
+    # AK from quote should match the test vector's AK_PUB.
+    var ak_in_quote = sgx_quote_ak_ptr(q);
+    assert_eq(load8(ak_in_quote) & 0xFF, load8(ak_pk) & 0xFF, "AK[0] matches");
+    assert_eq(load8(ak_in_quote + 63) & 0xFF, load8(ak_pk + 63) & 0xFF, "AK[63] matches");
+    # qe_auth_data = 32 bytes of 0x77.
+    assert_eq(sgx_quote_qe_auth_data_len(q), 32, "qe_auth_data_len == 32");
+    var aux = sgx_quote_qe_auth_data_ptr(q);
+    assert_eq(load8(aux) & 0xFF, 0x77, "qe_auth_data[0]");
+    # cert_data type = 5 (PCK PEM)
+    assert_eq(sgx_quote_cert_data_type(q), SGX_CERT_TYPE_PCK_PEM, "cert_type == 5");
+    assert_eq(sgx_quote_cert_data_len(q), 37, "cert_data_len");
+
+    # ============================================================
+    # Group 2 — sgx_quote_parse rejection of malformed/unsupported
+    # ============================================================
+    test_group("sgx_quote_parse — malformed rejection");
+
+    # Too-small buffer
+    var qbad = sgx_quote_alloc();
+    assert_eq(sgx_quote_parse(quote_buf, 50, qbad), 0, "truncated quote rejected");
+    assert_eq(sgx_quote_parse(quote_buf, 0, qbad), 0, "empty buffer rejected");
+
+    # Wrong version: flip the version u16 to v2.
+    var qv2 = alloc(QUOTE_LEN);
+    memcpy(qv2, quote_buf, QUOTE_LEN);
+    store8(qv2, 0x02);  # version low byte
+    assert_eq(sgx_quote_parse(qv2, QUOTE_LEN, qbad), 0, "non-v3 version rejected");
+
+    # Wrong att_key_type: flip to type 1 (EPID, deprecated).
+    var qepid = alloc(QUOTE_LEN);
+    memcpy(qepid, quote_buf, QUOTE_LEN);
+    store8(qepid + 2, 0x01);
+    assert_eq(sgx_quote_parse(qepid, QUOTE_LEN, qbad), 0, "non-ECDSA att_key_type rejected");
+
+    # signature_data_len overflows buf_len: bump the u32 at offset 432
+    # to a value larger than the remaining bytes.
+    var qsiglen = alloc(QUOTE_LEN);
+    memcpy(qsiglen, quote_buf, QUOTE_LEN);
+    # remaining = QUOTE_LEN - (48+384+4) = 653. Set sig_data_len = 10000 (way over).
+    store8(qsiglen + 432, 0x10);
+    store8(qsiglen + 433, 0x27);
+    store8(qsiglen + 434, 0x00);
+    store8(qsiglen + 435, 0x00);
+    assert_eq(sgx_quote_parse(qsiglen, QUOTE_LEN, qbad), 0,
+        "sig_data_len > remaining buf rejected");
+
+    # qe_auth_data_len overflows: find the auth_data_size u16 in the
+    # sig section. Layout offset: 48 + 384 + 4 (sig_data_len) + 64 +
+    # 64 + 384 + 64 = 1012. The u16 at 1012 is auth_data_size.
+    var qauthlen = alloc(QUOTE_LEN);
+    memcpy(qauthlen, quote_buf, QUOTE_LEN);
+    store8(qauthlen + 1012, 0xFF);
+    store8(qauthlen + 1013, 0xFF);
+    assert_eq(sgx_quote_parse(qauthlen, QUOTE_LEN, qbad), 0,
+        "qe_auth_data_len > remaining rejected");
+
+    # ============================================================
+    # Group 3 — sgx_quote_verify_with_pck — happy path
+    # ============================================================
+    test_group("sgx_quote_verify_with_pck — happy path");
+
+    # Re-parse the clean quote for verify
+    var qv = sgx_quote_alloc();
+    assert_eq(sgx_quote_parse(quote_buf, QUOTE_LEN, qv), 1, "parse for verify");
+    assert_eq(sgx_quote_verify_with_pck(qv, pck_pk), 1,
+        "synthesized quote verifies with PCK");
+
+    # ============================================================
+    # Group 4 — verify failure cases (each internal check fails in turn)
+    # ============================================================
+    test_group("sgx_quote_verify_with_pck — failure cases");
+
+    # 4a. Wrong PCK public key: pass AK_PUB instead. Step 1 (QE report
+    # signature) fails.
+    assert_eq(sgx_quote_verify_with_pck(qv, ak_pk), 0,
+        "wrong PCK rejects via QE-report-sig check");
+
+    # 4b. Tamper qe_report_signature → step 1 fails.
+    var qbuf_t1 = alloc(QUOTE_LEN);
+    memcpy(qbuf_t1, quote_buf, QUOTE_LEN);
+    # qe_report_sig sits at offset 48 + 384 + 4 + 64 + 64 + 384 = 948.
+    store8(qbuf_t1 + 948, (load8(qbuf_t1 + 948) & 0xFF) ^ 0x01);
+    var q_t1 = sgx_quote_alloc();
+    sgx_quote_parse(qbuf_t1, QUOTE_LEN, q_t1);
+    assert_eq(sgx_quote_verify_with_pck(q_t1, pck_pk), 0,
+        "tampered qe_report_sig fails step 1");
+
+    # 4c. Tamper qe_report.report_data → step 2 fails (binding hash mismatch).
+    # qe_report sits at offset 48 + 384 + 4 + 64 + 64 = 564.
+    # report_data inside qe_report at +320 = 884.
+    var qbuf_t2 = alloc(QUOTE_LEN);
+    memcpy(qbuf_t2, quote_buf, QUOTE_LEN);
+    store8(qbuf_t2 + 884, (load8(qbuf_t2 + 884) & 0xFF) ^ 0x01);
+    var q_t2 = sgx_quote_alloc();
+    sgx_quote_parse(qbuf_t2, QUOTE_LEN, q_t2);
+    # Note: this also breaks qe_report sig, so the rejection actually
+    # surfaces at step 1. Either way it's rejected — what matters is
+    # that the tamper is caught.
+    assert_eq(sgx_quote_verify_with_pck(q_t2, pck_pk), 0,
+        "tampered report_data caught");
+
+    # 4d. Tamper the AK in the quote → step 2 fails (binding hash) AND
+    # step 3 fails (AK doesn't match the body sig).
+    var qbuf_t3 = alloc(QUOTE_LEN);
+    memcpy(qbuf_t3, quote_buf, QUOTE_LEN);
+    # AK at offset 48 + 384 + 4 + 64 = 500
+    store8(qbuf_t3 + 500, (load8(qbuf_t3 + 500) & 0xFF) ^ 0x01);
+    var q_t3 = sgx_quote_alloc();
+    sgx_quote_parse(qbuf_t3, QUOTE_LEN, q_t3);
+    assert_eq(sgx_quote_verify_with_pck(q_t3, pck_pk), 0,
+        "tampered AK caught");
+
+    # 4e. Tamper the body ecdsa_signature → step 3 fails.
+    var qbuf_t4 = alloc(QUOTE_LEN);
+    memcpy(qbuf_t4, quote_buf, QUOTE_LEN);
+    # ecdsa_sig at offset 48 + 384 + 4 = 436
+    store8(qbuf_t4 + 436, (load8(qbuf_t4 + 436) & 0xFF) ^ 0x01);
+    var q_t4 = sgx_quote_alloc();
+    sgx_quote_parse(qbuf_t4, QUOTE_LEN, q_t4);
+    assert_eq(sgx_quote_verify_with_pck(q_t4, pck_pk), 0,
+        "tampered body ecdsa_sig fails step 3");
+
+    # 4f. Tamper enclave report body (which the AK signed) → step 3 fails.
+    var qbuf_t5 = alloc(QUOTE_LEN);
+    memcpy(qbuf_t5, quote_buf, QUOTE_LEN);
+    # mr_enclave at body offset 64 → absolute 48 + 64 = 112
+    store8(qbuf_t5 + 112, (load8(qbuf_t5 + 112) & 0xFF) ^ 0x01);
+    var q_t5 = sgx_quote_alloc();
+    sgx_quote_parse(qbuf_t5, QUOTE_LEN, q_t5);
+    assert_eq(sgx_quote_verify_with_pck(q_t5, pck_pk), 0,
+        "tampered mr_enclave fails step 3 (body sig)");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

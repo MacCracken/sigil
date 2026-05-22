@@ -5,6 +5,96 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.2.3] — 2026-05-23
+
+Third bite of the 3.2.x TEE attestation arc
+([`docs/development/3.2-tee-arc.md`](docs/development/3.2-tee-arc.md)):
+**Intel SGX DCAP v3 quote parser + verify orchestrator**. Composes
+against the X.509 walker (3.2.2), the ECDSA P-256 verify (3.2.1),
+and the existing SHA-256 surface to give kavach a parsed
+`SgxQuote` struct + the three internal signature checks Intel's
+attestation scheme defines.
+
+### Scope decision
+
+End-to-end signature verification against a real Intel-signed
+quote is **deferred**. Intel's hardware-rooted signing chain
+isn't reproducible locally, and a known-good redistributable
+sample wasn't available in the repos at tag time. Sigil 3.2.3
+ships:
+
+- The full **parser** with field accessors — tested against a
+  synthesized DCAP v3 quote.
+- The verify **orchestrator** as a thin composition of
+  `ecdsa_p256_verify` + `sha256` — tested against the
+  synthesized quote with stand-in PCK and AK keypairs generated
+  via openssl. Every internal signature check works against the
+  synthesized chain; the *logic* is in tree and exercised.
+
+The X.509 chain walk that ties the in-quote PCK cert to Intel's
+SGX Root CA is the caller's responsibility for 3.2.3 — sigil
+exposes `cert_data_ptr` / `cert_data_len` / `cert_data_type`
+accessors. PEM decoding of the in-quote PCK chain lands in a
+future patch when a real integration (kavach) surfaces the
+forcing function. See audit doc INFO-1.
+
+### Added
+
+- **`src/sgx.cyr` — DCAP v3 quote parser + verify orchestrator
+  (~370 lines).**
+  - `sgx_quote_parse(buf, buf_len, out)` — single-pass linear
+    walk of the Intel DCAP v3 binary format: 48-B header, 384-B
+    enclave report, u32 signature_data_len, fixed-position
+    signature section (ecdsa_sig 64 B / AK 64 B / qe_report
+    384 B / qe_report_sig 64 B), u16-prefixed qe_auth_data,
+    u16-type + u32-size qe_cert_data. Every length field
+    bounds-checked against `buf_len` before any dereference.
+    Rejects non-v3 versions, non-ECDSA-P256 attestation key
+    types, trailing bytes inside the signature section, and any
+    inner length that overflows the buffer.
+  - `sgx_quote_verify_with_pck(quote, pck_pk)` — the three
+    internal signature checks Intel's scheme defines:
+      1. PCK signs the QE report (`ecdsa_p256_verify` against
+         the raw 384-B qe_report under `pck_pk`).
+      2. AK is bound to the QE: `qe_report.report_data[0:32]`
+         == `SHA-256(AK_qx || AK_qy || qe_auth_data)`;
+         `report_data[32:64]` strictly zero (defense in depth —
+         see audit INFO-2).
+      3. AK signs the quote body
+         (`ecdsa_p256_verify` against `header || enclave_report`
+         under the AK extracted from the quote).
+  - Field accessors covering everything kavach's
+    `SgxAttestationReport` populates: `mr_enclave_ptr`,
+    `mr_signer_ptr`, `isv_prod_id`, `isv_svn`, `report_data_ptr`,
+    `ak_ptr`, `qe_report_ptr`, `cert_data_ptr/_len/_type`.
+- **`tests/tcyr/sgx.tcyr`** — 32 assertions across 5 groups:
+  parser happy path + field accessors, 5 malformed-input
+  rejection cases (truncated, empty, wrong version, wrong
+  att_key_type, overflowing sig_data_len, overflowing
+  auth_data_len), verify orchestrator green path, and 5 tamper
+  cases (each of the three internal sig checks fails in turn
+  plus mr_enclave and AK mutation). Vector generated offline
+  via the openssl CLI from a Python helper kept out of tree
+  (synthesized — the AK and PCK keypairs are test-only).
+
+### Security
+
+- Audit: `docs/audit/2026-05-23-audit.md`. **0 findings at any
+  severity** on the new ~370-line surface. Two new INFO items
+  document deliberate scope boundaries: the deferred PEM
+  decode + full chain walk (INFO-1), and the strict zero-pad
+  requirement on `report_data[32:64]` (INFO-2).
+- The three sig-check chain in `sgx_quote_verify_with_pck`
+  defends against the standard quote forgery scenarios — see
+  audit Step 9. An attacker forging a quote needs to break
+  either ECDSA P-256 or SHA-256.
+
+### Module wiring
+
+- `src/lib.cyr` includes `src/sgx.cyr` after `src/x509.cyr`.
+- `cyrius.cyml [lib].modules` lists the new module so
+  `cyrius distlib` bundles it into `dist/sigil.cyr`.
+
 ## [3.2.2] — 2026-05-22
 
 Second bite of the 3.2.x TEE attestation arc

@@ -1,0 +1,377 @@
+# sgx.cyr — Intel SGX DCAP v3 quote parser + verify orchestrator.
+#
+# Sigil 3.2.3 — bite 3 of the TEE attestation arc (origin:
+# `docs/development/3.2-tee-arc.md`).
+#
+# Scope (per the 3.2.3 user choice — "parser only, defer end-to-end
+# verify"): structural walk of a DCAP v3 ECDSA-P256 quote into an
+# offsets-into-buffer SgxQuote struct. The verify entry point
+# (`sgx_quote_verify_with_pck`) composes the existing primitives
+# (`sha256`, `ecdsa_p256_verify`) into the three-step internal
+# attestation check; the X.509 chain walk that ties the PCK public
+# key to Intel's SGX Root CA is the caller's responsibility for
+# 3.2.3 — PEM decoding of the in-quote `qe_cert_data` is its own
+# future patch.
+#
+# Surface:
+#   fn sgx_quote_parse(buf, buf_len, out): i64
+#       — parse a DCAP v3 quote (1 = ok, 0 = malformed/unsupported)
+#   fn sgx_quote_verify_with_pck(quote, pck_pk): i64
+#       — given a parsed quote and an externally-validated PCK
+#         public key (64 B raw Qx||Qy), verify the three internal
+#         signature checks:
+#           1. PCK signs the QE report (qe_report_signature over
+#              qe_report under pck_pk).
+#           2. AK is bound to the QE: qe_report.report_data[0:32]
+#              == SHA-256(AK_qx || AK_qy || qe_auth_data).
+#           3. AK signs the quote body (ecdsa_signature over
+#              header || enclave_report under AK).
+#         Returns 1 only if all three pass.
+#
+# Layout reference — Intel SGX TEE Quote Reference Spec (DCAP v3):
+#   QuoteHeader (48 B):
+#     version (u16 LE)
+#     att_key_type (u16 LE)   — 2 = ECDSA-P256
+#     reserved (u32 LE)
+#     qe_svn (u16 LE)
+#     pce_svn (u16 LE)
+#     qe_vendor_id (16 B)
+#     user_data (20 B)
+#
+#   EnclaveReport (384 B):
+#     cpu_svn (16 B)
+#     misc_select (u32 LE)
+#     reserved_1 (28 B)
+#     attributes (16 B)
+#     mr_enclave (32 B)           offset 64
+#     reserved_2 (32 B)
+#     mr_signer (32 B)            offset 128
+#     reserved_3 (96 B)
+#     isv_prod_id (u16 LE)        offset 256
+#     isv_svn (u16 LE)            offset 258
+#     reserved_4 (60 B)
+#     report_data (64 B)          offset 320
+#
+#   SignatureSection (variable):
+#     signature_data_len (u32 LE)
+#     ecdsa_signature (64 B)        — over header || enclave_report, signed by AK
+#     attestation_key (64 B)        — Qx || Qy of AK
+#     qe_report (384 B)             — QE's own enclave report
+#     qe_report_signature (64 B)    — over qe_report, signed by PCK
+#     qe_auth_data_size (u16 LE)
+#     qe_auth_data (qe_auth_data_size B)
+#     qe_cert_data_type (u16 LE)
+#     qe_cert_data_size (u32 LE)
+#     qe_cert_data (qe_cert_data_size B)
+#
+# Threat model: the quote buffer is fully attacker-controlled (it
+# travels from a remote untrusted host via a guest enclave's
+# attestation flow). Every length read is bounds-checked against
+# `buf_len` before any dereference. See
+# `docs/audit/2026-05-23-audit.md` for the 3.2.3 hardening review.
+
+# ================================================================
+# Format constants
+# ================================================================
+
+var SGX_QUOTE_HEADER_SIZE     = 48;
+var SGX_REPORT_BODY_SIZE      = 384;
+var SGX_AK_SIZE               = 64;
+var SGX_ECDSA_SIG_SIZE        = 64;
+var SGX_MIN_QUOTE_SIZE        = 48 + 384 + 4 + 64 + 64 + 384 + 64 + 2 + 2 + 4;
+
+var SGX_QUOTE_VERSION_V3      = 3;
+var SGX_ATT_KEY_TYPE_ECDSA_P256 = 2;
+
+# qe_cert_data_type values per Intel spec. 5 = PCK Cert Chain (PEM).
+# Other values exist (1=PPID, 7=manifest) but we expose the type
+# byte and let the caller decide.
+var SGX_CERT_TYPE_PCK_PEM     = 5;
+
+# Field offsets inside an EnclaveReport (used by accessors).
+var SGX_REPORT_OFF_MR_ENCLAVE   = 64;
+var SGX_REPORT_OFF_MR_SIGNER    = 128;
+var SGX_REPORT_OFF_ISV_PROD_ID  = 256;
+var SGX_REPORT_OFF_ISV_SVN      = 258;
+var SGX_REPORT_OFF_REPORT_DATA  = 320;
+
+# ================================================================
+# SgxQuote struct — 256 bytes. All offsets are relative to the
+# original buffer (load64(q + 0)); all lengths are in bytes.
+#
+#    0  buf_ptr
+#    8  buf_len
+#   16  version (u16 zero-extended to i64)
+#   24  att_key_type (u16 → i64)
+#   32  header_off (always 0)
+#   40  report_body_off (always 48)
+#   48  signature_data_len (u32 → i64) — content of the sig section,
+#       not including the u32 length prefix
+#   56  ecdsa_sig_off            — 64 B raw r||s
+#   64  ak_off                   — 64 B Qx||Qy
+#   72  qe_report_off            — 384 B
+#   80  qe_report_sig_off        — 64 B raw r||s
+#   88  qe_auth_data_off
+#   96  qe_auth_data_len
+#  104  qe_cert_data_type (u16)
+#  112  qe_cert_data_off
+#  120  qe_cert_data_len (u32)
+#  128..255  reserved
+# ================================================================
+
+fn sgx_quote_alloc(): i64 {
+    var q = alloc(256);
+    memset(q, 0, 256);
+    return q;
+}
+
+# Internal helpers (little-endian word reads — same convention as
+# Intel's wire format).
+fn _sgx_load_u16(buf, off): i64 {
+    return (load8(buf + off) & 0xFF) | ((load8(buf + off + 1) & 0xFF) << 8);
+}
+
+fn _sgx_load_u32(buf, off): i64 {
+    return (load8(buf + off) & 0xFF)
+         | ((load8(buf + off + 1) & 0xFF) << 8)
+         | ((load8(buf + off + 2) & 0xFF) << 16)
+         | ((load8(buf + off + 3) & 0xFF) << 24);
+}
+
+# ================================================================
+# Field accessors (post-parse). The integer-valued ones return the
+# value directly; the byte-region ones return absolute pointers
+# into the original DER buffer.
+# ================================================================
+
+fn sgx_quote_version(q): i64        { return load64(q + 16); }
+fn sgx_quote_att_key_type(q): i64   { return load64(q + 24); }
+fn sgx_quote_buf(q): i64            { return load64(q + 0); }
+fn sgx_quote_buf_len(q): i64        { return load64(q + 8); }
+
+fn sgx_quote_report_body_ptr(q): i64 {
+    return load64(q + 0) + load64(q + 40);
+}
+
+fn sgx_quote_mr_enclave_ptr(q): i64 {
+    return sgx_quote_report_body_ptr(q) + SGX_REPORT_OFF_MR_ENCLAVE;
+}
+
+fn sgx_quote_mr_signer_ptr(q): i64 {
+    return sgx_quote_report_body_ptr(q) + SGX_REPORT_OFF_MR_SIGNER;
+}
+
+fn sgx_quote_isv_prod_id(q): i64 {
+    return _sgx_load_u16(sgx_quote_buf(q),
+                          load64(q + 40) + SGX_REPORT_OFF_ISV_PROD_ID);
+}
+
+fn sgx_quote_isv_svn(q): i64 {
+    return _sgx_load_u16(sgx_quote_buf(q),
+                          load64(q + 40) + SGX_REPORT_OFF_ISV_SVN);
+}
+
+fn sgx_quote_report_data_ptr(q): i64 {
+    return sgx_quote_report_body_ptr(q) + SGX_REPORT_OFF_REPORT_DATA;
+}
+
+fn sgx_quote_ak_ptr(q): i64           { return load64(q + 0) + load64(q + 64); }
+fn sgx_quote_ecdsa_sig_ptr(q): i64    { return load64(q + 0) + load64(q + 56); }
+fn sgx_quote_qe_report_ptr(q): i64    { return load64(q + 0) + load64(q + 72); }
+fn sgx_quote_qe_report_sig_ptr(q): i64 { return load64(q + 0) + load64(q + 80); }
+fn sgx_quote_qe_auth_data_ptr(q): i64 { return load64(q + 0) + load64(q + 88); }
+fn sgx_quote_qe_auth_data_len(q): i64 { return load64(q + 96); }
+fn sgx_quote_cert_data_type(q): i64   { return load64(q + 104); }
+fn sgx_quote_cert_data_ptr(q): i64    { return load64(q + 0) + load64(q + 112); }
+fn sgx_quote_cert_data_len(q): i64    { return load64(q + 120); }
+
+# ================================================================
+# sgx_quote_parse — single-pass linear walk.
+#
+# Returns 1 on success, 0 on any malformed input.
+# ================================================================
+
+fn sgx_quote_parse(buf, buf_len, out): i64 {
+    memset(out, 0, 256);
+
+    # Minimum size check: header + body + sig_data_len + minimal
+    # signature section payload. Anything smaller cannot possibly
+    # be a v3 DCAP quote.
+    if (buf_len < SGX_MIN_QUOTE_SIZE) { return 0; }
+
+    # Header
+    var version = _sgx_load_u16(buf, 0);
+    var att_key_type = _sgx_load_u16(buf, 2);
+    if (version != SGX_QUOTE_VERSION_V3) { return 0; }
+    if (att_key_type != SGX_ATT_KEY_TYPE_ECDSA_P256) { return 0; }
+
+    store64(out + 0, buf);
+    store64(out + 8, buf_len);
+    store64(out + 16, version);
+    store64(out + 24, att_key_type);
+    store64(out + 32, 0);    # header_off
+    store64(out + 40, SGX_QUOTE_HEADER_SIZE);  # report_body_off
+
+    # signature_data_len field
+    var sig_len_off = SGX_QUOTE_HEADER_SIZE + SGX_REPORT_BODY_SIZE;
+    if (sig_len_off + 4 > buf_len) { return 0; }
+    var sig_data_len = _sgx_load_u32(buf, sig_len_off);
+    var sig_data_off = sig_len_off + 4;
+    # Reject sig_data_len that would push past buf_len OR is
+    # patently too small to contain the fixed part of the
+    # signature section.
+    if (sig_data_len < 0) { return 0; }     # u32 read can produce ≥ 2^31 as negative i64; guard anyway
+    if (sig_data_off + sig_data_len > buf_len) { return 0; }
+    var sig_min_fixed = SGX_ECDSA_SIG_SIZE + SGX_AK_SIZE
+                       + SGX_REPORT_BODY_SIZE + SGX_ECDSA_SIG_SIZE
+                       + 2 + 2 + 4;
+    if (sig_data_len < sig_min_fixed) { return 0; }
+
+    store64(out + 48, sig_data_len);
+
+    # Walk the signature section, recording offsets.
+    var cur = sig_data_off;
+    var sig_section_end = sig_data_off + sig_data_len;
+
+    # ecdsa_signature (64 B)
+    store64(out + 56, cur);
+    cur = cur + SGX_ECDSA_SIG_SIZE;
+    # attestation_key (64 B)
+    store64(out + 64, cur);
+    cur = cur + SGX_AK_SIZE;
+    # qe_report (384 B)
+    store64(out + 72, cur);
+    cur = cur + SGX_REPORT_BODY_SIZE;
+    # qe_report_signature (64 B)
+    store64(out + 80, cur);
+    cur = cur + SGX_ECDSA_SIG_SIZE;
+
+    # qe_auth_data: u16 size + bytes
+    if (cur + 2 > sig_section_end) { return 0; }
+    var auth_len = _sgx_load_u16(buf, cur);
+    if (auth_len < 0) { return 0; }
+    if (cur + 2 + auth_len > sig_section_end) { return 0; }
+    store64(out + 88, cur + 2);
+    store64(out + 96, auth_len);
+    cur = cur + 2 + auth_len;
+
+    # qe_cert_data: u16 type + u32 size + bytes
+    if (cur + 6 > sig_section_end) { return 0; }
+    var cert_type = _sgx_load_u16(buf, cur);
+    var cert_len  = _sgx_load_u32(buf, cur + 2);
+    if (cert_len < 0) { return 0; }
+    if (cur + 6 + cert_len > sig_section_end) { return 0; }
+    # Allow exact match (no trailing bytes inside the signature section)
+    if (cur + 6 + cert_len != sig_section_end) { return 0; }
+    store64(out + 104, cert_type);
+    store64(out + 112, cur + 6);
+    store64(out + 120, cert_len);
+
+    return 1;
+}
+
+# ================================================================
+# Verify orchestrator (3.2.3 — three internal signature checks).
+#
+# All three checks must pass.
+#
+# `pck_pk` is a 64-byte Qx||Qy raw P-256 public key, already
+# validated as on-curve and trusted by the caller (the X.509 chain
+# walk from the PCK leaf up to Intel SGX Root is the caller's
+# responsibility for 3.2.3 — PEM decoding inside the quote will
+# land in 3.2.3+).
+# ================================================================
+
+# Scratch globals (Cyrius quirk #1 — locals can clobber across
+# nested calls).
+var _sgxv_binding_input = 0;
+var _sgxv_binding_hash  = 0;
+var _sgxv_quote_body    = 0;
+var _sgxv_inited = 0;
+
+fn _sgxv_init(): i64 {
+    if (_sgxv_inited == 1) { return 0; }
+    # Max binding input: AK (64) + qe_auth_data (≤ 65535) = 65599 bytes.
+    # Allocate generously once. For typical quotes auth_data ≤ ~256.
+    _sgxv_binding_input = alloc(65600);
+    _sgxv_binding_hash  = alloc(32);
+    # Quote body for AK signature = header (48) + report body (384) = 432.
+    _sgxv_quote_body    = alloc(432);
+    _sgxv_inited = 1;
+    return 0;
+}
+
+fn sgx_quote_verify_with_pck(quote, pck_pk): i64 {
+    _sgxv_init();
+
+    # ----------------------------------------------------------------
+    # Step 1 — PCK signs the QE report.
+    # ----------------------------------------------------------------
+    var qe_report = sgx_quote_qe_report_ptr(quote);
+    var qe_report_sig = sgx_quote_qe_report_sig_ptr(quote);
+    if (ecdsa_p256_verify(pck_pk, qe_report, SGX_REPORT_BODY_SIZE, qe_report_sig) != 1) {
+        return 0;
+    }
+
+    # ----------------------------------------------------------------
+    # Step 2 — AK is bound to the QE.
+    # qe_report.report_data[0:32] == SHA-256(AK || qe_auth_data)
+    # The upper 32 bytes of report_data are required to be zero.
+    # ----------------------------------------------------------------
+    var ak  = sgx_quote_ak_ptr(quote);
+    var aux = sgx_quote_qe_auth_data_ptr(quote);
+    var aux_len = sgx_quote_qe_auth_data_len(quote);
+    if (aux_len < 0) { return 0; }
+    if (aux_len > 65536) { return 0; }   # bounded by our scratch
+
+    # Build SHA-256 input: AK || qe_auth_data
+    var i = 0;
+    while (i < SGX_AK_SIZE) {
+        store8(_sgxv_binding_input + i, load8(ak + i) & 0xFF);
+        i = i + 1;
+    }
+    i = 0;
+    while (i < aux_len) {
+        store8(_sgxv_binding_input + SGX_AK_SIZE + i, load8(aux + i) & 0xFF);
+        i = i + 1;
+    }
+    sha256(_sgxv_binding_input, SGX_AK_SIZE + aux_len, _sgxv_binding_hash);
+
+    # Compare against qe_report.report_data[0:32]
+    var rd = qe_report + SGX_REPORT_OFF_REPORT_DATA;
+    i = 0;
+    while (i < 32) {
+        if ((load8(rd + i) & 0xFF) != (load8(_sgxv_binding_hash + i) & 0xFF)) {
+            return 0;
+        }
+        i = i + 1;
+    }
+    # Upper 32 bytes must be zero (defense in depth — guards against
+    # an attacker stuffing additional bytes that affect downstream
+    # consumers parsing the full 64-byte report_data).
+    i = 32;
+    while (i < 64) {
+        if ((load8(rd + i) & 0xFF) != 0) { return 0; }
+        i = i + 1;
+    }
+
+    # ----------------------------------------------------------------
+    # Step 3 — AK signs the quote body (header || enclave_report).
+    # ----------------------------------------------------------------
+    var buf = sgx_quote_buf(quote);
+    # Assemble header || report_body into our scratch (they're
+    # contiguous in the quote, but copying is the same shape we'd use
+    # if the format ever inserted padding — defensive).
+    memcpy(_sgxv_quote_body, buf, SGX_QUOTE_HEADER_SIZE);
+    memcpy(_sgxv_quote_body + SGX_QUOTE_HEADER_SIZE,
+           buf + SGX_QUOTE_HEADER_SIZE, SGX_REPORT_BODY_SIZE);
+
+    var ecdsa_sig = sgx_quote_ecdsa_sig_ptr(quote);
+    if (ecdsa_p256_verify(ak, _sgxv_quote_body,
+                           SGX_QUOTE_HEADER_SIZE + SGX_REPORT_BODY_SIZE,
+                           ecdsa_sig) != 1) {
+        return 0;
+    }
+
+    return 1;
+}
