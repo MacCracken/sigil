@@ -1007,41 +1007,35 @@ fn sv_save_trust_store(sv, path): i64 {
 # (`tests/tcyr/batch_parallel.tcyr`, `tests/bcyr/batch_parallel.bcyr`)
 # exercise it without a build flag.
 #
-# Threading safety contract (3.2.0):
-# - The 3.0 ship serialised the whole `sv_verify_artifact` call
-#   inside `_sigil_batch_mutex` because the call chain hit
-#   `alloc` / `vec_push` (grow) / `fl_alloc` / `vec_new`, none
-#   of which are thread-safe under cyrius (CLAUDE.md quirk #7).
-#   Measured under cyrius 5.7.48: 0.96x – 1.04x vs serial. No
-#   throughput win because the mutex covered the dominant
+# Threading safety contract (3.3 in progress):
+# - 3.0 serialised the whole `sv_verify_artifact` call inside a
+#   batch mutex because the call chain hit `alloc` / `vec_push` /
+#   `fl_alloc` / `vec_new`, none of which are thread-safe under
+#   cyrius (CLAUDE.md quirk #7). Throughput parity with serial
+#   under cyrius 5.7.48 — the mutex covered the dominant
 #   `ed25519_verify` + `sha256_transform` work.
-# - 3.2.0 pre-allocates one `VerifyScratch` per artifact on the
-#   main thread and switches the worker body to
-#   `sv_verify_artifact_into(sv, path, type, scratch)` which is
-#   alloc-free — every per-artifact struct lives inside the
-#   scratch slot. Workers do not touch `alloc` / `fl_alloc` /
-#   `vec_new` / `vec_grow`. Single fl_alloc(count * _VSC_SIZE)
-#   pool replaces the ~10 per-call fl_allocs of the 3.0 path.
-# - **The mutex stays.** The crypto modules — `sha256_transform`,
-#   `ed25519_verify`, `aes256_*` — use MODULE-LEVEL globals for
-#   working state as a cyrius local-clobbering workaround
-#   (CLAUDE.md quirk #1: `_sha_ctx`, `_sha_a..h`, `_sha_t1/t2`,
-#   `_sha_i`, `_sha256_W`, etc.). Concurrent workers running
-#   `sha256_transform` race on those globals and produce
-#   corrupted digests, which then fail signature verify and
-#   register as wrong-trust-level in the result vr. Verified
-#   experimentally during 3.2.0 dev: mutex-off → 30/228
-#   batch_parallel tests fail; mutex-on → 228/228 pass.
-#   Per-worker crypto-state migration is queued for 3.3 (see
-#   `docs/development/roadmap.md` § "Towards v3.3" — requires
-#   moving working state to per-call scratch in sha256.cyr +
-#   ed25519.cyr + aes_gcm.cyr, plus a cyrius local-clobbering
-#   audit at each call site that currently uses globals).
-# - 3.2.0's actual win: ~10× fewer allocator calls per batch
-#   element (1 scratch-pool slot vs ~10 fl_allocs). Lower memory
-#   churn, smaller working-set for the freelist, cleaner attack
-#   surface. Throughput parity with 3.0's mutex-wrap (both
-#   ed25519+sha256 dominate; both serialise on the same mutex).
+# - 3.2.0 lifted all per-artifact allocs out of the worker:
+#   `sv_verify_artifact_into(sv, path, type, scratch)` runs
+#   alloc-free against a pre-allocated `VerifyScratch` pool.
+#   Workers do not touch `alloc` / `fl_alloc` / `vec_new` /
+#   `vec_grow`. The batch mutex still wrapped each artifact
+#   because the crypto modules used module-global working state.
+# - 3.3 attempt #1 (this cycle): refactored crypto-module working
+#   state from explicit named globals (`_sha_a`, `_sha256_W`,
+#   `_ga_*`, `_fpi_*`, etc.) into function-local `var X[N]`
+#   arrays. Discovery via cyrius source (parse_fn.cyr:2886) and
+#   confirmed by `tests/tcyr/var_array_semantics.tcyr`:
+#   **`var X[N]` inside a function in cyrius is a static
+#   function-scope global**, NOT a stack-local. The refactor was
+#   functionally equivalent to the pre-3.3 named globals — same
+#   race semantics under concurrent workers.
+# - Mutex stays for now. The proper 3.3 architecture is
+#   caller-provided scratch parameters threaded through every
+#   crypto entry point: each worker pre-allocates a per-worker
+#   crypto-scratch block on the main thread, then passes it
+#   down through ed25519_verify → fp_mul → u512_mod_p → ...
+#   That's a multi-module signature-change pass, queued for a
+#   future cycle (re-scope as 3.3.x or 3.4).
 # - `map_get` on the trust store is the only worker-side access
 #   to a shared container. Safe under the documented contract
 #   that no thread calls `map_set` on the trust store during a
@@ -1050,10 +1044,6 @@ fn sv_save_trust_store(sv, path): i64 {
 #   fan-out and never mutates during; downstream callers must
 #   do the same.
 # - Audit emission lifts to the main thread post-join.
-#   `audit_artifact_verified` and `alog_record` both touch the
-#   freelist + audit-log vec; emitting them serially after all
-#   workers finish keeps allocator activity strictly
-#   single-threaded.
 
 var _sigil_batch_mutex = 0;
 var _SIGIL_BATCH_PARALLEL_THRESHOLD = 4;
@@ -1096,6 +1086,18 @@ fn _batch_worker(arg): i64 {
 fn sv_verify_batch(sv, artifacts, count): i64 {
     if (count >= _SIGIL_BATCH_PARALLEL_THRESHOLD) {
         if (_sigil_batch_mutex == 0) { _sigil_batch_mutex = mutex_new(); }
+        # Pre-warm crypto module init on the main thread so the
+        # lazy `_*_inited` guards don't race across workers
+        # (CLAUDE.md quirk #7: alloc/fl_alloc are not thread-
+        # safe). Cheap on hot paths — each guard short-circuits
+        # after first call. Defence-in-depth alongside the
+        # batch mutex — workers never hit a cold init.
+        ed25519_init();
+        sha256_global_init();
+        sha512_global_init();
+        # Warm the SHA-NI CPUID probe + self-test so the cache and
+        # the K-table allocation happen on the main thread.
+        sha_ni_available();
         var workers = _SIGIL_BATCH_WORKERS;
         if (count < workers) { workers = count; }
 

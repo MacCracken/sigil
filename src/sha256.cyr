@@ -1,6 +1,14 @@
 # sha256.cyr — FIPS 180-4 SHA-256 implementation
-# All arithmetic masked to 32 bits. Working state in globals
-# to survive nested function calls (Cyrius compiler constraint).
+# All arithmetic masked to 32 bits. Working state is per-call
+# (function-local) so concurrent workers don't race; the round
+# constants K[0..63] are read-only after init and remain shared.
+#
+# Historical note: 2.x and 3.0–3.2 lifted the round state into
+# module globals as a cycc 3 local-clobbering workaround
+# (CLAUDE.md quirk #1). 3.3's empirical probe
+# (tests/tcyr/sha256_locals_probe.tcyr) confirmed cycc 6.0.1
+# preserves locals across the helper calls, unblocking the
+# refactor and the mutex-drop on the parallel-verify path.
 #
 # `sha256_transform` dispatches to the SHA-NI hardware path via
 # `sha_ni_available()` / `sha256_transform_ni()`; pull the dispatch
@@ -56,7 +64,6 @@ fn sha256_ssig1(x): i64 {
 # ================================================================
 
 var _sha256_K = 0;
-var _sha256_W = 0;
 var _sha256_inited = 0;
 
 fn sha256_global_init(): i64 {
@@ -128,7 +135,6 @@ fn sha256_global_init(): i64 {
     store64(_sha256_K + 496, 0xbef9a3f7);
     store64(_sha256_K + 504, 0xc67178f2);
 
-    _sha256_W = alloc(512);
     _sha256_inited = 1;
     return 0;
 }
@@ -173,21 +179,19 @@ fn sha256_init_into(ctx): i64 {
 }
 
 # ================================================================
-# Compression function — globals for working state
+# Compression function — per-call working state (3.3 refactor)
 # ================================================================
-
-var _sha_a = 0;
-var _sha_b = 0;
-var _sha_c = 0;
-var _sha_d = 0;
-var _sha_e = 0;
-var _sha_f = 0;
-var _sha_g = 0;
-var _sha_hv = 0;
-var _sha_t1 = 0;
-var _sha_t2 = 0;
-var _sha_ctx = 0;
-var _sha_i = 0;
+# All working state (a..hv, t1, t2, i, W) lives in function-local
+# variables. The pre-3.3 module-global pattern was a cycc 3
+# local-clobbering workaround that the cycc 6.0.1 codegen no
+# longer needs; verified by tests/tcyr/sha256_locals_probe.tcyr
+# against published FIPS 180-2 vectors and multi-block cross-
+# check against the reference path.
+#
+# Concurrency consequence: this function is now race-free across
+# threads, which unblocks dropping the _sigil_batch_mutex on the
+# parallel-verify hot path. Read-only globals (_sha256_K) remain
+# shared and safe under concurrent read.
 
 fn sha256_transform(ctx): i64 {
     # SHA-NI dispatch wire-point (2.9.2 foundation).
@@ -199,77 +203,76 @@ fn sha256_transform(ctx): i64 {
         if (sha256_transform_ni(ctx) == 0) { return 0; }
     }
 
-    _sha_ctx = ctx;
+    var W[512];           # 64 message-schedule words × 8 bytes
     var buf = ctx + 64;
 
-    # Prepare message schedule W[0..15] from block (big-endian)
-    _sha_i = 0;
-    while (_sha_i < 16) {
-        var off = _sha_i * 4;
+    # Prepare message schedule W[0..15] from block (big-endian).
+    var i = 0;
+    while (i < 16) {
+        var off = i * 4;
         var w = ((load8(buf + off) & 0xFF) << 24)
         | ((load8(buf + off + 1) & 0xFF) << 16)
         | ((load8(buf + off + 2) & 0xFF) << 8)
         | (load8(buf + off + 3) & 0xFF);
-        store64(_sha256_W + _sha_i * 8, w & MASK32);
-        _sha_i = _sha_i + 1;
+        store64(&W + i * 8, w & MASK32);
+        i = i + 1;
     }
 
-    # Extend W[16..63]
-    _sha_i = 16;
-    while (_sha_i < 64) {
-        var w16 = load64(_sha256_W + (_sha_i - 16) * 8);
-        var w15 = load64(_sha256_W + (_sha_i - 15) * 8);
-        var w7 = load64(_sha256_W + (_sha_i - 7) * 8);
-        var w2 = load64(_sha256_W + (_sha_i - 2) * 8);
+    # Extend W[16..63].
+    i = 16;
+    while (i < 64) {
+        var w16 = load64(&W + (i - 16) * 8);
+        var w15 = load64(&W + (i - 15) * 8);
+        var w7 = load64(&W + (i - 7) * 8);
+        var w2 = load64(&W + (i - 2) * 8);
         var s0 = sha256_ssig0(w15);
-        # _sha_i may be clobbered — reload from W offsets computed before calls
         var s1 = sha256_ssig1(w2);
-        store64(_sha256_W + _sha_i * 8, (w16 + s0 + w7 + s1) & MASK32);
-        _sha_i = _sha_i + 1;
+        store64(&W + i * 8, (w16 + s0 + w7 + s1) & MASK32);
+        i = i + 1;
     }
 
-    # Initialize working variables
-    _sha_a = load64(_sha_ctx);
-    _sha_b = load64(_sha_ctx + 8);
-    _sha_c = load64(_sha_ctx + 16);
-    _sha_d = load64(_sha_ctx + 24);
-    _sha_e = load64(_sha_ctx + 32);
-    _sha_f = load64(_sha_ctx + 40);
-    _sha_g = load64(_sha_ctx + 48);
-    _sha_hv = load64(_sha_ctx + 56);
+    # Initialize working variables.
+    var a = load64(ctx);
+    var b = load64(ctx + 8);
+    var c = load64(ctx + 16);
+    var d = load64(ctx + 24);
+    var e = load64(ctx + 32);
+    var f = load64(ctx + 40);
+    var g = load64(ctx + 48);
+    var hv = load64(ctx + 56);
 
-    # 64 rounds — accumulate into globals between function calls
-    _sha_i = 0;
-    while (_sha_i < 64) {
-        _sha_t1 = _sha_hv;
-        _sha_t1 = (_sha_t1 + sha256_bsig1(_sha_e)) & MASK32;
-        _sha_t1 = (_sha_t1 + sha256_ch(_sha_e, _sha_f, _sha_g)) & MASK32;
-        _sha_t1 = (_sha_t1 + load64(_sha256_K + _sha_i * 8)) & MASK32;
-        _sha_t1 = (_sha_t1 + load64(_sha256_W + _sha_i * 8)) & MASK32;
+    # 64 rounds.
+    i = 0;
+    while (i < 64) {
+        var t1 = hv;
+        t1 = (t1 + sha256_bsig1(e)) & MASK32;
+        t1 = (t1 + sha256_ch(e, f, g)) & MASK32;
+        t1 = (t1 + load64(_sha256_K + i * 8)) & MASK32;
+        t1 = (t1 + load64(&W + i * 8)) & MASK32;
 
-        _sha_t2 = sha256_bsig0(_sha_a);
-        _sha_t2 = (_sha_t2 + sha256_maj(_sha_a, _sha_b, _sha_c)) & MASK32;
+        var t2 = sha256_bsig0(a);
+        t2 = (t2 + sha256_maj(a, b, c)) & MASK32;
 
-        _sha_hv = _sha_g;
-        _sha_g = _sha_f;
-        _sha_f = _sha_e;
-        _sha_e = (_sha_d + _sha_t1) & MASK32;
-        _sha_d = _sha_c;
-        _sha_c = _sha_b;
-        _sha_b = _sha_a;
-        _sha_a = (_sha_t1 + _sha_t2) & MASK32;
-        _sha_i = _sha_i + 1;
+        hv = g;
+        g = f;
+        f = e;
+        e = (d + t1) & MASK32;
+        d = c;
+        c = b;
+        b = a;
+        a = (t1 + t2) & MASK32;
+        i = i + 1;
     }
 
-    # Add compressed chunk to current hash value
-    store64(_sha_ctx, (load64(_sha_ctx) + _sha_a) & MASK32);
-    store64(_sha_ctx + 8, (load64(_sha_ctx + 8) + _sha_b) & MASK32);
-    store64(_sha_ctx + 16, (load64(_sha_ctx + 16) + _sha_c) & MASK32);
-    store64(_sha_ctx + 24, (load64(_sha_ctx + 24) + _sha_d) & MASK32);
-    store64(_sha_ctx + 32, (load64(_sha_ctx + 32) + _sha_e) & MASK32);
-    store64(_sha_ctx + 40, (load64(_sha_ctx + 40) + _sha_f) & MASK32);
-    store64(_sha_ctx + 48, (load64(_sha_ctx + 48) + _sha_g) & MASK32);
-    store64(_sha_ctx + 56, (load64(_sha_ctx + 56) + _sha_hv) & MASK32);
+    # Add compressed chunk to current hash value.
+    store64(ctx, (load64(ctx) + a) & MASK32);
+    store64(ctx + 8, (load64(ctx + 8) + b) & MASK32);
+    store64(ctx + 16, (load64(ctx + 16) + c) & MASK32);
+    store64(ctx + 24, (load64(ctx + 24) + d) & MASK32);
+    store64(ctx + 32, (load64(ctx + 32) + e) & MASK32);
+    store64(ctx + 40, (load64(ctx + 40) + f) & MASK32);
+    store64(ctx + 48, (load64(ctx + 48) + g) & MASK32);
+    store64(ctx + 56, (load64(ctx + 56) + hv) & MASK32);
     return 0;
 }
 

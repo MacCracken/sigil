@@ -142,17 +142,37 @@ Run a closeout pass before tagging x.Y.0 or x.0.0. Ship as the last patch of the
 - **Runtime feature detection** over compile-time gating (follow libro pattern)
 - **Target size** — compiled binary contribution should be small and measurable
 
-## Known Cyrius Compiler Quirks (5.5.32)
+## Known Cyrius Compiler Quirks (6.0.1)
 
 Most cc3-era workarounds documented in earlier sigil versions are
-now resolved under cc5. Quirks still worth knowing:
+now resolved under cc5/cc6. Quirks still worth knowing:
 
-1. **Local variable clobbering** — still possible across deeply
-   nested call chains in cc5, though rarer than cc3. Not a
-   guaranteed bug. If a local's value looks wrong after a
-   function call, promote it to a global as a workaround. The
-   sha256 / ed25519 / aes_gcm modules all use this pattern for
-   their round-state.
+1. **`var X[N]` inside a function is a static global, not a
+   stack-local** — confirmed by `cyrius/src/frontend/parse_fn.cyr:2886`
+   ("DON'T restore VCNT — arrays inside functions are globals
+   that persist") and by `tests/tcyr/var_array_semantics.tcyr`
+   (first call observes 0; second call observes the bytes the
+   first call wrote). Scalar `var x = ...` locals ARE per-call
+   stack frame slots; only **array** declarations are statics.
+   Operational consequences:
+   - Same-function array reuse across sequential calls works
+     iff each call fully writes the buffer before reading.
+   - Concurrent threads share the array — every concurrent
+     entry races on the same memory. This blocks dropping any
+     mutex that serialises crypto-module calls. The mutex-drop
+     for `sv_verify_batch` (queued for 3.4) requires threading
+     a caller-provided scratch buffer through every
+     sha256/sha512/ed25519/fp_* signature; in-function
+     `var X[N]` cannot substitute.
+   - The 3.3 refactor swapped explicit named globals
+     (`_sha_a`, `_sha256_W`, `_ga_*`, `_fpi_*`, etc.) for
+     in-function `var X[N]` arrays. Storage is unchanged
+     (both are statics) but the form is cleaner — locality of
+     scope, no module-level pollution. The mutex stays.
+   - cycc 6 codegen DOES preserve scalar locals across deep
+     call chains; the cc3-era promote-to-global workaround for
+     scalar clobbering is no longer needed and was removed in
+     3.3.
 2. **`fl_alloc` vs bump `alloc` discipline** — `fl_alloc` +
    `fl_free` for per-call scratch (round keys, GCM tables).
    `alloc()` for init-time tables that live the whole program

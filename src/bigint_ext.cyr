@@ -48,73 +48,62 @@ fn u256_store_le(dst, src): i64 {
 }
 
 # ================================================================
-# 64×64 → 128-bit multiply (result in globals)
-# ================================================================
-
-var _m64_lo = 0;
-var _m64_hi = 0;
-
-fn _mul64_full(a, b): i64 {
-    var mask32 = 0xFFFFFFFF;
-    var aL = a & mask32;
-    var aH = (a >> 32) & mask32;
-    var bL = b & mask32;
-    var bH = (b >> 32) & mask32;
-    var ll = aL * bL;
-    var lh = aL * bH;
-    var hl = aH * bL;
-    var hh = aH * bH;
-    var mid = lh + hl;
-    var mid_carry = 0;
-    if ((mid ^ (1 << 63)) < (lh ^ (1 << 63))) { mid_carry = 1; }
-    var lo = ll + (mid << 32);
-    var lo_carry = 0;
-    if ((lo ^ (1 << 63)) < (ll ^ (1 << 63))) { lo_carry = 1; }
-    _m64_lo = lo;
-    _m64_hi = hh + (mid >> 32) + (mid_carry << 32) + lo_carry;
-    return 0;
-}
-
-# ================================================================
 # Full 256×256 → 512-bit multiply
 # out: 64 bytes (8 limbs)
 # ================================================================
-
-# Globals for mul_full inner loop (avoid local clobber across fn calls)
-var _mf_s1 = 0;
-var _mf_c1 = 0;
-var _mf_carry = 0;
-var _mf_hi = 0;
+# 3.3: per-call working state. The pre-3.3 module-globals were a
+# cycc 3 local-clobbering workaround that cycc 6.0.1 no longer
+# needs. `_mul64_full` is inlined here — it was its only caller
+# and returning two values via globals (`_m64_lo` / `_m64_hi`)
+# had no clean local equivalent.
 
 fn u256_mul_full(out, a, b): i64 {
     memset(out, 0, 64);
     var sbit = 1 << 63;
+    var mask32 = 0xFFFFFFFF;
     var i = 0;
     while (i < 4) {
-        _mf_carry = 0;
+        var carry = 0;
         var j = 0;
         while (j < 4) {
-            _mul64_full(load64(a + i * 8), load64(b + j * 8));
+            # Inlined 64×64 → 128-bit multiply.
+            var av = load64(a + i * 8);
+            var bv = load64(b + j * 8);
+            var aL = av & mask32;
+            var aH = (av >> 32) & mask32;
+            var bL = bv & mask32;
+            var bH = (bv >> 32) & mask32;
+            var ll = aL * bL;
+            var lh = aL * bH;
+            var hl = aH * bL;
+            var hh = aH * bH;
+            var mid = lh + hl;
+            var mid_carry = 0;
+            if ((mid ^ sbit) < (lh ^ sbit)) { mid_carry = 1; }
+            var m_lo = ll + (mid << 32);
+            var lo_carry = 0;
+            if ((m_lo ^ sbit) < (ll ^ sbit)) { lo_carry = 1; }
+            var m_hi = hh + (mid >> 32) + (mid_carry << 32) + lo_carry;
+
             var k = i + j;
             var prev = load64(out + k * 8);
-            _mf_hi = _m64_hi;
 
-            # s1 = prev + _m64_lo; _mf_c1 = overflow (inlined from _uadd_overflow)
-            _mf_s1 = prev + _m64_lo;
-            _mf_c1 = 0;
-            if ((_mf_s1 ^ sbit) < (prev ^ sbit)) { _mf_c1 = 1; }
+            # s1 = prev + m_lo; c1 = overflow
+            var s1 = prev + m_lo;
+            var c1 = 0;
+            if ((s1 ^ sbit) < (prev ^ sbit)) { c1 = 1; }
 
-            # s2 = s1 + carry; c2 = overflow (inlined)
-            var s2 = _mf_s1 + _mf_carry;
+            # s2 = s1 + carry; c2 = overflow
+            var s2 = s1 + carry;
             var c2 = 0;
-            if ((s2 ^ sbit) < (_mf_s1 ^ sbit)) { c2 = 1; }
+            if ((s2 ^ sbit) < (s1 ^ sbit)) { c2 = 1; }
 
             store64(out + k * 8, s2);
-            _mf_carry = _mf_hi + _mf_c1 + c2;
+            carry = m_hi + c1 + c2;
             j = j + 1;
         }
         if (i + 4 < 8) {
-            store64(out + (i + 4) * 8, load64(out + (i + 4) * 8) + _mf_carry);
+            store64(out + (i + 4) * 8, load64(out + (i + 4) * 8) + carry);
         }
         i = i + 1;
     }
@@ -128,27 +117,16 @@ fn u256_mul_full(out, a, b): i64 {
 # May need 1-2 further subtractions.
 # ================================================================
 
-# Global p = 2^255 - 19
+# Read-only-after-init: curve modulus p = 2^255 - 19 and the
+# Solinas constant 38 (= 2 · 19) used in 2^256 ≡ 38 (mod p).
 var _ed_p = 0;
 var _ed_p_inited = 0;
-var _mod_prod = 0;
-var _mod_aH = 0;
-var _mod_aL = 0;
 var _mod_38 = 0;
-var _mod_lowp = 0;
-var _mod_r = 0;
-var _mod_extra = 0;
 
 fn _init_ed_p(): i64 {
     if (_ed_p_inited == 1) { return 0; }
     _ed_p = u256_from_hex("7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffed");
-    _mod_prod = alloc(64);
-    _mod_aH = alloc(32);
-    _mod_aL = alloc(32);
     _mod_38 = u256_from(38);
-    _mod_lowp = alloc(32);
-    _mod_r = alloc(32);
-    _mod_extra = alloc(32);
     _ed_p_inited = 1;
     return 0;
 }
@@ -156,39 +134,42 @@ fn _init_ed_p(): i64 {
 fn u512_mod_p(out, val): i64 {
     _init_ed_p();
 
-    store64(_mod_aH, load64(val + 32));
-    store64(_mod_aH + 8, load64(val + 40));
-    store64(_mod_aH + 16, load64(val + 48));
-    store64(_mod_aH + 24, load64(val + 56));
+    var aH[32]; var aL[32]; var prod[64];
+    var lowp[32]; var r[32]; var extra[32];
 
-    store64(_mod_aL, load64(val));
-    store64(_mod_aL + 8, load64(val + 8));
-    store64(_mod_aL + 16, load64(val + 16));
-    store64(_mod_aL + 24, load64(val + 24));
+    store64(&aH, load64(val + 32));
+    store64(&aH + 8, load64(val + 40));
+    store64(&aH + 16, load64(val + 48));
+    store64(&aH + 24, load64(val + 56));
 
-    u256_mul_full(_mod_prod, _mod_aH, _mod_38);
+    store64(&aL, load64(val));
+    store64(&aL + 8, load64(val + 8));
+    store64(&aL + 16, load64(val + 16));
+    store64(&aL + 24, load64(val + 24));
 
-    store64(_mod_lowp, load64(_mod_prod));
-    store64(_mod_lowp + 8, load64(_mod_prod + 8));
-    store64(_mod_lowp + 16, load64(_mod_prod + 16));
-    store64(_mod_lowp + 24, load64(_mod_prod + 24));
+    u256_mul_full(&prod, &aH, _mod_38);
 
-    var carry = u256_add(_mod_r, _mod_aL, _mod_lowp);
-    var overflow = carry + load64(_mod_prod + 32);
+    store64(&lowp, load64(&prod));
+    store64(&lowp + 8, load64(&prod + 8));
+    store64(&lowp + 16, load64(&prod + 16));
+    store64(&lowp + 24, load64(&prod + 24));
+
+    var carry = u256_add(&r, &aL, &lowp);
+    var overflow = carry + load64(&prod + 32);
 
     while (overflow > 0) {
-        store64(_mod_extra, overflow * 38);
-        store64(_mod_extra + 8, 0);
-        store64(_mod_extra + 16, 0);
-        store64(_mod_extra + 24, 0);
-        overflow = u256_add(_mod_r, _mod_r, _mod_extra);
+        store64(&extra, overflow * 38);
+        store64(&extra + 8, 0);
+        store64(&extra + 16, 0);
+        store64(&extra + 24, 0);
+        overflow = u256_add(&r, &r, &extra);
     }
 
-    while (u256_cmp(_mod_r, _ed_p) >= 0) {
-        u256_sub(_mod_r, _mod_r, _ed_p);
+    while (u256_cmp(&r, _ed_p) >= 0) {
+        u256_sub(&r, &r, _ed_p);
     }
 
-    u256_copy(out, _mod_r);
+    u256_copy(out, &r);
     return 0;
 }
 
@@ -220,12 +201,10 @@ fn fp_neg(r, a): i64 {
     return 0;
 }
 
-var _fp_mul_product = 0;
-
 fn fp_mul(r, a, b): i64 {
-    if (_fp_mul_product == 0) { _fp_mul_product = alloc(64); }
-    u256_mul_full(_fp_mul_product, a, b);
-    u512_mod_p(r, _fp_mul_product);
+    var prod[64];
+    u256_mul_full(&prod, a, b);
+    u512_mod_p(r, &prod);
     return 0;
 }
 
@@ -237,42 +216,30 @@ fn fp_sq(r, a): i64 {
 # Modular exponentiation: r = base^exp mod p
 # ================================================================
 
-# Globals for fp_pow to survive nested calls (compiler clobber workaround)
-var _fp_pow_tmp = 0;
-var _fp_pow_result = 0;
-var _fp_pow_base = 0;
-var _fp_pow_exp = 0;
-var _fp_pow_i = 0;
-var _fp_pow_inited = 0;
-
 fn fp_pow(r, base, exp): i64 {
     _init_ed_p();
-    if (_fp_pow_inited == 0) {
-        _fp_pow_tmp = alloc(32);
-        _fp_pow_result = alloc(32);
-        _fp_pow_base = alloc(32);
-        _fp_pow_inited = 1;
-    }
-    store64(_fp_pow_result, 1);
-    store64(_fp_pow_result + 8, 0);
-    store64(_fp_pow_result + 16, 0);
-    store64(_fp_pow_result + 24, 0);
-    u256_copy(_fp_pow_base, base);
-    _fp_pow_exp = exp;
-    _fp_pow_i = 0;
-    while (_fp_pow_i < 256) {
-        var limb_idx = _fp_pow_i / 64;
-        var bit_idx = _fp_pow_i % 64;
-        var bit = (load64(_fp_pow_exp + limb_idx * 8) >> bit_idx) & 1;
+    var tmp[32];
+    var result[32];
+    var base_buf[32];
+    store64(&result, 1);
+    store64(&result + 8, 0);
+    store64(&result + 16, 0);
+    store64(&result + 24, 0);
+    u256_copy(&base_buf, base);
+    var i = 0;
+    while (i < 256) {
+        var limb_idx = i / 64;
+        var bit_idx = i % 64;
+        var bit = (load64(exp + limb_idx * 8) >> bit_idx) & 1;
         if (bit == 1) {
-            fp_mul(_fp_pow_tmp, _fp_pow_result, _fp_pow_base);
-            u256_copy(_fp_pow_result, _fp_pow_tmp);
+            fp_mul(&tmp, &result, &base_buf);
+            u256_copy(&result, &tmp);
         }
-        fp_mul(_fp_pow_tmp, _fp_pow_base, _fp_pow_base);
-        u256_copy(_fp_pow_base, _fp_pow_tmp);
-        _fp_pow_i = _fp_pow_i + 1;
+        fp_mul(&tmp, &base_buf, &base_buf);
+        u256_copy(&base_buf, &tmp);
+        i = i + 1;
     }
-    u256_copy(r, _fp_pow_result);
+    u256_copy(r, &result);
     return 0;
 }
 
@@ -283,100 +250,71 @@ fn fp_pow(r, base, exp): i64 {
 # (vs the generic fp_pow(p-2): ~512 fp_mul calls).
 # ================================================================
 
-var _fpi_t0 = 0;
-var _fpi_z9 = 0;
-var _fpi_z11 = 0;
-var _fpi_z5 = 0;
-var _fpi_z10 = 0;
-var _fpi_z50 = 0;
-var _fpi_z100 = 0;
-var _fpi_a = 0;
-var _fpi_r = 0;
-var _fpi_buf = 0;
-var _fpi_n = 0;
-var _fpi_i = 0;
-var _fpi_inited = 0;
-
 fn _fpi_sq_n(buf, n): i64 {
-    # In-place square `buf` n times. Params are saved to globals
-    # because Cyrius clobbers locals across nested fp_sq → fp_mul calls.
-    _fpi_buf = buf;
-    _fpi_n = n;
-    _fpi_i = 0;
-    while (_fpi_i < _fpi_n) {
-        fp_sq(_fpi_buf, _fpi_buf);
-        _fpi_i = _fpi_i + 1;
+    # In-place square `buf` n times.
+    var i = 0;
+    while (i < n) {
+        fp_sq(buf, buf);
+        i = i + 1;
     }
     return 0;
 }
 
 fn fp_inv(r, a): i64 {
     _init_ed_p();
-    if (_fpi_inited == 0) {
-        _fpi_t0 = alloc(32);
-        _fpi_z9 = alloc(32);
-        _fpi_z11 = alloc(32);
-        _fpi_z5 = alloc(32);
-        _fpi_z10 = alloc(32);
-        _fpi_z50 = alloc(32);
-        _fpi_z100 = alloc(32);
-        _fpi_a = alloc(32);
-        _fpi_inited = 1;
-    }
-    _fpi_r = r;
-    u256_copy(_fpi_a, a);
+    var t0[32]; var z9[32]; var z11[32]; var z5[32];
+    var z10[32]; var z50[32]; var z100[32]; var a_buf[32];
+    u256_copy(&a_buf, a);
 
-    # z2 in _fpi_t0: t0 = a^2
-    fp_sq(_fpi_t0, _fpi_a);
-    # _fpi_z9 = t0^4 * a   = a^9
-    fp_sq(_fpi_z9, _fpi_t0);
-    fp_sq(_fpi_z9, _fpi_z9);
-    fp_mul(_fpi_z9, _fpi_z9, _fpi_a);
-    # _fpi_z11 = z9 * z2(=t0) = a^11
-    fp_mul(_fpi_z11, _fpi_z9, _fpi_t0);
-    # _fpi_z5 = z11^2 * z9  = a^(2^5 - 1) = a^31
-    fp_sq(_fpi_z5, _fpi_z11);
-    fp_mul(_fpi_z5, _fpi_z5, _fpi_z9);
+    # z2 in t0: t0 = a^2
+    fp_sq(&t0, &a_buf);
+    # z9 = t0^4 * a   = a^9
+    fp_sq(&z9, &t0);
+    fp_sq(&z9, &z9);
+    fp_mul(&z9, &z9, &a_buf);
+    # z11 = z9 * z2(=t0) = a^11
+    fp_mul(&z11, &z9, &t0);
+    # z5 = z11^2 * z9  = a^(2^5 - 1) = a^31
+    fp_sq(&z5, &z11);
+    fp_mul(&z5, &z5, &z9);
 
-    # _fpi_z10 = z5^(2^5) * z5 = a^(2^10 - 1)
-    fp_sq(_fpi_z10, _fpi_z5);
-    _fpi_sq_n(_fpi_z10, 4);
-    fp_mul(_fpi_z10, _fpi_z10, _fpi_z5);
+    # z10 = z5^(2^5) * z5 = a^(2^10 - 1)
+    fp_sq(&z10, &z5);
+    _fpi_sq_n(&z10, 4);
+    fp_mul(&z10, &z10, &z5);
 
     # t0 = z10^(2^10) * z10 = a^(2^20 - 1)
-    fp_sq(_fpi_t0, _fpi_z10);
-    _fpi_sq_n(_fpi_t0, 9);
-    fp_mul(_fpi_t0, _fpi_t0, _fpi_z10);
+    fp_sq(&t0, &z10);
+    _fpi_sq_n(&t0, 9);
+    fp_mul(&t0, &t0, &z10);
 
     # t0 = t0^(2^20) * t0 = a^(2^40 - 1)
-    # Need a separate buffer for the squared copy — reuse _fpi_z9 shortly
-    # via: save current t0 into z9, then continue. But z9 is still live
-    # here (only z9 is needed no more — the last use was building z11).
-    # Re-purpose _fpi_z9 as scratch from here on.
-    u256_copy(_fpi_z9, _fpi_t0);
-    _fpi_sq_n(_fpi_t0, 20);
-    fp_mul(_fpi_t0, _fpi_t0, _fpi_z9);
+    # Save current t0 into z9 (which is dead after this point —
+    # the last use was building z11).
+    u256_copy(&z9, &t0);
+    _fpi_sq_n(&t0, 20);
+    fp_mul(&t0, &t0, &z9);
 
     # t0 = t0^(2^10) * z10 = a^(2^50 - 1)
-    _fpi_sq_n(_fpi_t0, 10);
-    fp_mul(_fpi_z50, _fpi_t0, _fpi_z10);
+    _fpi_sq_n(&t0, 10);
+    fp_mul(&z50, &t0, &z10);
 
     # t0 = z50^(2^50) * z50 = a^(2^100 - 1)
-    fp_sq(_fpi_t0, _fpi_z50);
-    _fpi_sq_n(_fpi_t0, 49);
-    fp_mul(_fpi_z100, _fpi_t0, _fpi_z50);
+    fp_sq(&t0, &z50);
+    _fpi_sq_n(&t0, 49);
+    fp_mul(&z100, &t0, &z50);
 
     # t0 = z100^(2^100) * z100 = a^(2^200 - 1)
-    fp_sq(_fpi_t0, _fpi_z100);
-    _fpi_sq_n(_fpi_t0, 99);
-    fp_mul(_fpi_t0, _fpi_t0, _fpi_z100);
+    fp_sq(&t0, &z100);
+    _fpi_sq_n(&t0, 99);
+    fp_mul(&t0, &t0, &z100);
 
     # t0 = t0^(2^50) * z50 = a^(2^250 - 1)
-    _fpi_sq_n(_fpi_t0, 50);
-    fp_mul(_fpi_t0, _fpi_t0, _fpi_z50);
+    _fpi_sq_n(&t0, 50);
+    fp_mul(&t0, &t0, &z50);
 
     # r = t0^(2^5) * z11 = a^(2^255 - 21) = a^(p - 2)
-    _fpi_sq_n(_fpi_t0, 5);
-    fp_mul(_fpi_r, _fpi_t0, _fpi_z11);
+    _fpi_sq_n(&t0, 5);
+    fp_mul(r, &t0, &z11);
     return 0;
 }

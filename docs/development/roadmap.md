@@ -11,60 +11,85 @@ see [CHANGELOG.md](../../CHANGELOG.md). Closed cycles:
 
 **Cyrius pin:** `6.0.1` (synced across `cyrius.cyml` and CI).
 
-## Road to v3.3 — per-worker crypto state
+## Road to v3.4 — caller-provided scratch for parallel verify
 
-The 3.2.0 alloc-free rewrite removed the allocator from the
-parallel-batch worker body but discovered the *deeper*
-bottleneck: every crypto module (`sha256.cyr`, `ed25519.cyr`,
-`aes_gcm.cyr`) uses module-level globals for working state as
-a cyrius local-clobbering workaround (CLAUDE.md quirk #1).
-Concurrent workers running `sha256_transform` race on
-`_sha_ctx` / `_sha_a..h` / `_sha_t1/t2` / `_sha_i` /
-`_sha256_W`; equivalent globals in the other modules. The
-3.2.0 ship verified this experimentally — mutex-off → 30/228
-`batch_parallel.tcyr` fail; mutex-on → pass.
+3.3 attempted to lift per-call working state out of module
+globals so the `_sigil_batch_mutex` could drop. The
+implementation swapped explicit named globals (`_sha_a..h`,
+`_sha256_W`, `_ga_*`, `_fpi_*`, etc.) for in-function
+`var X[N]` array declarations under the hypothesis (drawn
+from CLAUDE.md quirk #1's prior wording) that cycc 6 had
+fixed local clobbering and these would be per-call stack
+arrays.
 
-3.3 lifts those globals into per-call scratch so the
-`_sigil_batch_mutex` can finally drop. Target: 3×+ throughput
-at 4 workers on `sv_verify_batch_64`, the load-bearing item
-that 3.2.0's alloc-free rewrite set up but couldn't close.
+The hypothesis was wrong. Cyrius's `parse_fn.cyr:2886`
+("DON'T restore VCNT — arrays inside functions are globals
+that persist") and the probe at
+`tests/tcyr/var_array_semantics.tcyr` establish that **array
+declarations inside a function are static function-scope
+globals**, not stack arrays. Storage is unchanged from the
+3.2.x named-global form; concurrent workers still race.
+Scalar `var x = ...` locals ARE per-call (the scalar
+clobbering quirk that motivated the cc3-era globals is gone
+under cc6 — that part of the refactor stuck).
 
-### 3.3 work items
+The 3.3 ship therefore kept the batch mutex and shipped as a
+cleanup/refactor: -190 LOC net across `sha256.cyr`,
+`sha512.cyr`, `ed25519.cyr`, `aes_gcm.cyr`, `bigint_ext.cyr`,
+`sha_ni.cyr`, `verify.cyr`. The proper mutex-drop architecture
+is queued here.
 
-- [ ] **`sha256.cyr` — per-call scratch.** Move `_sha_ctx`,
-      `_sha_a..h`, `_sha_t1/t2`, `_sha_i`, `_sha256_W` from
-      module globals into a caller-provided scratch block.
-      Audit every call site for the cyrius local-clobbering
-      pattern that originally motivated the globals (quirk
-      #1 — promote-to-global was the recommended workaround).
-      cycc 6 may have improved the codegen enough that locals
-      survive; verify before declaring done.
+### 3.4 work items
 
-- [ ] **`ed25519.cyr` — per-call scratch.** Same shape.
-      `ed25519_verify` is the dominant verify-path cost
-      (~6.4 ms per artifact under SHA-NI on the dev host) and
-      the load-bearing item for parallel speedup.
+- [ ] **Caller-provided crypto scratch.** Top-level entry
+      points (`sha256`, `sha512`, `ed25519_verify`,
+      `ed25519_sign`, `aes_gcm_encrypt`, `aes_gcm_decrypt`,
+      `hash_file_into`) gain a scratch-buffer parameter
+      sized to the deepest call-chain working-set (rough
+      estimate ~3 KB per concurrent caller). Each function
+      slices its working buffers out of the scratch by
+      documented offset; the offset layout lives in a header
+      comment in each module.
 
-- [ ] **`aes_gcm.cyr` — per-call scratch.** Same shape.
-      AES-GCM isn't on the batch-verify hot path today, but
-      the same refactor closes a future parallel-encrypt
-      scenario.
+- [ ] **Thread scratch through the call chain.** Every
+      `fp_mul`, `fp_pow`, `fp_inv`, `u512_mod_p`,
+      `u256_mul_full`, `ge_add`, `ge_double`,
+      `ge_scalarmult`, `ge_scalarmult_base`,
+      `_ge_table_select`, `sha256_transform`,
+      `sha512_transform`, `sc_reduce`, `sc_muladd` signature
+      gains a scratch parameter. This is mechanical but
+      invasive — each fn signature changes, each caller
+      updates.
 
-- [ ] **Drop `_sigil_batch_mutex` once the three modules
-      ship.** Re-bench `sv_verify_batch_64` against the 3.2.0
-      `v3.2.0-allocfree` baseline; target ≥ 3× at 4 workers.
-      Add CSV row `v3.3-parallel-crypto`.
+- [ ] **Per-worker scratch pool in `sv_verify_batch`.**
+      Pre-allocate `workers * CRYPTO_SCRATCH_SIZE` bytes on
+      the main thread before fan-out, same shape as the
+      existing `count * _VSC_SIZE` artifact-scratch pool.
+      Pass the per-worker scratch pointer to `_batch_worker`
+      via the args struct.
 
-**Sequencing decision:** 3.3 is the next natural cycle now
-that the 3.2.x TEE arc has closed. The batch-verify mutex was
-the load-bearing item 3.2.0 set up and 3.2.x worked around;
-3.3 closes it. Likely shape: open as soon as a benchmark
-session establishes that cycc 6 hasn't already made the
-per-call-scratch refactor unnecessary (the local-clobber
-quirk that motivated the globals may be obsolete; verify
-empirically before doing the work).
+- [ ] **Drop `_sigil_batch_mutex`.** Run
+      `batch_parallel.tcyr` mutex-off — must stay 228/228.
+      Re-bench `sv_verify_batch_64` against the
+      `v3.2.0-allocfree` baseline (422.867 ms @ 64
+      artifacts). Target ≥ 3× at 4 workers. Add CSV row
+      `v3.4-parallel-crypto`.
 
-## Road to v3.4 — TEE attestation completion
+- [ ] **Inverse pass on the 3.3 in-function arrays.** Every
+      `var X[N]` added in 3.3 becomes either a slice of the
+      scratch buffer or, where the array is truly read-only
+      after init, lifts back to a module global. The 3.3
+      form had no functional advantage over named globals
+      under concurrent access; 3.4 closes the loop.
+
+**Sequencing decision:** open 3.4 when there's a forcing
+function — a downstream consumer hitting the serialised batch
+on the mutex's lock contention, or an AGNOS roadmap milestone
+that requires the parallel speedup. The refactor is invasive
+enough that it should be done in one focused sprint, not
+incrementally.
+
+## Road to v3.5 — TEE attestation completion
 
 3.2.x shipped the parsers and per-piece verify orchestrators
 across all three TEE backends, but left two surfaces caller-
@@ -79,11 +104,11 @@ driven for scope reasons:
   parses and verifies att_key_type = 2 only. The 3.2.4 P-384
   primitive is in tree, so this is a small delta.
 
-3.4 lands both so a kavach attestation backend can call a
+3.5 lands both so a kavach attestation backend can call a
 single `*_verify_full(quote, root_ca)` and get an end-to-end
 yes/no answer.
 
-### 3.4 work items
+### 3.5 work items
 
 - [ ] **PEM decoder.** New `src/pem.cyr` (~150 lines). Parse
       `-----BEGIN CERTIFICATE-----` / `-----END CERTIFICATE-----`
@@ -126,14 +151,14 @@ yes/no answer.
       recur. Audit those modules' allocation discipline as
       part of the same cycle.
 
-**Sequencing decision:** open 3.4 only when a real kavach
+**Sequencing decision:** open 3.5 only when a real kavach
 integration milestone requires end-to-end verify against
 fixture data. Until then, the per-piece API in 3.2.x is
 sufficient and the test surface for `*_verify_full` would be
 synthesised against another synthesised cert chain — limited
 return on the verification it adds.
 
-## Road to v3.5 — perf tuning: field arithmetic + alloc-free
+## Road to v3.6 — perf tuning: field arithmetic + alloc-free
 
 The 3.2.x verify paths are correct but slow:
 
@@ -148,23 +173,23 @@ The 3.2.x verify paths are correct but slow:
   `_p384_long_div_reduce`. Solinas word-level reduction
   drops the cost 20–50×.
 
-3.5 closes the four LOW audit findings (allocator-lifetime
+3.6 closes the four LOW audit findings (allocator-lifetime
 discipline) and lands Solinas reduction for both curves.
 
-### 3.5 work items
+### 3.6 work items
 
 - [ ] **Solinas reduction for P-256.** Word-level reduction
       against `p256 = 2^256 − 2^224 + 2^192 + 2^96 − 1` per
       FIPS 186-4 Appendix D / NIST SP 800-186. Replace
       `_p256_long_div_reduce` with the new pipeline.
       Re-bench against the `v3.2.1` baseline; target ≤ 10 ms
-      / verify. CSV row `v3.5-p256-solinas`.
+      / verify. CSV row `v3.6-p256-solinas`.
 
 - [ ] **Solinas reduction for P-384.** Same shape against
       `p384 = 2^384 − 2^128 − 2^96 + 2^32 − 1`. The P-384
       Solinas decomposition is wider (more word-level
       shuffles) but the structure is identical. CSV row
-      `v3.5-p384-solinas`.
+      `v3.6-p384-solinas`.
 
 - [ ] **Unified `_into`-shape API.** Eliminate per-first-call
       `alloc` in `x509_parse`, `_snp_v_init`, `_sgxv_init`,
@@ -177,13 +202,13 @@ discipline) and lands Solinas reduction for both curves.
       patterns.
 
 - [ ] **Re-run the full crypto bench suite.** Capture before /
-      after rows for every verify-path bench. The 3.5 ship
+      after rows for every verify-path bench. The 3.6 ship
       target: `ecdsa_p256_verify` and `ecdsa_p384_verify`
       both ≤ 10 ms / verify on the dev host. SEV-SNP / TDX
       verify rows benefit transitively from the P-256 /
       P-384 speedup; cross-check the deltas are clean.
 
-**Sequencing decision:** open 3.5 only if a downstream
+**Sequencing decision:** open 3.6 only if a downstream
 consumer surfaces a latency complaint (kavach's batch-
 attestation flow, ark's signature-heavy publisher workflow).
 Until then, the verify path is fast enough for one-shot

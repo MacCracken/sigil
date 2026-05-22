@@ -7,7 +7,6 @@
 # ================================================================
 
 var _sha512_K = 0;
-var _sha512_W = 0;
 var _sha512_inited = 0;
 
 fn _sha512_rotr(x, n): i64 {
@@ -123,7 +122,6 @@ fn sha512_global_init(): i64 {
     store64(_sha512_K + 624, 0x5fcb6fab3ad6faec);
     store64(_sha512_K + 632, 0x6c44198c4a475817);
 
-    _sha512_W = alloc(640);
     _sha512_inited = 1;
     return 0;
 }
@@ -138,8 +136,21 @@ fn sha512_global_init(): i64 {
 #   +200  total_len (8 bytes)
 
 fn sha512_init(): i64 {
-    sha512_global_init();
     var ctx = fl_alloc(208);
+    return sha512_init_into(ctx);
+}
+
+# Alloc-free variant of sha512_init. Initialises an existing
+# 208-byte context buffer with the FIPS 180-4 §5.3.5 initial
+# hash values and zeroes the block buffer + counters. Caller
+# MUST size `ctx` to at least 208 bytes.
+#
+# Used by `ed25519_verify` and other parallel-friendly callers
+# so a streaming SHA-512 hash can run without touching the
+# freelist allocator (CLAUDE.md quirk #7: `fl_alloc` is not
+# thread-safe).
+fn sha512_init_into(ctx): i64 {
+    sha512_global_init();
     store64(ctx, 0x6a09e667f3bcc908);
     store64(ctx + 8, 0xbb67ae8584caa73b);
     store64(ctx + 16, 0x3c6ef372fe94f82b);
@@ -155,30 +166,20 @@ fn sha512_init(): i64 {
 }
 
 # ================================================================
-# SHA-512 transform — globals for working state
+# SHA-512 transform — per-call working state (3.3 refactor)
 # ================================================================
-
-var _s5_a = 0;
-var _s5_b = 0;
-var _s5_c = 0;
-var _s5_d = 0;
-var _s5_e = 0;
-var _s5_f = 0;
-var _s5_g = 0;
-var _s5_hv = 0;
-var _s5_t1 = 0;
-var _s5_t2 = 0;
-var _s5_ctx = 0;
-var _s5_i = 0;
+# Mirror of sha256.cyr's 3.3 refactor: working state (a..hv,
+# t1, t2, i, W) lives in function locals. Round constants K
+# remain read-only-after-init and shared across threads.
 
 fn sha512_transform(ctx): i64 {
-    _s5_ctx = ctx;
+    var W[640];           # 80 message-schedule words × 8 bytes
     var buf = ctx + 64;
 
     # Prepare message schedule W[0..15] from block (big-endian 64-bit words)
-    _s5_i = 0;
-    while (_s5_i < 16) {
-        var off = _s5_i * 8;
+    var i = 0;
+    while (i < 16) {
+        var off = i * 8;
         var w = ((load8(buf + off) & 0xFF) << 56)
         | ((load8(buf + off + 1) & 0xFF) << 48)
         | ((load8(buf + off + 2) & 0xFF) << 40)
@@ -187,60 +188,60 @@ fn sha512_transform(ctx): i64 {
         | ((load8(buf + off + 5) & 0xFF) << 16)
         | ((load8(buf + off + 6) & 0xFF) << 8)
         | (load8(buf + off + 7) & 0xFF);
-        store64(_sha512_W + _s5_i * 8, w);
-        _s5_i = _s5_i + 1;
+        store64(&W + i * 8, w);
+        i = i + 1;
     }
 
     # Extend W[16..79]
-    _s5_i = 16;
-    while (_s5_i < 80) {
-        var w16 = load64(_sha512_W + (_s5_i - 16) * 8);
-        var w15 = load64(_sha512_W + (_s5_i - 15) * 8);
-        var w7 = load64(_sha512_W + (_s5_i - 7) * 8);
-        var w2 = load64(_sha512_W + (_s5_i - 2) * 8);
+    i = 16;
+    while (i < 80) {
+        var w16 = load64(&W + (i - 16) * 8);
+        var w15 = load64(&W + (i - 15) * 8);
+        var w7 = load64(&W + (i - 7) * 8);
+        var w2 = load64(&W + (i - 2) * 8);
         var s0 = sha512_ssig0(w15);
         var s1 = sha512_ssig1(w2);
-        store64(_sha512_W + _s5_i * 8, w16 + s0 + w7 + s1);
-        _s5_i = _s5_i + 1;
+        store64(&W + i * 8, w16 + s0 + w7 + s1);
+        i = i + 1;
     }
 
     # Initialize working variables
-    _s5_a = load64(_s5_ctx);
-    _s5_b = load64(_s5_ctx + 8);
-    _s5_c = load64(_s5_ctx + 16);
-    _s5_d = load64(_s5_ctx + 24);
-    _s5_e = load64(_s5_ctx + 32);
-    _s5_f = load64(_s5_ctx + 40);
-    _s5_g = load64(_s5_ctx + 48);
-    _s5_hv = load64(_s5_ctx + 56);
+    var a = load64(ctx);
+    var b = load64(ctx + 8);
+    var c = load64(ctx + 16);
+    var d = load64(ctx + 24);
+    var e = load64(ctx + 32);
+    var f = load64(ctx + 40);
+    var g = load64(ctx + 48);
+    var hv = load64(ctx + 56);
 
     # 80 rounds
-    _s5_i = 0;
-    while (_s5_i < 80) {
-        _s5_t1 = _s5_hv + sha512_bsig1(_s5_e) + sha512_ch(_s5_e, _s5_f, _s5_g);
-        _s5_t1 = _s5_t1 + load64(_sha512_K + _s5_i * 8) + load64(_sha512_W + _s5_i * 8);
-        _s5_t2 = sha512_bsig0(_s5_a) + sha512_maj(_s5_a, _s5_b, _s5_c);
+    i = 0;
+    while (i < 80) {
+        var t1 = hv + sha512_bsig1(e) + sha512_ch(e, f, g);
+        t1 = t1 + load64(_sha512_K + i * 8) + load64(&W + i * 8);
+        var t2 = sha512_bsig0(a) + sha512_maj(a, b, c);
 
-        _s5_hv = _s5_g;
-        _s5_g = _s5_f;
-        _s5_f = _s5_e;
-        _s5_e = _s5_d + _s5_t1;
-        _s5_d = _s5_c;
-        _s5_c = _s5_b;
-        _s5_b = _s5_a;
-        _s5_a = _s5_t1 + _s5_t2;
-        _s5_i = _s5_i + 1;
+        hv = g;
+        g = f;
+        f = e;
+        e = d + t1;
+        d = c;
+        c = b;
+        b = a;
+        a = t1 + t2;
+        i = i + 1;
     }
 
     # Add compressed chunk to current hash value
-    store64(_s5_ctx, load64(_s5_ctx) + _s5_a);
-    store64(_s5_ctx + 8, load64(_s5_ctx + 8) + _s5_b);
-    store64(_s5_ctx + 16, load64(_s5_ctx + 16) + _s5_c);
-    store64(_s5_ctx + 24, load64(_s5_ctx + 24) + _s5_d);
-    store64(_s5_ctx + 32, load64(_s5_ctx + 32) + _s5_e);
-    store64(_s5_ctx + 40, load64(_s5_ctx + 40) + _s5_f);
-    store64(_s5_ctx + 48, load64(_s5_ctx + 48) + _s5_g);
-    store64(_s5_ctx + 56, load64(_s5_ctx + 56) + _s5_hv);
+    store64(ctx, load64(ctx) + a);
+    store64(ctx + 8, load64(ctx + 8) + b);
+    store64(ctx + 16, load64(ctx + 16) + c);
+    store64(ctx + 24, load64(ctx + 24) + d);
+    store64(ctx + 32, load64(ctx + 32) + e);
+    store64(ctx + 40, load64(ctx + 40) + f);
+    store64(ctx + 48, load64(ctx + 48) + g);
+    store64(ctx + 56, load64(ctx + 56) + hv);
     return 0;
 }
 

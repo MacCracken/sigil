@@ -59,60 +59,42 @@ fn ge_copy(dst, src): i64 {
 # Cost: 8M + 1D (D = multiply by 2d)
 # ================================================================
 
-var _ga_t1 = 0;
-var _ga_t2 = 0;
-var _ga_A = 0;
-var _ga_B2 = 0;
-var _ga_C = 0;
-var _ga_D = 0;
-var _ga_E = 0;
-var _ga_F = 0;
-var _ga_G = 0;
-var _ga_H2 = 0;
-var _ga_inited = 0;
-
-fn _ge_init_temps(): i64 {
-    if (_ga_inited == 1) { return 0; }
-    _ga_t1 = alloc(32); _ga_t2 = alloc(32);
-    _ga_A = alloc(32); _ga_B2 = alloc(32);
-    _ga_C = alloc(32); _ga_D = alloc(32);
-    _ga_E = alloc(32); _ga_F = alloc(32);
-    _ga_G = alloc(32); _ga_H2 = alloc(32);
-    _ga_inited = 1;
-    return 0;
-}
-
 fn ge_add(r, p, q): i64 {
-    _ge_init_temps();
+    var t1[32]; var t2[32];
+    var A[32];  var B2[32];
+    var C[32];  var D[32];
+    var E[32];  var F[32];
+    var G[32];  var H2[32];
+
     # A = (Y1-X1)*(Y2-X2)
-    fp_sub(_ga_t1, ge_y(p), ge_x(p));
-    fp_sub(_ga_t2, ge_y(q), ge_x(q));
-    fp_mul(_ga_A, _ga_t1, _ga_t2);
+    fp_sub(&t1, ge_y(p), ge_x(p));
+    fp_sub(&t2, ge_y(q), ge_x(q));
+    fp_mul(&A, &t1, &t2);
 
     # B = (Y1+X1)*(Y2+X2)
-    fp_add(_ga_t1, ge_y(p), ge_x(p));
-    fp_add(_ga_t2, ge_y(q), ge_x(q));
-    fp_mul(_ga_B2, _ga_t1, _ga_t2);
+    fp_add(&t1, ge_y(p), ge_x(p));
+    fp_add(&t2, ge_y(q), ge_x(q));
+    fp_mul(&B2, &t1, &t2);
 
     # C = T1*2d*T2
-    fp_mul(_ga_C, ge_t(p), ge_t(q));
-    fp_mul(_ga_C, _ga_C, _ed_2d);
+    fp_mul(&C, ge_t(p), ge_t(q));
+    fp_mul(&C, &C, _ed_2d);
 
     # D = Z1*2*Z2
-    fp_mul(_ga_D, ge_z(p), ge_z(q));
-    fp_add(_ga_D, _ga_D, _ga_D);
+    fp_mul(&D, ge_z(p), ge_z(q));
+    fp_add(&D, &D, &D);
 
     # E=B-A, F=D-C, G=D+C, H=B+A
-    fp_sub(_ga_E, _ga_B2, _ga_A);
-    fp_sub(_ga_F, _ga_D, _ga_C);
-    fp_add(_ga_G, _ga_D, _ga_C);
-    fp_add(_ga_H2, _ga_B2, _ga_A);
+    fp_sub(&E, &B2, &A);
+    fp_sub(&F, &D, &C);
+    fp_add(&G, &D, &C);
+    fp_add(&H2, &B2, &A);
 
     # X3=E*F, Y3=G*H, T3=E*H, Z3=F*G
-    fp_mul(ge_x(r), _ga_E, _ga_F);
-    fp_mul(ge_y(r), _ga_G, _ga_H2);
-    fp_mul(ge_t(r), _ga_E, _ga_H2);
-    fp_mul(ge_z(r), _ga_F, _ga_G);
+    fp_mul(ge_x(r), &E, &F);
+    fp_mul(ge_y(r), &G, &H2);
+    fp_mul(ge_t(r), &E, &H2);
+    fp_mul(ge_z(r), &F, &G);
     return 0;
 }
 
@@ -120,49 +102,30 @@ fn ge_add(r, p, q): i64 {
 # Point doubling
 # ================================================================
 
-var _gd_A = 0;
-var _gd_B = 0;
-var _gd_C = 0;
-var _gd_D = 0;
-var _gd_E = 0;
-var _gd_F = 0;
-var _gd_G = 0;
-var _gd_H = 0;
-var _gd_t = 0;
-var _gd_inited = 0;
-
-fn _ge_init_dbl(): i64 {
-    if (_gd_inited == 1) { return 0; }
-    _gd_A = alloc(32); _gd_B = alloc(32);
-    _gd_C = alloc(32); _gd_D = alloc(32);
-    _gd_E = alloc(32); _gd_F = alloc(32);
-    _gd_G = alloc(32); _gd_H = alloc(32);
-    _gd_t = alloc(32);
-    _gd_inited = 1;
-    return 0;
-}
-
 fn ge_double(r, p): i64 {
-    _ge_init_dbl();
-    fp_sq(_gd_A, ge_x(p));
-    fp_sq(_gd_B, ge_y(p));
-    fp_sq(_gd_C, ge_z(p));
-    fp_add(_gd_C, _gd_C, _gd_C);
-    fp_neg(_gd_D, _gd_A);  # a=-1 for ed25519
+    var A[32]; var B[32]; var C[32]; var D[32];
+    var E[32]; var F[32]; var G[32]; var H[32];
+    var t[32];
 
-    fp_add(_gd_t, ge_x(p), ge_y(p));
-    fp_sq(_gd_E, _gd_t);
-    fp_sub(_gd_E, _gd_E, _gd_A);
-    fp_sub(_gd_E, _gd_E, _gd_B);
+    fp_sq(&A, ge_x(p));
+    fp_sq(&B, ge_y(p));
+    fp_sq(&C, ge_z(p));
+    fp_add(&C, &C, &C);
+    fp_neg(&D, &A);  # a=-1 for ed25519
 
-    fp_add(_gd_G, _gd_D, _gd_B);
-    fp_sub(_gd_F, _gd_G, _gd_C);
-    fp_sub(_gd_H, _gd_D, _gd_B);
+    fp_add(&t, ge_x(p), ge_y(p));
+    fp_sq(&E, &t);
+    fp_sub(&E, &E, &A);
+    fp_sub(&E, &E, &B);
 
-    fp_mul(ge_x(r), _gd_E, _gd_F);
-    fp_mul(ge_y(r), _gd_G, _gd_H);
-    fp_mul(ge_t(r), _gd_E, _gd_H);
-    fp_mul(ge_z(r), _gd_F, _gd_G);
+    fp_add(&G, &D, &B);
+    fp_sub(&F, &G, &C);
+    fp_sub(&H, &D, &B);
+
+    fp_mul(ge_x(r), &E, &F);
+    fp_mul(ge_y(r), &G, &H);
+    fp_mul(ge_t(r), &E, &H);
+    fp_mul(ge_z(r), &F, &G);
     return 0;
 }
 
@@ -175,13 +138,6 @@ fn ge_double(r, p): i64 {
 # Every iteration unconditionally computes both (r + q) and (2q) and
 # uses a branchless select to either adopt or discard the addition.
 # ================================================================
-
-var _gsm_q = 0;
-var _gsm_tmp = 0;
-var _gsm_i = 0;
-var _gsm_r = 0;
-var _gsm_s = 0;
-var _gsm_bit = 0;
 
 # Constant-time conditional move on a 128-byte extended point.
 # If bit == 1: dst := src.  If bit == 0: dst unchanged.
@@ -199,28 +155,25 @@ fn ge_cmov(dst, src, bit): i64 {
 }
 
 fn ge_scalarmult(r, s, p): i64 {
-    if (_gsm_q == 0) { _gsm_q = alloc(128); _gsm_tmp = alloc(128); }
-    _gsm_r = r;
-    _gsm_s = s;
-    ge_identity(_gsm_r);
-    ge_copy(_gsm_q, p);
+    var q[128];
+    var tmp[128];
+    ge_identity(r);
+    ge_copy(&q, p);
 
-    _gsm_i = 0;
-    while (_gsm_i < 256) {
-        # Extract bit_i of s before any nested call; stash in a global
-        # because locals are clobbered across ge_add / ge_cmov.
-        var byte_idx = _gsm_i / 8;
-        var bit_idx = _gsm_i % 8;
-        _gsm_bit = (load8(_gsm_s + byte_idx) >> bit_idx) & 1;
+    var i = 0;
+    while (i < 256) {
+        var byte_idx = i / 8;
+        var bit_idx = i % 8;
+        var bit = (load8(s + byte_idx) >> bit_idx) & 1;
 
         # Unconditional add; unconditional select.
-        ge_add(_gsm_tmp, _gsm_r, _gsm_q);
-        ge_cmov(_gsm_r, _gsm_tmp, _gsm_bit);
+        ge_add(&tmp, r, &q);
+        ge_cmov(r, &tmp, bit);
 
         # Unconditional double of q.
-        ge_double(_gsm_tmp, _gsm_q);
-        ge_copy(_gsm_q, _gsm_tmp);
-        _gsm_i = _gsm_i + 1;
+        ge_double(&tmp, &q);
+        ge_copy(&q, &tmp);
+        i = i + 1;
     }
     return 0;
 }
@@ -232,69 +185,47 @@ fn ge_scalarmult(r, s, p): i64 {
 # Must be constant-time — s is secret in keypair/sign.
 # ================================================================
 
-# Table select state
-var _gts_dst = 0;
-var _gts_row = 0;
-var _gts_digit = 0;
-var _gts_k = 0;
-
 # Branchless: sets dst := row[digit] in constant time. Iterates all
 # 16 entries and cmoves the one whose index equals digit. Memory
 # access pattern does not depend on digit.
 fn _ge_table_select(dst, row, digit): i64 {
-    _gts_dst = dst;
-    _gts_row = row;
-    _gts_digit = digit;
     # Initialize dst to identity (entry k=0) — equivalent and simpler
     # than reading row[0], which is also identity.
-    ge_identity(_gts_dst);
-    _gts_k = 1;
-    while (_gts_k < 16) {
+    ge_identity(dst);
+    var k = 1;
+    while (k < 16) {
         # eq = 1 iff k == digit, else 0  (branchless).
         # diff|(-diff) has its high bit set iff diff != 0.
-        var diff = _gts_k ^ _gts_digit;
+        var diff = k ^ digit;
         var neg = 0 - diff;
         var eq = 1 - (((diff | neg) >> 63) & 1);
-        ge_cmov(_gts_dst, _gts_row + _gts_k * 128, eq);
-        _gts_k = _gts_k + 1;
+        ge_cmov(dst, row + k * 128, eq);
+        k = k + 1;
     }
     return 0;
 }
 
-# Base scalarmult state
-var _gsb_r = 0;
-var _gsb_s = 0;
-var _gsb_sel = 0;
-var _gsb_tmp = 0;
-var _gsb_i = 0;
-var _gsb_digit = 0;
-
 fn ge_scalarmult_base(r, s): i64 {
-    if (_gsb_sel == 0) {
-        _gsb_sel = alloc(128);
-        _gsb_tmp = alloc(128);
-    }
-    _gsb_r = r;
-    _gsb_s = s;
-    ge_identity(_gsb_r);
+    var sel[128];
+    var tmp[128];
+    ge_identity(r);
 
-    _gsb_i = 0;
-    while (_gsb_i < 64) {
+    var i = 0;
+    while (i < 64) {
         # Public-index nibble extract: byte i/2, low or high nibble.
-        var byte_idx = _gsb_i / 2;
-        var b = load8(_gsb_s + byte_idx) & 0xFF;
-        var d = b & 0xF;
-        if ((_gsb_i & 1) == 1) { d = (b >> 4) & 0xF; }
-        _gsb_digit = d;
+        var byte_idx = i / 2;
+        var b = load8(s + byte_idx) & 0xFF;
+        var digit = b & 0xF;
+        if ((i & 1) == 1) { digit = (b >> 4) & 0xF; }
 
-        # Constant-time select into _gsb_sel.
-        _ge_table_select(_gsb_sel, _ed_B_table + _gsb_i * 16 * 128, _gsb_digit);
+        # Constant-time select into sel.
+        _ge_table_select(&sel, _ed_B_table + i * 16 * 128, digit);
 
         # r = r + sel  (ge_add handles r==identity and sel==identity correctly;
         # HWCD08 addition formula is complete on twisted Edwards curves).
-        ge_add(_gsb_tmp, _gsb_r, _gsb_sel);
-        ge_copy(_gsb_r, _gsb_tmp);
-        _gsb_i = _gsb_i + 1;
+        ge_add(&tmp, r, &sel);
+        ge_copy(r, &tmp);
+        i = i + 1;
     }
     return 0;
 }
@@ -304,38 +235,30 @@ fn ge_scalarmult_base(r, s): i64 {
 # Layout: table[i][k] = k * (16^i) * B. 64 rows × 16 entries × 128B.
 # ================================================================
 
-var _bt_table_i = 0;
-var _bt_k = 0;
-var _bt_base_i = 0;
-var _bt_row = 0;
-
 fn _build_ed_B_table(): i64 {
     _ed_B_table = alloc(131072);   # 64 * 16 * 128
-    _bt_base_i = alloc(128);
+    var base_i[128];
+    ge_copy(&base_i, _ed_B);
 
-    ge_copy(_bt_base_i, _ed_B);
-
-    _bt_table_i = 0;
-    while (_bt_table_i < 64) {
-        _bt_row = _ed_B_table + _bt_table_i * 16 * 128;
-        ge_identity(_bt_row);                              # k=0 → identity
-        ge_copy(_bt_row + 128, _bt_base_i);                # k=1 → base_i
-        _bt_k = 2;
-        while (_bt_k < 16) {
+    var table_i = 0;
+    while (table_i < 64) {
+        var row = _ed_B_table + table_i * 16 * 128;
+        ge_identity(row);                          # k=0 → identity
+        ge_copy(row + 128, &base_i);               # k=1 → base_i
+        var k = 2;
+        while (k < 16) {
             # row[k] = row[k-1] + base_i
-            ge_add(_bt_row + _bt_k * 128,
-            _bt_row + (_bt_k - 1) * 128,
-            _bt_base_i);
-            _bt_k = _bt_k + 1;
+            ge_add(row + k * 128, row + (k - 1) * 128, &base_i);
+            k = k + 1;
         }
-        if (_bt_table_i < 63) {
+        if (table_i < 63) {
             # base_{i+1} = 16 * base_i → four in-place doublings
-            ge_double(_bt_base_i, _bt_base_i);
-            ge_double(_bt_base_i, _bt_base_i);
-            ge_double(_bt_base_i, _bt_base_i);
-            ge_double(_bt_base_i, _bt_base_i);
+            ge_double(&base_i, &base_i);
+            ge_double(&base_i, &base_i);
+            ge_double(&base_i, &base_i);
+            ge_double(&base_i, &base_i);
         }
-        _bt_table_i = _bt_table_i + 1;
+        table_i = table_i + 1;
     }
     return 0;
 }
@@ -345,25 +268,19 @@ fn _build_ed_B_table(): i64 {
 # Encode y with sign of x in high bit of last byte
 # ================================================================
 
-var _gcomp_recip = 0;
-var _gcomp_x = 0;
-var _gcomp_y = 0;
-
 fn ge_to_bytes(out, p): i64 {
-    if (_gcomp_recip == 0) {
-        _gcomp_recip = alloc(32);
-        _gcomp_x = alloc(32);
-        _gcomp_y = alloc(32);
-    }
-    fp_inv(_gcomp_recip, ge_z(p));
-    fp_mul(_gcomp_x, ge_x(p), _gcomp_recip);
-    fp_mul(_gcomp_y, ge_y(p), _gcomp_recip);
+    var recip[32];
+    var x[32];
+    var y[32];
+    fp_inv(&recip, ge_z(p));
+    fp_mul(&x, ge_x(p), &recip);
+    fp_mul(&y, ge_y(p), &recip);
 
     # Encode y as 32 bytes little-endian
-    u256_store_le(out, _gcomp_y);
+    u256_store_le(out, &y);
 
     # Set high bit to sign of x (low bit of x)
-    var x_sign = u256_limb(_gcomp_x, 0) & 1;
+    var x_sign = u256_limb(&x, 0) & 1;
     store8(out + 31, (load8(out + 31) & 0xFF) | (x_sign << 7));
     return 0;
 }
@@ -373,87 +290,70 @@ fn ge_to_bytes(out, p): i64 {
 # Recover x from y using curve equation: x^2 = (y^2-1)/(dy^2+1)
 # ================================================================
 
-var _gdc_u = 0;
-var _gdc_v = 0;
-var _gdc_y2 = 0;
-var _gdc_one = 0;
-var _gdc_v3 = 0;
-var _gdc_v7 = 0;
-var _gdc_uv3 = 0;
-var _gdc_uv7 = 0;
-var _gdc_pow = 0;
-var _gdc_x = 0;
-var _gdc_check = 0;
-var _gdc_vx2 = 0;
-var _gdc_y = 0;
-var _gdc_s_copy = 0;
-var _gdc_x_sign = 0;
-var _gdc_p_out = 0;
-var _gdc_exp = 0;
-var _gdc_inited = 0;
+# (p-5)/8 — exponent for the curve-equation x-recovery. Read-only
+# after init; computed once in ed25519_init alongside the other
+# curve constants.
+var _ed_decomp_exp = 0;
 
 fn ge_from_bytes(p, s): i64 {
     ed25519_init();
-    if (_gdc_inited == 0) {
-        _gdc_u = alloc(32); _gdc_v = alloc(32); _gdc_y2 = alloc(32);
-        _gdc_one = u256_from(1); _gdc_v3 = alloc(32); _gdc_v7 = alloc(32);
-        _gdc_uv3 = alloc(32); _gdc_uv7 = alloc(32); _gdc_pow = alloc(32);
-        _gdc_x = alloc(32); _gdc_check = alloc(32); _gdc_vx2 = alloc(32);
-        _gdc_y = alloc(32); _gdc_s_copy = alloc(32);
-        _gdc_exp = u256_from_hex("0ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffd");
-        _gdc_inited = 1;
-    }
-    _gdc_p_out = p;
+
+    var u[32]; var v[32]; var y2[32];
+    var v3[32]; var v7[32]; var uv3[32]; var uv7[32];
+    var pow[32]; var x[32]; var check[32]; var vx2[32];
+    var y[32]; var s_copy[32]; var one[32];
+
+    memset(&one, 0, 32);
+    store64(&one, 1);
 
     # Decode y from bytes, clear sign bit
-    _gdc_x_sign = (load8(s + 31) >> 7) & 1;
-    memcpy(_gdc_s_copy, s, 32);
-    store8(_gdc_s_copy + 31, load8(_gdc_s_copy + 31) & 0x7F);
+    var x_sign = (load8(s + 31) >> 7) & 1;
+    memcpy(&s_copy, s, 32);
+    store8(&s_copy + 31, load8(&s_copy + 31) & 0x7F);
 
     # Load y as u256 from little-endian bytes
-    u256_load_le(_gdc_y, _gdc_s_copy);
+    u256_load_le(&y, &s_copy);
 
     # u = y^2 - 1
-    fp_sq(_gdc_y2, _gdc_y);
-    fp_sub(_gdc_u, _gdc_y2, _gdc_one);
+    fp_sq(&y2, &y);
+    fp_sub(&u, &y2, &one);
 
     # v = d*y^2 + 1
-    fp_mul(_gdc_v, _ed_d, _gdc_y2);
-    fp_add(_gdc_v, _gdc_v, _gdc_one);
+    fp_mul(&v, _ed_d, &y2);
+    fp_add(&v, &v, &one);
 
     # candidate = u * v^3 * (u*v^7)^((p-5)/8)
-    fp_sq(_gdc_v3, _gdc_v);
-    fp_mul(_gdc_v3, _gdc_v3, _gdc_v);        # v^3
-    fp_sq(_gdc_v7, _gdc_v3);
-    fp_mul(_gdc_v7, _gdc_v7, _gdc_v);        # v^7
-    fp_mul(_gdc_uv7, _gdc_u, _gdc_v7);       # u*v^7
-    fp_mul(_gdc_uv3, _gdc_u, _gdc_v3);       # u*v^3
+    fp_sq(&v3, &v);
+    fp_mul(&v3, &v3, &v);        # v^3
+    fp_sq(&v7, &v3);
+    fp_mul(&v7, &v7, &v);        # v^7
+    fp_mul(&uv7, &u, &v7);       # u*v^7
+    fp_mul(&uv3, &u, &v3);       # u*v^3
 
-    fp_pow(_gdc_pow, _gdc_uv7, _gdc_exp);
+    fp_pow(&pow, &uv7, _ed_decomp_exp);
 
     # x = u*v^3 * pow
-    fp_mul(_gdc_x, _gdc_uv3, _gdc_pow);
+    fp_mul(&x, &uv3, &pow);
 
     # Verify: v*x^2 == u?
-    fp_sq(_gdc_vx2, _gdc_x);
-    fp_mul(_gdc_check, _gdc_v, _gdc_vx2);
+    fp_sq(&vx2, &x);
+    fp_mul(&check, &v, &vx2);
 
     # If check != u, try x * sqrt(-1)
-    if (u256_eq(_gdc_check, _gdc_u) == 0) {
-        fp_mul(_gdc_x, _gdc_x, _ed_sqrtm1);
+    if (u256_eq(&check, &u) == 0) {
+        fp_mul(&x, &x, _ed_sqrtm1);
     }
 
     # Adjust sign
-    if ((u256_limb(_gdc_x, 0) & 1) != _gdc_x_sign) {
-        fp_neg(_gdc_x, _gdc_x);
+    if ((u256_limb(&x, 0) & 1) != x_sign) {
+        fp_neg(&x, &x);
     }
 
     # Set point: X=x, Y=y, Z=1, T=x*y
-    u256_copy(ge_x(_gdc_p_out), _gdc_x);
-    u256_copy(ge_y(_gdc_p_out), _gdc_y);
-    var one_z = u256_from(1);
-    u256_copy(ge_z(_gdc_p_out), one_z);
-    fp_mul(ge_t(_gdc_p_out), _gdc_x, _gdc_y);
+    u256_copy(ge_x(p), &x);
+    u256_copy(ge_y(p), &y);
+    u256_copy(ge_z(p), &one);
+    fp_mul(ge_t(p), &x, &y);
     return 0;
 }
 
@@ -502,6 +402,14 @@ fn ed25519_init(): i64 {
     # Precomputed fixed-base table for signing/keypair/verify (2.3.0).
     _build_ed_B_table();
 
+    # (p-5)/8 exponent for ge_from_bytes square-root recovery.
+    _ed_decomp_exp = u256_from_hex("0ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffd");
+
+    # R = 2^256 mod L for sc_reduce. Initialised here so the
+    # parallel-batch main-thread pre-warm in sv_verify_batch
+    # covers it (sc_reduce is called from ed25519_verify).
+    _scr_r256 = u256_from_hex("0ffffffffffffffffffffffffffffffec6ef5bf4737dcf70d6ec31748d98951d");
+
     _ed25519_inited = 1;
     return 0;
 }
@@ -510,25 +418,17 @@ fn ed25519_init(): i64 {
 # Scalar reduce: 64-byte hash -> 32-byte scalar mod L
 # ================================================================
 
-# R = 2^256 mod L — read-only constant, init-once. Safe to share
-# across threads because it's never mutated after init.
+# R = 2^256 mod L — read-only constant, init-once via
+# ed25519_init() so the parallel-batch pre-warm covers it.
 var _scr_r256 = 0;
-var _scr_inited = 0;
 
 fn sc_reduce(out, s64): i64 {
     # Reduce 512-bit value mod L using: val = hi*2^256 + lo ≡ hi*R + lo (mod L)
     # where R = 2^256 mod L. Iterate until hi == 0.
     #
-    # Scratch is stack-local (3.0 re-test: cc5 5.5.32 preserves
-    # pointer-to-local across the nested u256_* calls in this
-    # body, so the pre-3.0 globals-for-scratch workaround is no
-    # longer needed here). `lo`, `hi`, `prod` live only for the
-    # lifetime of the call — trivially per-thread by construction.
-    if (_scr_inited == 0) {
-        _scr_r256 = u256_from_hex("0ffffffffffffffffffffffffffffffec6ef5bf4737dcf70d6ec31748d98951d");
-        _scr_inited = 1;
-    }
-
+    # Scratch is stack-local — `lo`, `hi`, `prod` live only for
+    # the lifetime of the call (trivially per-thread by
+    # construction).
     var lo[32];
     var hi[32];
     var prod[64];
@@ -578,19 +478,17 @@ fn sc_reduce(out, s64): i64 {
 # sc_muladd: out = (a * b + c) mod L
 # ================================================================
 
-var _scma_prod = 0;
-
 fn sc_muladd(out, a, b, c): i64 {
-    if (_scma_prod == 0) { _scma_prod = alloc(64); }
-    u256_mul_full(_scma_prod, a, b);
+    var prod[64];
+    u256_mul_full(&prod, a, b);
 
     # Add c to the 512-bit product (low 256 bits, propagate carry to high)
-    var carry = u256_add(_scma_prod, _scma_prod, c);
+    var carry = u256_add(&prod, &prod, c);
     if (carry > 0) {
-        store64(_scma_prod + 32, load64(_scma_prod + 32) + carry);
+        store64(&prod + 32, load64(&prod + 32) + carry);
     }
 
-    sc_reduce(out, _scma_prod);
+    sc_reduce(out, &prod);
     return 0;
 }
 
@@ -598,33 +496,28 @@ fn sc_muladd(out, a, b, c): i64 {
 # Ed25519 keypair: seed (32 bytes) -> sk (64 bytes), pk (32 bytes)
 # ================================================================
 
-var _kp_hash = 0;
-var _kp_scalar = 0;
-
 fn ed25519_keypair(seed, sk_out, pk_out): i64 {
     ed25519_init();
-    if (_kp_hash == 0) { _kp_hash = alloc(64); _kp_scalar = alloc(32); }
-    sha512(seed, 32, _kp_hash);
+    # `secret var` (cyrius 5.3.5+) gives compiler-guaranteed
+    # zeroization on scope exit — replaces the pre-3.3 manual
+    # memset(_kp_*, 0, ...) pattern against module-global buffers.
+    secret var hash[64];
+    secret var scalar[32];
+    sha512(seed, 32, &hash);
 
     # Clamp scalar (first 32 bytes)
-    store8(_kp_hash, load8(_kp_hash) & 0xF8);
-    store8(_kp_hash + 31, (load8(_kp_hash + 31) & 0x7F) | 0x40);
+    store8(&hash, load8(&hash) & 0xF8);
+    store8(&hash + 31, (load8(&hash + 31) & 0x7F) | 0x40);
 
-    # Copy scalar to dedicated heap buffer (survives nested calls)
-    memcpy(_kp_scalar, _kp_hash, 32);
+    memcpy(&scalar, &hash, 32);
 
     # A = [a]B  (fixed-base, constant-time table lookup)
-    var A = ge_alloc();
-    ge_scalarmult_base(A, _kp_scalar);
-    ge_to_bytes(pk_out, A);
+    var A[128];
+    ge_scalarmult_base(&A, &scalar);
+    ge_to_bytes(pk_out, &A);
 
     memcpy(sk_out, seed, 32);
     memcpy(sk_out + 32, pk_out, 32);
-
-    # Zeroize secret scalar buffers. _kp_scalar holds the clamped
-    # private scalar a; _kp_hash[0..32] is a copy of it.
-    memset(_kp_hash, 0, 64);
-    memset(_kp_scalar, 0, 32);
     return 0;
 }
 
@@ -632,78 +525,58 @@ fn ed25519_keypair(seed, sk_out, pk_out): i64 {
 # Ed25519 sign: sk (64b), msg, msg_len -> sig (64b)
 # ================================================================
 
-var _sign_az = 0;
-var _sign_nhash = 0;
-var _sign_hram = 0;
-var _sign_sk = 0;
-var _sign_msg = 0;
-var _sign_msg_len = 0;
-var _sign_sig_out = 0;
-var _sign_r_scalar = 0;
-var _sign_h_scalar = 0;
-var _sign_a_scalar = 0;
-
 fn ed25519_sign(sk, msg, msg_len, sig_out): i64 {
     ed25519_init();
-    if (_sign_az == 0) {
-        _sign_az = alloc(64);
-        _sign_nhash = alloc(64);
-        _sign_hram = alloc(64);
-        _sign_r_scalar = alloc(32);
-        _sign_h_scalar = alloc(32);
-        _sign_a_scalar = alloc(32);
-    }
-    _sign_sk = sk;
-    _sign_msg = msg;
-    _sign_msg_len = msg_len;
-    _sign_sig_out = sig_out;
+    # Secret material — compiler-guaranteed zeroize on exit.
+    # az holds H(sk)[0..64] (clamped scalar a + nonce seed);
+    # r_scalar is the per-signature nonce; a_scalar is the
+    # long-term scalar a re-loaded as u256. Leaking any one
+    # recovers the signing secret.
+    secret var az[64];
+    secret var nhash[64];
+    secret var r_scalar[32];
+    secret var a_scalar[32];
+    # Public-derivable; no need to zeroize.
+    var hram[64];
+    var h_scalar[32];
+    var R_point[128];
+    var S_result[32];
 
-    sha512(_sign_sk, 32, _sign_az);
-    store8(_sign_az, load8(_sign_az) & 0xF8);
-    store8(_sign_az + 31, (load8(_sign_az + 31) & 0x7F) | 0x40);
+    sha512(sk, 32, &az);
+    store8(&az, load8(&az) & 0xF8);
+    store8(&az + 31, (load8(&az + 31) & 0x7F) | 0x40);
 
     # r = SHA-512(az[32..64] || msg) mod L
     var nctx = sha512_init();
-    sha512_update(nctx, _sign_az + 32, 32);
-    sha512_update(nctx, _sign_msg, _sign_msg_len);
-    sha512_finalize(nctx, _sign_nhash);
+    sha512_update(nctx, &az + 32, 32);
+    sha512_update(nctx, msg, msg_len);
+    sha512_finalize(nctx, &nhash);
     fl_free(nctx);
 
-    sc_reduce(_sign_r_scalar, _sign_nhash);
+    sc_reduce(&r_scalar, &nhash);
 
     # R = [r]B  (fixed-base, constant-time table lookup)
-    var R_point = ge_alloc();
-    ge_scalarmult_base(R_point, _sign_r_scalar);
-    ge_to_bytes(_sign_sig_out, R_point);
+    ge_scalarmult_base(&R_point, &r_scalar);
+    ge_to_bytes(sig_out, &R_point);
 
     # h = SHA-512(R || pk || msg) mod L
     var hctx = sha512_init();
-    sha512_update(hctx, _sign_sig_out, 32);
-    sha512_update(hctx, _sign_sk + 32, 32);
-    sha512_update(hctx, _sign_msg, _sign_msg_len);
-    sha512_finalize(hctx, _sign_hram);
+    sha512_update(hctx, sig_out, 32);
+    sha512_update(hctx, sk + 32, 32);
+    sha512_update(hctx, msg, msg_len);
+    sha512_finalize(hctx, &hram);
     fl_free(hctx);
 
-    sc_reduce(_sign_h_scalar, _sign_hram);
+    sc_reduce(&h_scalar, &hram);
 
     # Load a from az[0..32] as u256
-    u256_load_le(_sign_a_scalar, _sign_az);
+    u256_load_le(&a_scalar, &az);
 
     # S = (r + h*a) mod L
-    var S_result = alloc(32);
-    sc_muladd(S_result, _sign_h_scalar, _sign_a_scalar, _sign_r_scalar);
+    sc_muladd(&S_result, &h_scalar, &a_scalar, &r_scalar);
 
     # Write S as little-endian bytes to sig_out+32
-    u256_store_le(_sign_sig_out + 32, S_result);
-
-    # Zeroize all secret/derived material. _sign_az holds H(sk)[0..64]
-    # (the clamped scalar a and nonce seed). _sign_r_scalar is the
-    # per-signature nonce; _sign_a_scalar is the long-term scalar a
-    # re-loaded as u256. Leaking any one recovers the signing secret.
-    memset(_sign_az, 0, 64);
-    memset(_sign_nhash, 0, 64);
-    memset(_sign_r_scalar, 0, 32);
-    memset(_sign_a_scalar, 0, 32);
+    u256_store_le(sig_out + 32, &S_result);
     return 0;
 }
 
@@ -711,67 +584,58 @@ fn ed25519_sign(sk, msg, msg_len, sig_out): i64 {
 # Ed25519 verify: pk (32b), msg, msg_len, sig (64b) -> 0/1
 # ================================================================
 
-var _ver_pk = 0;
-var _ver_msg = 0;
-var _ver_msg_len = 0;
-var _ver_sig = 0;
-var _ver_hram = 0;
-var _ver_h_scalar = 0;
-var _ver_S_scalar = 0;
-var _ver_R_bytes = 0;
-
+# 3.3: alloc-free on the hot path. All per-call buffers (points
+# and scalars) live on the stack. No bump-allocator calls in the
+# verify body — concurrent workers in sv_verify_batch can run
+# this without serialising on the freelist or batch mutex.
 fn ed25519_verify(pk, msg, msg_len, sig): i64 {
     ed25519_init();
-    if (_ver_hram == 0) {
-        _ver_hram = alloc(64);
-        _ver_h_scalar = alloc(32);
-        _ver_S_scalar = alloc(32);
-        _ver_R_bytes = alloc(32);
-    }
-    _ver_pk = pk;
-    _ver_msg = msg;
-    _ver_msg_len = msg_len;
-    _ver_sig = sig;
+    var hram[64];
+    var h_scalar[32];
+    var S_scalar[32];
+    var R_bytes[32];
+    var A[128];
+    var SB[128];
+    var hA[128];
+    var R_check[128];
 
-    var A = ge_alloc();
-    ge_from_bytes(A, _ver_pk);
+    ge_from_bytes(&A, pk);
 
-    # h = SHA-512(R || pk || msg) mod L
-    var hctx = sha512_init();
-    sha512_update(hctx, _ver_sig, 32);
-    sha512_update(hctx, _ver_pk, 32);
-    sha512_update(hctx, _ver_msg, _ver_msg_len);
-    sha512_finalize(hctx, _ver_hram);
-    fl_free(hctx);
+    # h = SHA-512(R || pk || msg) mod L. Stack-allocated SHA-512
+    # context — sha512_init() would fl_alloc, which is not thread-
+    # safe under concurrent batch-verify workers.
+    var hctx[208];
+    sha512_init_into(&hctx);
+    sha512_update(&hctx, sig, 32);
+    sha512_update(&hctx, pk, 32);
+    sha512_update(&hctx, msg, msg_len);
+    sha512_finalize(&hctx, &hram);
 
-    sc_reduce(_ver_h_scalar, _ver_hram);
+    sc_reduce(&h_scalar, &hram);
 
     # Load S from sig[32..64] as scalar
-    u256_load_le(_ver_S_scalar, _ver_sig + 32);
+    u256_load_le(&S_scalar, sig + 32);
 
     # RFC 8032 §5.1.7 / §8.4: reject non-canonical S (S must be < L).
     # Prevents signature malleability — the same (pk, msg) must have
     # exactly one valid signature encoding.
-    if (u256_cmp(_ver_S_scalar, _ed_L) >= 0) { return 0; }
+    if (u256_cmp(&S_scalar, _ed_L) >= 0) { return 0; }
 
     # [S]B  (fixed-base; S is public, but base table wins on speed anyway)
-    var SB = ge_alloc();
-    ge_scalarmult_base(SB, _ver_S_scalar);
+    ge_scalarmult_base(&SB, &S_scalar);
 
     # [h]A
-    var hA = ge_alloc();
-    ge_scalarmult(hA, _ver_h_scalar, A);
+    ge_scalarmult(&hA, &h_scalar, &A);
 
     # R_check = [S]B - [h]A (negate hA: negate X and T)
-    fp_neg(ge_x(hA), ge_x(hA));
-    fp_neg(ge_t(hA), ge_t(hA));
+    fp_neg(ge_x(&hA), ge_x(&hA));
+    fp_neg(ge_t(&hA), ge_t(&hA));
 
-    var R_check = ge_alloc();
-    ge_add(R_check, SB, hA);
+    ge_add(&R_check, &SB, &hA);
 
-    ge_to_bytes(_ver_R_bytes, R_check);
+    ge_to_bytes(&R_bytes, &R_check);
 
-    return ct_eq_bytes_lens(_ver_R_bytes, 32, _ver_sig, 32);
+    return ct_eq_bytes_lens(&R_bytes, 32, sig, 32);
 }
 
 # ================================================================

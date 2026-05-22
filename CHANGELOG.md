@@ -5,6 +5,117 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.3.0] — 2026-05-22
+
+Cleanup / refactor cycle. The original 3.3 goal — drop
+`_sigil_batch_mutex` by moving crypto-module working state to
+per-call scratch — was investigated, refactored, and **deferred
+to 3.4** when a load-bearing cyrius semantic surfaced. The
+refactor itself shipped (net **−190 LOC across 7 modules**) and
+captures the discovery so 3.4 can be designed correctly.
+
+### Changed
+
+- **`src/sha256.cyr`, `src/sha512.cyr`, `src/ed25519.cyr`,
+  `src/aes_gcm.cyr`, `src/bigint_ext.cyr`, `src/sha_ni.cyr` —
+  per-call working state.** Explicit named module globals
+  (`_sha_a..h`, `_sha_t1/t2`, `_sha_i`, `_sha256_W`, `_sha512_W`,
+  `_s5_*`, `_ga_*`, `_gd_*`, `_gsm_*`, `_gts_*`, `_gsb_*`,
+  `_bt_*`, `_gcomp_*`, `_gdc_*`, `_scma_*`, `_kp_*`, `_sign_*`,
+  `_ver_*`, `_mod_*`, `_mf_*`, `_fp_pow_*`, `_fpi_*`, `_aes_state`,
+  `_aes_tmp`) replaced with in-function `var X[N]` array
+  declarations. Read-only init tables (`_ed_d`, `_ed_2d`,
+  `_ed_B`, `_ed_B_table`, `_ed_L`, `_ed_sqrtm1`, `_ed_p`,
+  `_mod_38`, `_sha256_K`, `_sha512_K`, `_aes_sbox`, `_aes_rcon`,
+  `_sha_ni_K`) retained as proper globals — init-once,
+  read-only, shared-safe.
+- **`src/ed25519.cyr` — alloc-free hot path.** `ed25519_verify`
+  no longer calls `ge_alloc()` × 4 + `alloc(32)` per call;
+  point and scalar buffers live in the function frame.
+  `ed25519_keypair` / `ed25519_sign` adopted `secret var` for
+  secret material with compiler-guaranteed zeroization on
+  scope exit (replaces pre-3.3 manual `memset(_kp_*, 0, ...)`).
+- **`src/sha512.cyr` — alloc-free init variant.** New
+  `sha512_init_into(ctx)` mirrors the 3.2.0 `sha256_init_into`
+  pattern; lets `ed25519_verify` run a streaming SHA-512 hash
+  without touching the freelist allocator. `sha512_init()`
+  retained as a heap-allocating convenience wrapper.
+- **`src/bigint_ext.cyr` — `_mul64_full` inlined.** Returning
+  two values via `_m64_lo` / `_m64_hi` globals had no clean
+  local equivalent; inlining into the sole caller
+  `u256_mul_full` eliminates the issue and removes a function
+  call from the inner multiplication loop.
+- **`src/sha_ni.cyr` — bswap mask split from working buffer.**
+  The pre-3.3 `_sha_ni_buf` (80 bytes) packed working state +
+  ABEF/CDGH saves + bswap mask. Mask split to its own
+  read-only `_sha_ni_bswap_src` global (16 bytes); working
+  area becomes a function-frame array memcpy'd from the
+  template per call. Sets up the 3.4 caller-scratch path for
+  the same module.
+- **`src/verify.cyr` — main-thread crypto pre-warm.**
+  `sv_verify_batch` now warms `ed25519_init()`,
+  `sha256_global_init()`, `sha512_global_init()`, and
+  `sha_ni_available()` on the main thread before fan-out.
+  Defence-in-depth alongside the (retained) batch mutex —
+  workers never hit a cold lazy-init guard.
+- **Init-guard simplification.** `_ga_inited`, `_gd_inited`,
+  `_gdc_inited`, `_kp_*` first-call-alloc guards,
+  `_fp_pow_inited`, `_fpi_inited`, `_aes_state_inited`,
+  `_scma_prod` first-call guard, `_ver_*` first-call guards
+  all removed — no longer needed once the heap allocations
+  they gated moved into function frames. `_ed_decomp_exp`
+  and `_scr_r256` lifted into `ed25519_init()` so the
+  main-thread pre-warm covers their initialisation.
+
+### Documented
+
+- **CLAUDE.md quirk #1 — rewritten.** Confirmed via
+  `cyrius/src/frontend/parse_fn.cyr:2886` ("DON'T restore VCNT
+  — arrays inside functions are globals that persist") and
+  `tests/tcyr/var_array_semantics.tcyr` that **`var X[N]`
+  inside a function is a static function-scope global, not a
+  stack array**. Scalar `var x = expr` locals ARE per-call
+  stack-frame slots. The cc3-era promote-to-global workaround
+  for scalar clobbering is no longer needed under cc6 (removed
+  in this cycle); the array-static behaviour persists and
+  blocks the parallel mutex-drop until 3.4's caller-scratch
+  refactor.
+- **`tests/tcyr/var_array_semantics.tcyr`** — minimal probe
+  that proves the array-static semantics from cyrius
+  user-space. Kept in-tree as both regression sentinel
+  (any future cyrius change to local-array storage trips
+  it) and as the load-bearing documentation for why 3.4's
+  architecture is the way it is.
+- **`tests/tcyr/sha256_locals_probe.tcyr`** — single-thread
+  FIPS-vector correctness probe of a locals-only
+  `sha256_transform_local`. Confirms the digest output
+  matches the production path even when the working state is
+  written before being read each call (same-thread reuse is
+  safe; the cross-thread story is the array-static issue).
+
+### Deferred
+
+- **`_sigil_batch_mutex` stays.** Dropping it requires
+  threading a caller-provided scratch buffer through every
+  `sha256_transform`, `sha512_transform`, `ge_*`, `fp_*`,
+  `u256_mul_full`, `u512_mod_p`, `sc_reduce`, `sc_muladd`,
+  `ed25519_verify`, `hash_file_into` signature. Per-worker
+  scratch pool (~3 KB / worker) pre-allocated by the main
+  thread before fan-out. Mechanical but invasive — re-scoped
+  as 3.4 with a clear architecture (see
+  `docs/development/roadmap.md` § "Road to v3.4").
+
+### Threading semantics (unchanged from 3.2.x)
+
+`batch_parallel.tcyr` continues to pass 228/228 with the
+mutex on. Mutex-off behaviour was characterised
+experimentally: ~12% of artifacts in the count=32 mixed
+batch fail signature verify, with R_check varying
+non-deterministically across runs from identical inputs —
+exactly the symptom an in-function array-static would
+produce. The new probe in `tests/tcyr/var_array_semantics.tcyr`
+ties this directly to the cyrius semantic.
+
 ## [3.2.6] — 2026-05-26
 
 Sixth and final bite of the 3.2.x TEE attestation arc

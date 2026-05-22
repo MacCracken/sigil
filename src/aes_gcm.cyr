@@ -24,9 +24,12 @@
 #     before free after every encrypt / decrypt call.
 #   - Input lengths validated at the GCM boundary.
 #
-# Globals: Cyrius single-pass compiler can clobber locals across
-# nested calls; working state lives in globals where it must
-# survive a nested call chain (same pattern as sha256.cyr).
+# Working state: per-call function locals. The pre-3.3 module-
+# global pattern was a cycc 3 local-clobbering workaround that
+# cycc 6.0.1 no longer needs (CLAUDE.md quirk #1, verified by
+# tests/tcyr/sha256_locals_probe.tcyr). Read-only init tables
+# (`_aes_sbox`, `_aes_rcon`) remain shared and safe under
+# concurrent read.
 
 # aes_ni.cyr supplies aes_ni_available() and aes256_encrypt_block_ni
 # for the dispatcher in aes256_encrypt_block below. Including it
@@ -185,73 +188,62 @@ fn aes256_key_expand(key, round_keys): i64 {
 # We store state[col*4 + row] to match that wire order — so
 # state[0..3] = column 0, state[4..7] = column 1, etc.
 
-var _aes_state = 0;
-var _aes_tmp = 0;
-var _aes_state_inited = 0;
-
-fn _aes_state_init(): i64 {
-    if (_aes_state_inited == 1) { return 0; }
-    _aes_state = alloc(16);
-    _aes_tmp = alloc(16);
-    _aes_state_inited = 1;
-    return 0;
-}
-
-fn _aes_add_round_key(rk, round): i64 {
+fn _aes_add_round_key(state, rk, round): i64 {
     var off = round * 16;
     var i = 0;
     while (i < 16) {
-        store8(_aes_state + i,
-        (load8(_aes_state + i) ^ load8(rk + off + i)) & 0xFF);
+        store8(state + i,
+        (load8(state + i) ^ load8(rk + off + i)) & 0xFF);
         i = i + 1;
     }
     return 0;
 }
 
-fn _aes_sub_bytes(): i64 {
+fn _aes_sub_bytes(state): i64 {
     var i = 0;
     while (i < 16) {
-        store8(_aes_state + i, _aes_sub(load8(_aes_state + i) & 0xFF));
+        store8(state + i, _aes_sub(load8(state + i) & 0xFF));
         i = i + 1;
     }
     return 0;
 }
 
-fn _aes_shift_rows(): i64 {
-    # State in column-major order: s[c,r] at _aes_state[c*4 + r].
+fn _aes_shift_rows(state): i64 {
+    # State in column-major order: s[c,r] at state[c*4 + r].
     # ShiftRows rotates row r left by r columns: row 0 unchanged,
     # row 1 rotated by 1, row 2 by 2, row 3 by 3.
-    # Read into _aes_tmp then write back permuted.
-    memcpy(_aes_tmp, _aes_state, 16);
+    # Read into tmp then write back permuted.
+    var tmp[16];
+    memcpy(&tmp, state, 16);
 
     # Row 0 (unchanged): columns 0,1,2,3
-    # store8(_aes_state + 0*4 + 0, load8(_aes_tmp + 0*4 + 0));  (no-op)
+    # store8(state + 0*4 + 0, load8(&tmp + 0*4 + 0));  (no-op)
 
     # Row 1 rotated left by 1:
     #   new s[0,1] = old s[1,1]    → state[0*4+1] = tmp[1*4+1]
     #   new s[1,1] = old s[2,1]    → state[1*4+1] = tmp[2*4+1]
     #   new s[2,1] = old s[3,1]    → state[2*4+1] = tmp[3*4+1]
     #   new s[3,1] = old s[0,1]    → state[3*4+1] = tmp[0*4+1]
-    store8(_aes_state +  1, load8(_aes_tmp +  5));
-    store8(_aes_state +  5, load8(_aes_tmp +  9));
-    store8(_aes_state +  9, load8(_aes_tmp + 13));
-    store8(_aes_state + 13, load8(_aes_tmp +  1));
+    store8(state +  1, load8(&tmp +  5));
+    store8(state +  5, load8(&tmp +  9));
+    store8(state +  9, load8(&tmp + 13));
+    store8(state + 13, load8(&tmp +  1));
 
     # Row 2 rotated left by 2:
-    store8(_aes_state +  2, load8(_aes_tmp + 10));
-    store8(_aes_state +  6, load8(_aes_tmp + 14));
-    store8(_aes_state + 10, load8(_aes_tmp +  2));
-    store8(_aes_state + 14, load8(_aes_tmp +  6));
+    store8(state +  2, load8(&tmp + 10));
+    store8(state +  6, load8(&tmp + 14));
+    store8(state + 10, load8(&tmp +  2));
+    store8(state + 14, load8(&tmp +  6));
 
     # Row 3 rotated left by 3 (equivalently: right by 1):
-    store8(_aes_state +  3, load8(_aes_tmp + 15));
-    store8(_aes_state +  7, load8(_aes_tmp +  3));
-    store8(_aes_state + 11, load8(_aes_tmp +  7));
-    store8(_aes_state + 15, load8(_aes_tmp + 11));
+    store8(state +  3, load8(&tmp + 15));
+    store8(state +  7, load8(&tmp +  3));
+    store8(state + 11, load8(&tmp +  7));
+    store8(state + 15, load8(&tmp + 11));
     return 0;
 }
 
-fn _aes_mix_columns(): i64 {
+fn _aes_mix_columns(state): i64 {
     # MixColumns transforms each column independently.
     # s'[0,c] = 2·s[0,c] ^ 3·s[1,c] ^ s[2,c] ^ s[3,c]
     # s'[1,c] = s[0,c] ^ 2·s[1,c] ^ 3·s[2,c] ^ s[3,c]
@@ -260,10 +252,10 @@ fn _aes_mix_columns(): i64 {
     # Where 2·x = xtime(x), 3·x = xtime(x) ^ x.
     var c = 0;
     while (c < 4) {
-        var a0 = load8(_aes_state + c * 4 + 0) & 0xFF;
-        var a1 = load8(_aes_state + c * 4 + 1) & 0xFF;
-        var a2 = load8(_aes_state + c * 4 + 2) & 0xFF;
-        var a3 = load8(_aes_state + c * 4 + 3) & 0xFF;
+        var a0 = load8(state + c * 4 + 0) & 0xFF;
+        var a1 = load8(state + c * 4 + 1) & 0xFF;
+        var a2 = load8(state + c * 4 + 2) & 0xFF;
+        var a3 = load8(state + c * 4 + 3) & 0xFF;
 
         var x0 = _aes_xtime(a0);
         var x1 = _aes_xtime(a1);
@@ -275,10 +267,10 @@ fn _aes_mix_columns(): i64 {
         var n2 = (a0 ^ a1 ^ x2 ^ (x3 ^ a3)) & 0xFF;
         var n3 = ((x0 ^ a0) ^ a1 ^ a2 ^ x3) & 0xFF;
 
-        store8(_aes_state + c * 4 + 0, n0);
-        store8(_aes_state + c * 4 + 1, n1);
-        store8(_aes_state + c * 4 + 2, n2);
-        store8(_aes_state + c * 4 + 3, n3);
+        store8(state + c * 4 + 0, n0);
+        store8(state + c * 4 + 1, n1);
+        store8(state + c * 4 + 2, n2);
+        store8(state + c * 4 + 3, n3);
         c = c + 1;
     }
     return 0;
@@ -303,28 +295,28 @@ fn aes256_encrypt_block(round_keys, in_block, out_block): i64 {
     }
 
     # Software path (FIPS 197 §5.1).
-    _aes_state_init();
-    memcpy(_aes_state, in_block, 16);
+    var state[16];
+    memcpy(&state, in_block, 16);
 
     # Initial round key
-    _aes_add_round_key(round_keys, 0);
+    _aes_add_round_key(&state, round_keys, 0);
 
     # 13 middle rounds
     var r = 1;
     while (r < 14) {
-        _aes_sub_bytes();
-        _aes_shift_rows();
-        _aes_mix_columns();
-        _aes_add_round_key(round_keys, r);
+        _aes_sub_bytes(&state);
+        _aes_shift_rows(&state);
+        _aes_mix_columns(&state);
+        _aes_add_round_key(&state, round_keys, r);
         r = r + 1;
     }
 
     # Final round (no MixColumns)
-    _aes_sub_bytes();
-    _aes_shift_rows();
-    _aes_add_round_key(round_keys, 14);
+    _aes_sub_bytes(&state);
+    _aes_shift_rows(&state);
+    _aes_add_round_key(&state, round_keys, 14);
 
-    memcpy(out_block, _aes_state, 16);
+    memcpy(out_block, &state, 16);
     return 0;
 }
 

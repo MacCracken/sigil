@@ -96,22 +96,22 @@ fn _sha_ni_cpuid_probe(out): i64 {
 }
 
 # ================================================================
-# Module-global scratch buffers (lazy init on first transform).
+# Read-only shared globals (lazy init on first transform).
 #
-#   _sha_ni_buf — 80 bytes:
-#                   +0..31  packed state in/out (8 dwords)
-#                   +32..47 ABEF_save (kernel xmm9 spilled to mem)
-#                   +48..63 CDGH_save (kernel xmm10 spilled to mem)
-#                   +64..79 PSHUFFLE_BYTE_FLIP_MASK
-#   _sha_ni_K   — 256 bytes: 64 packed dwords of the K constants
+#   _sha_ni_K          — 256 bytes: 64 packed dwords of the K constants
+#   _sha_ni_bswap_src  — 16 bytes:  PSHUFFLE_BYTE_FLIP_MASK template
+#                                   (memcpy'd into per-call buf+64)
 #
-# Bswap mask is embedded in _sha_ni_buf rather than a separate
-# allocation so `_sha_ni_compress_one` has only 3 parameters
-# (`ctx`, `buf`, `kbuf`). cc5 spills 3 params reliably to
-# [rbp-8], [rbp-16], [rbp-24] (proven by `aes_ni.cyr` since
-# 2.9.1); cc5.5.30 may spill a 4th param differently from cc5.6.x,
-# so we stay at 3 to keep the build portable across the toolchain
-# versions sigil's CI matrix uses.
+# 3.3: the pre-3.3 design used a single module-global 80-byte
+# `_sha_ni_buf` that held the packed-state in/out + ABEF/CDGH
+# saves + bswap mask. That made the SHA-NI compress non-
+# reentrant — concurrent batch-verify workers (3.3 dropped the
+# serialising mutex) stomped each other's state every block.
+#
+# Splitting the bswap mask (read-only) out of the working area
+# lets the working area become a per-call stack buffer.
+# `_sha_ni_compress_one` keeps its 3-parameter signature (the
+# safe cc5/cc6 prologue-spill shape).
 #
 # alloc() is 8-byte aligned but PSHUFB / PADDD with an m128
 # operand both require the memory address to be 16-aligned or
@@ -119,8 +119,8 @@ fn _sha_ni_cpuid_probe(out): i64 {
 # aligned via `_sha_ni_align16`.
 # ================================================================
 
-var _sha_ni_buf = 0;
 var _sha_ni_K = 0;
+var _sha_ni_bswap_src = 0;
 
 # _sha_ni_pack_k_word — write K[i] as 4 little-endian bytes at dst+0..3.
 fn _sha_ni_pack_k_word(dst, k): i64 {
@@ -143,22 +143,23 @@ fn _sha_ni_align16(addr): i64 {
 }
 
 fn _sha_ni_init(): i64 {
-    if (_sha_ni_buf != 0) { return 0; }
+    if (_sha_ni_K != 0) { return 0; }
 
-    _sha_ni_buf = _sha_ni_align16(alloc(80 + 16));
-    _sha_ni_K   = _sha_ni_align16(alloc(256 + 16));
+    _sha_ni_bswap_src = _sha_ni_align16(alloc(16 + 16));
+    _sha_ni_K         = _sha_ni_align16(alloc(256 + 16));
 
-    # PSHUFFLE_BYTE_FLIP_MASK at buf+64..79 — reverses bytes within
-    # each 32-bit dword. Matches the kernel constant
-    # 0x0c0d0e0f08090a0b0405060700010203.
-    store8(_sha_ni_buf + 64, 0x03); store8(_sha_ni_buf + 65, 0x02);
-    store8(_sha_ni_buf + 66, 0x01); store8(_sha_ni_buf + 67, 0x00);
-    store8(_sha_ni_buf + 68, 0x07); store8(_sha_ni_buf + 69, 0x06);
-    store8(_sha_ni_buf + 70, 0x05); store8(_sha_ni_buf + 71, 0x04);
-    store8(_sha_ni_buf + 72, 0x0B); store8(_sha_ni_buf + 73, 0x0A);
-    store8(_sha_ni_buf + 74, 0x09); store8(_sha_ni_buf + 75, 0x08);
-    store8(_sha_ni_buf + 76, 0x0F); store8(_sha_ni_buf + 77, 0x0E);
-    store8(_sha_ni_buf + 78, 0x0D); store8(_sha_ni_buf + 79, 0x0C);
+    # PSHUFFLE_BYTE_FLIP_MASK — reverses bytes within each 32-bit
+    # dword. Matches the kernel constant
+    # 0x0c0d0e0f08090a0b0405060700010203. Read-only after init;
+    # memcpy'd into per-call bufs at the top of each transform.
+    store8(_sha_ni_bswap_src + 0,  0x03); store8(_sha_ni_bswap_src + 1,  0x02);
+    store8(_sha_ni_bswap_src + 2,  0x01); store8(_sha_ni_bswap_src + 3,  0x00);
+    store8(_sha_ni_bswap_src + 4,  0x07); store8(_sha_ni_bswap_src + 5,  0x06);
+    store8(_sha_ni_bswap_src + 6,  0x05); store8(_sha_ni_bswap_src + 7,  0x04);
+    store8(_sha_ni_bswap_src + 8,  0x0B); store8(_sha_ni_bswap_src + 9,  0x0A);
+    store8(_sha_ni_bswap_src + 10, 0x09); store8(_sha_ni_bswap_src + 11, 0x08);
+    store8(_sha_ni_bswap_src + 12, 0x0F); store8(_sha_ni_bswap_src + 13, 0x0E);
+    store8(_sha_ni_bswap_src + 14, 0x0D); store8(_sha_ni_bswap_src + 15, 0x0C);
 
     # K constants from FIPS 180-4 §4.2.2 — packed 64×4-byte LE dwords.
     # Embedded directly rather than read from sha256.cyr's _sha256_K
@@ -515,8 +516,14 @@ fn _sha_ni_compress_one(ctx, buf, kbuf): i64 {
 # to the FIPS 180-4 software path on hosts where the CPUID probe
 # returns 0; this entry point is only invoked when SHA-NI is live.
 fn sha256_transform_ni(ctx): i64 {
-    if (_sha_ni_buf == 0) { _sha_ni_init(); }
-    _sha_ni_compress_one(ctx, _sha_ni_buf, _sha_ni_K);
+    if (_sha_ni_K == 0) { _sha_ni_init(); }
+    # Per-call working area. 80 bytes needed; over-allocate by 16
+    # so we can align the base to a 16-byte boundary (PSHUFB / PADDD
+    # m128 reads of buf+0/+16/+64 require alignment).
+    var raw[96];
+    var buf = _sha_ni_align16(&raw);
+    memcpy(buf + 64, _sha_ni_bswap_src, 16);
+    _sha_ni_compress_one(ctx, buf, _sha_ni_K);
     return 0;
 }
 
@@ -541,7 +548,7 @@ fn sha256_transform_ni(ctx): i64 {
 # low 32 bits hold the dword), block buf at +64..+127, buf_len at
 # +128, total_len at +136.
 fn _sha_ni_self_test(): i64 {
-    if (_sha_ni_buf == 0) { _sha_ni_init(); }
+    if (_sha_ni_K == 0) { _sha_ni_init(); }
 
     # Zero ctx slots.
     var i = 0;
@@ -568,7 +575,10 @@ fn _sha_ni_self_test(): i64 {
     store8(&_sha_ni_st_ctx + 67, 0x80);
     store8(&_sha_ni_st_ctx + 127, 0x18);
 
-    _sha_ni_compress_one(&_sha_ni_st_ctx, _sha_ni_buf, _sha_ni_K);
+    var raw[96];
+    var buf = _sha_ni_align16(&raw);
+    memcpy(buf + 64, _sha_ni_bswap_src, 16);
+    _sha_ni_compress_one(&_sha_ni_st_ctx, buf, _sha_ni_K);
 
     # Compare h0..h7 to FIPS 180-4 §B.1 expected digest. The high 32
     # bits of each 64-bit slot are guaranteed zero by the asm's

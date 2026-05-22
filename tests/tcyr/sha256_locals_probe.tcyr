@@ -1,0 +1,252 @@
+# sha256_locals_probe.tcyr — empirical check: under cycc 6.0.1,
+# do locals in the SHA-256 round loop / message-schedule loop
+# survive across the helper-fn calls (sha256_ssig*, sha256_bsig*,
+# sha256_ch, sha256_maj)?
+#
+# Background: src/sha256.cyr lifts the round state (a..h, t1, t2,
+# i, W) into module globals because cycc 3 clobbered these locals
+# across deeply nested calls (CLAUDE.md quirk #1). That motivated
+# the parallel-batch mutex in 3.2.0 — concurrent workers race on
+# the shared globals. Roadmap 3.3 hypothesises cycc 6 may have
+# fixed the codegen; this probe answers yes/no with no refactor
+# yet.
+#
+# If this test passes: locals survive → 3.3 refactor is just
+# "delete globals + restore locals", small.
+# If this test fails: locals still clobber → caller-provided
+# scratch needed (~3 modules × wider call-site audit), bigger.
+
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fmt.cyr"
+include "lib/json.cyr"
+include "lib/sakshi.cyr"
+include "lib/chrono.cyr"
+
+include "src/types.cyr"
+include "src/error.cyr"
+include "src/sha256.cyr"
+include "src/hex.cyr"
+
+# ============================================================
+# Locals-only SHA-256 transform — mirror of sha256_transform
+# in src/sha256.cyr line 192, but with all working state moved
+# from module globals back to function locals (a..h, t1, t2,
+# i, W). NO call into sha256_transform_ni — software path only,
+# so this isolates the local-clobbering question.
+# ============================================================
+
+fn sha256_transform_local(ctx): i64 {
+    var W[512];           # 64 i64 slots × 8 bytes
+    var i = 0;
+
+    # Prepare message schedule W[0..15] from block (big-endian).
+    # The local `i` must survive 4× load8() calls per iteration.
+    while (i < 16) {
+        var off = i * 4;
+        var w = ((load8(ctx + 64 + off) & 0xFF) << 24)
+        | ((load8(ctx + 64 + off + 1) & 0xFF) << 16)
+        | ((load8(ctx + 64 + off + 2) & 0xFF) << 8)
+        | (load8(ctx + 64 + off + 3) & 0xFF);
+        store64(&W + i * 8, w & MASK32);
+        i = i + 1;
+    }
+
+    # Extend W[16..63]. Critical clobber-risk: i must survive
+    # sha256_ssig0() and sha256_ssig1() calls.
+    i = 16;
+    while (i < 64) {
+        var w16 = load64(&W + (i - 16) * 8);
+        var w15 = load64(&W + (i - 15) * 8);
+        var w7 = load64(&W + (i - 7) * 8);
+        var w2 = load64(&W + (i - 2) * 8);
+        var s0 = sha256_ssig0(w15);
+        var s1 = sha256_ssig1(w2);
+        store64(&W + i * 8, (w16 + s0 + w7 + s1) & MASK32);
+        i = i + 1;
+    }
+
+    # Initialize working variables.
+    var a = load64(ctx);
+    var b = load64(ctx + 8);
+    var c = load64(ctx + 16);
+    var d = load64(ctx + 24);
+    var e = load64(ctx + 32);
+    var f = load64(ctx + 40);
+    var g = load64(ctx + 48);
+    var hv = load64(ctx + 56);
+
+    # 64 rounds — the load-bearing test. Each iteration calls
+    # 4 helpers (bsig0, bsig1, ch, maj). a..hv, t1, t2, i must
+    # all survive every call.
+    i = 0;
+    while (i < 64) {
+        var t1 = hv;
+        t1 = (t1 + sha256_bsig1(e)) & MASK32;
+        t1 = (t1 + sha256_ch(e, f, g)) & MASK32;
+        t1 = (t1 + load64(_sha256_K + i * 8)) & MASK32;
+        t1 = (t1 + load64(&W + i * 8)) & MASK32;
+
+        var t2 = sha256_bsig0(a);
+        t2 = (t2 + sha256_maj(a, b, c)) & MASK32;
+
+        hv = g;
+        g = f;
+        f = e;
+        e = (d + t1) & MASK32;
+        d = c;
+        c = b;
+        b = a;
+        a = (t1 + t2) & MASK32;
+        i = i + 1;
+    }
+
+    # Add compressed chunk to current hash value.
+    store64(ctx, (load64(ctx) + a) & MASK32);
+    store64(ctx + 8, (load64(ctx + 8) + b) & MASK32);
+    store64(ctx + 16, (load64(ctx + 16) + c) & MASK32);
+    store64(ctx + 24, (load64(ctx + 24) + d) & MASK32);
+    store64(ctx + 32, (load64(ctx + 32) + e) & MASK32);
+    store64(ctx + 40, (load64(ctx + 40) + f) & MASK32);
+    store64(ctx + 48, (load64(ctx + 48) + g) & MASK32);
+    store64(ctx + 56, (load64(ctx + 56) + hv) & MASK32);
+    return 0;
+}
+
+# Locals-using one-shot wrapper. Inlines init / update / finalize
+# so the only thing that varies from sha256() is which transform
+# fn is called.
+fn sha256_local(data, len, out): i64 {
+    sha256_global_init();   # set up _sha256_K
+    var ctx = fl_alloc(144);
+
+    # init
+    store64(ctx, 0x6a09e667);
+    store64(ctx + 8, 0xbb67ae85);
+    store64(ctx + 16, 0x3c6ef372);
+    store64(ctx + 24, 0xa54ff53a);
+    store64(ctx + 32, 0x510e527f);
+    store64(ctx + 40, 0x9b05688c);
+    store64(ctx + 48, 0x1f83d9ab);
+    store64(ctx + 56, 0x5be0cd19);
+    memset(ctx + 64, 0, 64);
+    store64(ctx + 128, 0);
+    store64(ctx + 136, len);
+
+    # update: process full 64-byte blocks directly, then buffer the tail
+    var pos = 0;
+    while (pos + 64 <= len) {
+        memcpy(ctx + 64, data + pos, 64);
+        sha256_transform_local(ctx);
+        pos = pos + 64;
+    }
+    var remaining = len - pos;
+    if (remaining > 0) {
+        memcpy(ctx + 64, data + pos, remaining);
+    }
+    store64(ctx + 128, remaining);
+
+    # finalize
+    var buf_len = remaining;
+    var total_bits = len * 8;
+    store8(ctx + 64 + buf_len, 0x80);
+    buf_len = buf_len + 1;
+    if (buf_len > 56) {
+        memset(ctx + 64 + buf_len, 0, 64 - buf_len);
+        sha256_transform_local(ctx);
+        buf_len = 0;
+    }
+    memset(ctx + 64 + buf_len, 0, 56 - buf_len);
+    store8(ctx + 64 + 56, (total_bits >> 56) & 0xFF);
+    store8(ctx + 64 + 57, (total_bits >> 48) & 0xFF);
+    store8(ctx + 64 + 58, (total_bits >> 40) & 0xFF);
+    store8(ctx + 64 + 59, (total_bits >> 32) & 0xFF);
+    store8(ctx + 64 + 60, (total_bits >> 24) & 0xFF);
+    store8(ctx + 64 + 61, (total_bits >> 16) & 0xFF);
+    store8(ctx + 64 + 62, (total_bits >> 8) & 0xFF);
+    store8(ctx + 64 + 63, total_bits & 0xFF);
+    sha256_transform_local(ctx);
+
+    var di = 0;
+    while (di < 8) {
+        var word = load64(ctx + di * 8);
+        store8(out + di * 4, (word >> 24) & 0xFF);
+        store8(out + di * 4 + 1, (word >> 16) & 0xFF);
+        store8(out + di * 4 + 2, (word >> 8) & 0xFF);
+        store8(out + di * 4 + 3, word & 0xFF);
+        di = di + 1;
+    }
+    fl_free(ctx);
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+
+    # ============================================================
+    # FIPS 180-2 published test vectors — single-block cases
+    # ============================================================
+    test_group("locals: SHA-256 empty");
+    var d1[32];
+    sha256_local("", 0, &d1);
+    assert_streq(hex_encode(&d1, 32),
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "sha256_local empty");
+
+    test_group("locals: SHA-256 abc");
+    var d2[32];
+    sha256_local("abc", 3, &d2);
+    assert_streq(hex_encode(&d2, 32),
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        "sha256_local abc");
+
+    # 56-byte FIPS vector — finalize triggers TWO transforms
+    # (padding overflows the 64-byte buffer). Exercises
+    # locals-survival across nested transform calls.
+    test_group("locals: SHA-256 56-byte (2-transform finalize)");
+    var d3[32];
+    sha256_local("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq", 56, &d3);
+    assert_streq(hex_encode(&d3, 32),
+        "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1",
+        "sha256_local 56-byte");
+
+    # ============================================================
+    # Multi-block — cross-check against the existing global-based
+    # sha256() to verify locals path holds across many transforms
+    # ============================================================
+    test_group("locals: SHA-256 multi-block 256B vs global path");
+    var input[256];
+    var fi = 0;
+    while (fi < 256) {
+        store8(&input + fi, (fi * 17 + 3) & 0xFF);
+        fi = fi + 1;
+    }
+    var ref256[32];
+    var loc256[32];
+    sha256(&input, 256, &ref256);
+    sha256_local(&input, 256, &loc256);
+    assert_streq(hex_encode(&loc256, 32), hex_encode(&ref256, 32),
+        "sha256_local 256B matches sha256 reference");
+
+    test_group("locals: SHA-256 multi-block 1024B vs global path");
+    var input2[1024];
+    var fj = 0;
+    while (fj < 1024) {
+        store8(&input2 + fj, (fj * 31 + 7) & 0xFF);
+        fj = fj + 1;
+    }
+    var ref1k[32];
+    var loc1k[32];
+    sha256(&input2, 1024, &ref1k);
+    sha256_local(&input2, 1024, &loc1k);
+    assert_streq(hex_encode(&loc1k, 32), hex_encode(&ref1k, 32),
+        "sha256_local 1024B matches sha256 reference");
+
+    return assert_summary();
+}

@@ -1,0 +1,66 @@
+# var_array_semantics.tcyr — confirm that `var x[N]` inside a
+# function is a static (function-scope global) in cyrius, NOT a
+# stack-local. This determines whether the 3.3 sha256/sha512/
+# ed25519/etc. "locals" refactor was correct or whether all those
+# var X[N] declarations are still actually shared globals.
+#
+# Test: a function probes its own var buf[16] after WRITING bytes
+# to it. If on subsequent calls the previous bytes are still
+# there before re-writing, the array persists across calls (=
+# static / global, NOT stack-local).
+
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fmt.cyr"
+include "lib/json.cyr"
+include "lib/sakshi.cyr"
+include "lib/chrono.cyr"
+
+# Read the FIRST byte of buf BEFORE writing, then overwrite all 16
+# bytes to `marker`. Returns the byte we observed before writing.
+fn probe(marker): i64 {
+    var buf[16];
+    var before = load8(&buf) & 0xFF;
+    var i = 0;
+    while (i < 16) {
+        store8(&buf + i, marker);
+        i = i + 1;
+    }
+    return before;
+}
+
+fn main() {
+    alloc_init();
+
+    # First call: buf might be 0-init or garbage. Write 0xAA.
+    var b1 = probe(0xAA);
+
+    # Second call: if buf is static (function-scope global), it
+    # still holds 0xAA from the previous call.
+    var b2 = probe(0xBB);
+
+    # Third call: if static, we now see 0xBB.
+    var b3 = probe(0xCC);
+
+    syscall(1, 1, "First call observed:  ", 22);
+    fmt_int(b1); syscall(1, 1, "\n", 1);
+    syscall(1, 1, "Second call observed: ", 22);
+    fmt_int(b2); syscall(1, 1, "\n", 1);
+    syscall(1, 1, "Third call observed:  ", 22);
+    fmt_int(b3); syscall(1, 1, "\n", 1);
+
+    if (b2 == 0xAA) {
+        if (b3 == 0xBB) {
+            syscall(1, 1, "VERDICT: var X[N] inside a function is STATIC (persists across calls)\n", 70);
+            return 0;
+        }
+    }
+    syscall(1, 1, "VERDICT: var X[N] inside a function appears to be per-call\n", 60);
+    return 1;
+}
