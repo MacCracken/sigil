@@ -5,6 +5,92 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.2.1] — 2026-05-21
+
+First bite of the 3.2.x TEE attestation arc
+([`docs/development/3.2-tee-arc.md`](docs/development/3.2-tee-arc.md)):
+**ECDSA verify on NIST P-256**. The foundation primitive for the
+SGX (3.2.3), SEV-SNP (3.2.4), and TDX (3.2.5) quote verifiers
+that follow.
+
+### Added
+
+- **`src/ecdsa_p256.cyr` — ECDSA P-256 verify
+  (`ecdsa_p256_verify(pk, msg, msg_len, sig)`).** ~680 lines
+  implementing the full SEC 1 v2.0 §4.1.4 / FIPS 186-5 §6.4.2
+  verify pipeline:
+  - P-256 field arithmetic mod
+    `p = 2^256 − 2^224 + 2^192 + 2^96 − 1` (`fp_p256_add`,
+    `fp_p256_sub`, `fp_p256_neg`, `fp_p256_mul`, `fp_p256_sq`,
+    `fp_p256_inv`).
+  - Scalar arithmetic mod the group order `n` (`fn_p256_mul`,
+    `fn_p256_inv`).
+  - Jacobian point operations on `y² = x³ − 3x + b`
+    (`pt_double`, `pt_add`, `pt_from_affine`, `pt_to_affine`)
+    using the EFD `dbl-2001-b` and `add-2007-bl` formulas
+    (4M+4S double, 12M+4S add).
+  - Constant-time scalar multiplication via Montgomery ladder
+    (`pt_scalarmul`) with `pt_cswap` for branchless point
+    swap. Ladder lives even though verify takes only public
+    inputs — defense in depth for any future sign / DH caller
+    composing against the same primitive.
+  - Field reduction via textbook long-division (256 iterations
+    of shl1 + conditional subtract). Slow but easy to audit;
+    Solinas word-level reduction queued as a bench-tuning
+    follow-up (see `docs/audit/2026-05-21-audit.md` INFO-2).
+- **`ecdsa_p256_verify_der(pk, msg, msg_len, sig_der, sig_der_len)`
+  — DER-wrapped signature decoder.** Strict-enough X.509 /
+  RFC 5480 shape: outer `SEQUENCE`, two `INTEGER`s, short-form
+  length only, optional 33-byte leading-`0x00` sign byte
+  tolerated. Every offset/length is bounds-checked against
+  `sig_der_len` before dereference.
+- **Big-endian byte ⇄ u256 codec (`u256_load_be` / `u256_store_be`).**
+  SEC 1 §2.3.5 encodes integers MSB-first; ed25519's
+  little-endian helpers were not reusable.
+- **`tests/tcyr/ecdsa_p256.tcyr`** — 49 assertions across 9
+  groups: BE codec roundtrip, `p256_reduce` corner cases,
+  field arithmetic, the curve-equation self-check
+  (`gy² ≡ gx³ − 3gx + b`), point arithmetic vs. published 2G
+  vector, ECDSA verify against both RFC 6979 §A.2.5 vectors
+  (`sample` / `test` messages), six negative-case rejections
+  (modified msg, flipped r/s bits, r=0, s=0, r=n, s=n), and
+  the DER wrapper.
+- **`tests/bcyr/ecdsa_p256.bcyr`** — verify bench (single row
+  `ecdsa_p256_verify`).
+
+### Perf
+
+- `ecdsa_p256_verify` measured at **136.283 ms** on the dev host
+  (RFC 6979 sample-msg, 15 iters, cyrius 6.0.1). Recorded in
+  `benches/history.csv` as `v3.2.1,ecdsa_p256_verify`. Slower
+  than `ed25519_verify` (~6.4 ms) — the gap is the bit-by-bit
+  field reduction. Solinas word-level reduction is the obvious
+  follow-up; tracked in `docs/development/roadmap.md` "Backlog
+  — unscheduled" until a downstream surfaces a forcing
+  function.
+
+### Security
+
+- Security audit: `docs/audit/2026-05-21-audit.md`. Zero
+  CRITICAL / HIGH / MEDIUM findings on the new surface. Two
+  LOW findings tracked:
+  - **LOW-1** — Q-on-curve check deferred to the TEE bites
+    that consume external-channel public keys (3.2.3–3.2.5).
+  - **LOW-2** — DER decoder tolerates non-strict 33-byte int
+    encodings; defense-in-depth, no exploitable consequence
+    in sigil's API surface.
+- Constant-time discipline maintained for the scalar-mul
+  primitive even though verify inputs are public — preserves
+  the "no timing side-channels on any future secret-data
+  caller" invariant.
+
+### Module wiring
+
+- `src/lib.cyr` includes `src/ecdsa_p256.cyr` after
+  `src/ed25519.cyr`.
+- `cyrius.cyml [lib].modules` lists the new module so
+  `cyrius distlib` bundles it into `dist/sigil.cyr`.
+
 ## [3.2.0] — 2026-05-21
 
 The 3.2.0 batch tracker lives in

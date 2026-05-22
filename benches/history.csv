@@ -127,3 +127,4 @@ timestamp,label,benchmark,estimate,unit
 2026-05-21T00:00:00Z,v3.2.0-allocfree,sv_verify_batch_4,28.669,ms
 2026-05-21T00:00:00Z,v3.2.0-allocfree,sv_verify_batch_16,106.892,ms
 2026-05-21T00:00:00Z,v3.2.0-allocfree,sv_verify_batch_64,422.867,ms
+2026-05-21T00:00:00Z,v3.2.1,ecdsa_p256_verify,136.283,ms

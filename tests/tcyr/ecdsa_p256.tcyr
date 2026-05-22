@@ -1,0 +1,392 @@
+# ecdsa_p256.tcyr — ECDSA P-256 verify, with field-arithmetic groundwork tests.
+#
+# Sigil 3.2.1 — first bite of the TEE attestation arc.
+#
+# Test groups (built up bottom-to-top, so a failure in field
+# arithmetic surfaces before any signature-verify failure):
+#   1. big-endian byte ⇄ u256 codec
+#   2. p256_reduce — 512-bit → 256-bit mod p256
+#   3. fp_p256_add / sub / neg / mul / sq
+#   4. (later bites) Jacobian point ops, scalar mul, verify
+
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/string.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fmt.cyr"
+include "lib/json.cyr"
+include "lib/sakshi.cyr"
+include "lib/chrono.cyr"
+include "lib/bigint.cyr"
+include "lib/ct.cyr"
+
+include "src/types.cyr"
+include "src/error.cyr"
+include "src/sha256.cyr"
+include "src/hex.cyr"
+include "src/sha512.cyr"
+include "src/bigint_ext.cyr"
+include "src/ed25519.cyr"
+include "src/ecdsa_p256.cyr"
+
+fn main() {
+    alloc_init();
+    _p256_init();
+
+    # ============================================================
+    # Group 1 — big-endian byte codec roundtrip
+    # ============================================================
+    test_group("u256 big-endian load/store roundtrip");
+
+    # Known value: hex represents a 32-byte big-endian integer.
+    # After load_be → store_be the bytes should match exactly.
+    var be_bytes = hex_decode("6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296", 64);
+    var dst_limbs = alloc(32);
+    u256_load_be(dst_limbs, be_bytes);
+
+    # The loaded value should compare equal to _p256_gx (initialised via
+    # u256_from_hex which is big-endian by convention).
+    assert_eq(u256_eq(dst_limbs, _p256_gx), 1, "load_be(gx_bytes) == gx");
+
+    var roundtrip = alloc(32);
+    u256_store_be(roundtrip, dst_limbs);
+    var roundtrip_hex = hex_encode(roundtrip, 32);
+    assert_streq(roundtrip_hex,
+        "6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296",
+        "store_be(load_be(gx)) == gx");
+
+    # ============================================================
+    # Group 2 — p256_reduce
+    # ============================================================
+    test_group("p256_reduce");
+
+    # 2a: any value < p reduces to itself.
+    # Pad a 256-bit value into the low half of a 512-bit buffer.
+    var val512 = alloc(64);
+    memset(val512, 0, 64);
+    # Place the value 7 in the low limb.
+    store64(val512, 7);
+    var reduced = alloc(32);
+    p256_reduce(reduced, val512);
+    assert_eq(load64(reduced), 7,           "reduce(7) low limb");
+    assert_eq(load64(reduced + 8), 0,       "reduce(7) limb 1");
+    assert_eq(load64(reduced + 16), 0,      "reduce(7) limb 2");
+    assert_eq(load64(reduced + 24), 0,      "reduce(7) limb 3");
+
+    # 2b: p itself reduces to 0.
+    memset(val512, 0, 64);
+    store64(val512 + 0,  load64(_p256_p));
+    store64(val512 + 8,  load64(_p256_p + 8));
+    store64(val512 + 16, load64(_p256_p + 16));
+    store64(val512 + 24, load64(_p256_p + 24));
+    p256_reduce(reduced, val512);
+    assert_eq(u256_is_zero(reduced), 1, "reduce(p) == 0");
+
+    # 2c: p + 1 reduces to 1. Build p+1 properly (limb[0] of p is 0xFF..FF
+    # so a naive `limb[0] + 1` drops the carry into limb[1] — use u256_add).
+    memset(val512, 0, 64);
+    var p_plus_one = u256_clone(_p256_p);
+    u256_add(p_plus_one, p_plus_one, _p256_one);
+    store64(val512 + 0,  load64(p_plus_one));
+    store64(val512 + 8,  load64(p_plus_one + 8));
+    store64(val512 + 16, load64(p_plus_one + 16));
+    store64(val512 + 24, load64(p_plus_one + 24));
+    p256_reduce(reduced, val512);
+    assert_eq(load64(reduced), 1,     "reduce(p+1) low limb == 1");
+    assert_eq(load64(reduced + 8), 0, "reduce(p+1) limb 1");
+    assert_eq(load64(reduced + 16), 0, "reduce(p+1) limb 2");
+    assert_eq(load64(reduced + 24), 0, "reduce(p+1) limb 3");
+
+    # 2d: 2^256 ≡ 2^224 - 2^192 - 2^96 + 1  (mod p256)
+    # i.e. the high half = 1, low half = 0. Expected reduction:
+    #    (2^256 - p) = (2^224 - 2^192 - 2^96 + 1)
+    # Big-endian hex (64 chars):
+    #   limb[3] = 00000000fffffffe   high half of result
+    #   limb[2] = ffffffffffffffff
+    #   limb[1] = ffffffff00000000
+    #   limb[0] = 0000000000000001   low half
+    memset(val512, 0, 64);
+    store64(val512 + 32, 1);
+    p256_reduce(reduced, val512);
+    var expected_2_256_modp = u256_from_hex(
+        "00000000fffffffeffffffffffffffffffffffff000000000000000000000001");
+    assert_eq(u256_eq(reduced, expected_2_256_modp), 1, "reduce(2^256) == 2^256 - p");
+
+    # ============================================================
+    # Group 3 — field arithmetic
+    # ============================================================
+    test_group("fp_p256_add / sub / neg");
+
+    # 3a: 0 + 0 = 0
+    var a = u256_zero();
+    var b = u256_zero();
+    var r = u256_zero();
+    fp_p256_add(r, a, b);
+    assert_eq(u256_is_zero(r), 1, "0 + 0 == 0");
+
+    # 3b: 1 + 1 = 2
+    store64(a, 1);
+    store64(b, 1);
+    fp_p256_add(r, a, b);
+    assert_eq(load64(r), 2,        "1 + 1 == 2 (low limb)");
+    assert_eq(load64(r + 8), 0,    "1 + 1 == 2 (limb 1)");
+
+    # 3c: (p-1) + 1 = 0 mod p
+    u256_copy(a, _p256_p);
+    u256_sub(a, a, _p256_one);
+    store64(b, 1);
+    store64(b + 8, 0);
+    store64(b + 16, 0);
+    store64(b + 24, 0);
+    fp_p256_add(r, a, b);
+    assert_eq(u256_is_zero(r), 1, "(p-1) + 1 == 0 (mod p)");
+
+    # 3d: 0 - 1 = p - 1
+    store64(a, 0); store64(a + 8, 0); store64(a + 16, 0); store64(a + 24, 0);
+    store64(b, 1); store64(b + 8, 0); store64(b + 16, 0); store64(b + 24, 0);
+    fp_p256_sub(r, a, b);
+    var pm1 = u256_clone(_p256_p);
+    u256_sub(pm1, pm1, _p256_one);
+    assert_eq(u256_eq(r, pm1), 1, "0 - 1 == p - 1 (mod p)");
+
+    # 3e: -0 = 0
+    fp_p256_neg(r, a);
+    assert_eq(u256_is_zero(r), 1, "-0 == 0");
+
+    # 3f: -1 = p - 1
+    store64(a, 1); store64(a + 8, 0); store64(a + 16, 0); store64(a + 24, 0);
+    fp_p256_neg(r, a);
+    assert_eq(u256_eq(r, pm1), 1, "-1 == p - 1");
+
+    test_group("fp_p256_mul / sq");
+
+    # 3g: 1 * x = x for x = gx
+    store64(a, 1); store64(a + 8, 0); store64(a + 16, 0); store64(a + 24, 0);
+    fp_p256_mul(r, a, _p256_gx);
+    assert_eq(u256_eq(r, _p256_gx), 1, "1 * gx == gx");
+
+    # 3h: gx * 1 = gx
+    fp_p256_mul(r, _p256_gx, a);
+    assert_eq(u256_eq(r, _p256_gx), 1, "gx * 1 == gx");
+
+    # 3i: 0 * gx = 0
+    store64(a, 0);
+    fp_p256_mul(r, a, _p256_gx);
+    assert_eq(u256_is_zero(r), 1, "0 * gx == 0");
+
+    # 3j: gx * gx (just check non-zero, non-equal to gx — basic sanity)
+    fp_p256_sq(r, _p256_gx);
+    assert_eq(u256_is_zero(r), 0,                "gx^2 != 0");
+    assert_eq(u256_eq(r, _p256_gx), 0,           "gx^2 != gx");
+
+    # 3k: curve-equation self-check — the base point G must satisfy
+    #     gy^2 ≡ gx^3 - 3*gx + b   (mod p)
+    # This single identity exercises mul, sq, add, sub, and reduction
+    # together with constants we already trust (gx, gy, b are encoded
+    # straight from FIPS 186-4). If reduction or the field op surface
+    # is wrong anywhere, this test fails.
+    test_group("base point on the curve");
+    var lhs = u256_zero();        # gy^2
+    var rhs = u256_zero();        # gx^3 - 3*gx + b
+    var tmp = u256_zero();
+    var three_gx = u256_zero();
+    var two_gx = u256_zero();
+
+    fp_p256_sq(lhs, _p256_gy);
+
+    fp_p256_sq(tmp, _p256_gx);            # tmp = gx^2
+    fp_p256_mul(rhs, tmp, _p256_gx);      # rhs = gx^3
+
+    fp_p256_add(two_gx, _p256_gx, _p256_gx);
+    fp_p256_add(three_gx, two_gx, _p256_gx);
+
+    fp_p256_sub(rhs, rhs, three_gx);      # rhs = gx^3 - 3*gx
+    fp_p256_add(rhs, rhs, _p256_b);       # rhs = gx^3 - 3*gx + b
+
+    assert_eq(u256_eq(lhs, rhs), 1, "gy^2 == gx^3 - 3*gx + b (mod p)");
+
+    # ============================================================
+    # Group 4 — point arithmetic sanity
+    # ============================================================
+    test_group("point arithmetic");
+
+    # Build G in Jacobian and round-trip back to affine — should recover (gx, gy).
+    var G = pt_alloc();
+    pt_from_affine(G, _p256_gx, _p256_gy);
+    var ax = u256_zero();
+    var ay = u256_zero();
+    pt_to_affine(ax, ay, G);
+    assert_eq(u256_eq(ax, _p256_gx), 1, "affine(G).x == gx");
+    assert_eq(u256_eq(ay, _p256_gy), 1, "affine(G).y == gy");
+
+    # 2G — compare against a published value.
+    # From SEC 2 / NIST test vectors:
+    #   2G.x = 7CF27B188D034F7E8A52380304B51AC3C08969E277F21B35A60B48FC47669978
+    #   2G.y = 07775510DB8ED040293D9AC69F7430DBBA7DADE63CE982299E04B79D227873D1
+    var G2 = pt_alloc();
+    pt_double(G2, G);
+    pt_to_affine(ax, ay, G2);
+    # Compare via big-endian byte encoding — hex_encode reads bytes
+    # left-to-right and the u256 LE limb layout would otherwise produce
+    # a byte-reversed hex string.
+    var ax_be = alloc(32);
+    var ay_be = alloc(32);
+    u256_store_be(ax_be, ax);
+    u256_store_be(ay_be, ay);
+    assert_streq(hex_encode(ax_be, 32),
+        "7cf27b188d034f7e8a52380304b51ac3c08969e277f21b35a60b48fc47669978",
+        "(2G).x matches published P-256 vector");
+    assert_streq(hex_encode(ay_be, 32),
+        "07775510db8ed040293d9ac69f7430dbba7dade63ce982299e04b79d227873d1",
+        "(2G).y matches published P-256 vector");
+
+    # G + G via pt_add should give the same as pt_double.
+    var Gsum = pt_alloc();
+    pt_add(Gsum, G, G);
+    var bx = u256_zero(); var by = u256_zero();
+    pt_to_affine(bx, by, Gsum);
+    assert_eq(u256_eq(ax, bx), 1, "pt_add(G,G).x == pt_double(G).x");
+    assert_eq(u256_eq(ay, by), 1, "pt_add(G,G).y == pt_double(G).y");
+
+    # G + O == G (identity)
+    var O = pt_alloc();
+    pt_set_infinity(O);
+    pt_add(Gsum, G, O);
+    pt_to_affine(bx, by, Gsum);
+    assert_eq(u256_eq(bx, _p256_gx), 1, "G + O == G (x)");
+    assert_eq(u256_eq(by, _p256_gy), 1, "G + O == G (y)");
+
+    # n * G == O (group order kills the base point)
+    var nG = pt_alloc();
+    pt_scalarmul(nG, _p256_n, G);
+    assert_eq(pt_is_infinity(nG), 1, "n * G == O");
+
+    # 1 * G == G
+    var one = u256_clone(_p256_one);
+    var oneG = pt_alloc();
+    pt_scalarmul(oneG, one, G);
+    pt_to_affine(bx, by, oneG);
+    assert_eq(u256_eq(bx, _p256_gx), 1, "1 * G == G (x)");
+    assert_eq(u256_eq(by, _p256_gy), 1, "1 * G == G (y)");
+
+    # 2 * G == G + G
+    var two = u256_clone(_p256_one);
+    fp_p256_add(two, two, two);   # 2 in the scalar field — fine since 2 < n
+    var twoG = pt_alloc();
+    pt_scalarmul(twoG, two, G);
+    pt_to_affine(bx, by, twoG);
+    var bx_be = alloc(32);
+    u256_store_be(bx_be, bx);
+    assert_streq(hex_encode(bx_be, 32),
+        "7cf27b188d034f7e8a52380304b51ac3c08969e277f21b35a60b48fc47669978",
+        "2 * G via ladder matches 2G vector");
+
+    # ============================================================
+    # Group 5 — ECDSA verify (RFC 6979 Appendix A.2.5)
+    # ============================================================
+    test_group("ecdsa_p256_verify — RFC 6979 P-256/SHA-256");
+
+    # Public key:
+    #   Ux = 60FED4BA255A9D31C961EB74C6356D68C049B8923B61FA6CE669622E60F29FB6
+    #   Uy = 7903FE1008B8BC99A41AE9E95628BC64F2F1B20C2D7E9F5177A3C294D4462299
+    var pk = hex_decode("60fed4ba255a9d31c961eb74c6356d68c049b8923b61fa6ce669622e60f29fb67903fe1008b8bc99a41ae9e95628bc64f2f1b20c2d7e9f5177a3c294d4462299", 128);
+
+    # Test 5a: message = "sample"
+    #   r = EFD48B2AACB6A8FD1140DD9CD45E81D69D2C877B56AAF991C34D0EA84EAF3716
+    #   s = F7CB1C942D657C41D436C7A1B6E29F65F3E900DBB9AFF4064DC4AB2F843ACDA8
+    var sig1 = hex_decode("efd48b2aacb6a8fd1140dd9cd45e81d69d2c877b56aaf991c34d0ea84eaf3716f7cb1c942d657c41d436c7a1b6e29f65f3e900dbb9aff4064dc4ab2f843acda8", 128);
+    assert_eq(ecdsa_p256_verify(pk, "sample", 6, sig1), 1,
+        "RFC 6979 §A.2.5 sample-msg signature valid");
+
+    # Test 5b: message = "test"
+    #   r = F1ABB023518351CD71D881567B1EA663ED3EFCF6C5132B354F28D3B0B7D38367
+    #   s = 019F4113742A2B14BD25926B49C649155F267E60D3814B4C0CC84250E46F0083
+    var sig2 = hex_decode("f1abb023518351cd71d881567b1ea663ed3efcf6c5132b354f28d3b0b7d38367019f4113742a2b14bd25926b49c649155f267e60d3814b4c0cc84250e46f0083", 128);
+    assert_eq(ecdsa_p256_verify(pk, "test", 4, sig2), 1,
+        "RFC 6979 §A.2.5 test-msg signature valid");
+
+    test_group("ecdsa_p256_verify — negative cases");
+
+    # 5c: wrong message — same sig as 5a but msg = "Sample" (capital S)
+    assert_eq(ecdsa_p256_verify(pk, "Sample", 6, sig1), 0,
+        "modified message rejected");
+
+    # 5d: flipped bit in r
+    var sig_bad = alloc(64);
+    memcpy(sig_bad, sig1, 64);
+    store8(sig_bad, (load8(sig_bad) & 0xFF) ^ 0x01);
+    assert_eq(ecdsa_p256_verify(pk, "sample", 6, sig_bad), 0,
+        "flipped bit in r rejected");
+
+    # 5e: flipped bit in s
+    memcpy(sig_bad, sig1, 64);
+    store8(sig_bad + 32, (load8(sig_bad + 32) & 0xFF) ^ 0x01);
+    assert_eq(ecdsa_p256_verify(pk, "sample", 6, sig_bad), 0,
+        "flipped bit in s rejected");
+
+    # 5f: r = 0
+    memcpy(sig_bad, sig1, 64);
+    memset(sig_bad, 0, 32);
+    assert_eq(ecdsa_p256_verify(pk, "sample", 6, sig_bad), 0,
+        "r == 0 rejected");
+
+    # 5g: s = 0
+    memcpy(sig_bad, sig1, 64);
+    memset(sig_bad + 32, 0, 32);
+    assert_eq(ecdsa_p256_verify(pk, "sample", 6, sig_bad), 0,
+        "s == 0 rejected");
+
+    # 5h: r = n (out of range)
+    memcpy(sig_bad, sig1, 64);
+    u256_store_be(sig_bad, _p256_n);
+    assert_eq(ecdsa_p256_verify(pk, "sample", 6, sig_bad), 0,
+        "r == n rejected (out of range)");
+
+    # 5i: s = n
+    memcpy(sig_bad, sig1, 64);
+    u256_store_be(sig_bad + 32, _p256_n);
+    assert_eq(ecdsa_p256_verify(pk, "sample", 6, sig_bad), 0,
+        "s == n rejected (out of range)");
+
+    test_group("ecdsa_p256_verify_der — DER wrapper");
+
+    # 5j: DER-encode sig1 and verify through the wrapper.
+    # SEQUENCE { INTEGER r, INTEGER s }
+    # r starts with 0xEF (high bit set) → DER 0x00 prefix needed → 33 B int
+    # s starts with 0xF7 (high bit set) → DER 0x00 prefix needed → 33 B int
+    # SEQUENCE body = 2 + 33 + 2 + 33 = 70 bytes
+    # Whole DER = 0x30, 0x46 (=70), <body> → 72 bytes
+    var sig_der = alloc(72);
+    store8(sig_der, 0x30);
+    store8(sig_der + 1, 70);
+    store8(sig_der + 2, 0x02);
+    store8(sig_der + 3, 33);
+    store8(sig_der + 4, 0x00);
+    memcpy(sig_der + 5, sig1, 32);
+    store8(sig_der + 37, 0x02);
+    store8(sig_der + 38, 33);
+    store8(sig_der + 39, 0x00);
+    memcpy(sig_der + 40, sig1 + 32, 32);
+    assert_eq(ecdsa_p256_verify_der(pk, "sample", 6, sig_der, 72), 1,
+        "DER-encoded sig1 verifies");
+
+    # 5k: malformed DER — wrong SEQUENCE tag
+    store8(sig_der, 0x31);
+    assert_eq(ecdsa_p256_verify_der(pk, "sample", 6, sig_der, 72), 0,
+        "DER with wrong outer tag rejected");
+    store8(sig_der, 0x30);    # restore
+
+    # 5l: malformed DER — truncated
+    assert_eq(ecdsa_p256_verify_der(pk, "sample", 6, sig_der, 5), 0,
+        "truncated DER rejected");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

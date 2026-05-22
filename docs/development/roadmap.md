@@ -20,7 +20,7 @@ function). Each minor in the arc tags independently on `main`:
 
 | Tag    | Module surface                                  | Unblocks |
 |--------|-------------------------------------------------|----------|
-| 3.2.1  | ECDSA P-256 verify                              | foundation |
+| 3.2.1  | ECDSA P-256 verify ✅ (2026-05-21)              | foundation |
 | 3.2.2  | Minimal X.509 cert-chain walker                 | foundation |
 | 3.2.3  | `src/sgx.cyr` — quote parse + verify            | kavach SGX backend |
 | 3.2.4  | `src/sev_snp.cyr` — VCEK chain + report verify  | kavach SEV backend |
