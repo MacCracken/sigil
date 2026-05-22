@@ -5,6 +5,89 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.4.1] — 2026-05-22
+
+SEV-SNP attestation completion. Closes the explicit gap deferred
+from 3.4.0: the AMD VCEK leaf in a SEV-SNP cert chain holds a
+P-384 pubkey that sigil's prior x509 parser (P-256-only) could
+not extract. 3.4.1 extends x509 SPKI parsing to dispatch on the
+curve OID (prime256v1 OR secp384r1), tracks per-cert curve and
+pubkey width, and ships `snp_report_verify_full` to match the
+`*_verify_full` shape that SGX and TDX got in 3.4.0.
+
+### Added
+
+- **x509 P-384 SPKI extraction.** `src/x509.cyr` accepts
+  either `id-ecPublicKey + prime256v1` (existing, 64-byte
+  pubkey) or `id-ecPublicKey + secp384r1` (NEW, 96-byte
+  pubkey). On-curve validation dispatches to the matching
+  curve primitive (`pt_is_on_curve` for P-256,
+  `pt_p384_is_on_curve` for P-384). New `secp384r1` OID
+  constant (1.3.132.0.34 → DER `06 05 2B 81 04 00 22`). New
+  accessors `x509_cert_curve(c)` and `x509_cert_pubkey_len(c)`.
+  New constants `X509_CURVE_P256` (= 1) and `X509_CURVE_P384`
+  (= 2).
+- **`snp_report_verify_full(report, vcek_chain_pem,
+  vcek_chain_pem_len, ark_root_der, ark_root_der_len,
+  now_unix)`.** End-to-end SEV-SNP verify. Composes
+  `pem_decode_certs` → `x509_parse` (per cert + ARK root) →
+  drop self-issued top → `x509_verify_chain` anchored on
+  caller's root → curve gate (leaf must be P-384, pubkey_len
+  must be 96) → `snp_report_verify` against the 96-byte VCEK
+  pubkey. 11-assertion test surface
+  (`tests/tcyr/snp_verify_full.tcyr`) covers happy path,
+  wrong-root rejection, malformed inputs, tamper rejection,
+  and the wrong-curve-leaf guard.
+- **P-384 cert parsing tests.** New
+  `tests/tcyr/x509_p384.tcyr` (12 assertions) covers SPKI
+  extraction against a real P-384 cert, chain walk under a
+  P-256 root, and the mixed-curve guard that rejects P-384
+  issuers.
+
+### Changed
+
+- **`X509Cert` struct layout.** The pubkey slot at offset +96
+  expanded from 64 to 96 bytes. Subsequent fields shifted +32:
+  `sig_algo` +160 → +192, `sig_off` +168 → +200, `sig_len`
+  +176 → +208, `is_ca` +184 → +216, `path_len` +192 → +224.
+  New fields: `curve` at +232, `pubkey_len` at +240. The
+  reserved tail shrinks from 56 to 8 bytes. All accessors and
+  setters updated; no public-API behavior change for P-256
+  consumers.
+- **`_x509_verify_link` curve gate.** Issuer cert must have
+  `curve == X509_CURVE_P256` — chain-link signatures remain
+  ECDSA-SHA256, and `ecdsa_p256_verify` only understands
+  64-byte pubkeys. A P-384 issuer is rejected explicitly
+  (would otherwise silently consume the lower 64 bytes of the
+  96-byte pubkey slot and produce a wrong verify result). The
+  LEAF may still be P-384; this restriction applies only to
+  certs that sign a subsequent link.
+- **`tests/tcyr/sev_snp.tcyr` includes.** Added `src/x509.cyr`
+  and `src/pem.cyr` to the test's include list — required by
+  the new `snp_report_verify_full` surface in `sev_snp.cyr`.
+
+### Scope cuts (documented, not deferred)
+
+- **Chain-link signature verify remains ECDSA-SHA256 only.**
+  P-384 chain links (P-384 issuer signing a child) are
+  rejected. Real AMD VCEK chains use RSA at the ARK/ASK links
+  and ECDSA-P-384-SHA256 at the VCEK level — neither is
+  walkable by sigil's x509 today. Real-deployment consumers
+  must pre-walk ARK → ASK externally and hand sigil only the
+  ASK → VCEK fragment (or skip the chain walk entirely and
+  use `snp_report_verify` against a caller-validated VCEK
+  pubkey).
+
+### Security
+
+- Audit pass at `docs/audit/2026-05-22-3.4.1-audit.md`. Zero
+  CRITICAL / HIGH / MEDIUM findings. One NEW LOW
+  (`_snp_v_init` joins the existing six bump-alloc LOWs;
+  closure at 3.6 with the unified `_into` API). Three INFO
+  findings document the mixed-curve restriction, in-quote ARK
+  treatment, and the X509Cert struct footprint approaching
+  saturation (~248 of 256 bytes used).
+
 ## [3.4.0] — 2026-05-22
 
 TEE attestation completion. Closes the per-piece API gap from

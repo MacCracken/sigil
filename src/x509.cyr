@@ -64,6 +64,15 @@ var DER_TAG_CONTEXT_3_EXP    = 0xA3;   # [3] EXPLICIT — extensions
 # Supported signature algorithm enum stored in X509Cert.sig_algo.
 var X509_SIG_ECDSA_SHA256    = 1;
 
+# Supported curve enum stored in X509Cert.curve. The leaf cert in an
+# AMD VCEK chain holds a P-384 pubkey; chain-link signatures (root →
+# intermediates → leaf) remain ECDSA-SHA256, so the issuer of every
+# verified link MUST still be P-256. Mixed-curve chains where an
+# intermediate is P-384 are out of scope for 3.4.1 — they'd require
+# ecdsa_p384_verify dispatch inside `_x509_verify_link` (deferred).
+var X509_CURVE_P256          = 1;
+var X509_CURVE_P384          = 2;
+
 # ================================================================
 # DER primitive walker
 #
@@ -141,6 +150,7 @@ fn der_skip(buf, buf_len, pos, expected_tag, out_next_pos): i64 {
 # We compare against a fixed set of OIDs by raw DER encoding:
 #   id-ecPublicKey:       1.2.840.10045.2.1   →  06 07 2A 86 48 CE 3D 02 01
 #   prime256v1:           1.2.840.10045.3.1.7 →  06 08 2A 86 48 CE 3D 03 01 07
+#   secp384r1:            1.3.132.0.34        →  06 05 2B 81 04 00 22
 #   ecdsa-with-SHA256:    1.2.840.10045.4.3.2 →  06 08 2A 86 48 CE 3D 04 03 02
 #   basicConstraints:     2.5.29.19           →  06 03 55 1D 13
 #   keyUsage:             2.5.29.15           →  06 03 55 1D 0F
@@ -150,6 +160,7 @@ fn der_skip(buf, buf_len, pos, expected_tag, out_next_pos): i64 {
 
 var _oid_ec_pub_key       = 0;
 var _oid_prime256v1       = 0;
+var _oid_secp384r1         = 0;
 var _oid_ecdsa_with_sha256 = 0;
 var _oid_basic_constraints = 0;
 var _oid_key_usage         = 0;
@@ -166,6 +177,8 @@ fn _x509_oids_init(): i64 {
     _oid_ec_pub_key        = _build_oid("2a8648ce3d0201", 14);
     # 8-byte content for prime256v1:    2A 86 48 CE 3D 03 01 07
     _oid_prime256v1        = _build_oid("2a8648ce3d030107", 16);
+    # 5-byte content for secp384r1:     2B 81 04 00 22
+    _oid_secp384r1         = _build_oid("2b81040022", 10);
     # 8-byte content for ecdsa-with-SHA256: 2A 86 48 CE 3D 04 03 02
     _oid_ecdsa_with_sha256 = _build_oid("2a8648ce3d040302", 16);
     # 3-byte content for basicConstraints: 55 1D 13
@@ -204,16 +217,24 @@ fn _oid_eq(buf, off, len, ref, ref_len): i64 {
 #   72  subject_total_len — length of subject TLV
 #   80  not_before        — epoch seconds
 #   88  not_after         — epoch seconds
-#   96  pubkey[64]        — raw P-256 affine: Qx || Qy (already
-#                            pt_is_on_curve-validated at parse time)
-#  160  sig_algo          — X509_SIG_ECDSA_SHA256 only (== 1)
-#  168  sig_off           — offset of signature value (P-256 raw
+#   96  pubkey[96]        — raw affine point: Qx || Qy. For
+#                            X509_CURVE_P256, the LOWER 64 bytes hold
+#                            the pubkey and the upper 32 bytes are
+#                            zero. For X509_CURVE_P384, all 96 bytes
+#                            hold Qx (48) || Qy (48). Already
+#                            on-curve-validated at parse time
+#                            (pt_is_on_curve for P-256,
+#                            pt_p384_is_on_curve for P-384).
+#  192  sig_algo          — X509_SIG_ECDSA_SHA256 only (== 1)
+#  200  sig_off           — offset of signature value (P-256 raw
 #                            r || s, after BIT STRING + DER int
 #                            unwrapping)
-#  176  sig_len           — must equal 64
-#  184  is_ca             — 1 if basicConstraints CA bit set
-#  192  path_len          — -1 if absent, else value
-#  200..256  reserved / pad
+#  208  sig_len           — must equal 64
+#  216  is_ca             — 1 if basicConstraints CA bit set
+#  224  path_len          — -1 if absent, else value
+#  232  curve             — X509_CURVE_P256 or X509_CURVE_P384
+#  240  pubkey_len        — 64 for P-256, 96 for P-384
+#  248..256  reserved / pad
 # ================================================================
 
 fn x509_cert_alloc(): i64 {
@@ -222,12 +243,14 @@ fn x509_cert_alloc(): i64 {
     return c;
 }
 
-fn x509_cert_pubkey(c): i64       { return c + 96; }
+fn x509_cert_pubkey(c): i64        { return c + 96; }
 fn x509_cert_not_before(c): i64    { return load64(c + 80); }
 fn x509_cert_not_after(c): i64     { return load64(c + 88); }
-fn x509_cert_is_ca(c): i64         { return load64(c + 184); }
-fn x509_cert_path_len(c): i64      { return load64(c + 192); }
-fn x509_cert_sig_algo(c): i64      { return load64(c + 160); }
+fn x509_cert_is_ca(c): i64         { return load64(c + 216); }
+fn x509_cert_path_len(c): i64      { return load64(c + 224); }
+fn x509_cert_sig_algo(c): i64      { return load64(c + 192); }
+fn x509_cert_curve(c): i64         { return load64(c + 232); }
+fn x509_cert_pubkey_len(c): i64    { return load64(c + 240); }
 
 # Internal setters (for x509_parse below).
 fn _x509_set_der(c, ptr, len): i64        { store64(c + 0, ptr); store64(c + 8, len); return 0; }
@@ -237,10 +260,12 @@ fn _x509_set_issuer(c, off, len): i64     { store64(c + 48, off); store64(c + 56
 fn _x509_set_subject(c, off, len): i64    { store64(c + 64, off); store64(c + 72, len); return 0; }
 fn _x509_set_not_before(c, t): i64        { store64(c + 80, t); return 0; }
 fn _x509_set_not_after(c, t): i64         { store64(c + 88, t); return 0; }
-fn _x509_set_sig_algo(c, a): i64          { store64(c + 160, a); return 0; }
-fn _x509_set_sig(c, off, len): i64        { store64(c + 168, off); store64(c + 176, len); return 0; }
-fn _x509_set_is_ca(c, v): i64             { store64(c + 184, v); return 0; }
-fn _x509_set_path_len(c, v): i64          { store64(c + 192, v); return 0; }
+fn _x509_set_sig_algo(c, a): i64          { store64(c + 192, a); return 0; }
+fn _x509_set_sig(c, off, len): i64        { store64(c + 200, off); store64(c + 208, len); return 0; }
+fn _x509_set_is_ca(c, v): i64             { store64(c + 216, v); return 0; }
+fn _x509_set_path_len(c, v): i64          { store64(c + 224, v); return 0; }
+fn _x509_set_curve(c, v): i64             { store64(c + 232, v); return 0; }
+fn _x509_set_pubkey_len(c, v): i64        { store64(c + 240, v); return 0; }
 
 # ================================================================
 # ASN.1 time decoders
@@ -479,8 +504,10 @@ fn _xp_parse_algid_ecdsa_sha256(buf, buf_len, pos): i64 {
 }
 
 # Parse SubjectPublicKeyInfo at `pos`. Must be id-ecPublicKey with
-# prime256v1 parameters. Extracts the raw 64-byte (Qx || Qy)
-# uncompressed point into cert.pubkey, validates it is on the curve.
+# either prime256v1 (P-256, 64-byte pubkey) or secp384r1 (P-384,
+# 96-byte pubkey) parameters. Extracts the raw uncompressed point
+# into cert.pubkey, on-curve-validates via the appropriate curve
+# primitive, and sets cert.curve + cert.pubkey_len accordingly.
 # Returns next position on success, -1 on failure.
 fn _xp_parse_spki(buf, buf_len, pos, cert): i64 {
     _x509_oids_init();
@@ -490,7 +517,7 @@ fn _xp_parse_spki(buf, buf_len, pos, cert): i64 {
     if (spki_len < 0) { return 0 - 1; }
     var spki_end = spki_cp + spki_len;
 
-    # AlgorithmIdentifier: SEQUENCE { id-ecPublicKey, prime256v1 OID }
+    # AlgorithmIdentifier: SEQUENCE { id-ecPublicKey, curve OID }
     var alg_cp = 0;
     var alg_np = 0;
     var alg_len = der_walk(buf, buf_len, spki_cp, DER_TAG_SEQUENCE, &alg_cp, &alg_np);
@@ -503,39 +530,67 @@ fn _xp_parse_spki(buf, buf_len, pos, cert): i64 {
     if (oid_len < 0) { return 0 - 1; }
     if (_oid_eq(buf, oid_cp, oid_len, _oid_ec_pub_key, 7) == 0) { return 0 - 1; }
 
-    # Parameters must be the prime256v1 OID.
+    # Parameters must be either prime256v1 (P-256) or secp384r1 (P-384).
     if (oid_np >= alg_end) { return 0 - 1; }
     var pcp = 0; var pnp = 0;
     var p_len = der_walk(buf, buf_len, oid_np, DER_TAG_OBJECT_ID, &pcp, &pnp);
     if (p_len < 0) { return 0 - 1; }
-    if (_oid_eq(buf, pcp, p_len, _oid_prime256v1, 8) == 0) { return 0 - 1; }
 
-    # subjectPublicKey BIT STRING — must contain 0x04 (uncompressed) ||
-    # 32 bytes Qx || 32 bytes Qy = 65 bytes total. The BIT STRING
-    # itself begins with one byte counting unused bits (must be 0).
+    var curve = 0;
+    var pk_len = 0;
+    var coord_len = 0;
+    if (_oid_eq(buf, pcp, p_len, _oid_prime256v1, 8) == 1) {
+        curve = X509_CURVE_P256;
+        pk_len = 64;
+        coord_len = 32;
+    } else {
+        if (_oid_eq(buf, pcp, p_len, _oid_secp384r1, 5) == 1) {
+            curve = X509_CURVE_P384;
+            pk_len = 96;
+            coord_len = 48;
+        } else {
+            return 0 - 1;
+        }
+    }
+
+    # subjectPublicKey BIT STRING — 0x04 (uncompressed) || Qx ||
+    # Qy. The BIT STRING begins with one byte counting unused bits
+    # (must be 0). Total length: 1 + 1 + 2*coord_len.
     var bs_cp = 0;
     var bs_np = 0;
     var bs_len = der_walk(buf, buf_len, alg_np, DER_TAG_BIT_STRING, &bs_cp, &bs_np);
     if (bs_len < 0) { return 0 - 1; }
-    if (bs_len != 66) { return 0 - 1; }   # 1 unused-bits + 65 point bytes
+    if (bs_len != 2 + pk_len) { return 0 - 1; }
     if ((load8(buf + bs_cp) & 0xFF) != 0) { return 0 - 1; }
     if ((load8(buf + bs_cp + 1) & 0xFF) != 0x04) { return 0 - 1; }
 
-    # Stash raw pubkey (Qx || Qy) into cert.pubkey.
+    # Stash raw pubkey (Qx || Qy) into cert.pubkey. The slot is
+    # 96 bytes wide; P-256 pubkeys land in the lower 64 with the
+    # upper 32 left at the memset(0) baseline.
     var pk = x509_cert_pubkey(cert);
     var i = 0;
-    while (i < 64) {
+    while (i < pk_len) {
         store8(pk + i, load8(buf + bs_cp + 2 + i) & 0xFF);
         i = i + 1;
     }
 
-    # On-curve check (closes audit 2026-05-21 LOW-1 for this consumer).
-    var qx_limbs[32];
-    var qy_limbs[32];
-    u256_load_be(&qx_limbs, pk);
-    u256_load_be(&qy_limbs, pk + 32);
-    if (pt_is_on_curve(&qx_limbs, &qy_limbs) == 0) { return 0 - 1; }
+    # On-curve check — dispatch on curve.
+    if (curve == X509_CURVE_P256) {
+        var qx_limbs[32];
+        var qy_limbs[32];
+        u256_load_be(&qx_limbs, pk);
+        u256_load_be(&qy_limbs, pk + 32);
+        if (pt_is_on_curve(&qx_limbs, &qy_limbs) == 0) { return 0 - 1; }
+    } else {
+        var qx_limbs6[48];
+        var qy_limbs6[48];
+        u384_load_be(&qx_limbs6, pk);
+        u384_load_be(&qy_limbs6, pk + 48);
+        if (pt_p384_is_on_curve(&qx_limbs6, &qy_limbs6) == 0) { return 0 - 1; }
+    }
 
+    _x509_set_curve(cert, curve);
+    _x509_set_pubkey_len(cert, pk_len);
     return spki_np;
 }
 
@@ -828,9 +883,16 @@ fn _x509_verify_link(child, issuer_cert): i64 {
     var der_ptr = load64(child + 0);
     var tbs_off = load64(child + 16);
     var tbs_len = load64(child + 24);
-    var sig_addr = load64(child + 168);
-    var sig_len  = load64(child + 176);
+    var sig_addr = load64(child + 200);
+    var sig_len  = load64(child + 208);
     if (sig_len != 64) { return 0; }
+    # Issuer must be P-256 — chain-link signatures are
+    # ECDSA-SHA256, so the verify primitive only understands P-256
+    # pubkeys. A P-384 issuer would imply a P-384 chain-link
+    # signature (out of scope for 3.4.1). The leaf may still be
+    # P-384; this restriction applies only to certs that SIGN a
+    # subsequent link, never to the leaf itself.
+    if (x509_cert_curve(issuer_cert) != X509_CURVE_P256) { return 0; }
 
     var pk = x509_cert_pubkey(issuer_cert);
     # ecdsa_p256_verify takes (pk, msg, msg_len, sig). We pass the

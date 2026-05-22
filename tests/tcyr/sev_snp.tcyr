@@ -36,6 +36,8 @@ include "src/bigint_ext.cyr"
 include "src/ed25519.cyr"
 include "src/ecdsa_p256.cyr"
 include "src/ecdsa_p384.cyr"
+include "src/x509.cyr"
+include "src/pem.cyr"
 include "src/sev_snp.cyr"
 
 var VCEK_PUB_HEX = "2ff9fbf34a7ddba6a51840a81955f7a3012b723caacfc8de6aacde1be2965ef6e992869a9bebe69db3d362da2105510f5e9b44184fb5472ebd6b129413d4fc77e0523f8280907fefb407abf6f44bf8389baa8bc4bcbc2acc395d7b7239bf4be7";

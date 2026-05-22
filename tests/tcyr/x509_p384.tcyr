@@ -1,0 +1,134 @@
+# x509_p384.tcyr — P-384 SPKI parser tests.
+#
+# Sigil 3.4.1 — bite 1 of the SEV-SNP completion arc.
+#
+# Tests the new secp384r1 path in _xp_parse_spki:
+#   1. A P-384 VCEK leaf cert parses to curve=P-384, pubkey_len=96.
+#   2. The extracted pubkey matches the openssl-derived raw bytes.
+#   3. The P-384 leaf chains correctly under a P-256 root via
+#      x509_verify_chain (chain-link sig is still ECDSA-SHA256
+#      since the root signed with P-256).
+#   4. An issuer with curve=P-384 is rejected by _x509_verify_link
+#      (mixed-curve chains are out of 3.4.1 scope).
+#
+# Fixture: /tmp/sgx_fx/vcek.pem — P-384 cert signed by the same
+# root.pem used in sgx_verify_full + tdx_verify_full fixtures.
+
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/string.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fmt.cyr"
+include "lib/json.cyr"
+include "lib/sakshi.cyr"
+include "lib/chrono.cyr"
+include "lib/bigint.cyr"
+include "lib/ct.cyr"
+
+include "src/types.cyr"
+include "src/error.cyr"
+include "src/sha256.cyr"
+include "src/hex.cyr"
+include "src/sha512.cyr"
+include "src/sha384.cyr"
+include "src/bigint_ext.cyr"
+include "src/ecdsa_p256.cyr"
+include "src/ecdsa_p384.cyr"
+include "src/x509.cyr"
+
+# Same root.pem used in sgx_verify_full / tdx_verify_full fixtures.
+var ROOT_DER_LEN = 425;
+var ROOT_DER_HEX = "308201a53082014aa00302010202146eb7f1bdf9e70eaf1a249c81e0dfef196f4d9b6c300a06082a8648ce3d040302301e311c301a06035504030c13536967696c20534758205465737420526f6f74301e170d3236303532323232313131365a170d3336303531393232313131365a301e311c301a06035504030c13536967696c20534758205465737420526f6f743059301306072a8648ce3d020106082a8648ce3d030107034200047cac643174559edf412ec1e6835e970f11e251e236ea753101221dbde033758b706f0124cccb503f0a1417b4742ad4792ca0741c40414a61a47402326db35cfea3663064301d0603551d0e04160414d8dc667128d3ab2da779b58cb5cad072bcd79294301f0603551d23041830168014d8dc667128d3ab2da779b58cb5cad072bcd7929430120603551d130101ff040830060101ff020101300e0603551d0f0101ff040403020106300a06082a8648ce3d0403020349003046022100de5497b9a682b6e56d6c23386f7ba5e0c604bcd921d5d5af4d62de74e267462f022100f086da5097b88c98655bd7c2aaa10c2be651b5031f294d8cbf3d01c3405b88a3";
+
+# P-384 VCEK leaf cert signed by the root.
+var VCEK_DER_LEN = 451;
+var VCEK_DER_HEX = "308201bf30820165a0030201020214123e1be0a69ed2584ca4506de3c2512d9f11fc84300a06082a8648ce3d040302301e311c301a06035504030c13536967696c20534758205465737420526f6f74301e170d3236303532323232343433345a170d3237303532323232343433345a30223120301e06035504030c17536967696c205345562d534e502054657374205643454b3076301006072a8648ce3d020106052b8104002203620004a519623d0ce2c586308cd29613307b021377b40bfa2ea7b82356ad23afa18a7633b9c62634dcc5c2e0be0d7d1837e44426e7e2a1f44761668b3bc76d5b4bb30089f9118ebdcaa69da461ade37c12afd21d85dd0e36772e78aafbeb8d8cddc65ca360305e300c0603551d130101ff04023000300e0603551d0f0101ff040403020780301d0603551d0e04160414e12c78023c706c8dc7d169dcd1c24198cee11ace301f0603551d23041830168014d8dc667128d3ab2da779b58cb5cad072bcd79294300a06082a8648ce3d0403020348003045022100cbeab818c74d0ff8fd7129012140f21be208fb9989c5033c5aaa6ca8a9f7422702204dfd8dabeb779b8e00d49a40159b74e58a28101b5cf8356cc9d1aa3bb96e339a";
+
+# Expected raw 96-byte Qx||Qy pubkey (derived via `openssl ec -pubout`).
+var VCEK_PUB_HEX = "a519623d0ce2c586308cd29613307b021377b40bfa2ea7b82356ad23afa18a7633b9c62634dcc5c2e0be0d7d1837e44426e7e2a1f44761668b3bc76d5b4bb30089f9118ebdcaa69da461ade37c12afd21d85dd0e36772e78aafbeb8d8cddc65c";
+
+var NOW_IN_WINDOW = 1782518400;   # 2026-06-15, well inside both certs
+
+fn bytes_eq(a, b, len): i64 {
+    var i = 0;
+    while (i < len) {
+        if ((load8(a + i) & 0xFF) != (load8(b + i) & 0xFF)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn main() {
+    alloc_init();
+    _p256_init();
+    _p384_init();
+
+    var root_der = hex_decode(ROOT_DER_HEX, 2 * ROOT_DER_LEN);
+    var vcek_der = hex_decode(VCEK_DER_HEX, 2 * VCEK_DER_LEN);
+    var vcek_pub_expected = hex_decode(VCEK_PUB_HEX, 192);
+
+    # ============================================================
+    # Group 1 — P-384 SPKI parsing
+    # ============================================================
+    test_group("x509_parse — P-384 leaf SPKI");
+
+    var vcek = x509_cert_alloc();
+    assert_eq(x509_parse(vcek_der, VCEK_DER_LEN, vcek), 1, "P-384 cert parses");
+    assert_eq(x509_cert_curve(vcek), X509_CURVE_P384, "curve = P-384");
+    assert_eq(x509_cert_pubkey_len(vcek), 96, "pubkey_len = 96");
+    assert_eq(x509_cert_is_ca(vcek), 0, "VCEK is end-entity (CA=FALSE)");
+    assert_eq(x509_cert_sig_algo(vcek), X509_SIG_ECDSA_SHA256, "VCEK signed by ECDSA-SHA256");
+
+    var pk = x509_cert_pubkey(vcek);
+    assert_eq(bytes_eq(pk, vcek_pub_expected, 96), 1,
+              "extracted P-384 pubkey matches openssl reference");
+
+    # ============================================================
+    # Group 2 — P-256 root
+    # ============================================================
+    test_group("x509_parse — P-256 root for reference");
+
+    var root = x509_cert_alloc();
+    assert_eq(x509_parse(root_der, ROOT_DER_LEN, root), 1, "root parses");
+    assert_eq(x509_cert_curve(root), X509_CURVE_P256, "root curve = P-256");
+    assert_eq(x509_cert_pubkey_len(root), 64, "root pubkey_len = 64");
+
+    # ============================================================
+    # Group 3 — Chain walk: P-256 root → P-384 leaf
+    # ============================================================
+    test_group("x509_verify_chain — P-256 root signs P-384 leaf");
+
+    var inters = alloc(0);
+    assert_eq(x509_verify_chain(vcek, inters, 0, root, NOW_IN_WINDOW), 1,
+              "P-256 root → P-384 leaf chain verifies");
+    assert_eq(x509_verify_chain(vcek, inters, 0, root, 0), 1,
+              "now_unix=0 disables time check (still verifies)");
+
+    # ============================================================
+    # Group 4 — Mixed-curve guard: P-384 issuer rejected
+    # ============================================================
+    test_group("x509_verify_chain — P-384 issuer rejection (out of 3.4.1 scope)");
+
+    # Synthetically force the chain walker to treat the P-384 cert
+    # as an issuer. We can't actually sign anything with our P-384
+    # leaf (no private key here) — instead, point a child cert's
+    # struct at the leaf as its parent and watch the link reject.
+    var leaf_clone = x509_cert_alloc();
+    memcpy(leaf_clone, vcek, 256);
+
+    # Use the leaf itself as both child and root — the chain
+    # would attempt to verify leaf-signed-by-leaf, which exercises
+    # _x509_verify_link with a P-384 issuer.
+    assert_eq(x509_verify_chain(leaf_clone, inters, 0, vcek, NOW_IN_WINDOW), 0,
+              "P-384 issuer rejected by chain link (mixed-curve unsupported)");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

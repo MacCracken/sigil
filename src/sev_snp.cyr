@@ -23,14 +23,28 @@
 #         `ecdsa_p384_verify`. Returns 1 on success, 0 on any
 #         failure.
 #
-# Scope (mirrors 3.2.3): the ARK → ASK → VCEK X.509 chain walk
-# stays caller-driven for 3.2.4. AMD's VCEK chain ships per-CPU
-# (fetched from AMD KDS once per host); the caller decodes
-# whatever cert chain shape they have (PEM or DER) via the
-# existing `x509_*` surface and passes the validated VCEK pubkey
-# to `snp_report_verify`. A future patch can land an integrated
-# `snp_report_verify_full(report, ark_root)` wrapper once a
-# real-deployment shape is in tree.
+# Scope as of 3.4.1: the per-piece API remains (parser +
+# `snp_report_verify` against an externally-validated VCEK
+# pubkey), and an integrated `snp_report_verify_full` wrapper is
+# now available — see the surface section below. The wrapper
+# requires that the VCEK chain delivered alongside the report
+# contains a P-384 leaf cert (the standard AMD shape); chain-link
+# signatures must still be ECDSA-SHA256 (P-256 issuers) until
+# `x509.cyr` gains broader chain-link verify support. Real AMD
+# chains use RSA at the ARK/ASK links, which sigil's x509 does
+# not parse; consumers integrating against real AMD KDS chains
+# will still need an external pre-step that walks ARK → ASK and
+# hands sigil only the ASK → VCEK fragment (or skips chain walk
+# entirely and uses `snp_report_verify` directly).
+#
+# Surface additions over 3.2.4:
+#   fn snp_report_verify_full(report, vcek_chain_pem,
+#                              vcek_chain_pem_len, ark_root_der,
+#                              ark_root_der_len, now_unix): i64
+#       — composes pem_decode_certs → x509_parse (per cert + root)
+#         → x509_verify_chain (anchored at caller's root) →
+#         snp_report_verify against the leaf's 96-byte P-384
+#         pubkey. Returns 1 on full success, 0 on any failure.
 
 # ================================================================
 # Format constants
@@ -231,4 +245,104 @@ fn snp_report_verify(report, vcek_pk): i64 {
     _snp_reverse_bytes(_snp_sig_be + 48, sig_s_le, SNP_P384_FIELD_BYTES);
 
     return ecdsa_p384_verify(vcek_pk, buf, SNP_REPORT_BODY_SIZE, _snp_sig_be);
+}
+
+# ================================================================
+# snp_report_verify_full — end-to-end SEV-SNP verify (3.4.1).
+#
+# Pipeline:
+#   1. pem_decode_certs(vcek_chain_pem, …) → array of DER certs.
+#   2. x509_parse each in-quote cert + the caller's ARK root.
+#   3. Drop self-issued top-of-chain (embedded ARK copy) if
+#      present; reverse remaining intermediates into issuer-
+#      towards-leaf order.
+#   4. x509_verify_chain anchored on caller's `ark_root_der`.
+#   5. Verify the leaf is a P-384 cert with a 96-byte pubkey
+#      (snp_report_verify requires a P-384 VCEK key).
+#   6. Extract the 96-byte VCEK pubkey from the leaf and call
+#      snp_report_verify(report, vcek_pk).
+#
+# Same alloc-drift LOW shape as `sgx_quote_verify_full` /
+# `tdx_quote_verify_full` — closes at 3.6 with the unified `_into`
+# API. The VCEK chain bytes are caller-owned; sigil reads them
+# in-place via the DER pointers stashed in `out_chain` entries.
+#
+# Returns 1 on full success, 0 on any failure.
+# ================================================================
+
+var SNP_VERIFY_FULL_MAX_CERTS = 4;
+
+fn _snp_cert_is_self_issued(c): i64 {
+    var buf = load64(c + 0);
+    var iss_off = load64(c + 48); var iss_len = load64(c + 56);
+    var sub_off = load64(c + 64); var sub_len = load64(c + 72);
+    return _x509_dn_eq(buf, iss_off, iss_len, buf, sub_off, sub_len);
+}
+
+fn snp_report_verify_full(report, vcek_chain_pem, vcek_chain_pem_len,
+                            ark_root_der, ark_root_der_len, now_unix): i64 {
+    # Cert chain must be non-empty.
+    if (vcek_chain_pem_len <= 0) { return 0; }
+    if (ark_root_der_len <= 0) { return 0; }
+
+    # Re-check the report's signature_algo gate — defence in
+    # depth; snp_report_verify also gates this, but a malformed
+    # report mutated between parse and verify must not slip
+    # through verify_full either.
+    if (snp_report_signature_algo(report) != SNP_SIG_ECDSA_P384_SHA384) {
+        return 0;
+    }
+
+    var chain[64];
+    memset(&chain, 0, 64);
+    var n = pem_decode_certs(vcek_chain_pem, vcek_chain_pem_len,
+                              &chain, SNP_VERIFY_FULL_MAX_CERTS);
+    if (n < 1) { return 0; }
+
+    var parsed[4];
+    var i = 0;
+    while (i < n) {
+        var c = x509_cert_alloc();
+        var ptr = load64(&chain + i * 16);
+        var len = load64(&chain + i * 16 + 8);
+        if (x509_parse(ptr, len, c) != 1) { return 0; }
+        store64(&parsed + i * 8, c);
+        i = i + 1;
+    }
+
+    var root = x509_cert_alloc();
+    if (x509_parse(ark_root_der, ark_root_der_len, root) != 1) { return 0; }
+
+    # Leaf at chain[0]; drop self-issued top (embedded ARK copy).
+    var leaf = load64(&parsed + 0);
+    var top_idx = n - 1;
+    if (n >= 2) {
+        var top = load64(&parsed + top_idx * 8);
+        if (_snp_cert_is_self_issued(top) == 1) { top_idx = top_idx - 1; }
+    }
+
+    var inters[4];
+    memset(&inters, 0, 32);
+    var inters_n = 0;
+    i = top_idx;
+    while (i >= 1) {
+        store64(&inters + inters_n * 8, load64(&parsed + i * 8));
+        inters_n = inters_n + 1;
+        i = i - 1;
+    }
+
+    if (x509_verify_chain(leaf, &inters, inters_n, root, now_unix) != 1) {
+        return 0;
+    }
+
+    # VCEK leaf must be P-384 — `snp_report_verify` needs a
+    # 96-byte pubkey to chain into `ecdsa_p384_verify`. A P-256
+    # leaf would parse cleanly but would silently misalign
+    # downstream (only the lower 64 bytes of the pubkey slot
+    # hold data); reject explicitly.
+    if (x509_cert_curve(leaf) != X509_CURVE_P384) { return 0; }
+    if (x509_cert_pubkey_len(leaf) != 96) { return 0; }
+
+    var vcek_pk = x509_cert_pubkey(leaf);
+    return snp_report_verify(report, vcek_pk);
 }

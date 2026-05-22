@@ -8,13 +8,14 @@ see [CHANGELOG.md](../../CHANGELOG.md). Closed cycles:
   X.509 → SGX → SEV-SNP → TDX → SGX seal).
 - [`3.2-scope.md`](3.2-scope.md) — 3.2.0 cycle history.
 - [`3.0-scope.md`](3.0-scope.md) — 3.0 cycle history.
-- **3.4 — TEE attestation completion** (shipped 2026-05-22). PEM
-  decoder + `sgx_quote_verify_full` + `tdx_quote_verify_full` +
-  TDX `att_key_type=3` (P-384/SHA-384) dispatch. Deferred:
-  `snp_report_verify_full` (carries the AMD VCEK P-384 SPKI
-  blocker — see "Backlog" below). See CHANGELOG 3.4.0 entry for
-  the full ship summary; `docs/audit/2026-05-22-3.4.0-audit.md`
-  for the audit pass.
+- **3.4 — TEE attestation completion** (shipped 2026-05-22).
+  - **3.4.0**: PEM decoder + `sgx_quote_verify_full` +
+    `tdx_quote_verify_full` + TDX `att_key_type=3` (P-384/SHA-384)
+    dispatch. Audit: `docs/audit/2026-05-22-3.4.0-audit.md`.
+  - **3.4.1**: x509 P-384 SPKI extraction + `snp_report_verify_full`
+    + `X509_CURVE_*` constants + struct layout shift. Closes the
+    SEV-SNP gap deferred from 3.4.0. Audit:
+    `docs/audit/2026-05-22-3.4.1-audit.md`.
 
 **Cyrius pin:** `6.0.1` (synced across `cyrius.cyml` and CI).
 
@@ -166,24 +167,24 @@ INFO docs.
 Items with a clear shape but no forcing function. Land
 in-place when an adjacent edit touches the relevant module.
 
-- [ ] **`snp_report_verify_full` + x509 P-384 SPKI extraction.**
-      Deferred from 3.4. Sigil's x509 parser is P-256-only —
-      `_xp_parse_spki` accepts only `id-ecPublicKey +
-      prime256v1` and stores a 64-byte pubkey at cert offset
-      +96. AMD's real VCEK leaf cert is P-384 (96-byte pubkey),
-      which `snp_report_verify` needs. Closure requires:
-      (a) parse `secp384r1` (OID `1.3.132.0.34`) in
-      `_xp_parse_spki` and BIT-STRING-decode the 97-byte
-      uncompressed point; (b) track pubkey width per cert
-      (struct slot + accessor `x509_cert_pubkey_len`);
-      (c) dispatch `_x509_verify_link` on the issuer's pubkey
-      width (still requires the issuer cert to be P-256 for
-      ECDSA-SHA256 chain signatures — RSA-signed ARK/ASK links
-      are a separate scope item). Then a thin
-      `snp_report_verify_full(report, vcek_chain_pem,
-      vcek_chain_pem_len, ark_root_der, ark_root_der_len,
-      now_unix)` wrapper. Test fixture requires regenerating
-      a P-384-leaf test chain via openssl.
+- [ ] **x509 chain-link verify for non-ECDSA-P256 issuers.**
+      3.4.1 lets the leaf cert be P-384 but every issuer in a
+      verified chain must remain P-256 (chain-link signatures
+      are ECDSA-SHA256 only). Two follow-ups, both gated on a
+      downstream consumer ask:
+      - **P-384 chain-link verify**: extend
+        `_x509_verify_link` to dispatch on issuer curve. A
+        P-384 issuer would route to a P-384 sig algorithm
+        (likely a new `X509_SIG_ECDSA_SHA384` enum value);
+        the cert parser would accept ecdsa-with-SHA384 OID
+        (1.2.840.10045.4.3.3 → DER `06 08 2A 86 48 CE 3D 04
+        03 03`) and tag certs accordingly.
+      - **RSA chain-link verify**: out of scope for sigil
+        today — sigil has no RSA primitive. Real AMD ARK/ASK
+        links are RSA-4096 + SHA-384. Surfaces only when a
+        consumer integrates against real AMD KDS chains
+        end-to-end via sigil (vs. external pre-walk + sigil
+        ASK→VCEK fragment).
 
 - [ ] **Scatter-store for the fixed-base comb.** Distribute
       the 128-byte point entries across cache lines so a
