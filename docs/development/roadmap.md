@@ -16,6 +16,12 @@ see [CHANGELOG.md](../../CHANGELOG.md). Closed cycles:
     + `X509_CURVE_*` constants + struct layout shift. Closes the
     SEV-SNP gap deferred from 3.4.0. Audit:
     `docs/audit/2026-05-22-3.4.1-audit.md`.
+  - **3.4.2**: Packaging fix — `dist/sigil.cyr` regenerated
+    from current source (had drifted ten module additions
+    behind since the upstream `cyrius distlib` subcommand
+    retired); `scripts/regen-dist.sh` shipped as the
+    replacement. 2026-05-22 doc-tree restructure rides along.
+    Audit: `docs/audit/2026-05-22-3.4.2-audit.md`.
 
 **Cyrius pin:** `6.0.1` (synced across `cyrius.cyml` and CI).
 

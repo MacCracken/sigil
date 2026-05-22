@@ -7,9 +7,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+(none — tip is 3.4.2)
+
+## [3.4.2] — 2026-05-22
+
+Packaging-fix release. `dist/sigil.cyr` (sigil's bundled
+single-file distribution) had drifted ten module additions
+behind the source tree — frozen at 3.2.0-era content since the
+upstream `cyrius distlib` subcommand was retired. This release
+regenerates the bundle from the current `cyrius.cyml [lib].modules`
+list and ships `scripts/regen-dist.sh` to replace the retired
+cyrius subcommand going forward. Bundles the 2026-05-22 doc-tree
+restructure as ride-along so the documentation ledger gets a
+released-version timestamp.
+
+### Fixed
+
+- **`dist/sigil.cyr` — regenerated against current source tree.**
+  The bundled distribution was missing every module added since
+  3.2.0:
+  - `ecdsa_p256.cyr` (3.2.1) — ECDSA P-256 verify
+  - `x509.cyr` (3.2.2) — minimal X.509 cert parser + chain walker
+  - `sgx.cyr` (3.2.3) — Intel SGX DCAP v3 quote verify
+  - `sha384.cyr`, `ecdsa_p384.cyr`, `sev_snp.cyr` (3.2.4)
+  - `tdx.cyr` (3.2.5) — Intel TDX v4 TD-quote verify
+  - `seal.cyr` (3.2.6) — SGX sealing-key derivation
+  - `pem.cyr` (3.4.0) — RFC 4648 base64 + PEM block decoder
+  - And by composition all three of the 3.4 cycle's
+    `*_verify_full` end-to-end orchestrators (which depend on
+    `pem.cyr` + `x509.cyr` + `ecdsa_*.cyr`).
+
+  Bundle grew from 9,457 → 14,086 lines. Consumers building
+  against `dist/sigil.cyr` rather than including `src/lib.cyr`
+  against a sibling checkout now see the full 3.4.x public API
+  surface. First-party AGNOS consumers (daimon, kavach, ark,
+  …) build against `src/lib.cyr` directly and were unaffected.
+
+### Added
+
+- **`scripts/regen-dist.sh`** — replaces the retired `cyrius
+  distlib` subcommand. Concatenates `cyrius.cyml [lib].modules`
+  in source-include order into `dist/sigil.cyr` with the prior
+  bundle's header + section-separator format preserved. Re-run
+  whenever `[lib].modules` changes or a listed module needs
+  its update to land in the dist bundle.
+
+### Changed
+
+- **`cyrius.cyml [lib].modules`** — added `src/pem.cyr` (was
+  missing from the list, which was the proximate cause of the
+  3.4.x portion of the dist drift). Added a test-layout
+  comment block documenting sigil's per-module `.tcyr` pattern
+  vs. the agnosticos-standard single `src/test.cyr` shape.
+
 ### Documentation
 
-- Documentation tree restructured to match agnosticos
+The 2026-05-22 doc-tree sweep moves under this release rather
+than waiting for the next 3.x minor. Per Keep a Changelog,
+patch releases can carry documentation changes; bundling here
+gives `docs/doc-health.md` a released-version timestamp.
+
+- **Tree restructured** to match agnosticos
   [first-party-documentation](https://github.com/MacCracken/agnosticos/blob/main/docs/development/planning/first-party-documentation.md)
   conventions:
   - **New**: `docs/development/state.md` — live state snapshot
@@ -37,14 +95,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `applications/` → `planning/`).
 - `README.md`, `CONTRIBUTING.md`, `SECURITY.md`, and
   `docs/architecture/overview.md` rewritten against the
-  current 3.4.1 surface (added ECDSA P-256/P-384, AES-GCM,
+  current 3.4.x surface (added ECDSA P-256/P-384, AES-GCM,
   HKDF, SHA-384, ML-DSA, X.509, PEM, SGX/TDX/SEV-SNP, seal).
-- `cyrius.cyml [lib].modules` — added `src/pem.cyr` (was
-  missing; would have shipped a dist bundle without the PEM
-  decoder).
 - `docs/development/roadmap.md` — trimmed renumber breadcrumbs
   from the 3.4 ship; bumped LOW-finding count to 7 across the
   3.2.x and 3.4.x cycles.
+
+### Security
+
+- Audit pass at `docs/audit/2026-05-22-3.4.2-audit.md`. Zero
+  CRITICAL / HIGH / MEDIUM / LOW findings on the source tree
+  (unchanged from 3.4.1). Two INFO findings document the
+  packaging-flow gap that allowed the dist drift to accumulate
+  (root cause: retired `cyrius distlib` subcommand) and the
+  candidate programmatic gate (module-list drift check at
+  closeout) that would have caught it earlier.
 
 ## [3.4.1] — 2026-05-22
 

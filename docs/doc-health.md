@@ -6,16 +6,20 @@ type: state
 
 # Documentation Health — sigil
 
-> **Last refresh**: 2026-05-22 (v3.4.1 — doc-tree audit + new
-> scaffolding sweep). This pass added `docs/development/state.md`,
-> `docs/adr/` (README + template + 3 seed ADRs),
+> **Last refresh**: 2026-05-22 (v3.4.2 — doc sweep shipped
+> as ride-along on the dist-bundle regen patch release).
+> This pass added `docs/development/state.md`, `docs/adr/`
+> (README + template + 3 seed ADRs),
 > `docs/architecture/README.md`, `docs/sources.md`, and this
 > ledger. Restructured `CLAUDE.md` to match agnosticos
 > `example_claude.md` template (durable-only content; state
 > pointer block; agnosticos planning links fixed
 > `applications/` → `planning/`). Rewrote `README.md`,
 > `CONTRIBUTING.md`, `SECURITY.md`, `docs/architecture/overview.md`
-> against current 3.4.1 surface.
+> against current 3.4.x surface. **NEW**: `scripts/regen-dist.sh`
+> shipped to close the dist-bundle drift root cause (retired
+> `cyrius distlib` subcommand) — see audit
+> `2026-05-22-3.4.2-audit.md` INFO-1.
 >
 > **Refresh cadence**: when docs are touched, update the
 > affected row inline. Full audit at minor closeout
@@ -94,6 +98,8 @@ citation index for every crypto primitive.
 | `LICENSE` | (per upstream) | 🔵 Evergreen | GPL-3.0-only. |
 | `VERSION` | 2026-05-22 | ✅ Fresh | `3.4.1`. Bumped every release. |
 | `cyrius.cyml` | 2026-05-22 | ✅ Fresh | Added `pem.cyr` to `[lib].modules` (was missing — would have shipped a dist bundle without the PEM decoder). Added test-layout comment block. |
+| `scripts/regen-dist.sh` | 2026-05-22 | ✅ Fresh | **New at 3.4.2.** Replaces the retired `cyrius distlib` subcommand. Re-run when `[lib].modules` changes or when a listed module needs its update to land in the dist bundle. |
+| `dist/sigil.cyr` | 2026-05-22 | ✅ Fresh | Regenerated at 3.4.2. Bundle grew 9,457 → 14,086 lines after closing ten module additions of drift since 3.2.0. |
 | `benchmarks-rust-v-cyrius.md` | (closed) | 🔵 Evergreen | Frozen cross-implementation perf baseline. CLAUDE.md (Current Status, retired) declares this archived comparison — not rebuilt per release. |
 
 ---
@@ -137,6 +143,7 @@ finding closes).
 | `2026-05-26-audit.md` | 2026-05-26 | 🔵 Dated artifact (3.2.6 closeout + TEE arc close) |
 | `2026-05-22-3.4.0-audit.md` | 2026-05-22 | 🔵 Dated artifact (3.4.0 closeout) |
 | `2026-05-22-3.4.1-audit.md` | 2026-05-22 | 🔵 Dated artifact (3.4.1 closeout) |
+| `2026-05-22-3.4.2-audit.md` | 2026-05-22 | 🔵 Dated artifact (3.4.2 closeout — packaging-fix release; INFO-only) |
 
 **Audit floor**: 7 open LOW findings (bump-allocator
 lifetime), batched closure at 3.6 per ADR 0003. Zero

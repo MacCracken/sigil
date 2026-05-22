@@ -12,10 +12,10 @@
 
 | Field | Value |
 |---|---|
-| Current version | **3.4.1** (`VERSION`) |
+| Current version | **3.4.2** (`VERSION`) |
 | Cyrius toolchain pin | **6.0.1** (`cyrius.cyml [package].cyrius`) |
 | Last release date | 2026-05-22 |
-| Last release audit | [`2026-05-22-3.4.1-audit.md`](../audit/2026-05-22-3.4.1-audit.md) |
+| Last release audit | [`2026-05-22-3.4.2-audit.md`](../audit/2026-05-22-3.4.2-audit.md) |
 | Phase | Released, security hardening active |
 
 ## Test surface
@@ -30,6 +30,7 @@ Per-cycle assertion delta:
 
 - 3.4.0 ship: +66 (`pem.tcyr` 39, `sgx_verify_full.tcyr` 11, `tdx_verify_full.tcyr` 16)
 - 3.4.1 ship: +23 (`x509_p384.tcyr` 12, `snp_verify_full.tcyr` 11)
+- 3.4.2 ship: 0 (packaging-fix release; no source changes)
 
 ## Consumers (AGNOS first-party)
 
@@ -48,6 +49,7 @@ Consumers that link or rely on sigil for trust verification:
 
 | Version | Date | Headline |
 |---|---|---|
+| 3.4.2 | 2026-05-22 | Packaging fix — `dist/sigil.cyr` regenerated from current source (was frozen at 3.2.0 era); `scripts/regen-dist.sh` shipped to replace the retired `cyrius distlib` subcommand. Doc-tree restructure rides along. |
 | 3.4.1 | 2026-05-22 | SEV-SNP attestation completion (x509 P-384 SPKI + `snp_report_verify_full`) |
 | 3.4.0 | 2026-05-22 | TEE attestation completion (PEM decoder, `sgx`/`tdx_quote_verify_full`, TDX `att_key_type=3`) |
 | 3.3.0 | 2026-05-22 | Cleanup / refactor cycle (−190 LOC; mutex-drop deferred to 3.5 after `var X[N]` static-array discovery) |
