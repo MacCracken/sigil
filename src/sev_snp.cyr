@@ -1,0 +1,234 @@
+# sev_snp.cyr — AMD SEV-SNP attestation report parser + verify
+# orchestrator.
+#
+# Sigil 3.2.4 — bite 4 of the TEE attestation arc.
+#
+# Reference: AMD SEV Secure Nested Paging Firmware ABI Specification
+# (Pub. 56860), §7.3 (Attestation Report Structure). The report is
+# a fixed-size 1184-byte (0x4A0) binary blob; the first 672 bytes
+# (0x000..0x2A0) make up the signed body, and the remainder is the
+# VCEK signature (r, s) stored little-endian with zero-padding plus
+# 368 bytes of reserved space.
+#
+# Surface:
+#   fn snp_report_parse(buf, buf_len, out): i64
+#       — parse the fixed layout into an SnpReport struct (1 = ok,
+#         0 = malformed/unsupported). version must be 2 (current
+#         GenoaPilatos+ firmware); signature_algo must be 1
+#         (ECDSA P-384 / SHA-384).
+#   fn snp_report_verify(report, vcek_pk): i64
+#       — given a parsed report + an externally-validated VCEK
+#         public key (96 B raw Qx||Qy big-endian), hash the signed
+#         body with SHA-384 and verify the report's signature via
+#         `ecdsa_p384_verify`. Returns 1 on success, 0 on any
+#         failure.
+#
+# Scope (mirrors 3.2.3): the ARK → ASK → VCEK X.509 chain walk
+# stays caller-driven for 3.2.4. AMD's VCEK chain ships per-CPU
+# (fetched from AMD KDS once per host); the caller decodes
+# whatever cert chain shape they have (PEM or DER) via the
+# existing `x509_*` surface and passes the validated VCEK pubkey
+# to `snp_report_verify`. A future patch can land an integrated
+# `snp_report_verify_full(report, ark_root)` wrapper once a
+# real-deployment shape is in tree.
+
+# ================================================================
+# Format constants
+# ================================================================
+
+var SNP_REPORT_SIZE          = 1184;   # 0x4A0
+var SNP_REPORT_BODY_SIZE     = 672;    # 0x2A0 — the signed prefix
+var SNP_SIG_PADDED_R_LEN     = 72;     # AMD pads ECDSA r to 72 B LE
+var SNP_SIG_PADDED_S_LEN     = 72;
+var SNP_P384_FIELD_BYTES     = 48;     # the actual r/s width
+var SNP_SIG_RESERVED_LEN     = 368;    # trailer after r||s
+
+var SNP_VERSION_V2           = 2;
+var SNP_SIG_ECDSA_P384_SHA384 = 1;
+
+# Field offsets within the report buffer (per AMD spec).
+var SNP_OFF_VERSION           = 0x000;
+var SNP_OFF_GUEST_SVN         = 0x004;
+var SNP_OFF_POLICY            = 0x008;
+var SNP_OFF_FAMILY_ID         = 0x010;
+var SNP_OFF_IMAGE_ID          = 0x020;
+var SNP_OFF_VMPL              = 0x030;
+var SNP_OFF_SIG_ALGO          = 0x034;
+var SNP_OFF_CURRENT_TCB       = 0x038;
+var SNP_OFF_PLATFORM_INFO     = 0x040;
+var SNP_OFF_REPORT_DATA       = 0x050;
+var SNP_OFF_MEASUREMENT       = 0x090;
+var SNP_OFF_HOST_DATA         = 0x0C0;
+var SNP_OFF_ID_KEY_DIGEST     = 0x0E0;
+var SNP_OFF_AUTHOR_KEY_DIGEST = 0x110;
+var SNP_OFF_REPORT_ID         = 0x140;
+var SNP_OFF_REPORT_ID_MA      = 0x160;
+var SNP_OFF_REPORTED_TCB      = 0x180;
+var SNP_OFF_CHIP_ID           = 0x1A0;
+var SNP_OFF_SIG_R             = 0x2A0;
+var SNP_OFF_SIG_S             = 0x2E8;
+
+# ================================================================
+# SnpReport struct — 256 bytes
+#
+#   0  buf_ptr
+#   8  buf_len  (must equal SNP_REPORT_SIZE for a valid parse)
+#  16  version
+#  24  guest_svn
+#  32  policy
+#  40  vmpl
+#  48  signature_algo
+#  56  current_tcb
+#  64  platform_info
+#  72  reported_tcb
+#  80..255  reserved (all field positions are derivable from
+#           buf + SNP_OFF_* — no need to store per-field offsets)
+# ================================================================
+
+fn snp_report_alloc(): i64 {
+    var r = alloc(256);
+    memset(r, 0, 256);
+    return r;
+}
+
+fn _snp_load_u32(buf, off): i64 {
+    return (load8(buf + off) & 0xFF)
+         | ((load8(buf + off + 1) & 0xFF) << 8)
+         | ((load8(buf + off + 2) & 0xFF) << 16)
+         | ((load8(buf + off + 3) & 0xFF) << 24);
+}
+
+fn _snp_load_u64(buf, off): i64 {
+    return (load8(buf + off) & 0xFF)
+         | ((load8(buf + off + 1) & 0xFF) << 8)
+         | ((load8(buf + off + 2) & 0xFF) << 16)
+         | ((load8(buf + off + 3) & 0xFF) << 24)
+         | ((load8(buf + off + 4) & 0xFF) << 32)
+         | ((load8(buf + off + 5) & 0xFF) << 40)
+         | ((load8(buf + off + 6) & 0xFF) << 48)
+         | ((load8(buf + off + 7) & 0xFF) << 56);
+}
+
+# ----------------------------------------------------------------
+# Accessors
+# ----------------------------------------------------------------
+
+fn snp_report_buf(r): i64               { return load64(r + 0); }
+fn snp_report_version(r): i64            { return load64(r + 16); }
+fn snp_report_guest_svn(r): i64          { return load64(r + 24); }
+fn snp_report_policy(r): i64             { return load64(r + 32); }
+fn snp_report_vmpl(r): i64               { return load64(r + 40); }
+fn snp_report_signature_algo(r): i64     { return load64(r + 48); }
+fn snp_report_current_tcb(r): i64        { return load64(r + 56); }
+fn snp_report_platform_info(r): i64      { return load64(r + 64); }
+fn snp_report_reported_tcb(r): i64       { return load64(r + 72); }
+
+fn snp_report_family_id_ptr(r): i64      { return snp_report_buf(r) + SNP_OFF_FAMILY_ID; }
+fn snp_report_image_id_ptr(r): i64       { return snp_report_buf(r) + SNP_OFF_IMAGE_ID; }
+fn snp_report_data_ptr(r): i64           { return snp_report_buf(r) + SNP_OFF_REPORT_DATA; }
+fn snp_report_measurement_ptr(r): i64    { return snp_report_buf(r) + SNP_OFF_MEASUREMENT; }
+fn snp_report_host_data_ptr(r): i64      { return snp_report_buf(r) + SNP_OFF_HOST_DATA; }
+fn snp_report_id_key_digest_ptr(r): i64  { return snp_report_buf(r) + SNP_OFF_ID_KEY_DIGEST; }
+fn snp_report_author_key_digest_ptr(r): i64 { return snp_report_buf(r) + SNP_OFF_AUTHOR_KEY_DIGEST; }
+fn snp_report_report_id_ptr(r): i64      { return snp_report_buf(r) + SNP_OFF_REPORT_ID; }
+fn snp_report_report_id_ma_ptr(r): i64   { return snp_report_buf(r) + SNP_OFF_REPORT_ID_MA; }
+fn snp_report_chip_id_ptr(r): i64        { return snp_report_buf(r) + SNP_OFF_CHIP_ID; }
+fn snp_report_sig_r_ptr(r): i64          { return snp_report_buf(r) + SNP_OFF_SIG_R; }
+fn snp_report_sig_s_ptr(r): i64          { return snp_report_buf(r) + SNP_OFF_SIG_S; }
+
+# ================================================================
+# snp_report_parse — single-pass header validation + offset stash.
+#
+# AMD's spec mandates the report is exactly 1184 bytes. Reject
+# anything else.
+# ================================================================
+
+fn snp_report_parse(buf, buf_len, out): i64 {
+    memset(out, 0, 256);
+
+    if (buf_len != SNP_REPORT_SIZE) { return 0; }
+
+    var version = _snp_load_u32(buf, SNP_OFF_VERSION);
+    if (version != SNP_VERSION_V2) { return 0; }
+
+    var sig_algo = _snp_load_u32(buf, SNP_OFF_SIG_ALGO);
+    if (sig_algo != SNP_SIG_ECDSA_P384_SHA384) { return 0; }
+
+    store64(out + 0,  buf);
+    store64(out + 8,  buf_len);
+    store64(out + 16, version);
+    store64(out + 24, _snp_load_u32(buf, SNP_OFF_GUEST_SVN));
+    store64(out + 32, _snp_load_u64(buf, SNP_OFF_POLICY));
+    store64(out + 40, _snp_load_u32(buf, SNP_OFF_VMPL));
+    store64(out + 48, sig_algo);
+    store64(out + 56, _snp_load_u64(buf, SNP_OFF_CURRENT_TCB));
+    store64(out + 64, _snp_load_u64(buf, SNP_OFF_PLATFORM_INFO));
+    store64(out + 72, _snp_load_u64(buf, SNP_OFF_REPORTED_TCB));
+
+    return 1;
+}
+
+# ================================================================
+# Verify orchestrator
+#
+# AMD spec: ECDSA P-384 signature is stored as r (72 B LE-padded)
+# and s (72 B LE-padded). Sigil's `ecdsa_p384_verify` takes a 96-B
+# BE r||s buffer. So we (a) reject non-zero padding in the upper
+# 24 bytes of each, (b) reverse the low 48 bytes of each into the
+# 96-B BE buffer, (c) pass through `ecdsa_p384_verify`.
+#
+# The signed body is bytes 0..SNP_REPORT_BODY_SIZE of the
+# report — `ecdsa_p384_verify` computes SHA-384 internally.
+# ================================================================
+
+var _snp_sig_be = 0;
+var _snp_inited = 0;
+
+fn _snp_v_init(): i64 {
+    if (_snp_inited == 1) { return 0; }
+    _snp_sig_be = alloc(96);
+    _snp_inited = 1;
+    return 0;
+}
+
+# Reverse `src` of length `len` into `dst` (byte-wise reversal).
+fn _snp_reverse_bytes(dst, src, len): i64 {
+    var i = 0;
+    while (i < len) {
+        store8(dst + i, load8(src + (len - 1 - i)) & 0xFF);
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn snp_report_verify(report, vcek_pk): i64 {
+    _snp_v_init();
+
+    # Re-check the signature algorithm — defense in depth (the
+    # parser already gated this, but a caller could mutate the
+    # struct between parse and verify).
+    if (snp_report_signature_algo(report) != SNP_SIG_ECDSA_P384_SHA384) {
+        return 0;
+    }
+
+    var buf = snp_report_buf(report);
+    var sig_r_le = buf + SNP_OFF_SIG_R;
+    var sig_s_le = buf + SNP_OFF_SIG_S;
+
+    # Validate the high 24 bytes of each are zero. AMD pads the
+    # 48-byte P-384 value to 72 bytes; the high bytes MUST be zero.
+    # An attacker setting those would force a malformed-but-accepted
+    # signature in a non-strict verifier.
+    var i = SNP_P384_FIELD_BYTES;
+    while (i < SNP_SIG_PADDED_R_LEN) {
+        if ((load8(sig_r_le + i) & 0xFF) != 0) { return 0; }
+        if ((load8(sig_s_le + i) & 0xFF) != 0) { return 0; }
+        i = i + 1;
+    }
+
+    # Convert LE → BE for sigil's ecdsa_p384_verify.
+    _snp_reverse_bytes(_snp_sig_be + 0, sig_r_le, SNP_P384_FIELD_BYTES);
+    _snp_reverse_bytes(_snp_sig_be + 48, sig_s_le, SNP_P384_FIELD_BYTES);
+
+    return ecdsa_p384_verify(vcek_pk, buf, SNP_REPORT_BODY_SIZE, _snp_sig_be);
+}

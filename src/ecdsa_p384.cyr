@@ -1,0 +1,955 @@
+# ecdsa_p384.cyr — ECDSA verify on NIST P-384 (secp384r1)
+#
+# Sigil 3.2.4 — bite 4 of the TEE attestation arc. Mirrors
+# `src/ecdsa_p256.cyr` (3.2.1) at 384 bits. The structural shape is
+# identical (constants → BE codec → reduction → field arithmetic →
+# scalar field → Jacobian point ops → Montgomery-ladder scalar mul
+# → verify); the only differences are the 6-limb (48-byte) value
+# width and the curve constants.
+#
+# Surface:
+#   fn ecdsa_p384_verify(pk, msg, msg_len, sig): i64
+#       — pk: 96 bytes (Qx || Qy big-endian)
+#       — sig: 96 bytes (r || s big-endian)
+#       — msg-rep: SHA-384(msg), per FIPS 186-5 §6.4.2 step 3
+#         with hash output L = field width
+#   fn pt_p384_is_on_curve(x, y): i64
+#       — affine curve-equation + in-field-range gate; same shape
+#         as `pt_is_on_curve` for P-256.
+#
+# Implementation references:
+#   • FIPS 186-5 §6 — ECDSA algorithm
+#   • SEC 1 v2.0 §4.1.4 — verifying operation
+#   • FIPS 186-4 D.1.2.4 / SP 800-186 — P-384 curve params
+#
+# All u384 helpers are private to this module. If 3.2.5 (TDX) or a
+# future consumer needs P-384 arithmetic outside ECDSA, lift them
+# into `lib/bigint.cyr` as `u384_*` analogues at that point.
+
+# ================================================================
+# Curve constants — initialised on first call via `_p384_init`.
+# ================================================================
+
+# Field prime p384 = 2^384 - 2^128 - 2^96 + 2^32 - 1
+#   = FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFFFF0000000000000000FFFFFFFF
+var _p384_p = 0;
+
+# Group order n384
+var _p384_n = 0;
+
+# Curve coefficient b for y² = x³ - 3x + b
+var _p384_b = 0;
+
+# Base point G affine
+var _p384_gx = 0;
+var _p384_gy = 0;
+
+# Long-lived scratch (init-time alloc, reused)
+var _p384_prod = 0;        # 96-byte (768-bit) full-product
+var _p384_tmp1 = 0;        # 48-byte
+var _p384_tmp2 = 0;        # 48-byte
+var _p384_one  = 0;
+
+var _p384_inited = 0;
+
+# ----------------------------------------------------------------
+# u384 helpers — 6 × 64-bit LE limbs = 48 bytes
+# ----------------------------------------------------------------
+
+fn u384_zero(): i64 {
+    var r = alloc(48);
+    memset(r, 0, 48);
+    return r;
+}
+
+fn u384_from(val): i64 {
+    var r = alloc(48);
+    memset(r, 0, 48);
+    store64(r, val);
+    return r;
+}
+
+fn u384_copy(dst, src): i64 {
+    memcpy(dst, src, 48);
+    return 0;
+}
+
+fn u384_clone(a): i64 {
+    var r = alloc(48);
+    memcpy(r, a, 48);
+    return r;
+}
+
+fn u384_is_zero(a): i64 {
+    var i = 0;
+    while (i < 6) {
+        if (load64(a + i * 8) != 0) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn u384_eq(a, b): i64 {
+    var i = 0;
+    while (i < 6) {
+        if (load64(a + i * 8) != load64(b + i * 8)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# Returns 1 if a > b, -1 if a < b, 0 if equal (unsigned).
+fn u384_cmp(a, b): i64 {
+    var sbit = 1 << 63;
+    var i = 5;
+    while (i >= 0) {
+        var al = load64(a + i * 8);
+        var bl = load64(b + i * 8);
+        var ax = al ^ sbit;
+        var bx = bl ^ sbit;
+        if (ax > bx) { return 1; }
+        if (ax < bx) { return 0 - 1; }
+        i = i - 1;
+    }
+    return 0;
+}
+
+# r = a + b mod 2^384; returns carry-out (0 or 1).
+fn u384_add(r, a, b): i64 {
+    var sbit = 1 << 63;
+    var carry = 0;
+    var i = 0;
+    while (i < 6) {
+        var av = load64(a + i * 8);
+        var bv = load64(b + i * 8);
+        var s1 = av + bv;
+        var c1 = 0;
+        if ((s1 ^ sbit) < (av ^ sbit)) { c1 = 1; }
+        var s2 = s1 + carry;
+        var c2 = 0;
+        if ((s2 ^ sbit) < (s1 ^ sbit)) { c2 = 1; }
+        store64(r + i * 8, s2);
+        carry = c1 + c2;
+        i = i + 1;
+    }
+    return carry;
+}
+
+# r = a - b mod 2^384; returns borrow-out (0 or 1).
+fn u384_sub(r, a, b): i64 {
+    var sbit = 1 << 63;
+    var borrow = 0;
+    var i = 0;
+    while (i < 6) {
+        var av = load64(a + i * 8);
+        var bv = load64(b + i * 8);
+        var nb = 0;
+        if (borrow > 0) {
+            if (bv == (0 - 1)) {
+                nb = 1;
+                store64(r + i * 8, av);
+            } else {
+                var bv2 = bv + 1;
+                if ((bv2 ^ sbit) > (av ^ sbit)) { nb = 1; }
+                store64(r + i * 8, av - bv2);
+            }
+        } else {
+            if ((bv ^ sbit) > (av ^ sbit)) { nb = 1; }
+            store64(r + i * 8, av - bv);
+        }
+        borrow = nb;
+        i = i + 1;
+    }
+    return borrow;
+}
+
+# r = a << 1; returns MSB-out.
+fn u384_shl1(r, a): i64 {
+    var carry = 0;
+    var i = 0;
+    while (i < 6) {
+        var v = load64(a + i * 8);
+        store64(r + i * 8, (v << 1) | carry);
+        carry = (v >> 63) & 1;
+        i = i + 1;
+    }
+    return carry;
+}
+
+# 64×64 → 128 bit multiply (lo/hi via 32-bit halves).
+var _p384_m64_lo = 0;
+var _p384_m64_hi = 0;
+
+fn _p384_mul64(a, b): i64 {
+    var mask32 = 0xFFFFFFFF;
+    var aL = a & mask32;
+    var aH = (a >> 32) & mask32;
+    var bL = b & mask32;
+    var bH = (b >> 32) & mask32;
+    var ll = aL * bL;
+    var lh = aL * bH;
+    var hl = aH * bL;
+    var hh = aH * bH;
+    var mid = lh + hl;
+    var mid_carry = 0;
+    if ((mid ^ (1 << 63)) < (lh ^ (1 << 63))) { mid_carry = 1; }
+    var lo = ll + (mid << 32);
+    var lo_carry = 0;
+    if ((lo ^ (1 << 63)) < (ll ^ (1 << 63))) { lo_carry = 1; }
+    _p384_m64_lo = lo;
+    _p384_m64_hi = hh + (mid >> 32) + (mid_carry << 32) + lo_carry;
+    return 0;
+}
+
+# Schoolbook 384×384 → 768-bit multiply.
+# out: 96 bytes (12 limbs)
+fn u384_mul_full(out, a, b): i64 {
+    memset(out, 0, 96);
+    var sbit = 1 << 63;
+    var i = 0;
+    while (i < 6) {
+        var carry = 0;
+        var j = 0;
+        while (j < 6) {
+            _p384_mul64(load64(a + i * 8), load64(b + j * 8));
+            var k = i + j;
+            var prev = load64(out + k * 8);
+            var s1 = prev + _p384_m64_lo;
+            var c1 = 0;
+            if ((s1 ^ sbit) < (prev ^ sbit)) { c1 = 1; }
+            var s2 = s1 + carry;
+            var c2 = 0;
+            if ((s2 ^ sbit) < (s1 ^ sbit)) { c2 = 1; }
+            store64(out + k * 8, s2);
+            carry = _p384_m64_hi + c1 + c2;
+            j = j + 1;
+        }
+        if (i + 6 < 12) {
+            store64(out + (i + 6) * 8, load64(out + (i + 6) * 8) + carry);
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Parse a 96-char big-endian hex string into a 48-byte LE-limb buffer.
+fn u384_from_hex(s): i64 {
+    var r = u384_zero();
+    var len = strlen(s);
+    if (len > 96) { len = 96; }
+    var i = 0;
+    while (i < len) {
+        # Shift left by 4 bits.
+        var carry = 0;
+        var li = 0;
+        while (li < 6) {
+            var v = load64(r + li * 8);
+            store64(r + li * 8, (v << 4) | carry);
+            carry = (v >> 60) & 0xF;
+            li = li + 1;
+        }
+        var c = load8(s + i);
+        var d = 0;
+        if (c >= 48) { if (c <= 57) { d = c - 48; } }
+        if (c >= 97) { if (c <= 102) { d = c - 87; } }
+        if (c >= 65) { if (c <= 70) { d = c - 55; } }
+        store64(r, load64(r) | d);
+        i = i + 1;
+    }
+    return r;
+}
+
+# 48 BE bytes → 6 LE limbs.
+fn u384_load_be(dst, src): i64 {
+    var i = 0;
+    while (i < 6) {
+        var off = (5 - i) * 8;
+        store64(dst + i * 8,
+        ((load8(src + off + 0) & 0xFF) << 56)
+        | ((load8(src + off + 1) & 0xFF) << 48)
+        | ((load8(src + off + 2) & 0xFF) << 40)
+        | ((load8(src + off + 3) & 0xFF) << 32)
+        | ((load8(src + off + 4) & 0xFF) << 24)
+        | ((load8(src + off + 5) & 0xFF) << 16)
+        | ((load8(src + off + 6) & 0xFF) << 8)
+        | (load8(src + off + 7) & 0xFF));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# 6 LE limbs → 48 BE bytes.
+fn u384_store_be(dst, src): i64 {
+    var i = 0;
+    while (i < 6) {
+        var off = (5 - i) * 8;
+        var v = load64(src + i * 8);
+        store8(dst + off + 0, (v >> 56) & 0xFF);
+        store8(dst + off + 1, (v >> 48) & 0xFF);
+        store8(dst + off + 2, (v >> 40) & 0xFF);
+        store8(dst + off + 3, (v >> 32) & 0xFF);
+        store8(dst + off + 4, (v >> 24) & 0xFF);
+        store8(dst + off + 5, (v >> 16) & 0xFF);
+        store8(dst + off + 6, (v >> 8) & 0xFF);
+        store8(dst + off + 7, v & 0xFF);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ----------------------------------------------------------------
+# Initialisation
+# ----------------------------------------------------------------
+
+fn _p384_init(): i64 {
+    if (_p384_inited == 1) { return 0; }
+    _p384_p  = u384_from_hex("fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffeffffffff0000000000000000ffffffff");
+    _p384_n  = u384_from_hex("ffffffffffffffffffffffffffffffffffffffffffffffffc7634d81f4372ddf581a0db248b0a77aecec196accc52973");
+    _p384_b  = u384_from_hex("b3312fa7e23ee7e4988e056be3f82d19181d9c6efe8141120314088f5013875ac656398d8a2ed19d2a85c8edd3ec2aef");
+    _p384_gx = u384_from_hex("aa87ca22be8b05378eb1c71ef320ad746e1d3b628ba79b9859f741e082542a385502f25dbf55296c3a545e3872760ab7");
+    _p384_gy = u384_from_hex("3617de4a96262c6f5d9e98bf9292dc29f8f41dbd289a147ce9da3113b5f0b8c00a60b1ce1d7e819d7a431d7c90ea0e5f");
+    _p384_prod = alloc(96);
+    _p384_tmp1 = alloc(48);
+    _p384_tmp2 = alloc(48);
+    _p384_one  = u384_from(1);
+    _p384_inited = 1;
+    return 0;
+}
+
+# ================================================================
+# Reduction mod p384 — textbook long-division (384 iterations of
+# shl1 + conditional subtract). Same shape as `p256_reduce`; the
+# carry-bit invariant analysis carries over (V = 2·R + bit < 2p,
+# so one conditional subtract per iteration suffices). Slow but
+# correct and easy to audit; Solinas word-level reduction is the
+# bench-tuning follow-up tracked in roadmap.
+# ================================================================
+
+var _p384_R = 0;
+
+fn _p384_long_div_reduce(R, lo): i64 {
+    var i = 383;
+    while (i >= 0) {
+        var byte_off = i / 8;
+        var bit_off = i & 7;
+        var bit = (load8(lo + byte_off) >> bit_off) & 1;
+
+        var carry = u384_shl1(R, R);
+        store64(R, load64(R) | bit);
+
+        if (carry == 1) {
+            u384_sub(R, R, _p384_p);
+        } else {
+            if (u384_cmp(R, _p384_p) >= 0) { u384_sub(R, R, _p384_p); }
+        }
+        i = i - 1;
+    }
+    return 0;
+}
+
+# r = val mod p384 (val is 768-bit, r is 384-bit).
+fn p384_reduce(out, val): i64 {
+    _p384_init();
+    if (_p384_R == 0) { _p384_R = alloc(48); }
+    # R = high half of val
+    memcpy(_p384_R, val + 48, 48);
+    if (u384_cmp(_p384_R, _p384_p) >= 0) { u384_sub(_p384_R, _p384_R, _p384_p); }
+    _p384_long_div_reduce(_p384_R, val);
+    u384_copy(out, _p384_R);
+    return 0;
+}
+
+# ================================================================
+# Field arithmetic mod p384
+# ================================================================
+
+fn fp_p384_add(r, a, b): i64 {
+    _p384_init();
+    var carry = u384_add(r, a, b);
+    if (carry == 1) { u384_sub(r, r, _p384_p); }
+    if (u384_cmp(r, _p384_p) >= 0) { u384_sub(r, r, _p384_p); }
+    return 0;
+}
+
+fn fp_p384_sub(r, a, b): i64 {
+    _p384_init();
+    var borrow = u384_sub(r, a, b);
+    if (borrow > 0) { u384_add(r, r, _p384_p); }
+    return 0;
+}
+
+fn fp_p384_neg(r, a): i64 {
+    _p384_init();
+    if (u384_is_zero(a) == 1) { u384_copy(r, a); return 0; }
+    u384_sub(r, _p384_p, a);
+    return 0;
+}
+
+fn fp_p384_mul(r, a, b): i64 {
+    _p384_init();
+    u384_mul_full(_p384_prod, a, b);
+    p384_reduce(r, _p384_prod);
+    return 0;
+}
+
+fn fp_p384_sq(r, a): i64 {
+    return fp_p384_mul(r, a, a);
+}
+
+# Modular inversion via Fermat: a^(p-2) mod p.
+var _p384_inv_tmp = 0;
+var _p384_inv_res = 0;
+var _p384_inv_base = 0;
+var _p384_inv_exp = 0;
+var _p384_inv_inited = 0;
+
+fn _p384_inv_init(): i64 {
+    if (_p384_inv_inited == 1) { return 0; }
+    _p384_init();
+    _p384_inv_tmp  = alloc(48);
+    _p384_inv_res  = alloc(48);
+    _p384_inv_base = alloc(48);
+    _p384_inv_exp  = u384_clone(_p384_p);
+    store64(_p384_inv_exp, load64(_p384_inv_exp) - 2);
+    _p384_inv_inited = 1;
+    return 0;
+}
+
+fn fp_p384_inv(r, a): i64 {
+    _p384_inv_init();
+    memset(_p384_inv_res, 0, 48);
+    store64(_p384_inv_res, 1);
+    u384_copy(_p384_inv_base, a);
+
+    var i = 0;
+    while (i < 384) {
+        var limb_idx = i / 64;
+        var bit_idx  = i & 63;
+        var bit = (load64(_p384_inv_exp + limb_idx * 8) >> bit_idx) & 1;
+        if (bit == 1) {
+            fp_p384_mul(_p384_inv_tmp, _p384_inv_res, _p384_inv_base);
+            u384_copy(_p384_inv_res, _p384_inv_tmp);
+        }
+        fp_p384_sq(_p384_inv_tmp, _p384_inv_base);
+        u384_copy(_p384_inv_base, _p384_inv_tmp);
+        i = i + 1;
+    }
+    u384_copy(r, _p384_inv_res);
+    return 0;
+}
+
+# ================================================================
+# Scalar field arithmetic mod n384
+# ================================================================
+
+var _p384_n_R = 0;
+
+fn _p384_long_div_reduce_n(R, lo): i64 {
+    var i = 383;
+    while (i >= 0) {
+        var byte_off = i / 8;
+        var bit_off = i & 7;
+        var bit = (load8(lo + byte_off) >> bit_off) & 1;
+        var carry = u384_shl1(R, R);
+        store64(R, load64(R) | bit);
+        if (carry == 1) {
+            u384_sub(R, R, _p384_n);
+        } else {
+            if (u384_cmp(R, _p384_n) >= 0) { u384_sub(R, R, _p384_n); }
+        }
+        i = i - 1;
+    }
+    return 0;
+}
+
+fn n384_reduce(out, val): i64 {
+    _p384_init();
+    if (_p384_n_R == 0) { _p384_n_R = alloc(48); }
+    memcpy(_p384_n_R, val + 48, 48);
+    if (u384_cmp(_p384_n_R, _p384_n) >= 0) { u384_sub(_p384_n_R, _p384_n_R, _p384_n); }
+    _p384_long_div_reduce_n(_p384_n_R, val);
+    u384_copy(out, _p384_n_R);
+    return 0;
+}
+
+fn fn_p384_reduce384(out, a): i64 {
+    _p384_init();
+    u384_copy(out, a);
+    if (u384_cmp(out, _p384_n) >= 0) { u384_sub(out, out, _p384_n); }
+    return 0;
+}
+
+var _p384_n_prod = 0;
+
+fn fn_p384_mul(r, a, b): i64 {
+    _p384_init();
+    if (_p384_n_prod == 0) { _p384_n_prod = alloc(96); }
+    u384_mul_full(_p384_n_prod, a, b);
+    n384_reduce(r, _p384_n_prod);
+    return 0;
+}
+
+# r = a^-1 mod n via Fermat (a^(n-2) mod n).
+var _p384_ninv_tmp = 0;
+var _p384_ninv_res = 0;
+var _p384_ninv_base = 0;
+var _p384_ninv_exp = 0;
+var _p384_ninv_inited = 0;
+
+fn _p384_ninv_init(): i64 {
+    if (_p384_ninv_inited == 1) { return 0; }
+    _p384_init();
+    _p384_ninv_tmp  = alloc(48);
+    _p384_ninv_res  = alloc(48);
+    _p384_ninv_base = alloc(48);
+    _p384_ninv_exp  = u384_clone(_p384_n);
+    store64(_p384_ninv_exp, load64(_p384_ninv_exp) - 2);
+    _p384_ninv_inited = 1;
+    return 0;
+}
+
+fn fn_p384_inv(r, a): i64 {
+    _p384_ninv_init();
+    memset(_p384_ninv_res, 0, 48);
+    store64(_p384_ninv_res, 1);
+    u384_copy(_p384_ninv_base, a);
+    var i = 0;
+    while (i < 384) {
+        var limb_idx = i / 64;
+        var bit_idx  = i & 63;
+        var bit = (load64(_p384_ninv_exp + limb_idx * 8) >> bit_idx) & 1;
+        if (bit == 1) {
+            fn_p384_mul(_p384_ninv_tmp, _p384_ninv_res, _p384_ninv_base);
+            u384_copy(_p384_ninv_res, _p384_ninv_tmp);
+        }
+        fn_p384_mul(_p384_ninv_tmp, _p384_ninv_base, _p384_ninv_base);
+        u384_copy(_p384_ninv_base, _p384_ninv_tmp);
+        i = i + 1;
+    }
+    u384_copy(r, _p384_ninv_res);
+    return 0;
+}
+
+# ================================================================
+# On-curve check
+# ================================================================
+
+var _onc384_lhs = 0;
+var _onc384_rhs = 0;
+var _onc384_tmp = 0;
+var _onc384_three_x = 0;
+var _onc384_inited = 0;
+
+fn _onc384_init(): i64 {
+    if (_onc384_inited == 1) { return 0; }
+    _p384_init();
+    _onc384_lhs = alloc(48);
+    _onc384_rhs = alloc(48);
+    _onc384_tmp = alloc(48);
+    _onc384_three_x = alloc(48);
+    _onc384_inited = 1;
+    return 0;
+}
+
+fn pt_p384_is_on_curve(x, y): i64 {
+    _onc384_init();
+    if (u384_cmp(x, _p384_p) >= 0) { return 0; }
+    if (u384_cmp(y, _p384_p) >= 0) { return 0; }
+    if (u384_is_zero(x) == 1) {
+        if (u384_is_zero(y) == 1) { return 0; }
+    }
+    fp_p384_sq(_onc384_lhs, y);
+    fp_p384_sq(_onc384_tmp, x);
+    fp_p384_mul(_onc384_rhs, _onc384_tmp, x);
+    fp_p384_add(_onc384_tmp, x, x);
+    fp_p384_add(_onc384_three_x, _onc384_tmp, x);
+    fp_p384_sub(_onc384_rhs, _onc384_rhs, _onc384_three_x);
+    fp_p384_add(_onc384_rhs, _onc384_rhs, _p384_b);
+    if (u384_eq(_onc384_lhs, _onc384_rhs) == 1) { return 1; }
+    return 0;
+}
+
+# ================================================================
+# Jacobian point arithmetic on P-384
+#
+# Point representation: 144 bytes (X 48 || Y 48 || Z 48 of LE limbs).
+# Z == 0 represents the point at infinity.
+# Formulas: same EFD references as P-256 (dbl-2001-b for a=-3,
+# add-2007-bl for general add).
+# ================================================================
+
+fn _pt384_x(p): i64 { return p; }
+fn _pt384_y(p): i64 { return p + 48; }
+fn _pt384_z(p): i64 { return p + 96; }
+
+fn pt384_alloc(): i64 {
+    var p = alloc(144);
+    memset(p, 0, 144);
+    return p;
+}
+
+fn pt384_set_infinity(p): i64 {
+    memset(p, 0, 144);
+    return 0;
+}
+
+fn pt384_is_infinity(p): i64 {
+    if (u384_is_zero(_pt384_z(p)) == 1) { return 1; }
+    return 0;
+}
+
+fn pt384_copy(dst, src): i64 {
+    memcpy(dst, src, 144);
+    return 0;
+}
+
+fn pt384_cswap(swap, a, b): i64 {
+    var mask = 0 - swap;
+    var i = 0;
+    while (i < 18) {       # 18 × 8 bytes = 144
+        var av = load64(a + i * 8);
+        var bv = load64(b + i * 8);
+        var t  = mask & (av ^ bv);
+        store64(a + i * 8, av ^ t);
+        store64(b + i * 8, bv ^ t);
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn pt384_from_affine(p, x, y): i64 {
+    u384_copy(_pt384_x(p), x);
+    u384_copy(_pt384_y(p), y);
+    memset(_pt384_z(p), 0, 48);
+    store64(_pt384_z(p), 1);
+    return 0;
+}
+
+var _pt384_aff_zinv  = 0;
+var _pt384_aff_zinv2 = 0;
+var _pt384_aff_zinv3 = 0;
+
+fn pt384_to_affine(out_x, out_y, p): i64 {
+    if (pt384_is_infinity(p) == 1) { return 0; }
+    if (_pt384_aff_zinv  == 0) { _pt384_aff_zinv  = alloc(48); }
+    if (_pt384_aff_zinv2 == 0) { _pt384_aff_zinv2 = alloc(48); }
+    if (_pt384_aff_zinv3 == 0) { _pt384_aff_zinv3 = alloc(48); }
+    fp_p384_inv(_pt384_aff_zinv, _pt384_z(p));
+    fp_p384_sq(_pt384_aff_zinv2, _pt384_aff_zinv);
+    fp_p384_mul(_pt384_aff_zinv3, _pt384_aff_zinv2, _pt384_aff_zinv);
+    fp_p384_mul(out_x, _pt384_x(p), _pt384_aff_zinv2);
+    fp_p384_mul(out_y, _pt384_y(p), _pt384_aff_zinv3);
+    return 1;
+}
+
+# Point doubling (EFD dbl-2001-b, a = -3).
+var _ptd384_delta = 0;
+var _ptd384_gamma = 0;
+var _ptd384_beta  = 0;
+var _ptd384_alpha = 0;
+var _ptd384_t1    = 0;
+var _ptd384_t2    = 0;
+var _ptd384_x3    = 0;
+var _ptd384_y3    = 0;
+var _ptd384_z3    = 0;
+var _ptd384_inited = 0;
+
+fn _ptd384_init(): i64 {
+    if (_ptd384_inited == 1) { return 0; }
+    _ptd384_delta = alloc(48);
+    _ptd384_gamma = alloc(48);
+    _ptd384_beta  = alloc(48);
+    _ptd384_alpha = alloc(48);
+    _ptd384_t1    = alloc(48);
+    _ptd384_t2    = alloc(48);
+    _ptd384_x3    = alloc(48);
+    _ptd384_y3    = alloc(48);
+    _ptd384_z3    = alloc(48);
+    _ptd384_inited = 1;
+    return 0;
+}
+
+fn pt384_double(out, p): i64 {
+    _p384_init();
+    _ptd384_init();
+    if (pt384_is_infinity(p) == 1) { pt384_set_infinity(out); return 0; }
+
+    fp_p384_sq(_ptd384_delta, _pt384_z(p));
+    fp_p384_sq(_ptd384_gamma, _pt384_y(p));
+    fp_p384_mul(_ptd384_beta, _pt384_x(p), _ptd384_gamma);
+
+    fp_p384_sub(_ptd384_t1, _pt384_x(p), _ptd384_delta);
+    fp_p384_add(_ptd384_t2, _pt384_x(p), _ptd384_delta);
+    fp_p384_mul(_ptd384_alpha, _ptd384_t1, _ptd384_t2);
+    fp_p384_add(_ptd384_t1, _ptd384_alpha, _ptd384_alpha);
+    fp_p384_add(_ptd384_alpha, _ptd384_t1, _ptd384_alpha);
+
+    fp_p384_sq(_ptd384_x3, _ptd384_alpha);
+    fp_p384_add(_ptd384_t1, _ptd384_beta, _ptd384_beta);
+    fp_p384_add(_ptd384_t1, _ptd384_t1, _ptd384_t1);
+    fp_p384_add(_ptd384_t2, _ptd384_t1, _ptd384_t1);
+    fp_p384_sub(_ptd384_x3, _ptd384_x3, _ptd384_t2);
+
+    fp_p384_add(_ptd384_t1, _pt384_y(p), _pt384_z(p));
+    fp_p384_sq(_ptd384_z3, _ptd384_t1);
+    fp_p384_sub(_ptd384_z3, _ptd384_z3, _ptd384_gamma);
+    fp_p384_sub(_ptd384_z3, _ptd384_z3, _ptd384_delta);
+
+    fp_p384_add(_ptd384_t1, _ptd384_beta, _ptd384_beta);
+    fp_p384_add(_ptd384_t1, _ptd384_t1, _ptd384_t1);
+    fp_p384_sub(_ptd384_t1, _ptd384_t1, _ptd384_x3);
+    fp_p384_mul(_ptd384_y3, _ptd384_alpha, _ptd384_t1);
+    fp_p384_sq(_ptd384_t2, _ptd384_gamma);
+    fp_p384_add(_ptd384_t1, _ptd384_t2, _ptd384_t2);
+    fp_p384_add(_ptd384_t1, _ptd384_t1, _ptd384_t1);
+    fp_p384_add(_ptd384_t1, _ptd384_t1, _ptd384_t1);
+    fp_p384_sub(_ptd384_y3, _ptd384_y3, _ptd384_t1);
+
+    u384_copy(_pt384_x(out), _ptd384_x3);
+    u384_copy(_pt384_y(out), _ptd384_y3);
+    u384_copy(_pt384_z(out), _ptd384_z3);
+    return 0;
+}
+
+# Point addition (EFD add-2007-bl).
+var _pta384_z1z1 = 0;
+var _pta384_z2z2 = 0;
+var _pta384_u1   = 0;
+var _pta384_u2   = 0;
+var _pta384_s1   = 0;
+var _pta384_s2   = 0;
+var _pta384_h    = 0;
+var _pta384_i    = 0;
+var _pta384_j    = 0;
+var _pta384_r    = 0;
+var _pta384_v    = 0;
+var _pta384_t1   = 0;
+var _pta384_t2   = 0;
+var _pta384_x3   = 0;
+var _pta384_y3   = 0;
+var _pta384_z3   = 0;
+var _pta384_inited = 0;
+
+fn _pta384_init(): i64 {
+    if (_pta384_inited == 1) { return 0; }
+    _pta384_z1z1 = alloc(48);
+    _pta384_z2z2 = alloc(48);
+    _pta384_u1   = alloc(48);
+    _pta384_u2   = alloc(48);
+    _pta384_s1   = alloc(48);
+    _pta384_s2   = alloc(48);
+    _pta384_h    = alloc(48);
+    _pta384_i    = alloc(48);
+    _pta384_j    = alloc(48);
+    _pta384_r    = alloc(48);
+    _pta384_v    = alloc(48);
+    _pta384_t1   = alloc(48);
+    _pta384_t2   = alloc(48);
+    _pta384_x3   = alloc(48);
+    _pta384_y3   = alloc(48);
+    _pta384_z3   = alloc(48);
+    _pta384_inited = 1;
+    return 0;
+}
+
+fn pt384_add(out, p, q): i64 {
+    _p384_init();
+    _pta384_init();
+
+    if (pt384_is_infinity(p) == 1) { pt384_copy(out, q); return 0; }
+    if (pt384_is_infinity(q) == 1) { pt384_copy(out, p); return 0; }
+
+    fp_p384_sq(_pta384_z1z1, _pt384_z(p));
+    fp_p384_sq(_pta384_z2z2, _pt384_z(q));
+
+    fp_p384_mul(_pta384_u1, _pt384_x(p), _pta384_z2z2);
+    fp_p384_mul(_pta384_u2, _pt384_x(q), _pta384_z1z1);
+
+    fp_p384_mul(_pta384_t1, _pt384_z(q), _pta384_z2z2);
+    fp_p384_mul(_pta384_s1, _pt384_y(p), _pta384_t1);
+    fp_p384_mul(_pta384_t1, _pt384_z(p), _pta384_z1z1);
+    fp_p384_mul(_pta384_s2, _pt384_y(q), _pta384_t1);
+
+    fp_p384_sub(_pta384_h, _pta384_u2, _pta384_u1);
+
+    if (u384_is_zero(_pta384_h) == 1) {
+        if (u384_eq(_pta384_s1, _pta384_s2) == 1) {
+            return pt384_double(out, p);
+        } else {
+            pt384_set_infinity(out);
+            return 0;
+        }
+    }
+
+    fp_p384_add(_pta384_t1, _pta384_h, _pta384_h);
+    fp_p384_sq(_pta384_i, _pta384_t1);
+    fp_p384_mul(_pta384_j, _pta384_h, _pta384_i);
+    fp_p384_sub(_pta384_t1, _pta384_s2, _pta384_s1);
+    fp_p384_add(_pta384_r, _pta384_t1, _pta384_t1);
+    fp_p384_mul(_pta384_v, _pta384_u1, _pta384_i);
+
+    fp_p384_sq(_pta384_x3, _pta384_r);
+    fp_p384_sub(_pta384_x3, _pta384_x3, _pta384_j);
+    fp_p384_add(_pta384_t1, _pta384_v, _pta384_v);
+    fp_p384_sub(_pta384_x3, _pta384_x3, _pta384_t1);
+
+    fp_p384_sub(_pta384_t1, _pta384_v, _pta384_x3);
+    fp_p384_mul(_pta384_y3, _pta384_r, _pta384_t1);
+    fp_p384_mul(_pta384_t1, _pta384_s1, _pta384_j);
+    fp_p384_add(_pta384_t2, _pta384_t1, _pta384_t1);
+    fp_p384_sub(_pta384_y3, _pta384_y3, _pta384_t2);
+
+    fp_p384_add(_pta384_t1, _pt384_z(p), _pt384_z(q));
+    fp_p384_sq(_pta384_t2, _pta384_t1);
+    fp_p384_sub(_pta384_t2, _pta384_t2, _pta384_z1z1);
+    fp_p384_sub(_pta384_t2, _pta384_t2, _pta384_z2z2);
+    fp_p384_mul(_pta384_z3, _pta384_t2, _pta384_h);
+
+    u384_copy(_pt384_x(out), _pta384_x3);
+    u384_copy(_pt384_y(out), _pta384_y3);
+    u384_copy(_pt384_z(out), _pta384_z3);
+    return 0;
+}
+
+# Montgomery-ladder scalar multiplication.
+var _ptm384_r0 = 0;
+var _ptm384_r1 = 0;
+var _ptm384_sum = 0;
+var _ptm384_dbl = 0;
+var _ptm384_scalar = 0;
+var _ptm384_inited = 0;
+
+fn _ptm384_init(): i64 {
+    if (_ptm384_inited == 1) { return 0; }
+    _ptm384_r0 = pt384_alloc();
+    _ptm384_r1 = pt384_alloc();
+    _ptm384_sum = pt384_alloc();
+    _ptm384_dbl = pt384_alloc();
+    _ptm384_inited = 1;
+    return 0;
+}
+
+fn pt384_scalarmul(out, k, P): i64 {
+    _p384_init();
+    _ptm384_init();
+
+    pt384_set_infinity(_ptm384_r0);
+    pt384_copy(_ptm384_r1, P);
+    _ptm384_scalar = k;
+    var prev = 0;
+    var i = 383;
+    while (i >= 0) {
+        var limb_idx = i / 64;
+        var bit_idx  = i & 63;
+        var bit = (load64(_ptm384_scalar + limb_idx * 8) >> bit_idx) & 1;
+        var swap = prev ^ bit;
+        pt384_cswap(swap, _ptm384_r0, _ptm384_r1);
+        pt384_add(_ptm384_sum, _ptm384_r0, _ptm384_r1);
+        pt384_double(_ptm384_dbl, _ptm384_r0);
+        pt384_copy(_ptm384_r1, _ptm384_sum);
+        pt384_copy(_ptm384_r0, _ptm384_dbl);
+        prev = bit;
+        i = i - 1;
+    }
+    pt384_cswap(prev, _ptm384_r0, _ptm384_r1);
+    pt384_copy(out, _ptm384_r0);
+    return 0;
+}
+
+# ================================================================
+# ECDSA P-384 verify (SEC 1 v2.0 §4.1.4)
+#
+# Inputs:
+#   pk    — 96 bytes, Qx || Qy (big-endian)
+#   sig   — 96 bytes, r || s   (big-endian)
+#   msg   — message bytes; SHA-384(msg) is the message representative
+# ================================================================
+
+var _ecv384_e        = 0;
+var _ecv384_r        = 0;
+var _ecv384_s        = 0;
+var _ecv384_w        = 0;
+var _ecv384_u1       = 0;
+var _ecv384_u2       = 0;
+var _ecv384_qx       = 0;
+var _ecv384_qy       = 0;
+var _ecv384_digest   = 0;
+var _ecv384_P_u1G    = 0;
+var _ecv384_P_u2Q    = 0;
+var _ecv384_R        = 0;
+var _ecv384_Rx       = 0;
+var _ecv384_Ry       = 0;
+var _ecv384_Rx_modn  = 0;
+var _ecv384_G        = 0;
+var _ecv384_Q        = 0;
+var _ecv384_inited   = 0;
+
+fn _ecv384_init(): i64 {
+    if (_ecv384_inited == 1) { return 0; }
+    _p384_init();
+    _ecv384_e        = alloc(48);
+    _ecv384_r        = alloc(48);
+    _ecv384_s        = alloc(48);
+    _ecv384_w        = alloc(48);
+    _ecv384_u1       = alloc(48);
+    _ecv384_u2       = alloc(48);
+    _ecv384_qx       = alloc(48);
+    _ecv384_qy       = alloc(48);
+    _ecv384_digest   = alloc(48);
+    _ecv384_P_u1G    = pt384_alloc();
+    _ecv384_P_u2Q    = pt384_alloc();
+    _ecv384_R        = pt384_alloc();
+    _ecv384_Rx       = alloc(48);
+    _ecv384_Ry       = alloc(48);
+    _ecv384_Rx_modn  = alloc(48);
+    _ecv384_G        = pt384_alloc();
+    _ecv384_Q        = pt384_alloc();
+    pt384_from_affine(_ecv384_G, _p384_gx, _p384_gy);
+    _ecv384_inited = 1;
+    return 0;
+}
+
+fn ecdsa_p384_verify(pk, msg, msg_len, sig): i64 {
+    _ecv384_init();
+
+    # 1. Decode r, s
+    u384_load_be(_ecv384_r, sig);
+    u384_load_be(_ecv384_s, sig + 48);
+    if (u384_is_zero(_ecv384_r) == 1) { return 0; }
+    if (u384_is_zero(_ecv384_s) == 1) { return 0; }
+    if (u384_cmp(_ecv384_r, _p384_n) >= 0) { return 0; }
+    if (u384_cmp(_ecv384_s, _p384_n) >= 0) { return 0; }
+
+    # 2. Decode + validate Q
+    u384_load_be(_ecv384_qx, pk);
+    u384_load_be(_ecv384_qy, pk + 48);
+    if (pt_p384_is_on_curve(_ecv384_qx, _ecv384_qy) == 0) { return 0; }
+    pt384_from_affine(_ecv384_Q, _ecv384_qx, _ecv384_qy);
+
+    # 3. e = SHA-384(msg) reduced mod n (the message representative has
+    # the same bit length as the field; for P-384 / SHA-384 it matches
+    # exactly so we just load BE and reduce once if ≥ n).
+    sha384(msg, msg_len, _ecv384_digest);
+    u384_load_be(_ecv384_e, _ecv384_digest);
+    if (u384_cmp(_ecv384_e, _p384_n) >= 0) { u384_sub(_ecv384_e, _ecv384_e, _p384_n); }
+
+    # 4. w = s^-1 mod n
+    fn_p384_inv(_ecv384_w, _ecv384_s);
+
+    # 5. u1 = e*w mod n, u2 = r*w mod n
+    fn_p384_mul(_ecv384_u1, _ecv384_e, _ecv384_w);
+    fn_p384_mul(_ecv384_u2, _ecv384_r, _ecv384_w);
+
+    # 6. R = u1*G + u2*Q
+    pt384_scalarmul(_ecv384_P_u1G, _ecv384_u1, _ecv384_G);
+    pt384_scalarmul(_ecv384_P_u2Q, _ecv384_u2, _ecv384_Q);
+    pt384_add(_ecv384_R, _ecv384_P_u1G, _ecv384_P_u2Q);
+
+    if (pt384_is_infinity(_ecv384_R) == 1) { return 0; }
+
+    # 7. v = Rx mod n; accept iff v == r
+    pt384_to_affine(_ecv384_Rx, _ecv384_Ry, _ecv384_R);
+    fn_p384_reduce384(_ecv384_Rx_modn, _ecv384_Rx);
+    if (u384_eq(_ecv384_Rx_modn, _ecv384_r) == 1) { return 1; }
+    return 0;
+}

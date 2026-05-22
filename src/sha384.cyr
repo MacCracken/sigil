@@ -1,0 +1,58 @@
+# sha384.cyr — FIPS 180-4 SHA-384.
+#
+# SHA-384 reuses SHA-512's compression core (`src/sha512.cyr`) with
+# two changes per FIPS 180-4 §5.3.4 / §6.5:
+#   1. Different initial hash value (IV).
+#   2. Output is the leftmost 48 bytes of the final 64-byte state.
+#
+# Used by:
+#   • SEV-SNP attestation reports — measurement field is a SHA-384
+#     digest of the guest's launch state (per AMD's spec).
+#   • Future ECDSA P-384 signature workflows where the message
+#     representative is SHA-384(msg).
+#
+# Wrapper-style implementation — the heavy lifting stays in
+# `sha512_transform` / `sha512_update` / `sha512_finalize`. Sigil
+# 2.x's `sha256.cyr` / `sha512.cyr` / `hkdf.cyr` separation
+# pattern is preserved.
+
+# SHA-384 initial hash (FIPS 180-4 §5.3.4)
+fn sha384_init(): i64 {
+    sha512_global_init();
+    var ctx = fl_alloc(208);
+    store64(ctx +  0, 0xcbbb9d5dc1059ed8);
+    store64(ctx +  8, 0x629a292a367cd507);
+    store64(ctx + 16, 0x9159015a3070dd17);
+    store64(ctx + 24, 0x152fecd8f70e5939);
+    store64(ctx + 32, 0x67332667ffc00b31);
+    store64(ctx + 40, 0x8eb44a8768581511);
+    store64(ctx + 48, 0xdb0c2e0d64f98fa7);
+    store64(ctx + 56, 0x47b5481dbefa4fa4);
+    memset(ctx + 64, 0, 128);
+    store64(ctx + 192, 0);
+    store64(ctx + 200, 0);
+    return ctx;
+}
+
+# Update — identical streaming behaviour to SHA-512 (same block size).
+fn sha384_update(ctx, data, len): i64 {
+    return sha512_update(ctx, data, len);
+}
+
+# Finalize — run the SHA-512 finaliser into a 64-byte scratch, then
+# truncate to the leftmost 48 bytes.
+fn sha384_finalize(ctx, out): i64 {
+    var tmp[64];
+    sha512_finalize(ctx, &tmp);
+    memcpy(out, &tmp, 48);
+    return 0;
+}
+
+# Convenience — hash `data` (len bytes) into `out` (48 bytes).
+fn sha384(data, len, out): i64 {
+    var ctx = sha384_init();
+    sha384_update(ctx, data, len);
+    sha384_finalize(ctx, out);
+    fl_free(ctx);
+    return 0;
+}

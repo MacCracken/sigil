@@ -1,0 +1,182 @@
+# sev_snp.tcyr — AMD SEV-SNP attestation report parser + verify-
+# orchestrator tests.
+#
+# Sigil 3.2.4 — bite 4 of the TEE attestation arc.
+#
+# Test vector below is a synthesized SEV-SNP report:
+#   • Test VCEK keypair generated via openssl secp384r1
+#   • Signed body (672 B) constructed with test fixed-pattern bytes
+#   • Signed via SHA-384 + ECDSA P-384
+#   • Stored in AMD's little-endian r/s padded-72-byte format
+# See `/tmp/gen_snp_test_vector.py` (out of tree).
+
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/string.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fmt.cyr"
+include "lib/json.cyr"
+include "lib/sakshi.cyr"
+include "lib/chrono.cyr"
+include "lib/bigint.cyr"
+include "lib/ct.cyr"
+
+include "src/types.cyr"
+include "src/error.cyr"
+include "src/sha256.cyr"
+include "src/hex.cyr"
+include "src/sha512.cyr"
+include "src/sha384.cyr"
+include "src/bigint_ext.cyr"
+include "src/ed25519.cyr"
+include "src/ecdsa_p256.cyr"
+include "src/ecdsa_p384.cyr"
+include "src/sev_snp.cyr"
+
+var VCEK_PUB_HEX = "2ff9fbf34a7ddba6a51840a81955f7a3012b723caacfc8de6aacde1be2965ef6e992869a9bebe69db3d362da2105510f5e9b44184fb5472ebd6b129413d4fc77e0523f8280907fefb407abf6f44bf8389baa8bc4bcbc2acc395d7b7239bf4be7";
+var REPORT_HEX = "02000000050000000000030000000000aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaabbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb0000000001000000050201000000000000000000000000000000000000000000ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000011111111111111111111111111111111111111111111111111111111111111110000000000000000000000000000000000000000000000000000000000000000050201000000000000000000000000000000000000000000000000000000000022222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222050201000000000001320100320101000502010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000f89a046bd86d6f75394472122531eeb005fa55bd060e777730096a2e512a76cb7d5efdf0e53be3d6dea8bf9f7215c2df000000000000000000000000000000000000000000000000a450ca746ed85f0fa28aab0c319fe8141165e1b728fb0ebf29b6e1f6dc55d651c5ac483ac0b96eccc2814995fef8bc3b0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
+var REPORT_LEN = 1184;
+
+# Test helpers extracted into separate fns to keep main() small —
+# Cyrius's single-pass compiler appears to struggle with very long
+# function bodies that pile up local var declarations (the same
+# code body inlined in main() segfaults at the first parse call; the
+# same body split across helpers below runs cleanly).
+
+fn run_parse_tests(report_buf, vcek_pk): i64 {
+    test_group("snp_report_parse — happy path");
+    var r = snp_report_alloc();
+    assert_eq(snp_report_parse(report_buf, REPORT_LEN, r), 1, "parse OK");
+    assert_eq(snp_report_version(r), SNP_VERSION_V2, "version v2");
+    assert_eq(snp_report_signature_algo(r), SNP_SIG_ECDSA_P384_SHA384,
+        "signature_algo == ECDSA P-384 / SHA-384");
+    assert_eq(snp_report_guest_svn(r), 5, "guest_svn == 5");
+    assert_eq(snp_report_vmpl(r), 0, "vmpl == 0");
+
+    test_group("snp_report — field accessors");
+    var fid = snp_report_family_id_ptr(r);
+    assert_eq(load8(fid) & 0xFF, 0xAA, "family_id[0]");
+    assert_eq(load8(fid + 15) & 0xFF, 0xAA, "family_id[15]");
+    var iid = snp_report_image_id_ptr(r);
+    assert_eq(load8(iid) & 0xFF, 0xBB, "image_id[0]");
+    var rd = snp_report_data_ptr(r);
+    assert_eq(load8(rd) & 0xFF, 0xCC, "report_data[0]");
+    assert_eq(load8(rd + 63) & 0xFF, 0xCC, "report_data[63]");
+    var mre = snp_report_measurement_ptr(r);
+    assert_eq(load8(mre) & 0xFF, 0xDD, "measurement[0]");
+    assert_eq(load8(mre + 47) & 0xFF, 0xDD, "measurement[47]");
+    var hd = snp_report_host_data_ptr(r);
+    assert_eq(load8(hd) & 0xFF, 0xEE, "host_data[0]");
+    var cid = snp_report_chip_id_ptr(r);
+    assert_eq(load8(cid) & 0xFF, 0x22, "chip_id[0]");
+    assert_eq(load8(cid + 63) & 0xFF, 0x22, "chip_id[63]");
+    var rid = snp_report_report_id_ptr(r);
+    assert_eq(load8(rid) & 0xFF, 0x11, "report_id[0]");
+    return 0;
+}
+
+fn run_malformed_tests(report_buf): i64 {
+    test_group("snp_report_parse — malformed rejection");
+    var rbad = snp_report_alloc();
+    assert_eq(snp_report_parse(report_buf, 0, rbad), 0, "empty buffer rejected");
+    assert_eq(snp_report_parse(report_buf, 100, rbad), 0, "truncated rejected");
+    assert_eq(snp_report_parse(report_buf, REPORT_LEN - 1, rbad), 0,
+        "1-byte short rejected");
+    assert_eq(snp_report_parse(report_buf, REPORT_LEN + 1, rbad), 0,
+        "1-byte long rejected");
+
+    var rv = alloc(REPORT_LEN);
+    memcpy(rv, report_buf, REPORT_LEN);
+    store8(rv, 0x03);
+    assert_eq(snp_report_parse(rv, REPORT_LEN, rbad), 0, "non-v2 version rejected");
+
+    var rs = alloc(REPORT_LEN);
+    memcpy(rs, report_buf, REPORT_LEN);
+    store8(rs + 0x34, 0x02);
+    assert_eq(snp_report_parse(rs, REPORT_LEN, rbad), 0, "non-ECDSA-P384/SHA-384 algo rejected");
+    return 0;
+}
+
+fn run_verify_tests(report_buf, vcek_pk): i64 {
+    test_group("snp_report_verify — happy path");
+    var r = snp_report_alloc();
+    snp_report_parse(report_buf, REPORT_LEN, r);
+    assert_eq(snp_report_verify(r, vcek_pk), 1, "synthesized report verifies with VCEK");
+    return 0;
+}
+
+fn run_tamper_tests(report_buf, vcek_pk): i64 {
+    test_group("snp_report_verify — tamper rejection");
+
+    # Tampered VCEK (likely makes it off-curve)
+    var vcek_bad = alloc(96);
+    memcpy(vcek_bad, vcek_pk, 96);
+    store8(vcek_bad, (load8(vcek_bad) & 0xFF) ^ 0x01);
+    var r0 = snp_report_alloc();
+    snp_report_parse(report_buf, REPORT_LEN, r0);
+    assert_eq(snp_report_verify(r0, vcek_bad), 0, "tampered VCEK rejected");
+
+    # Tampered measurement
+    var rbuf_t1 = alloc(REPORT_LEN);
+    memcpy(rbuf_t1, report_buf, REPORT_LEN);
+    store8(rbuf_t1 + 0x90, (load8(rbuf_t1 + 0x90) & 0xFF) ^ 0x01);
+    var rt1 = snp_report_alloc();
+    snp_report_parse(rbuf_t1, REPORT_LEN, rt1);
+    assert_eq(snp_report_verify(rt1, vcek_pk), 0, "tampered measurement rejected");
+
+    # Tampered report_data
+    var rbuf_t2 = alloc(REPORT_LEN);
+    memcpy(rbuf_t2, report_buf, REPORT_LEN);
+    store8(rbuf_t2 + 0x50, (load8(rbuf_t2 + 0x50) & 0xFF) ^ 0x01);
+    var rt2 = snp_report_alloc();
+    snp_report_parse(rbuf_t2, REPORT_LEN, rt2);
+    assert_eq(snp_report_verify(rt2, vcek_pk), 0, "tampered report_data rejected");
+
+    # Tampered sig.r
+    var rbuf_t3 = alloc(REPORT_LEN);
+    memcpy(rbuf_t3, report_buf, REPORT_LEN);
+    store8(rbuf_t3 + 0x2A0, (load8(rbuf_t3 + 0x2A0) & 0xFF) ^ 0x01);
+    var rt3 = snp_report_alloc();
+    snp_report_parse(rbuf_t3, REPORT_LEN, rt3);
+    assert_eq(snp_report_verify(rt3, vcek_pk), 0, "tampered sig.r rejected");
+
+    # Tampered sig.s
+    var rbuf_t4 = alloc(REPORT_LEN);
+    memcpy(rbuf_t4, report_buf, REPORT_LEN);
+    store8(rbuf_t4 + 0x2E8, (load8(rbuf_t4 + 0x2E8) & 0xFF) ^ 0x01);
+    var rt4 = snp_report_alloc();
+    snp_report_parse(rbuf_t4, REPORT_LEN, rt4);
+    assert_eq(snp_report_verify(rt4, vcek_pk), 0, "tampered sig.s rejected");
+
+    # Non-zero padding in sig.r high bytes
+    var rbuf_t5 = alloc(REPORT_LEN);
+    memcpy(rbuf_t5, report_buf, REPORT_LEN);
+    store8(rbuf_t5 + 0x2A0 + 48, 0x01);
+    var rt5 = snp_report_alloc();
+    snp_report_parse(rbuf_t5, REPORT_LEN, rt5);
+    assert_eq(snp_report_verify(rt5, vcek_pk), 0,
+        "non-zero padding in sig.r rejected (defense in depth)");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    _p384_init();
+    var report_buf = hex_decode(REPORT_HEX, 2 * REPORT_LEN);
+    var vcek_pk    = hex_decode(VCEK_PUB_HEX, 192);
+
+    run_parse_tests(report_buf, vcek_pk);
+    run_malformed_tests(report_buf);
+    run_verify_tests(report_buf, vcek_pk);
+    run_tamper_tests(report_buf, vcek_pk);
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

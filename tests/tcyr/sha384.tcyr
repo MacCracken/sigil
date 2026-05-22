@@ -1,0 +1,72 @@
+# sha384.tcyr — FIPS 180-4 SHA-384 vectors.
+#
+# Wrapper around sha512_transform; tests confirm the truncated IV
+# + truncated output produce the canonical published digests.
+
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/string.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fmt.cyr"
+include "lib/json.cyr"
+include "lib/sakshi.cyr"
+include "lib/chrono.cyr"
+include "lib/bigint.cyr"
+include "lib/ct.cyr"
+
+include "src/types.cyr"
+include "src/error.cyr"
+include "src/sha256.cyr"
+include "src/hex.cyr"
+include "src/sha512.cyr"
+include "src/sha384.cyr"
+
+fn main() {
+    alloc_init();
+
+    var out = alloc(48);
+
+    test_group("sha384 — FIPS 180-4 vectors");
+
+    # Empty string. Expected digest (FIPS 180-4 App. B.1):
+    # 38b060a751ac96384cd9327eb1b1e36a21fdb71114be07434c0cc7bf63f6e1da274edebfe76f65fbd51ad2f14898b95b
+    sha384("", 0, out);
+    assert_streq(hex_encode(out, 48),
+        "38b060a751ac96384cd9327eb1b1e36a21fdb71114be07434c0cc7bf63f6e1da274edebfe76f65fbd51ad2f14898b95b",
+        "empty string");
+
+    # "abc". Expected (FIPS 180-2 App. D / 180-4):
+    # cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605a43ff5bed8086072ba1e7cc2358baeca134c825a7
+    sha384("abc", 3, out);
+    assert_streq(hex_encode(out, 48),
+        "cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605a43ff5bed8086072ba1e7cc2358baeca134c825a7",
+        "abc");
+
+    # 896-bit / 112-char input (one block + tail):
+    # "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"
+    var msg2 = "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq";
+    sha384(msg2, 56, out);
+    assert_streq(hex_encode(out, 48),
+        "3391fdddfc8dc7393707a65b1b4709397cf8b1d162af05abfe8f450de5f36bc6b0455a8520bc4e6f5fe95b1fe3c8452b",
+        "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq");
+
+    # Streaming API parity check — same digest via incremental update.
+    var ctx = sha384_init();
+    sha384_update(ctx, "ab", 2);
+    sha384_update(ctx, "c", 1);
+    sha384_finalize(ctx, out);
+    fl_free(ctx);
+    assert_streq(hex_encode(out, 48),
+        "cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605a43ff5bed8086072ba1e7cc2358baeca134c825a7",
+        "abc via streaming update");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

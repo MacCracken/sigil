@@ -5,6 +5,104 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.2.4] — 2026-05-24
+
+Fourth bite of the 3.2.x TEE attestation arc
+([`docs/development/3.2-tee-arc.md`](docs/development/3.2-tee-arc.md)):
+**AMD SEV-SNP attestation report verifier**. The largest bite of
+the arc — SEV-SNP signs with ECDSA P-384 / SHA-384, neither of
+which sigil had yet, so 3.2.4 lands the foundation for both
+SEV-SNP (this bite) and TDX (3.2.5 — TDX's QE-signing path may
+also use P-384).
+
+The arc doc's tentative "slot P-384 between 3.2.5 and 3.2.6" note
+is superseded: P-384 lands here as a proper foundation primitive.
+
+### Added
+
+- **`src/sha384.cyr` — FIPS 180-4 SHA-384 wrapper (~60 lines).**
+  Reuses `sha512_transform` (already audited at 2.x); only the
+  IV (FIPS 180-4 §5.3.4) and the output truncation to 48 bytes
+  differ. Tested against FIPS 180-4 App. B.1 vectors (empty,
+  "abc", 112-char) plus a streaming-update parity check.
+- **`src/ecdsa_p384.cyr` — ECDSA verify on NIST P-384
+  (~700 lines).** Structural mirror of `src/ecdsa_p256.cyr`
+  at 384 bits — same shape (constants → BE codec → reduction
+  → field arithmetic → scalar field → Jacobian point ops →
+  Montgomery-ladder scalar mul → verify), 6-limb u384
+  buffers replacing 4-limb u256. Includes a public
+  `pt_p384_is_on_curve` helper that `ecdsa_p384_verify` calls
+  unconditionally — same Bos-et-al-2014 invalid-curve defense
+  as P-256. Long-division reduction; Solinas word-level
+  optimisation rolls into the existing 3.2.1 bench-tuning
+  follow-up.
+- **`src/sev_snp.cyr` — AMD SEV-SNP attestation report parser +
+  verify orchestrator (~280 lines).** Per AMD's SEV-SNP
+  Firmware ABI Spec §7.3: fixed-1184-byte report with a 672-
+  byte signed body + the signature section. `snp_report_parse`
+  validates version=2 + signature_algo=1 (ECDSA P-384/SHA-384)
+  + exact size. `snp_report_verify(report, vcek_pk)` reverses
+  AMD's little-endian r/s padded-72-byte format into the
+  big-endian r||s shape `ecdsa_p384_verify` expects, verifies
+  the high 24 bytes of each are zero (defense in depth), then
+  composes against `ecdsa_p384_verify` to validate the body
+  signature. Field accessors for measurement (SHA-384 of guest
+  launch state), mr_enclave equivalents, report_data, chip_id,
+  etc. — everything kavach's `SnpAttestationReport` populates.
+- **`tests/tcyr/sha384.tcyr`** — 4 FIPS 180-4 vectors green.
+- **`tests/tcyr/ecdsa_p384.tcyr`** — 36 assertions across 8
+  groups: field arithmetic, curve-equation self-check on G,
+  2G against published SEC 2 reference, RFC 6979 §A.2.6
+  vectors (`sample` and `test`), 8 negative cases (modified
+  msg, flipped r/s bits, r/s=0, r/s=n, off-curve pk).
+- **`tests/tcyr/sev_snp.tcyr`** — 29 assertions across 5 groups:
+  parser happy path + 11 field-accessor checks, 6 malformed
+  rejection cases, verify orchestrator green path, 6 tamper
+  cases (VCEK / measurement / report_data / sig.r / sig.s /
+  non-zero pad). Synthesized vector generated offline via the
+  same openssl+Python helper pattern as 3.2.3.
+
+### Scope decision
+
+The ARK → ASK → VCEK X.509 chain walk stays caller-driven for
+3.2.4, mirroring 3.2.3's "parser-only + per-piece verify"
+choice. The caller fetches the VCEK chain from AMD KDS (typically
+PEM-encoded) and walks it via the existing `x509_*` surface
+before handing the validated VCEK pubkey to `snp_report_verify`.
+PEM decoding + an integrated `snp_report_verify_full(report,
+ark_root)` wrapper land in a future patch when a real-deployment
+shape surfaces. See audit doc INFO-1.
+
+### Security
+
+- Audit: `docs/audit/2026-05-24-audit.md`. **0 CRITICAL / HIGH /
+  MEDIUM** findings across ~1200 new lines (sha384 + ecdsa_p384
+  + sev_snp). One new LOW (perm-lifetime allocation in
+  `_snp_v_init` — consistent with 3.2.2's LOW-1 pattern, not
+  exploitable). Four new INFO items documenting deferred scope,
+  a Cyrius long-`main()` quirk hit during test development
+  (worked around by splitting test helpers — see audit INFO-3),
+  and field-reduction speed.
+- CVE-2022-21449 (zero r/s), invalid-curve attack (Bos et al.),
+  CVE-2020-0601 (curve param spoofing), and algorithm-confusion
+  attacks all defended. See audit Step 9.
+
+### Cyrius compiler note
+
+Sigil tests with very long `main()` bodies (~150 lines of locals)
+can trigger a Cyrius single-pass-compiler segfault at the first
+nested-call site. Workaround: split test logic into helper
+functions, keep `main()` short. Documented in audit INFO-3;
+filed as a Cyrius-side issue for follow-up. Future sigil tests
+should adopt the helper-split pattern from the start.
+
+### Module wiring
+
+- `src/lib.cyr` includes (in order): `sha384.cyr` after
+  `sha512.cyr`, `ecdsa_p384.cyr` after `ecdsa_p256.cyr`,
+  `sev_snp.cyr` after `sgx.cyr`.
+- `cyrius.cyml [lib].modules` lists all three new modules.
+
 ## [3.2.3] — 2026-05-23
 
 Third bite of the 3.2.x TEE attestation arc
