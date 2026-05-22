@@ -1,0 +1,307 @@
+# tdx.cyr — Intel TDX v4 TD-quote parser + verify orchestrator.
+#
+# Sigil 3.2.5 — bite 5 of the TEE attestation arc (origin:
+# `docs/development/3.2-tee-arc.md`).
+#
+# TDX quotes share the SGX DCAP signature-section layout — the
+# quoting enclave that signs a TD-quote runs on Intel SGX
+# hardware on the same host, so the AK / PCK / QE-report dance is
+# byte-identical to SGX (see `src/sgx.cyr`). What differs:
+#   • Header byte 0..1: version = 4 (vs SGX's 3)
+#   • Header byte 4..7: tee_type = 0x00000081 (TDX) (vs SGX's
+#     all-zero reserved word)
+#   • Quote body: a 584-byte TD_QUOTE_BODY (vs SGX's 384-byte
+#     EnclaveReport) carrying MRTD / MRSEAM / RTMR0..3 etc.
+#
+# Scope (per the 3.2.3 / 3.2.4 pattern): parser-only with a
+# verify orchestrator that takes a pre-validated PCK pubkey. The
+# X.509 chain walk from the in-quote PCK leaf up to Intel SGX
+# Root CA is the caller's responsibility for now — TDX shares
+# the SGX cert chain so reusing kavach's external walk is the
+# natural fit.
+#
+# 3.2.5 supports att_key_type = 2 (ECDSA P-256 / SHA-256) only —
+# the deployment-dominant TDX 1.0 case. ECDSA P-384 / SHA-384
+# (att_key_type = 3) is the natural follow-up patch once a P-384
+# TDX deployment surfaces; the P-384 primitive landed at 3.2.4 so
+# the wiring is a small delta.
+#
+# Surface:
+#   fn tdx_quote_parse(buf, buf_len, out): i64
+#       — 1 = ok, 0 = malformed/unsupported.
+#   fn tdx_quote_verify_with_pck(quote, pck_pk): i64
+#       — three internal sig checks (PCK→QE-report, AK binding,
+#         AK→quote-body). PCK pubkey is 64 B raw Qx||Qy big-
+#         endian, externally validated by the caller's X.509
+#         chain walk.
+
+# ================================================================
+# Format constants
+# ================================================================
+
+var TDX_QUOTE_HEADER_SIZE        = 48;
+var TDX_QUOTE_BODY_SIZE          = 584;   # TD_QUOTE_BODY
+var TDX_QUOTE_SIGNED_PREFIX_SIZE = 632;   # header + body
+var TDX_AK_SIZE                  = 64;
+var TDX_ECDSA_SIG_SIZE           = 64;
+var TDX_MIN_QUOTE_SIZE           = 48 + 584 + 4 + 64 + 64 + 384 + 64 + 2 + 2 + 4;
+
+var TDX_QUOTE_VERSION_V4         = 4;
+var TDX_ATT_KEY_TYPE_ECDSA_P256  = 2;
+var TDX_TEE_TYPE_TDX             = 0x81;
+
+# Field offsets inside TD_QUOTE_BODY (per Intel TDX 1.0 quote spec).
+var TDX_BODY_OFF_TEE_TCB_SVN     = 0;
+var TDX_BODY_OFF_MRSEAM          = 16;
+var TDX_BODY_OFF_MRSEAMSIGNER    = 64;
+var TDX_BODY_OFF_SEAM_ATTRIBUTES = 112;
+var TDX_BODY_OFF_TD_ATTRIBUTES   = 120;
+var TDX_BODY_OFF_XFAM            = 128;
+var TDX_BODY_OFF_MRTD            = 136;
+var TDX_BODY_OFF_MRCONFIGID      = 184;
+var TDX_BODY_OFF_MROWNER         = 232;
+var TDX_BODY_OFF_MROWNERCONFIG   = 280;
+var TDX_BODY_OFF_RTMR0           = 328;
+var TDX_BODY_OFF_RTMR1           = 376;
+var TDX_BODY_OFF_RTMR2           = 424;
+var TDX_BODY_OFF_RTMR3           = 472;
+var TDX_BODY_OFF_REPORT_DATA     = 520;
+
+# ================================================================
+# TdxQuote struct — 256 bytes
+#
+#    0  buf_ptr
+#    8  buf_len
+#   16  version
+#   24  att_key_type
+#   32  tee_type
+#   40  header_off (always 0)
+#   48  td_body_off (always 48)
+#   56  signature_data_len
+#   64  ecdsa_sig_off            — 64 B raw r||s
+#   72  ak_off                   — 64 B Qx||Qy
+#   80  qe_report_off            — 384 B (SGX enclave report shape)
+#   88  qe_report_sig_off        — 64 B raw r||s
+#   96  qe_auth_data_off
+#  104  qe_auth_data_len
+#  112  qe_cert_data_type
+#  120  qe_cert_data_off
+#  128  qe_cert_data_len
+#  136..255  reserved
+# ================================================================
+
+fn tdx_quote_alloc(): i64 {
+    var q = alloc(256);
+    memset(q, 0, 256);
+    return q;
+}
+
+# Little-endian word loads — same shape as the SGX helpers but
+# private to this module (keeps modules loosely coupled; promoting
+# to a shared lib/le.cyr can wait until a third consumer arrives).
+fn _tdx_load_u16(buf, off): i64 {
+    return (load8(buf + off) & 0xFF)
+         | ((load8(buf + off + 1) & 0xFF) << 8);
+}
+
+fn _tdx_load_u32(buf, off): i64 {
+    return (load8(buf + off) & 0xFF)
+         | ((load8(buf + off + 1) & 0xFF) << 8)
+         | ((load8(buf + off + 2) & 0xFF) << 16)
+         | ((load8(buf + off + 3) & 0xFF) << 24);
+}
+
+# ================================================================
+# Field accessors
+# ================================================================
+
+fn tdx_quote_buf(q): i64                { return load64(q + 0); }
+fn tdx_quote_buf_len(q): i64            { return load64(q + 8); }
+fn tdx_quote_version(q): i64            { return load64(q + 16); }
+fn tdx_quote_att_key_type(q): i64       { return load64(q + 24); }
+fn tdx_quote_tee_type(q): i64           { return load64(q + 32); }
+
+fn tdx_quote_td_body_ptr(q): i64        { return load64(q + 0) + load64(q + 48); }
+
+fn tdx_quote_mrseam_ptr(q): i64         { return tdx_quote_td_body_ptr(q) + TDX_BODY_OFF_MRSEAM; }
+fn tdx_quote_mrseamsigner_ptr(q): i64   { return tdx_quote_td_body_ptr(q) + TDX_BODY_OFF_MRSEAMSIGNER; }
+fn tdx_quote_mrtd_ptr(q): i64           { return tdx_quote_td_body_ptr(q) + TDX_BODY_OFF_MRTD; }
+fn tdx_quote_mrconfigid_ptr(q): i64     { return tdx_quote_td_body_ptr(q) + TDX_BODY_OFF_MRCONFIGID; }
+fn tdx_quote_mrowner_ptr(q): i64        { return tdx_quote_td_body_ptr(q) + TDX_BODY_OFF_MROWNER; }
+fn tdx_quote_rtmr0_ptr(q): i64          { return tdx_quote_td_body_ptr(q) + TDX_BODY_OFF_RTMR0; }
+fn tdx_quote_rtmr1_ptr(q): i64          { return tdx_quote_td_body_ptr(q) + TDX_BODY_OFF_RTMR1; }
+fn tdx_quote_rtmr2_ptr(q): i64          { return tdx_quote_td_body_ptr(q) + TDX_BODY_OFF_RTMR2; }
+fn tdx_quote_rtmr3_ptr(q): i64          { return tdx_quote_td_body_ptr(q) + TDX_BODY_OFF_RTMR3; }
+fn tdx_quote_report_data_ptr(q): i64    { return tdx_quote_td_body_ptr(q) + TDX_BODY_OFF_REPORT_DATA; }
+fn tdx_quote_td_attributes_ptr(q): i64  { return tdx_quote_td_body_ptr(q) + TDX_BODY_OFF_TD_ATTRIBUTES; }
+fn tdx_quote_xfam_ptr(q): i64           { return tdx_quote_td_body_ptr(q) + TDX_BODY_OFF_XFAM; }
+
+fn tdx_quote_ak_ptr(q): i64             { return load64(q + 0) + load64(q + 72); }
+fn tdx_quote_ecdsa_sig_ptr(q): i64      { return load64(q + 0) + load64(q + 64); }
+fn tdx_quote_qe_report_ptr(q): i64      { return load64(q + 0) + load64(q + 80); }
+fn tdx_quote_qe_report_sig_ptr(q): i64  { return load64(q + 0) + load64(q + 88); }
+fn tdx_quote_qe_auth_data_ptr(q): i64   { return load64(q + 0) + load64(q + 96); }
+fn tdx_quote_qe_auth_data_len(q): i64   { return load64(q + 104); }
+fn tdx_quote_cert_data_type(q): i64     { return load64(q + 112); }
+fn tdx_quote_cert_data_ptr(q): i64      { return load64(q + 0) + load64(q + 120); }
+fn tdx_quote_cert_data_len(q): i64      { return load64(q + 128); }
+
+# ================================================================
+# tdx_quote_parse — single-pass linear walk.
+# ================================================================
+
+fn tdx_quote_parse(buf, buf_len, out): i64 {
+    memset(out, 0, 256);
+
+    if (buf_len < TDX_MIN_QUOTE_SIZE) { return 0; }
+
+    var version      = _tdx_load_u16(buf, 0);
+    var att_key_type = _tdx_load_u16(buf, 2);
+    var tee_type     = _tdx_load_u32(buf, 4);
+
+    if (version != TDX_QUOTE_VERSION_V4) { return 0; }
+    if (att_key_type != TDX_ATT_KEY_TYPE_ECDSA_P256) { return 0; }
+    if (tee_type != TDX_TEE_TYPE_TDX) { return 0; }
+
+    store64(out + 0,  buf);
+    store64(out + 8,  buf_len);
+    store64(out + 16, version);
+    store64(out + 24, att_key_type);
+    store64(out + 32, tee_type);
+    store64(out + 40, 0);
+    store64(out + 48, TDX_QUOTE_HEADER_SIZE);
+
+    # signature_data_len
+    var sig_len_off = TDX_QUOTE_HEADER_SIZE + TDX_QUOTE_BODY_SIZE;
+    if (sig_len_off + 4 > buf_len) { return 0; }
+    var sig_data_len = _tdx_load_u32(buf, sig_len_off);
+    var sig_data_off = sig_len_off + 4;
+    if (sig_data_len < 0) { return 0; }
+    if (sig_data_off + sig_data_len > buf_len) { return 0; }
+    var sig_min_fixed = TDX_ECDSA_SIG_SIZE + TDX_AK_SIZE
+                       + 384 + TDX_ECDSA_SIG_SIZE
+                       + 2 + 2 + 4;
+    if (sig_data_len < sig_min_fixed) { return 0; }
+
+    store64(out + 56, sig_data_len);
+
+    var cur = sig_data_off;
+    var sig_section_end = sig_data_off + sig_data_len;
+
+    # ecdsa_signature (64 B)
+    store64(out + 64, cur);
+    cur = cur + TDX_ECDSA_SIG_SIZE;
+    # attestation_key (64 B)
+    store64(out + 72, cur);
+    cur = cur + TDX_AK_SIZE;
+    # qe_report (384 B — SGX enclave report shape)
+    store64(out + 80, cur);
+    cur = cur + 384;
+    # qe_report_signature (64 B)
+    store64(out + 88, cur);
+    cur = cur + TDX_ECDSA_SIG_SIZE;
+
+    # qe_auth_data: u16 size + bytes
+    if (cur + 2 > sig_section_end) { return 0; }
+    var auth_len = _tdx_load_u16(buf, cur);
+    if (auth_len < 0) { return 0; }
+    if (cur + 2 + auth_len > sig_section_end) { return 0; }
+    store64(out + 96, cur + 2);
+    store64(out + 104, auth_len);
+    cur = cur + 2 + auth_len;
+
+    # qe_cert_data: u16 type + u32 size + bytes
+    if (cur + 6 > sig_section_end) { return 0; }
+    var cert_type = _tdx_load_u16(buf, cur);
+    var cert_len  = _tdx_load_u32(buf, cur + 2);
+    if (cert_len < 0) { return 0; }
+    if (cur + 6 + cert_len > sig_section_end) { return 0; }
+    if (cur + 6 + cert_len != sig_section_end) { return 0; }
+    store64(out + 112, cert_type);
+    store64(out + 120, cur + 6);
+    store64(out + 128, cert_len);
+
+    return 1;
+}
+
+# ================================================================
+# Verify orchestrator — same three-step shape as SGX, with the
+# signed body being 632 bytes (header + TD report body) instead
+# of SGX's 432 (header + enclave report).
+# ================================================================
+
+# SGX-style report-data offset inside the QE report.
+var TDX_QE_REPORT_OFF_REPORT_DATA = 320;
+
+var _tdxv_binding_input = 0;
+var _tdxv_binding_hash  = 0;
+var _tdxv_quote_body    = 0;
+var _tdxv_inited = 0;
+
+fn _tdxv_init(): i64 {
+    if (_tdxv_inited == 1) { return 0; }
+    # Max binding input: AK (64) + qe_auth_data (≤ 65535).
+    _tdxv_binding_input = alloc(65600);
+    _tdxv_binding_hash  = alloc(32);
+    # Signed prefix: header (48) + TD body (584) = 632 bytes.
+    _tdxv_quote_body    = alloc(TDX_QUOTE_SIGNED_PREFIX_SIZE);
+    _tdxv_inited = 1;
+    return 0;
+}
+
+fn tdx_quote_verify_with_pck(quote, pck_pk): i64 {
+    _tdxv_init();
+
+    # Step 1 — PCK signs the QE report (384 B SGX enclave report shape).
+    var qe_report = tdx_quote_qe_report_ptr(quote);
+    var qe_report_sig = tdx_quote_qe_report_sig_ptr(quote);
+    if (ecdsa_p256_verify(pck_pk, qe_report, 384, qe_report_sig) != 1) {
+        return 0;
+    }
+
+    # Step 2 — AK binding via SHA-256(AK || qe_auth_data) in qe_report.report_data.
+    var ak  = tdx_quote_ak_ptr(quote);
+    var aux = tdx_quote_qe_auth_data_ptr(quote);
+    var aux_len = tdx_quote_qe_auth_data_len(quote);
+    if (aux_len < 0) { return 0; }
+    if (aux_len > 65536) { return 0; }
+
+    var i = 0;
+    while (i < TDX_AK_SIZE) {
+        store8(_tdxv_binding_input + i, load8(ak + i) & 0xFF);
+        i = i + 1;
+    }
+    i = 0;
+    while (i < aux_len) {
+        store8(_tdxv_binding_input + TDX_AK_SIZE + i, load8(aux + i) & 0xFF);
+        i = i + 1;
+    }
+    sha256(_tdxv_binding_input, TDX_AK_SIZE + aux_len, _tdxv_binding_hash);
+
+    var rd = qe_report + TDX_QE_REPORT_OFF_REPORT_DATA;
+    i = 0;
+    while (i < 32) {
+        if ((load8(rd + i) & 0xFF) != (load8(_tdxv_binding_hash + i) & 0xFF)) {
+            return 0;
+        }
+        i = i + 1;
+    }
+    i = 32;
+    while (i < 64) {
+        if ((load8(rd + i) & 0xFF) != 0) { return 0; }
+        i = i + 1;
+    }
+
+    # Step 3 — AK signs the quote body (header || TD report body, 632 B).
+    var buf = tdx_quote_buf(quote);
+    memcpy(_tdxv_quote_body, buf, TDX_QUOTE_SIGNED_PREFIX_SIZE);
+
+    var ecdsa_sig = tdx_quote_ecdsa_sig_ptr(quote);
+    if (ecdsa_p256_verify(ak, _tdxv_quote_body,
+                           TDX_QUOTE_SIGNED_PREFIX_SIZE,
+                           ecdsa_sig) != 1) {
+        return 0;
+    }
+
+    return 1;
+}

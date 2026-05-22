@@ -5,6 +5,78 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.2.5] — 2026-05-25
+
+Fifth bite of the 3.2.x TEE attestation arc
+([`docs/development/3.2-tee-arc.md`](docs/development/3.2-tee-arc.md)):
+**Intel TDX v4 TD-quote parser + verify orchestrator**. Composes
+against the SGX-shape signature section (TDX quotes are signed by
+the SGX QE on the same host) and adds the TDX-specific 584-byte
+TD report body parsing. The smallest bite of the arc since
+3.2.3 — most of the structural work was already in tree.
+
+### Added
+
+- **`src/tdx.cyr` — TDX v4 quote parser + verify orchestrator
+  (~290 lines).**
+  - `tdx_quote_parse(buf, buf_len, out)` — bounds-checked
+    linear walk of the v4 layout: 48-B header (version=4,
+    tee_type=0x81, att_key_type=2), 584-B TD_QUOTE_BODY
+    (MRTD/MRSEAM/MRSEAMSIGNER/RTMR0..3/TD_ATTRIBUTES/XFAM/
+    REPORT_DATA per Intel TDX 1.0 spec), then the SGX-shape
+    signature section. Three independent header invariants
+    enforced — version, tee_type, att_key_type — so SGX quotes
+    won't be mis-parsed as TDX (audit Step 9).
+  - `tdx_quote_verify_with_pck(quote, pck_pk)` — same three-
+    step shape as `sgx_quote_verify_with_pck`:
+      1. PCK signs the QE report (384-B SGX enclave-report
+         shape).
+      2. AK is bound to the QE via SHA-256(AK || qe_auth_data)
+         in `qe_report.report_data[0:32]`; upper 32 bytes
+         required zero.
+      3. AK signs the quote body — but the body is **632 bytes**
+         (header + TD report) instead of SGX's 432.
+  - Field accessors for everything a kavach TDX backend
+    populates: `tdx_quote_mrtd_ptr`, `mrseam_ptr`, `rtmr0..3_ptr`,
+    `report_data_ptr`, `td_attributes_ptr`, `xfam_ptr`,
+    `ak_ptr`, `qe_report_ptr`, `cert_data_ptr/_len/_type`.
+- **`tests/tcyr/tdx.tcyr`** — 32 assertions across 5 groups:
+  parser happy path + 14 field-accessor checks, 5 malformed
+  rejection cases (truncated/empty + 4 header invariant
+  violations + sig_data_len overflow), verify orchestrator
+  green path, 4 tamper cases (wrong PCK / qe_report_sig / AK /
+  body ecdsa_sig / MRTD). Test vector generated offline
+  (openssl + Python helper, same pattern as 3.2.3 SGX). Tests
+  use the helper-split pattern recommended by the 3.2.4 audit
+  INFO-3.
+
+### Scope decision
+
+- `att_key_type = 2` (ECDSA P-256 / SHA-256) supported.
+  `att_key_type = 3` (P-384 / SHA-384) deferred — the 3.2.4
+  P-384 primitive is available so the delta is small when an
+  integration surfaces. Audit doc INFO-1.
+- PCK chain walk stays caller-driven — TDX shares the SGX
+  Intel Root → PCK chain, so the same external-x509-walk
+  pattern from 3.2.3 applies. PEM decoding rolls into the
+  existing 3.2.3 follow-up.
+
+### Security
+
+- Audit: `docs/audit/2026-05-25-audit.md`. **0 findings at any
+  severity** on the new ~290-line surface. Two new INFO items
+  document the P-384 deferral and the chain-walk scope split
+  (both consistent with prior bites' patterns).
+- The quote-format-confusion defense (SGX vs TDX) is the
+  load-bearing audit item — three independent header invariants
+  enforced; an SGX quote cannot be mis-parsed as TDX or vice
+  versa.
+
+### Module wiring
+
+- `src/lib.cyr` includes `src/tdx.cyr` after `src/sev_snp.cyr`.
+- `cyrius.cyml [lib].modules` lists the new module.
+
 ## [3.2.4] — 2026-05-24
 
 Fourth bite of the 3.2.x TEE attestation arc

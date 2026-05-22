@@ -59,6 +59,7 @@ include "src/ecdsa_p384.cyr"
 include "src/x509.cyr"
 include "src/sgx.cyr"
 include "src/sev_snp.cyr"
+include "src/tdx.cyr"
 # ML-DSA-65 (FIPS 204) — post-quantum signing.
 #
 # Opt-in via `-D SIGIL_PQC` at the cyrius build invocation

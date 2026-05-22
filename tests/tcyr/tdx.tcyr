@@ -1,0 +1,192 @@
+# tdx.tcyr — Intel TDX v4 TD-quote parser + verify-orchestrator tests.
+#
+# Sigil 3.2.5 — bite 5 of the TEE attestation arc.
+#
+# Test vector: synthesized TDX v4 quote (1312 B) — test AK + test PCK
+# keypairs (openssl prime256v1), TD body filled with fixed-pattern
+# bytes, AK signs (header || td_body) (632 B), QE report follows the
+# SGX enclave-report shape, PCK signs QE report. See
+# `/tmp/gen_tdx_test_vector.py` (out of tree).
+#
+# Helper-split pattern (per 3.2.4 audit INFO-3): test logic in
+# small fns to avoid the Cyrius long-main-body quirk.
+
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/string.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fmt.cyr"
+include "lib/json.cyr"
+include "lib/sakshi.cyr"
+include "lib/chrono.cyr"
+include "lib/bigint.cyr"
+include "lib/ct.cyr"
+
+include "src/types.cyr"
+include "src/error.cyr"
+include "src/sha256.cyr"
+include "src/hex.cyr"
+include "src/sha512.cyr"
+include "src/bigint_ext.cyr"
+include "src/ed25519.cyr"
+include "src/ecdsa_p256.cyr"
+include "src/tdx.cyr"
+
+# Synthesized test vector — generated 2026-05-25.
+var AK_PUB_HEX  = "26493b59b63fe8d45884995bbf69858329f0a2b26388bf3acd1e43ed831fb89971d2d5cdb6a0f886f058fe97bcdc9a41c72aa6effd424b7502e71ad7d2ba3895";
+var PCK_PUB_HEX = "4e41c5e158c000a7b94d5f09585d1090ffb95e88f1e15fa28e951c5ef2ea6bccc74bc90a581f529abc1a61f9a8e581e805fd8bd1b29bb604b3c7b907587fc151";
+var QUOTE_HEX   = "04000200810000000000000011111111111111111111111111111111222222222222222222222222222222222222222205050505050505050505050505050505bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee00000000000000000700000000000000e700000000000000aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddda402000021b6ad1bc0fd5df2f8c93740d2547273ad80390f321ecaf16b37af8d6e451422b14c3599308a68f6bf811f2061b00ec4d1e2f00b245bdd1380daad827057f3e026493b59b63fe8d45884995bbf69858329f0a2b26388bf3acd1e43ed831fb89971d2d5cdb6a0f886f058fe97bcdc9a41c72aa6effd424b7502e71ad7d2ba389502020202020202020202020202020202000000000000000000000000000000000000000000000000000000000000000006060606060606060606060606060606dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd0000000000000000000000000000000000000000000000000000000000000000eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001000500000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000eb77ab3db737c3f27e0c4416e14177c1c50b9c31bdbca77c9d64f687b0d722ef0000000000000000000000000000000000000000000000000000000000000000de5cdf9b3700b36a028aade142e77227cb49f94d7d8dda4dc72d3e50138e60bcbb1a2a0115211089ebe1064a708fbca2b06a272a8a4e80d2a7ed942789944e2a2000777777777777777777777777777777777777777777777777777777777777777705003c0000002d2d20706c616365686f6c64657220666f722050434b206365727420636861696e2028544458207368617265732053475820636861696e29202d2d0a";
+var QUOTE_LEN   = 1312;
+
+fn run_parse_tests(quote_buf, ak_pk): i64 {
+    test_group("tdx_quote_parse — happy path");
+    var q = tdx_quote_alloc();
+    assert_eq(tdx_quote_parse(quote_buf, QUOTE_LEN, q), 1, "parse OK");
+    assert_eq(tdx_quote_version(q), TDX_QUOTE_VERSION_V4, "version v4");
+    assert_eq(tdx_quote_att_key_type(q), TDX_ATT_KEY_TYPE_ECDSA_P256, "att_key_type ECDSA-P256");
+    assert_eq(tdx_quote_tee_type(q), TDX_TEE_TYPE_TDX, "tee_type TDX (0x81)");
+    assert_eq(tdx_quote_buf_len(q), QUOTE_LEN, "buf_len recorded");
+
+    test_group("tdx_quote — field accessors");
+    var mrtd = tdx_quote_mrtd_ptr(q);
+    assert_eq(load8(mrtd) & 0xFF, 0xAA, "MRTD[0]");
+    assert_eq(load8(mrtd + 47) & 0xFF, 0xAA, "MRTD[47]");
+    var mrseam = tdx_quote_mrseam_ptr(q);
+    assert_eq(load8(mrseam) & 0xFF, 0xBB, "MRSEAM[0]");
+    assert_eq(load8(mrseam + 47) & 0xFF, 0xBB, "MRSEAM[47]");
+    var mrss = tdx_quote_mrseamsigner_ptr(q);
+    assert_eq(load8(mrss) & 0xFF, 0xEE, "MRSEAMSIGNER[0]");
+    var rd = tdx_quote_report_data_ptr(q);
+    assert_eq(load8(rd) & 0xFF, 0xDD, "REPORT_DATA[0]");
+    assert_eq(load8(rd + 63) & 0xFF, 0xDD, "REPORT_DATA[63]");
+    var rtmr0 = tdx_quote_rtmr0_ptr(q);
+    assert_eq(load8(rtmr0) & 0xFF, 0xC0, "RTMR0[0]");
+    var rtmr1 = tdx_quote_rtmr1_ptr(q);
+    assert_eq(load8(rtmr1) & 0xFF, 0xC1, "RTMR1[0]");
+    var rtmr2 = tdx_quote_rtmr2_ptr(q);
+    assert_eq(load8(rtmr2) & 0xFF, 0xC2, "RTMR2[0]");
+    var rtmr3 = tdx_quote_rtmr3_ptr(q);
+    assert_eq(load8(rtmr3) & 0xFF, 0xC3, "RTMR3[0]");
+
+    var ak_in_quote = tdx_quote_ak_ptr(q);
+    assert_eq(load8(ak_in_quote) & 0xFF, load8(ak_pk) & 0xFF, "AK[0] matches");
+    assert_eq(load8(ak_in_quote + 63) & 0xFF, load8(ak_pk + 63) & 0xFF, "AK[63] matches");
+
+    assert_eq(tdx_quote_qe_auth_data_len(q), 32, "qe_auth_data_len == 32");
+    assert_eq(tdx_quote_cert_data_type(q), 5, "cert_type == 5 (PCK PEM)");
+    return 0;
+}
+
+fn run_malformed_tests(quote_buf): i64 {
+    test_group("tdx_quote_parse — malformed rejection");
+    var qbad = tdx_quote_alloc();
+    assert_eq(tdx_quote_parse(quote_buf, 50, qbad), 0, "truncated rejected");
+    assert_eq(tdx_quote_parse(quote_buf, 0, qbad), 0, "empty rejected");
+
+    # Wrong version (3 = SGX)
+    var qv = alloc(QUOTE_LEN);
+    memcpy(qv, quote_buf, QUOTE_LEN);
+    store8(qv, 0x03);
+    assert_eq(tdx_quote_parse(qv, QUOTE_LEN, qbad), 0, "non-v4 version rejected");
+
+    # Wrong tee_type (0 = SGX)
+    var qt = alloc(QUOTE_LEN);
+    memcpy(qt, quote_buf, QUOTE_LEN);
+    store8(qt + 4, 0);
+    assert_eq(tdx_quote_parse(qt, QUOTE_LEN, qbad), 0, "non-TDX tee_type rejected");
+
+    # Wrong att_key_type (1 = EPID, deprecated)
+    var qa = alloc(QUOTE_LEN);
+    memcpy(qa, quote_buf, QUOTE_LEN);
+    store8(qa + 2, 1);
+    assert_eq(tdx_quote_parse(qa, QUOTE_LEN, qbad), 0, "non-ECDSA-P256 att_key_type rejected");
+
+    # signature_data_len overflows: sig_len field is at offset
+    # 48 + 584 = 632. Set it to 0xFFFFFFFF (huge).
+    var qs = alloc(QUOTE_LEN);
+    memcpy(qs, quote_buf, QUOTE_LEN);
+    store8(qs + 632, 0xFF);
+    store8(qs + 633, 0xFF);
+    store8(qs + 634, 0xFF);
+    store8(qs + 635, 0x7F);
+    assert_eq(tdx_quote_parse(qs, QUOTE_LEN, qbad), 0, "sig_data_len overflow rejected");
+    return 0;
+}
+
+fn run_verify_tests(quote_buf, pck_pk): i64 {
+    test_group("tdx_quote_verify_with_pck — happy path");
+    var q = tdx_quote_alloc();
+    tdx_quote_parse(quote_buf, QUOTE_LEN, q);
+    assert_eq(tdx_quote_verify_with_pck(q, pck_pk), 1,
+        "synthesized TDX quote verifies with PCK");
+    return 0;
+}
+
+fn run_tamper_tests(quote_buf, pck_pk, ak_pk): i64 {
+    test_group("tdx_quote_verify_with_pck — tamper rejection");
+
+    # 4a. Wrong PCK (pass AK instead). Step 1 fails.
+    var q = tdx_quote_alloc();
+    tdx_quote_parse(quote_buf, QUOTE_LEN, q);
+    assert_eq(tdx_quote_verify_with_pck(q, ak_pk), 0, "wrong PCK rejects via QE-sig check");
+
+    # 4b. Tamper qe_report_sig.
+    # qe_report_sig at offset 48 + 584 + 4 + 64 + 64 + 384 = 1148.
+    var qbuf_t1 = alloc(QUOTE_LEN);
+    memcpy(qbuf_t1, quote_buf, QUOTE_LEN);
+    store8(qbuf_t1 + 1148, (load8(qbuf_t1 + 1148) & 0xFF) ^ 0x01);
+    var q_t1 = tdx_quote_alloc();
+    tdx_quote_parse(qbuf_t1, QUOTE_LEN, q_t1);
+    assert_eq(tdx_quote_verify_with_pck(q_t1, pck_pk), 0, "tampered qe_report_sig fails step 1");
+
+    # 4c. Tamper AK in quote (step 2 binding fails).
+    # AK at offset 48 + 584 + 4 + 64 = 700.
+    var qbuf_t2 = alloc(QUOTE_LEN);
+    memcpy(qbuf_t2, quote_buf, QUOTE_LEN);
+    store8(qbuf_t2 + 700, (load8(qbuf_t2 + 700) & 0xFF) ^ 0x01);
+    var q_t2 = tdx_quote_alloc();
+    tdx_quote_parse(qbuf_t2, QUOTE_LEN, q_t2);
+    assert_eq(tdx_quote_verify_with_pck(q_t2, pck_pk), 0, "tampered AK caught");
+
+    # 4d. Tamper body ecdsa_sig (step 3).
+    # ecdsa_sig at offset 48 + 584 + 4 = 636.
+    var qbuf_t3 = alloc(QUOTE_LEN);
+    memcpy(qbuf_t3, quote_buf, QUOTE_LEN);
+    store8(qbuf_t3 + 636, (load8(qbuf_t3 + 636) & 0xFF) ^ 0x01);
+    var q_t3 = tdx_quote_alloc();
+    tdx_quote_parse(qbuf_t3, QUOTE_LEN, q_t3);
+    assert_eq(tdx_quote_verify_with_pck(q_t3, pck_pk), 0, "tampered body ecdsa_sig fails step 3");
+
+    # 4e. Tamper MRTD (signed body — step 3 sig fails).
+    # MRTD at TD body offset 136 → absolute 48 + 136 = 184.
+    var qbuf_t4 = alloc(QUOTE_LEN);
+    memcpy(qbuf_t4, quote_buf, QUOTE_LEN);
+    store8(qbuf_t4 + 184, (load8(qbuf_t4 + 184) & 0xFF) ^ 0x01);
+    var q_t4 = tdx_quote_alloc();
+    tdx_quote_parse(qbuf_t4, QUOTE_LEN, q_t4);
+    assert_eq(tdx_quote_verify_with_pck(q_t4, pck_pk), 0, "tampered MRTD fails step 3");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    _p256_init();
+    var quote_buf = hex_decode(QUOTE_HEX, 2 * QUOTE_LEN);
+    var pck_pk    = hex_decode(PCK_PUB_HEX, 128);
+    var ak_pk     = hex_decode(AK_PUB_HEX, 128);
+
+    run_parse_tests(quote_buf, ak_pk);
+    run_malformed_tests(quote_buf);
+    run_verify_tests(quote_buf, pck_pk);
+    run_tamper_tests(quote_buf, pck_pk, ak_pk);
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

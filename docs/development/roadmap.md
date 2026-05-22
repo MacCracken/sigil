@@ -24,7 +24,7 @@ function). Each minor in the arc tags independently on `main`:
 | 3.2.2  | Minimal X.509 cert-chain walker ✅ (2026-05-22) | foundation |
 | 3.2.3  | `src/sgx.cyr` — quote parse + verify ✅ (2026-05-23) | kavach SGX backend |
 | 3.2.4  | `src/sev_snp.cyr` — VCEK chain + report verify ✅ (2026-05-24) | kavach SEV backend |
-| 3.2.5  | `src/tdx.cyr` — TD-quote (shares SGX chain)     | kavach TDX backend |
+| 3.2.5  | `src/tdx.cyr` — TD-quote (shares SGX chain) ✅ (2026-05-25) | kavach TDX backend |
 | 3.2.6  | `src/seal.cyr` — SGX sealing (MRSIGNER/ISVSVN)  | kavach SGX persistence |
 
 If the arc stalls (kavach roadmap shifts, or a higher-priority
