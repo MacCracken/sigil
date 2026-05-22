@@ -1,48 +1,15 @@
 # Sigil Roadmap
 
 Forward-looking work only. For shipped items and version history
-see [CHANGELOG.md](../../CHANGELOG.md). For in-flight cycle scope:
+see [CHANGELOG.md](../../CHANGELOG.md). Closed cycles:
 
 - [`3.2-tee-arc.md`](3.2-tee-arc.md) — 3.2.x TEE attestation
-  sub-arc (6-bite patch series, ECDSA → X.509 → SGX → SEV-SNP →
-  TDX → SGX seal).
-- [`3.2-scope.md`](3.2-scope.md) — 3.2.0 cycle history (closed).
-- [`3.0-scope.md`](3.0-scope.md) — 3.0 cycle history (closed).
+  sub-arc, complete 2026-05-21 → 2026-05-26 (6 bites: ECDSA →
+  X.509 → SGX → SEV-SNP → TDX → SGX seal).
+- [`3.2-scope.md`](3.2-scope.md) — 3.2.0 cycle history.
+- [`3.0-scope.md`](3.0-scope.md) — 3.0 cycle history.
 
 **Cyrius pin:** `6.0.1` (synced across `cyrius.cyml` and CI).
-
-## v3.2.x — TEE attestation arc ✅ COMPLETE (2026-05-21 → 2026-05-26)
-
-All six bites shipped on consecutive days. Patch series tracker:
-[`3.2-tee-arc.md`](3.2-tee-arc.md). Closeout summary in
-[`docs/audit/2026-05-26-audit.md`](../audit/2026-05-26-audit.md):
-~3215 new lines of cryptographic and parsing code, **zero
-CRITICAL / HIGH / MEDIUM** audit findings across the arc.
-
-| Tag    | Module surface                                  | Unblocks |
-|--------|-------------------------------------------------|----------|
-| 3.2.1  | ECDSA P-256 verify ✅ (2026-05-21)              | foundation |
-| 3.2.2  | Minimal X.509 cert-chain walker ✅ (2026-05-22) | foundation |
-| 3.2.3  | `src/sgx.cyr` — quote parse + verify ✅ (2026-05-23) | kavach SGX backend |
-| 3.2.4  | `src/sev_snp.cyr` — VCEK chain + report verify ✅ (2026-05-24) | kavach SEV backend |
-| 3.2.5  | `src/tdx.cyr` — TD-quote (shares SGX chain) ✅ (2026-05-25) | kavach TDX backend |
-| 3.2.6  | `src/seal.cyr` — SGX sealing (MRSIGNER/ISVSVN) ✅ (2026-05-26) | kavach SGX persistence |
-
-**Open follow-ups carried forward from the arc** (none blocking
-any current consumer):
-
-- PEM decoder + integrated chain-walk wrappers for SGX / SEV-SNP
-  / TDX — currently caller-driven. Single shared follow-up patch.
-- ECDSA P-384 / SHA-384 variant of the TDX parser
-  (att_key_type=3). Small delta now that the P-384 primitive is
-  in tree.
-- Solinas word-level field reduction for both P-256 and P-384.
-  Bench tuning — long-division reduction is correct but slow
-  (~136 ms / verify for P-256, ~3× for P-384). Moved to
-  "Backlog — unscheduled" below.
-- Unified `_into`-shape API for parsers / verifiers that
-  currently retain scratch on first call (closes 4 LOW audit
-  findings across the arc).
 
 ## Road to v3.3 — per-worker crypto state
 
@@ -88,11 +55,140 @@ that 3.2.0's alloc-free rewrite set up but couldn't close.
       `v3.2.0-allocfree` baseline; target ≥ 3× at 4 workers.
       Add CSV row `v3.3-parallel-crypto`.
 
-**Sequencing decision:** 3.3 can open immediately after a
-3.2.x TEE bite tags, or defer behind the full TEE arc.
-Likely path: open after 3.2.2 (X.509 walker) lands — that
-gives kavach a meaningful integration milestone while the
-crypto refactor proceeds in parallel.
+**Sequencing decision:** 3.3 is the next natural cycle now
+that the 3.2.x TEE arc has closed. The batch-verify mutex was
+the load-bearing item 3.2.0 set up and 3.2.x worked around;
+3.3 closes it. Likely shape: open as soon as a benchmark
+session establishes that cycc 6 hasn't already made the
+per-call-scratch refactor unnecessary (the local-clobber
+quirk that motivated the globals may be obsolete; verify
+empirically before doing the work).
+
+## Road to v3.4 — TEE attestation completion
+
+3.2.x shipped the parsers and per-piece verify orchestrators
+across all three TEE backends, but left two surfaces caller-
+driven for scope reasons:
+
+- The X.509 chain walk from each format's embedded
+  `qe_cert_data` (PEM-encoded PCK chain for SGX/TDX, VCEK
+  chain for SEV-SNP) up to the format's root CA. Consumers
+  currently extract the cert bytes and walk via the existing
+  `x509_*` surface themselves.
+- TDX `att_key_type = 3` (ECDSA P-384 / SHA-384). 3.2.5
+  parses and verifies att_key_type = 2 only. The 3.2.4 P-384
+  primitive is in tree, so this is a small delta.
+
+3.4 lands both so a kavach attestation backend can call a
+single `*_verify_full(quote, root_ca)` and get an end-to-end
+yes/no answer.
+
+### 3.4 work items
+
+- [ ] **PEM decoder.** New `src/pem.cyr` (~150 lines). Parse
+      `-----BEGIN CERTIFICATE-----` / `-----END CERTIFICATE-----`
+      block sequences from the raw bytes; base64-decode each
+      block's body. Surface:
+      `pem_decode_certs(buf, buf_len, out_chain, max_certs)`
+      → returns the count of decoded DER blobs (or -1 on
+      malformed input). Bounds-checked at every step (this is
+      attacker-controlled input from the embedded cert data).
+
+- [ ] **`sgx_quote_verify_full(quote, intel_sgx_root_cert)`.**
+      Compose: decode `qe_cert_data` via the PEM decoder,
+      parse each cert via `x509_parse`, walk root → ... →
+      leaf via `x509_verify_chain`, extract leaf's pubkey,
+      call `sgx_quote_verify_with_pck`. Single end-to-end
+      answer.
+
+- [ ] **`snp_report_verify_full(report, ark_root_cert)`.**
+      Same shape against the ARK → ASK → VCEK chain. SEV-SNP
+      typically delivers the VCEK chain alongside the report
+      (out-of-band fetch from AMD KDS), so the entry point
+      takes both the report and the cert-chain bytes.
+
+- [ ] **`tdx_quote_verify_full(quote, intel_sgx_root_cert)`.**
+      TDX shares the SGX PCK chain, so structurally identical
+      to `sgx_quote_verify_full`.
+
+- [ ] **TDX att_key_type=3 (P-384 / SHA-384).** Extend
+      `src/tdx.cyr` to dispatch on att_key_type at parse
+      time: =2 → ECDSA P-256 / SHA-256 (existing), =3 → P-384
+      / SHA-384 (new). The signature section gains 32 bytes
+      per r/s and the AK doubles to 96 bytes; binding hash
+      still consumes only the lower 32 of the SHA-384 output
+      to fit `report_data[0:32]`.
+
+- [ ] **Closes the four LOW audit findings.** The PEM decoder
+      and the full-verify wrappers will allocate scratch
+      buffers; ship them with `_into`-shape variants from the
+      start so the 3.2.2 / 3.2.4 LOW-1 pattern doesn't
+      recur. Audit those modules' allocation discipline as
+      part of the same cycle.
+
+**Sequencing decision:** open 3.4 only when a real kavach
+integration milestone requires end-to-end verify against
+fixture data. Until then, the per-piece API in 3.2.x is
+sufficient and the test surface for `*_verify_full` would be
+synthesised against another synthesised cert chain — limited
+return on the verification it adds.
+
+## Road to v3.5 — perf tuning: field arithmetic + alloc-free
+
+The 3.2.x verify paths are correct but slow:
+
+- `ecdsa_p256_verify` measured at 136 ms / verify
+  (`benches/history.csv` row `v3.2.1`). The 3.2.1 audit's
+  INFO-2 documented this as the bench-tuning follow-up.
+- `ecdsa_p384_verify` un-measured but structurally ~3× the
+  P-256 cost (long-division reduction at 384 bits — 1.5×
+  the iterations × ~2× the limb-op cost).
+- Both are bottlenecked by the textbook bit-by-bit
+  long-division reduction in `_p256_long_div_reduce` /
+  `_p384_long_div_reduce`. Solinas word-level reduction
+  drops the cost 20–50×.
+
+3.5 closes the four LOW audit findings (allocator-lifetime
+discipline) and lands Solinas reduction for both curves.
+
+### 3.5 work items
+
+- [ ] **Solinas reduction for P-256.** Word-level reduction
+      against `p256 = 2^256 − 2^224 + 2^192 + 2^96 − 1` per
+      FIPS 186-4 Appendix D / NIST SP 800-186. Replace
+      `_p256_long_div_reduce` with the new pipeline.
+      Re-bench against the `v3.2.1` baseline; target ≤ 10 ms
+      / verify. CSV row `v3.5-p256-solinas`.
+
+- [ ] **Solinas reduction for P-384.** Same shape against
+      `p384 = 2^384 − 2^128 − 2^96 + 2^32 − 1`. The P-384
+      Solinas decomposition is wider (more word-level
+      shuffles) but the structure is identical. CSV row
+      `v3.5-p384-solinas`.
+
+- [ ] **Unified `_into`-shape API.** Eliminate per-first-call
+      `alloc` in `x509_parse`, `_snp_v_init`, `_sgxv_init`,
+      `_tdxv_init`. Two patterns to choose between:
+      caller-provides-scratch (matches 3.2.0's
+      `sv_verify_artifact_into`) or library-owns-pool. The
+      former is cleaner for long-running consumers (kavach);
+      the latter is simpler for one-shot use. Audit doc
+      to pick the shape with input from kavach's actual call
+      patterns.
+
+- [ ] **Re-run the full crypto bench suite.** Capture before /
+      after rows for every verify-path bench. The 3.5 ship
+      target: `ecdsa_p256_verify` and `ecdsa_p384_verify`
+      both ≤ 10 ms / verify on the dev host. SEV-SNP / TDX
+      verify rows benefit transitively from the P-256 /
+      P-384 speedup; cross-check the deltas are clean.
+
+**Sequencing decision:** open 3.5 only if a downstream
+consumer surfaces a latency complaint (kavach's batch-
+attestation flow, ark's signature-heavy publisher workflow).
+Until then, the verify path is fast enough for one-shot
+checks. Cache the open audit follow-ups via this cycle's
+INFO docs.
 
 ## Backlog — unscheduled
 
@@ -155,9 +251,3 @@ Out-of-scope today; surface if a consumer asks for them.
   preprocessor buffer cap (CLAUDE.md quirk #8). When cyrius
   raises this cap (or adds a flag to select a larger buffer),
   flip PQC to default-on and drop the cmdline gate.
-
-- **P-384 ECDSA verify.** Some TDX deployments use P-384
-  attestation keys. If the 3.2.5 `src/tdx.cyr` bring-up
-  surfaces a real consumer need, slot `src/ecdsa_p384.cyr`
-  between 3.2.5 and 3.2.6. Otherwise P-256 (shipping in
-  3.2.1) covers the documented Intel / AMD chains.
