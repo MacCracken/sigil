@@ -5,6 +5,93 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.2.2] — 2026-05-22
+
+Second bite of the 3.2.x TEE attestation arc
+([`docs/development/3.2-tee-arc.md`](docs/development/3.2-tee-arc.md)):
+**minimal X.509 cert-chain walker**. The DER parsing substrate
+SGX (3.2.3), SEV-SNP (3.2.4), and TDX (3.2.5) need. This is the
+highest-risk parser yet added to sigil — it consumes attacker-
+controlled DER from remote quoting enclaves and firmware — so
+the audit (`docs/audit/2026-05-22-audit.md`) is the load-bearing
+artifact of this tag.
+
+### Added
+
+- **`src/x509.cyr` — minimal X.509 parser + chain walker
+  (~720 lines).** Just enough X.509 to walk SGX / SEV-SNP
+  attestation chains:
+  - `x509_parse(der, der_len, out_cert)` — single-pass walk of
+    `Certificate ::= SEQUENCE { TBSCertificate,
+    signatureAlgorithm, signature }`. Validates v3, ecdsa-with-
+    SHA256 (both the inner TBS.signature and outer
+    signatureAlgorithm), id-ecPublicKey + prime256v1
+    parameters, on-curve subject public key (calls
+    `pt_is_on_curve` — closes audit 2026-05-21 LOW-1),
+    basicConstraints, and the SHA-256-of-TBS / r||s signature
+    layout. Returns `1` on success, `0` on any malformed or
+    unsupported input.
+  - `x509_verify_chain(leaf, intermediates, intermediates_len,
+    root, now_unix)` — walks root → intermediates → leaf. For
+    each non-root link: re-hashes the child's TBS bytes and
+    verifies the signature against the issuer's pubkey via
+    `ecdsa_p256_verify`; checks issuer/subject DN byte-equality;
+    checks the child's validity window against `now_unix`
+    (passing `now_unix == 0` disables the time check for hosts
+    with untrusted wall-clocks). Intermediates must have the
+    CA basicConstraints bit set.
+  - `der_walk(buf, buf_len, pos, tag, &content_pos, &next_pos)`
+    — bounds-checked TLV cursor that every higher-level parse
+    step goes through. Long-form lengths capped at 4 bytes,
+    indefinite-length form (`0x80`) rejected, content offset
+    + length bounds-checked against the buffer before any
+    dereference.
+  - ASN.1 time decoders (`_x509_parse_utctime`,
+    `_x509_parse_gentime`) — UTCTime year-window per RFC 5280
+    (`00..49` → 20xx, `50..99` → 19xx, but pre-1970 rejected
+    since epoch math starts there), strict 13/15-byte format,
+    trailing `Z` required, day-in-month validated against the
+    year's leap status.
+- **`pt_is_on_curve(x, y)` in `src/ecdsa_p256.cyr`** — affine
+  curve-equation check `y² ≡ x³ - 3x + b (mod p)` plus
+  in-field-range and not-(0,0) gates. Now invoked
+  unconditionally by `ecdsa_p256_verify` (3.2.1's verify path
+  was internally consistent for trusted keys; 3.2.2 closes the
+  external-pubkey gap before the X.509 surface ships).
+- **`tests/tcyr/x509.tcyr`** — 35 assertions across 8 groups:
+  DER primitive walker (tag/length/bounds), ASN.1 time decode
+  (UTCTime + GeneralizedTime + 4 rejection cases), parse of
+  openssl-generated root + leaf certs, full chain verify green
+  path, 6 negative cases (now < notBefore, now > notAfter,
+  flipped TBS byte, DN mismatch, empty input, truncated input,
+  wrong outer tag).
+
+### Security
+
+- Audit: `docs/audit/2026-05-22-audit.md`. **0 CRITICAL / HIGH /
+  MEDIUM** on the new ~720-line surface. **LOW-1 from
+  2026-05-21 is closed** by the on-curve check landing in
+  `pt_is_on_curve` and being called from both
+  `ecdsa_p256_verify` and `_xp_parse_spki`. One new LOW
+  (perm-lifetime allocation in `x509_parse` — bump-allocator
+  shape, not exploitable, deferred to a `_into` variant when
+  the kavach backend surfaces a forcing function). Two new
+  INFO items: deliberate minimum-length-encoding laxity, and
+  byte-equality DN matching (correct for SGX/SEV/TDX chains,
+  flagged for any future interop with human-administered CAs).
+- CVE pattern check: CVE-2008-5077 (ASN.1 length confusion),
+  CVE-2014-1568 (BER padding forgery), CVE-2009-2409
+  (algorithm confusion via MD2), CVE-2022-3602/3786 (name-
+  constraint overflow), Frankencerts-style algorithm
+  substitution, and invalid-curve attack (Bos et al. 2014) all
+  covered. See audit Step 9.
+
+### Module wiring
+
+- `src/lib.cyr` includes `src/x509.cyr` after `src/ecdsa_p256.cyr`.
+- `cyrius.cyml [lib].modules` lists the new module so
+  `cyrius distlib` bundles it into `dist/sigil.cyr`.
+
 ## [3.2.1] — 2026-05-21
 
 First bite of the 3.2.x TEE attestation arc

@@ -287,6 +287,27 @@ fn main() {
         "2 * G via ladder matches 2G vector");
 
     # ============================================================
+    # Group 4.5 — pt_is_on_curve (closes audit 2026-05-21 LOW-1)
+    # ============================================================
+    test_group("pt_is_on_curve");
+
+    # G is on the curve.
+    assert_eq(pt_is_on_curve(_p256_gx, _p256_gy), 1, "G is on curve");
+
+    # The (0, 0) "infinity-like" affine pair is rejected.
+    var zero = u256_zero();
+    assert_eq(pt_is_on_curve(zero, zero), 0, "(0, 0) rejected");
+
+    # (gx, gy + 1) is OFF the curve.
+    var gy_plus_1 = u256_clone(_p256_gy);
+    fp_p256_add(gy_plus_1, gy_plus_1, _p256_one);
+    assert_eq(pt_is_on_curve(_p256_gx, gy_plus_1), 0, "(gx, gy+1) off-curve rejected");
+
+    # Coordinate >= p is rejected (use p itself as x).
+    assert_eq(pt_is_on_curve(_p256_p, _p256_gy), 0, "x == p rejected (out of range)");
+    assert_eq(pt_is_on_curve(_p256_gx, _p256_p), 0, "y == p rejected (out of range)");
+
+    # ============================================================
     # Group 5 — ECDSA verify (RFC 6979 Appendix A.2.5)
     # ============================================================
     test_group("ecdsa_p256_verify — RFC 6979 P-256/SHA-256");

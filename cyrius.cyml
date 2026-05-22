@@ -56,6 +56,7 @@ modules = [
     "src/bigint_ext.cyr",
     "src/ed25519.cyr",
     "src/ecdsa_p256.cyr",
+    "src/x509.cyr",
     "src/mldsa_params.cyr",
     "src/mldsa_reduce.cyr",
     "src/mldsa_ntt.cyr",

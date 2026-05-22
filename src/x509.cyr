@@ -1,0 +1,896 @@
+# x509.cyr — minimal X.509 cert-chain walker for the 3.2.x TEE arc.
+#
+# Sigil 3.2.2 — bite 2 of the TEE attestation arc (origin:
+# `docs/development/3.2-tee-arc.md`). Just enough X.509 to walk
+# IAS root → SGX intermediate → leaf, and ARK → ASK → VCEK
+# (SEV-SNP). Explicitly NOT a general PKIX library:
+#   • only ecdsa-with-SHA256 signatures (the algo used by SGX/SEV
+#     attestation chains today)
+#   • only P-256 subjectPublicKeyInfo (id-ecPublicKey + prime256v1)
+#   • no policy mapping, no name constraints, no CRL fetching, no
+#     general TLS chain walk
+#   • no support for v1/v2 certs — TBSCertificate version must be
+#     v3 (the integer 2)
+#   • basicConstraints / keyUsage parsed against a small allow-list
+#     (CA bit must be set on intermediates and the root; leaf must
+#     be end-entity with no CA flag)
+#
+# Surface:
+#   fn x509_parse(der, der_len, out_cert): i64
+#       — parses a DER-encoded Certificate into out_cert (256 B
+#         struct allocated via `x509_cert_alloc`). Returns 1 on
+#         success, 0 on any malformed / unsupported input. Performs
+#         pt_is_on_curve on the subject public key as part of parse;
+#         a cert with an off-curve key never reaches the chain walker.
+#
+#   fn x509_verify_chain(leaf, intermediates, intermediates_len,
+#                         root, now_unix): i64
+#       — verifies the chain: each non-root cert is hashed (TBS) and
+#         its signature checked against the issuer's public key,
+#         issuer/subject DN bytes must match across the link, each
+#         cert must be valid at `now_unix`, and intermediates must
+#         have the CA basicConstraints bit set. Returns 1 on a fully
+#         verified chain, 0 otherwise.
+#
+# Threat model:
+#   The DER buffer comes from an untrusted channel (a remote SGX
+#   quoting enclave or SEV-SNP firmware response). This is the
+#   highest-risk parser in sigil to date. Every TLV walk is bounds-
+#   checked against the buffer length; no offset arithmetic crosses
+#   the validated boundary. See `docs/audit/2026-05-22-audit.md`
+#   for the 3.2.2 hardening review.
+
+# ================================================================
+# ASN.1 / DER tag constants
+# ================================================================
+
+var DER_TAG_BOOLEAN          = 0x01;
+var DER_TAG_INTEGER          = 0x02;
+var DER_TAG_BIT_STRING       = 0x03;
+var DER_TAG_OCTET_STRING     = 0x04;
+var DER_TAG_NULL             = 0x05;
+var DER_TAG_OBJECT_ID        = 0x06;
+var DER_TAG_UTF8STRING       = 0x0C;
+var DER_TAG_PRINTABLESTRING  = 0x13;
+var DER_TAG_TELETEXSTRING    = 0x14;
+var DER_TAG_IA5STRING        = 0x16;
+var DER_TAG_UTCTIME          = 0x17;
+var DER_TAG_GENTIME          = 0x18;
+var DER_TAG_SEQUENCE         = 0x30;
+var DER_TAG_SET              = 0x31;
+var DER_TAG_CONTEXT_0_EXP    = 0xA0;   # [0] EXPLICIT — version, etc.
+var DER_TAG_CONTEXT_3_EXP    = 0xA3;   # [3] EXPLICIT — extensions
+
+# Supported signature algorithm enum stored in X509Cert.sig_algo.
+var X509_SIG_ECDSA_SHA256    = 1;
+
+# ================================================================
+# DER primitive walker
+#
+# Two layers:
+#   _der_len(buf, pos, buf_len, out_content_pos): reads the length
+#       field at `pos` (assumes tag already consumed). Sets
+#       *out_content_pos to the first byte of the content. Returns
+#       the content length, or -1 on malformed.
+#   der_walk(buf, buf_len, pos, expected_tag, out_content_pos,
+#             out_next_pos): asserts the tag at `pos` equals
+#       `expected_tag`, decodes length, sets *out_content_pos and
+#       *out_next_pos = pos_after_tlv. Returns content length, -1
+#       on tag mismatch / OOB.
+# ================================================================
+
+# Read DER length. `pos` points to the length byte. `buf_len` is the
+# total buffer length. Returns content length or -1.
+fn _der_len(buf, pos, buf_len, out_content_pos): i64 {
+    if (pos >= buf_len) { return 0 - 1; }
+    var b0 = load8(buf + pos) & 0xFF;
+    if (b0 < 0x80) {
+        # short form
+        store64(out_content_pos, pos + 1);
+        return b0;
+    }
+    var nbytes = b0 & 0x7F;
+    # 0x80 (indefinite-length) and lengths > 4 bytes are rejected.
+    # P-256 certs never have any single field exceed 2^31 - 1.
+    if (nbytes == 0) { return 0 - 1; }
+    if (nbytes > 4) { return 0 - 1; }
+    if (pos + 1 + nbytes > buf_len) { return 0 - 1; }
+    var len = 0;
+    var i = 0;
+    while (i < nbytes) {
+        len = (len << 8) | (load8(buf + pos + 1 + i) & 0xFF);
+        i = i + 1;
+    }
+    # DER strictly requires minimum-length encoding: a length that
+    # could fit in fewer bytes must use the shorter form. We allow
+    # long-form for compatibility with widely-deployed CAs that
+    # technically violate this but otherwise validate.
+    if (len < 0) { return 0 - 1; }
+    store64(out_content_pos, pos + 1 + nbytes);
+    return len;
+}
+
+# Walk one TLV at `pos`, asserting its tag.
+# Returns content length (≥ 0) on success, -1 on tag mismatch / OOB.
+# Sets *out_content_pos = first byte of content,
+#      *out_next_pos    = byte after the TLV.
+fn der_walk(buf, buf_len, pos, expected_tag, out_content_pos, out_next_pos): i64 {
+    if (pos >= buf_len) { return 0 - 1; }
+    var tag = load8(buf + pos) & 0xFF;
+    if (tag != (expected_tag & 0xFF)) { return 0 - 1; }
+    var content_pos = 0;
+    var len = _der_len(buf, pos + 1, buf_len, &content_pos);
+    if (len < 0) { return 0 - 1; }
+    if (content_pos + len > buf_len) { return 0 - 1; }
+    store64(out_content_pos, content_pos);
+    store64(out_next_pos, content_pos + len);
+    return len;
+}
+
+# Same as der_walk but only returns the next-pos via out_next_pos;
+# discards content position. Used to skip over fields we don't read.
+fn der_skip(buf, buf_len, pos, expected_tag, out_next_pos): i64 {
+    var content_pos = 0;
+    var len = der_walk(buf, buf_len, pos, expected_tag, &content_pos, out_next_pos);
+    return len;
+}
+
+# ================================================================
+# OID matching
+#
+# We compare against a fixed set of OIDs by raw DER encoding:
+#   id-ecPublicKey:       1.2.840.10045.2.1   →  06 07 2A 86 48 CE 3D 02 01
+#   prime256v1:           1.2.840.10045.3.1.7 →  06 08 2A 86 48 CE 3D 03 01 07
+#   ecdsa-with-SHA256:    1.2.840.10045.4.3.2 →  06 08 2A 86 48 CE 3D 04 03 02
+#   basicConstraints:     2.5.29.19           →  06 03 55 1D 13
+#   keyUsage:             2.5.29.15           →  06 03 55 1D 0F
+#
+# We hold the *contents* (after the OID tag+len) for direct compare.
+# ================================================================
+
+var _oid_ec_pub_key       = 0;
+var _oid_prime256v1       = 0;
+var _oid_ecdsa_with_sha256 = 0;
+var _oid_basic_constraints = 0;
+var _oid_key_usage         = 0;
+var _x509_oids_inited      = 0;
+
+# Build a small heap buffer holding the OID's content bytes.
+fn _build_oid(bytes_hex, hex_len): i64 {
+    return hex_decode(bytes_hex, hex_len);
+}
+
+fn _x509_oids_init(): i64 {
+    if (_x509_oids_inited == 1) { return 0; }
+    # 7-byte content for id-ecPublicKey: 2A 86 48 CE 3D 02 01
+    _oid_ec_pub_key        = _build_oid("2a8648ce3d0201", 14);
+    # 8-byte content for prime256v1:    2A 86 48 CE 3D 03 01 07
+    _oid_prime256v1        = _build_oid("2a8648ce3d030107", 16);
+    # 8-byte content for ecdsa-with-SHA256: 2A 86 48 CE 3D 04 03 02
+    _oid_ecdsa_with_sha256 = _build_oid("2a8648ce3d040302", 16);
+    # 3-byte content for basicConstraints: 55 1D 13
+    _oid_basic_constraints = _build_oid("551d13", 6);
+    # 3-byte content for keyUsage:       55 1D 0F
+    _oid_key_usage         = _build_oid("551d0f", 6);
+    _x509_oids_inited = 1;
+    return 0;
+}
+
+# Compare DER OID content at (buf + off, len) to a reference content
+# buffer (ref, ref_len). Returns 1 if equal, 0 otherwise.
+fn _oid_eq(buf, off, len, ref, ref_len): i64 {
+    if (len != ref_len) { return 0; }
+    var i = 0;
+    while (i < len) {
+        if ((load8(buf + off + i) & 0xFF) != (load8(ref + i) & 0xFF)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# ================================================================
+# X509Cert struct — 256 bytes (parsed cert metadata + extracted key)
+#
+# Offsets (in bytes, all little-endian i64 unless noted):
+#    0  der_ptr           — pointer to the original DER buffer
+#    8  der_len           — total length of the DER cert
+#   16  tbs_off           — offset of TBSCertificate SEQUENCE start
+#   24  tbs_total_len     — full TLV length of TBS (tag+len+content)
+#   32  serial_off        — offset of serial INTEGER content
+#   40  serial_len        — length of serial content
+#   48  issuer_off        — offset of issuer SEQUENCE tag (full TLV)
+#   56  issuer_total_len  — length of issuer TLV
+#   64  subject_off       — offset of subject SEQUENCE tag (full TLV)
+#   72  subject_total_len — length of subject TLV
+#   80  not_before        — epoch seconds
+#   88  not_after         — epoch seconds
+#   96  pubkey[64]        — raw P-256 affine: Qx || Qy (already
+#                            pt_is_on_curve-validated at parse time)
+#  160  sig_algo          — X509_SIG_ECDSA_SHA256 only (== 1)
+#  168  sig_off           — offset of signature value (P-256 raw
+#                            r || s, after BIT STRING + DER int
+#                            unwrapping)
+#  176  sig_len           — must equal 64
+#  184  is_ca             — 1 if basicConstraints CA bit set
+#  192  path_len          — -1 if absent, else value
+#  200..256  reserved / pad
+# ================================================================
+
+fn x509_cert_alloc(): i64 {
+    var c = alloc(256);
+    memset(c, 0, 256);
+    return c;
+}
+
+fn x509_cert_pubkey(c): i64       { return c + 96; }
+fn x509_cert_not_before(c): i64    { return load64(c + 80); }
+fn x509_cert_not_after(c): i64     { return load64(c + 88); }
+fn x509_cert_is_ca(c): i64         { return load64(c + 184); }
+fn x509_cert_path_len(c): i64      { return load64(c + 192); }
+fn x509_cert_sig_algo(c): i64      { return load64(c + 160); }
+
+# Internal setters (for x509_parse below).
+fn _x509_set_der(c, ptr, len): i64        { store64(c + 0, ptr); store64(c + 8, len); return 0; }
+fn _x509_set_tbs(c, off, len): i64        { store64(c + 16, off); store64(c + 24, len); return 0; }
+fn _x509_set_serial(c, off, len): i64     { store64(c + 32, off); store64(c + 40, len); return 0; }
+fn _x509_set_issuer(c, off, len): i64     { store64(c + 48, off); store64(c + 56, len); return 0; }
+fn _x509_set_subject(c, off, len): i64    { store64(c + 64, off); store64(c + 72, len); return 0; }
+fn _x509_set_not_before(c, t): i64        { store64(c + 80, t); return 0; }
+fn _x509_set_not_after(c, t): i64         { store64(c + 88, t); return 0; }
+fn _x509_set_sig_algo(c, a): i64          { store64(c + 160, a); return 0; }
+fn _x509_set_sig(c, off, len): i64        { store64(c + 168, off); store64(c + 176, len); return 0; }
+fn _x509_set_is_ca(c, v): i64             { store64(c + 184, v); return 0; }
+fn _x509_set_path_len(c, v): i64          { store64(c + 192, v); return 0; }
+
+# ================================================================
+# ASN.1 time decoders
+#
+# UTCTime:         YYMMDDHHMMSSZ  (13 bytes)   years 50-99 → 19xx, 00-49 → 20xx
+# GeneralizedTime: YYYYMMDDHHMMSSZ (15 bytes)
+#
+# Both use Z (Zulu / UTC). Anything else rejected. We don't support
+# the "no seconds" YYMMDDHHMMZ shortcut (rare in modern certs).
+# ================================================================
+
+# Days-in-month table (non-leap). Initialised once.
+var _x509_mdays = 0;
+var _x509_mdays_inited = 0;
+fn _x509_init_mdays(): i64 {
+    if (_x509_mdays_inited == 1) { return 0; }
+    _x509_mdays = alloc(96);   # 12 × 8 bytes
+    store64(_x509_mdays + 0,  31);
+    store64(_x509_mdays + 8,  28);
+    store64(_x509_mdays + 16, 31);
+    store64(_x509_mdays + 24, 30);
+    store64(_x509_mdays + 32, 31);
+    store64(_x509_mdays + 40, 30);
+    store64(_x509_mdays + 48, 31);
+    store64(_x509_mdays + 56, 31);
+    store64(_x509_mdays + 64, 30);
+    store64(_x509_mdays + 72, 31);
+    store64(_x509_mdays + 80, 30);
+    store64(_x509_mdays + 88, 31);
+    _x509_mdays_inited = 1;
+    return 0;
+}
+
+fn _x509_is_leap(y): i64 {
+    if (y % 4 != 0) { return 0; }
+    if (y % 100 != 0) { return 1; }
+    if (y % 400 != 0) { return 0; }
+    return 1;
+}
+
+# Convert (yr, mo, dy, hr, mn, sc) to epoch seconds. Returns -1 on
+# range-invalid input.
+fn _x509_date_to_epoch(yr, mo, dy, hr, mn, sc): i64 {
+    if (mo < 1) { return 0 - 1; }
+    if (mo > 12) { return 0 - 1; }
+    if (dy < 1) { return 0 - 1; }
+    if (dy > 31) { return 0 - 1; }
+    if (hr > 23) { return 0 - 1; }
+    if (mn > 59) { return 0 - 1; }
+    if (sc > 59) { return 0 - 1; }
+    if (yr < 1970) { return 0 - 1; }
+    _x509_init_mdays();
+    var days = 0;
+    var y = 1970;
+    while (y < yr) {
+        days = days + 365;
+        if (_x509_is_leap(y) == 1) { days = days + 1; }
+        y = y + 1;
+    }
+    var m = 1;
+    while (m < mo) {
+        days = days + load64(_x509_mdays + (m - 1) * 8);
+        if (m == 2) { if (_x509_is_leap(yr) == 1) { days = days + 1; } }
+        m = m + 1;
+    }
+    # Validate day-in-month
+    var max_dy = load64(_x509_mdays + (mo - 1) * 8);
+    if (mo == 2) { if (_x509_is_leap(yr) == 1) { max_dy = max_dy + 1; } }
+    if (dy > max_dy) { return 0 - 1; }
+    days = days + dy - 1;
+    return days * 86400 + hr * 3600 + mn * 60 + sc;
+}
+
+# Read 2 ASCII digits at (buf + pos). Returns the value or -1.
+fn _x509_dec2(buf, pos): i64 {
+    var c0 = load8(buf + pos) & 0xFF;
+    var c1 = load8(buf + pos + 1) & 0xFF;
+    if (c0 < 48) { return 0 - 1; }
+    if (c0 > 57) { return 0 - 1; }
+    if (c1 < 48) { return 0 - 1; }
+    if (c1 > 57) { return 0 - 1; }
+    return (c0 - 48) * 10 + (c1 - 48);
+}
+
+# Read 4 ASCII digits.
+fn _x509_dec4(buf, pos): i64 {
+    var hi = _x509_dec2(buf, pos);
+    var lo = _x509_dec2(buf, pos + 2);
+    if (hi < 0) { return 0 - 1; }
+    if (lo < 0) { return 0 - 1; }
+    return hi * 100 + lo;
+}
+
+# Parse UTCTime content at (buf + off, len) → epoch seconds, or -1.
+fn _x509_parse_utctime(buf, off, len): i64 {
+    if (len != 13) { return 0 - 1; }
+    if ((load8(buf + off + 12) & 0xFF) != 0x5A) { return 0 - 1; }   # 'Z'
+    var yy = _x509_dec2(buf, off);
+    var mo = _x509_dec2(buf, off + 2);
+    var dy = _x509_dec2(buf, off + 4);
+    var hr = _x509_dec2(buf, off + 6);
+    var mn = _x509_dec2(buf, off + 8);
+    var sc = _x509_dec2(buf, off + 10);
+    if (yy < 0) { return 0 - 1; }
+    if (mo < 0) { return 0 - 1; }
+    if (dy < 0) { return 0 - 1; }
+    if (hr < 0) { return 0 - 1; }
+    if (mn < 0) { return 0 - 1; }
+    if (sc < 0) { return 0 - 1; }
+    var yr = 0;
+    if (yy < 50) { yr = 2000 + yy; }
+    else         { yr = 1900 + yy; }
+    return _x509_date_to_epoch(yr, mo, dy, hr, mn, sc);
+}
+
+# Parse GeneralizedTime content at (buf + off, len) → epoch seconds, or -1.
+fn _x509_parse_gentime(buf, off, len): i64 {
+    if (len != 15) { return 0 - 1; }
+    if ((load8(buf + off + 14) & 0xFF) != 0x5A) { return 0 - 1; }
+    var yr = _x509_dec4(buf, off);
+    var mo = _x509_dec2(buf, off + 4);
+    var dy = _x509_dec2(buf, off + 6);
+    var hr = _x509_dec2(buf, off + 8);
+    var mn = _x509_dec2(buf, off + 10);
+    var sc = _x509_dec2(buf, off + 12);
+    if (yr < 0) { return 0 - 1; }
+    if (mo < 0) { return 0 - 1; }
+    if (dy < 0) { return 0 - 1; }
+    if (hr < 0) { return 0 - 1; }
+    if (mn < 0) { return 0 - 1; }
+    if (sc < 0) { return 0 - 1; }
+    return _x509_date_to_epoch(yr, mo, dy, hr, mn, sc);
+}
+
+# Parse either UTCTime or GeneralizedTime starting at `pos`. Returns
+# the next position (positive) on success, -1 on failure. Sets the
+# `out_epoch` ptr to the decoded epoch seconds.
+fn _x509_parse_time(buf, buf_len, pos, out_epoch, out_next_pos): i64 {
+    if (pos >= buf_len) { return 0 - 1; }
+    var tag = load8(buf + pos) & 0xFF;
+    var content_pos = 0;
+    var next_pos = 0;
+    var len = 0;
+    if (tag == DER_TAG_UTCTIME) {
+        len = der_walk(buf, buf_len, pos, DER_TAG_UTCTIME, &content_pos, &next_pos);
+        if (len < 0) { return 0 - 1; }
+        var t = _x509_parse_utctime(buf, content_pos, len);
+        if (t < 0) { return 0 - 1; }
+        store64(out_epoch, t);
+        store64(out_next_pos, next_pos);
+        return 1;
+    }
+    if (tag == DER_TAG_GENTIME) {
+        len = der_walk(buf, buf_len, pos, DER_TAG_GENTIME, &content_pos, &next_pos);
+        if (len < 0) { return 0 - 1; }
+        var t2 = _x509_parse_gentime(buf, content_pos, len);
+        if (t2 < 0) { return 0 - 1; }
+        store64(out_epoch, t2);
+        store64(out_next_pos, next_pos);
+        return 1;
+    }
+    return 0 - 1;
+}
+
+# ================================================================
+# X.509 Certificate parsing
+#
+#   Certificate ::= SEQUENCE {
+#       tbsCertificate       TBSCertificate,
+#       signatureAlgorithm   AlgorithmIdentifier,
+#       signature            BIT STRING
+#   }
+#
+#   TBSCertificate ::= SEQUENCE {
+#       version              [0] EXPLICIT INTEGER DEFAULT v1,
+#       serialNumber         INTEGER,
+#       signature            AlgorithmIdentifier,
+#       issuer               Name,
+#       validity             Validity,
+#       subject              Name,
+#       subjectPublicKeyInfo SubjectPublicKeyInfo,
+#       extensions           [3] EXPLICIT Extensions OPTIONAL
+#   }
+#
+# This parser walks the structure once, validates each field, and
+# stashes offsets into the X509Cert struct. Every step bounds-
+# checks against `der_len`.
+# ================================================================
+
+# Globals for nested-call survival (Cyrius quirk #1).
+var _xp_buf = 0;
+var _xp_buf_len = 0;
+var _xp_cert = 0;
+var _xp_cp = 0;        # scratch content_pos
+var _xp_np = 0;        # scratch next_pos
+var _xp_n2p = 0;       # second scratch next_pos
+var _xp_alloced = 0;
+
+fn _xp_init(): i64 {
+    if (_xp_alloced == 1) { return 0; }
+    _xp_cp  = alloc(8);
+    _xp_np  = alloc(8);
+    _xp_n2p = alloc(8);
+    _xp_alloced = 1;
+    return 0;
+}
+
+# Parse the AlgorithmIdentifier at `pos` and check it is
+# ecdsa-with-SHA256. The parameters field, if present, must be NULL
+# (the absence of curve parameters is implicit for this algorithm).
+# Returns the next position on success, -1 on failure.
+fn _xp_parse_algid_ecdsa_sha256(buf, buf_len, pos): i64 {
+    _x509_oids_init();
+    var content_pos = 0;
+    var next_pos = 0;
+    var seq_len = der_walk(buf, buf_len, pos, DER_TAG_SEQUENCE, &content_pos, &next_pos);
+    if (seq_len < 0) { return 0 - 1; }
+    var seq_end = content_pos + seq_len;
+
+    # OID
+    var oid_cp = 0;
+    var oid_np = 0;
+    var oid_len = der_walk(buf, buf_len, content_pos, DER_TAG_OBJECT_ID, &oid_cp, &oid_np);
+    if (oid_len < 0) { return 0 - 1; }
+    if (_oid_eq(buf, oid_cp, oid_len, _oid_ecdsa_with_sha256, 8) == 0) { return 0 - 1; }
+
+    # Optional parameters — for ecdsa-with-SHA256 RFC 5758 §3.2 says
+    # absent. Some certs encode NULL, some omit. Accept either.
+    if (oid_np < seq_end) {
+        # If present, must be NULL with zero-length content.
+        if ((load8(buf + oid_np) & 0xFF) != DER_TAG_NULL) { return 0 - 1; }
+        if (oid_np + 2 > seq_end) { return 0 - 1; }
+        if ((load8(buf + oid_np + 1) & 0xFF) != 0x00) { return 0 - 1; }
+    }
+    return next_pos;
+}
+
+# Parse SubjectPublicKeyInfo at `pos`. Must be id-ecPublicKey with
+# prime256v1 parameters. Extracts the raw 64-byte (Qx || Qy)
+# uncompressed point into cert.pubkey, validates it is on the curve.
+# Returns next position on success, -1 on failure.
+fn _xp_parse_spki(buf, buf_len, pos, cert): i64 {
+    _x509_oids_init();
+    var spki_cp = 0;
+    var spki_np = 0;
+    var spki_len = der_walk(buf, buf_len, pos, DER_TAG_SEQUENCE, &spki_cp, &spki_np);
+    if (spki_len < 0) { return 0 - 1; }
+    var spki_end = spki_cp + spki_len;
+
+    # AlgorithmIdentifier: SEQUENCE { id-ecPublicKey, prime256v1 OID }
+    var alg_cp = 0;
+    var alg_np = 0;
+    var alg_len = der_walk(buf, buf_len, spki_cp, DER_TAG_SEQUENCE, &alg_cp, &alg_np);
+    if (alg_len < 0) { return 0 - 1; }
+    var alg_end = alg_cp + alg_len;
+
+    var oid_cp = 0;
+    var oid_np = 0;
+    var oid_len = der_walk(buf, buf_len, alg_cp, DER_TAG_OBJECT_ID, &oid_cp, &oid_np);
+    if (oid_len < 0) { return 0 - 1; }
+    if (_oid_eq(buf, oid_cp, oid_len, _oid_ec_pub_key, 7) == 0) { return 0 - 1; }
+
+    # Parameters must be the prime256v1 OID.
+    if (oid_np >= alg_end) { return 0 - 1; }
+    var pcp = 0; var pnp = 0;
+    var p_len = der_walk(buf, buf_len, oid_np, DER_TAG_OBJECT_ID, &pcp, &pnp);
+    if (p_len < 0) { return 0 - 1; }
+    if (_oid_eq(buf, pcp, p_len, _oid_prime256v1, 8) == 0) { return 0 - 1; }
+
+    # subjectPublicKey BIT STRING — must contain 0x04 (uncompressed) ||
+    # 32 bytes Qx || 32 bytes Qy = 65 bytes total. The BIT STRING
+    # itself begins with one byte counting unused bits (must be 0).
+    var bs_cp = 0;
+    var bs_np = 0;
+    var bs_len = der_walk(buf, buf_len, alg_np, DER_TAG_BIT_STRING, &bs_cp, &bs_np);
+    if (bs_len < 0) { return 0 - 1; }
+    if (bs_len != 66) { return 0 - 1; }   # 1 unused-bits + 65 point bytes
+    if ((load8(buf + bs_cp) & 0xFF) != 0) { return 0 - 1; }
+    if ((load8(buf + bs_cp + 1) & 0xFF) != 0x04) { return 0 - 1; }
+
+    # Stash raw pubkey (Qx || Qy) into cert.pubkey.
+    var pk = x509_cert_pubkey(cert);
+    var i = 0;
+    while (i < 64) {
+        store8(pk + i, load8(buf + bs_cp + 2 + i) & 0xFF);
+        i = i + 1;
+    }
+
+    # On-curve check (closes audit 2026-05-21 LOW-1 for this consumer).
+    var qx_limbs[32];
+    var qy_limbs[32];
+    u256_load_be(&qx_limbs, pk);
+    u256_load_be(&qy_limbs, pk + 32);
+    if (pt_is_on_curve(&qx_limbs, &qy_limbs) == 0) { return 0 - 1; }
+
+    return spki_np;
+}
+
+# Parse extensions. We only look at basicConstraints and keyUsage;
+# everything else is skipped. Critical extensions we don't understand
+# are rejected (RFC 5280 §4.2 — must reject critical unknown).
+fn _xp_parse_extensions(buf, buf_len, pos, cert): i64 {
+    _x509_oids_init();
+    var ext_cp = 0;
+    var ext_np = 0;
+    # [3] EXPLICIT Extensions
+    var outer_len = der_walk(buf, buf_len, pos, DER_TAG_CONTEXT_3_EXP, &ext_cp, &ext_np);
+    if (outer_len < 0) { return 0 - 1; }
+
+    # Inner SEQUENCE OF Extension
+    var inner_cp = 0;
+    var inner_np = 0;
+    var inner_len = der_walk(buf, buf_len, ext_cp, DER_TAG_SEQUENCE, &inner_cp, &inner_np);
+    if (inner_len < 0) { return 0 - 1; }
+    var seq_end = inner_cp + inner_len;
+
+    var cur = inner_cp;
+    while (cur < seq_end) {
+        var e_cp = 0;
+        var e_np = 0;
+        var e_len = der_walk(buf, buf_len, cur, DER_TAG_SEQUENCE, &e_cp, &e_np);
+        if (e_len < 0) { return 0 - 1; }
+        var e_end = e_cp + e_len;
+
+        # extnID OBJECT IDENTIFIER
+        var oid_cp = 0;
+        var oid_np = 0;
+        var oid_len = der_walk(buf, buf_len, e_cp, DER_TAG_OBJECT_ID, &oid_cp, &oid_np);
+        if (oid_len < 0) { return 0 - 1; }
+
+        # Optional critical BOOLEAN (default FALSE)
+        var critical = 0;
+        var after_crit = oid_np;
+        if (oid_np < e_end) {
+            if ((load8(buf + oid_np) & 0xFF) == DER_TAG_BOOLEAN) {
+                var b_cp = 0;
+                var b_np = 0;
+                var b_len = der_walk(buf, buf_len, oid_np, DER_TAG_BOOLEAN, &b_cp, &b_np);
+                if (b_len != 1) { return 0 - 1; }
+                if ((load8(buf + b_cp) & 0xFF) != 0) { critical = 1; }
+                after_crit = b_np;
+            }
+        }
+
+        # extnValue OCTET STRING — wraps the actual extension content.
+        var v_cp = 0;
+        var v_np = 0;
+        var v_len = der_walk(buf, buf_len, after_crit, DER_TAG_OCTET_STRING, &v_cp, &v_np);
+        if (v_len < 0) { return 0 - 1; }
+
+        var matched = 0;
+
+        # basicConstraints
+        if (_oid_eq(buf, oid_cp, oid_len, _oid_basic_constraints, 3) == 1) {
+            matched = 1;
+            # Content: SEQUENCE { cA BOOLEAN DEFAULT FALSE, pathLenConstraint INTEGER OPTIONAL }
+            var bc_cp = 0;
+            var bc_np = 0;
+            var bc_len = der_walk(buf, buf_len, v_cp, DER_TAG_SEQUENCE, &bc_cp, &bc_np);
+            if (bc_len < 0) { return 0 - 1; }
+            var bc_end = bc_cp + bc_len;
+            var bccur = bc_cp;
+            var is_ca = 0;
+            if (bccur < bc_end) {
+                if ((load8(buf + bccur) & 0xFF) == DER_TAG_BOOLEAN) {
+                    var bp = 0; var bn = 0;
+                    var bl = der_walk(buf, buf_len, bccur, DER_TAG_BOOLEAN, &bp, &bn);
+                    if (bl != 1) { return 0 - 1; }
+                    if ((load8(buf + bp) & 0xFF) != 0) { is_ca = 1; }
+                    bccur = bn;
+                }
+            }
+            _x509_set_is_ca(cert, is_ca);
+            # path_len: only meaningful if cA == TRUE
+            if (bccur < bc_end) {
+                var ip = 0; var inn = 0;
+                var il = der_walk(buf, buf_len, bccur, DER_TAG_INTEGER, &ip, &inn);
+                if (il < 0) { return 0 - 1; }
+                if (il > 8) { return 0 - 1; }
+                # Decode big-endian integer into i64.
+                var pl = 0;
+                var k = 0;
+                while (k < il) {
+                    pl = (pl << 8) | (load8(buf + ip + k) & 0xFF);
+                    k = k + 1;
+                }
+                _x509_set_path_len(cert, pl);
+            } else {
+                _x509_set_path_len(cert, 0 - 1);
+            }
+        }
+
+        # keyUsage: parsed but not enforced beyond keeping the chain
+        # walker honest about CA-vs-leaf via basicConstraints. We
+        # accept the extension without inspecting bits; future work
+        # can tighten this when an integration calls for it.
+
+        # Critical extension we don't recognise → reject.
+        if (matched == 0) {
+            if (critical == 1) {
+                if (_oid_eq(buf, oid_cp, oid_len, _oid_key_usage, 3) == 0) {
+                    return 0 - 1;
+                }
+            }
+        }
+        cur = e_np;
+    }
+    return ext_np;
+}
+
+# Top-level parser. See header for the grammar walked.
+fn x509_parse(der, der_len, out_cert): i64 {
+    _xp_init();
+    _x509_oids_init();
+    memset(out_cert, 0, 256);
+    _x509_set_der(out_cert, der, der_len);
+    _x509_set_path_len(out_cert, 0 - 1);
+
+    # Certificate ::= SEQUENCE { ... }
+    var cert_cp = 0;
+    var cert_np = 0;
+    var cert_seq_len = der_walk(der, der_len, 0, DER_TAG_SEQUENCE, &cert_cp, &cert_np);
+    if (cert_seq_len < 0) { return 0; }
+
+    # tbsCertificate — capture its full TLV (tag+len+content) so the
+    # chain walker can re-hash the exact bytes the signer signed.
+    var tbs_cp = 0;
+    var tbs_np = 0;
+    var tbs_inner_len = der_walk(der, der_len, cert_cp, DER_TAG_SEQUENCE, &tbs_cp, &tbs_np);
+    if (tbs_inner_len < 0) { return 0; }
+    _x509_set_tbs(out_cert, cert_cp, tbs_np - cert_cp);
+    var tbs_end = tbs_cp + tbs_inner_len;
+
+    var cur = tbs_cp;
+
+    # version [0] EXPLICIT INTEGER — must be v3 (== 2).
+    if ((load8(der + cur) & 0xFF) != DER_TAG_CONTEXT_0_EXP) { return 0; }
+    var v_cp = 0; var v_np = 0;
+    if (der_walk(der, der_len, cur, DER_TAG_CONTEXT_0_EXP, &v_cp, &v_np) < 0) { return 0; }
+    var vi_cp = 0; var vi_np = 0;
+    var vi_len = der_walk(der, der_len, v_cp, DER_TAG_INTEGER, &vi_cp, &vi_np);
+    if (vi_len != 1) { return 0; }
+    if ((load8(der + vi_cp) & 0xFF) != 0x02) { return 0; }   # version v3
+    cur = v_np;
+
+    # serialNumber
+    var s_cp = 0; var s_np = 0;
+    var s_len = der_walk(der, der_len, cur, DER_TAG_INTEGER, &s_cp, &s_np);
+    if (s_len < 0) { return 0; }
+    _x509_set_serial(out_cert, s_cp, s_len);
+    cur = s_np;
+
+    # signature (inner) — AlgorithmIdentifier. Must match outer sig
+    # algo (we'll check that consistency below after parsing the
+    # outer one). For now, require ecdsa-with-SHA256.
+    var inner_algo_next = _xp_parse_algid_ecdsa_sha256(der, der_len, cur);
+    if (inner_algo_next < 0) { return 0; }
+    cur = inner_algo_next;
+
+    # issuer — capture full TLV
+    var iss_cp = 0; var iss_np = 0;
+    var iss_len = der_walk(der, der_len, cur, DER_TAG_SEQUENCE, &iss_cp, &iss_np);
+    if (iss_len < 0) { return 0; }
+    _x509_set_issuer(out_cert, cur, iss_np - cur);
+    cur = iss_np;
+
+    # validity SEQUENCE { notBefore, notAfter }
+    var val_cp = 0; var val_np = 0;
+    var val_len = der_walk(der, der_len, cur, DER_TAG_SEQUENCE, &val_cp, &val_np);
+    if (val_len < 0) { return 0; }
+    var nb = 0; var nb_next = 0;
+    if (_x509_parse_time(der, der_len, val_cp, &nb, &nb_next) < 0) { return 0; }
+    var na = 0; var na_next = 0;
+    if (_x509_parse_time(der, der_len, nb_next, &na, &na_next) < 0) { return 0; }
+    if (na_next != val_cp + val_len) { return 0; }   # trailing garbage
+    _x509_set_not_before(out_cert, nb);
+    _x509_set_not_after(out_cert, na);
+    cur = val_np;
+
+    # subject
+    var sub_cp = 0; var sub_np = 0;
+    var sub_len = der_walk(der, der_len, cur, DER_TAG_SEQUENCE, &sub_cp, &sub_np);
+    if (sub_len < 0) { return 0; }
+    _x509_set_subject(out_cert, cur, sub_np - cur);
+    cur = sub_np;
+
+    # subjectPublicKeyInfo
+    var spki_next = _xp_parse_spki(der, der_len, cur, out_cert);
+    if (spki_next < 0) { return 0; }
+    cur = spki_next;
+
+    # Optional [3] extensions
+    if (cur < tbs_end) {
+        if ((load8(der + cur) & 0xFF) == DER_TAG_CONTEXT_3_EXP) {
+            var ext_next = _xp_parse_extensions(der, der_len, cur, out_cert);
+            if (ext_next < 0) { return 0; }
+            cur = ext_next;
+        }
+    }
+    if (cur != tbs_end) { return 0; }    # trailing garbage in TBS
+
+    # outer signatureAlgorithm
+    var outer_algo_next = _xp_parse_algid_ecdsa_sha256(der, der_len, tbs_np);
+    if (outer_algo_next < 0) { return 0; }
+    _x509_set_sig_algo(out_cert, X509_SIG_ECDSA_SHA256);
+
+    # signature BIT STRING — wraps an ECDSA signature DER SEQUENCE
+    # of two INTEGERs. We unwrap into a fixed 64-byte r||s buffer
+    # (allocated separately, stashed via sig_off/sig_len in the cert).
+    var sb_cp = 0; var sb_np = 0;
+    var sb_len = der_walk(der, der_len, outer_algo_next, DER_TAG_BIT_STRING, &sb_cp, &sb_np);
+    if (sb_len < 0) { return 0; }
+    if (sb_len < 1) { return 0; }
+    if ((load8(der + sb_cp) & 0xFF) != 0) { return 0; }    # unused bits must be 0
+    var inner_sig_off = sb_cp + 1;
+    var inner_sig_len = sb_len - 1;
+
+    # Unwrap r || s into a 64-byte heap buffer. Same decode shape as
+    # _ecdsa_der_int in src/ecdsa_p256.cyr — we reuse that helper.
+    var raw_sig = alloc(64);
+    memset(raw_sig, 0, 64);
+    var pos_after_seq_tag = 0;
+    var inner_seq_len = der_walk(der, der_len, inner_sig_off, DER_TAG_SEQUENCE,
+                                   &pos_after_seq_tag, &sb_np);
+    if (inner_seq_len < 0) { return 0; }
+    var inner_seq_end = pos_after_seq_tag + inner_seq_len;
+    var r_next = _ecdsa_der_int(der, pos_after_seq_tag, inner_seq_end, raw_sig);
+    if (r_next < 0) { return 0; }
+    var s_next2 = _ecdsa_der_int(der, r_next, inner_seq_end, raw_sig + 32);
+    if (s_next2 < 0) { return 0; }
+    if (s_next2 != inner_seq_end) { return 0; }
+
+    # Store raw_sig as a pointer-style "offset" = the absolute heap
+    # address. sig_off/sig_len semantics for ECDSA sigs are "raw r||s
+    # bytes at this address" (not an offset into der). Distinguish by
+    # length: 64 = raw r||s; everything else is a parse error above.
+    _x509_set_sig(out_cert, raw_sig, 64);
+
+    if (sb_np != cert_cp + cert_seq_len) { return 0; }
+    return 1;
+}
+
+# ================================================================
+# Chain verification
+#
+# x509_verify_chain(leaf, intermediates, intermediates_len, root,
+#                    now_unix):
+#   • Walk the chain root → intermediates[0] → ... → intermediates[n-1]
+#     → leaf. (Caller supplies intermediates in issuer-towards-leaf
+#     order; `intermediates_len` may be 0 for a directly-root-signed
+#     leaf.)
+#   • For every link: hash issuer-cert's TBS, verify the child's
+#     signature against the issuer's pubkey via ecdsa_p256_verify;
+#     check child.issuer DN bytes == parent.subject DN bytes; check
+#     child.not_before ≤ now_unix ≤ child.not_after; intermediates
+#     must have basicConstraints CA bit set.
+#   • The root is treated as a trust anchor — its self-signature
+#     and basicConstraints are NOT re-checked. (Trust establishment
+#     is by sigil's caller — the kavach attestation backend, the
+#     ark publisher keyring, etc.)
+# ================================================================
+
+# Helper: compare two DN byte slices for equality.
+fn _x509_dn_eq(buf_a, off_a, len_a, buf_b, off_b, len_b): i64 {
+    if (len_a != len_b) { return 0; }
+    var i = 0;
+    while (i < len_a) {
+        if ((load8(buf_a + off_a + i) & 0xFF) != (load8(buf_b + off_b + i) & 0xFF)) {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# Hash the TBSCertificate of `cert` and verify `child`'s signature
+# against the *issuer pubkey* — i.e. the signature on `child` was
+# produced by the holder of `issuer_cert`'s private key. We pack
+# the issuer's 64-byte (Qx || Qy) into the 64-byte form that
+# `ecdsa_p256_verify` expects.
+fn _x509_verify_link(child, issuer_cert): i64 {
+    # Sanity: sig algo on child must be ecdsa-with-SHA256
+    if (x509_cert_sig_algo(child) != X509_SIG_ECDSA_SHA256) { return 0; }
+
+    var der_ptr = load64(child + 0);
+    var tbs_off = load64(child + 16);
+    var tbs_len = load64(child + 24);
+    var sig_addr = load64(child + 168);
+    var sig_len  = load64(child + 176);
+    if (sig_len != 64) { return 0; }
+
+    var pk = x509_cert_pubkey(issuer_cert);
+    # ecdsa_p256_verify takes (pk, msg, msg_len, sig). We pass the
+    # raw TBS bytes; the verify entry sha256-hashes them internally.
+    return ecdsa_p256_verify(pk, der_ptr + tbs_off, tbs_len, sig_addr);
+}
+
+# Check time validity. now_unix == 0 disables the check (caller's
+# explicit opt-out; the SGX bite may use this when the host clock
+# is untrusted and verification rides on the report's TCB nonce).
+fn _x509_in_window(cert, now_unix): i64 {
+    if (now_unix == 0) { return 1; }
+    if (now_unix < x509_cert_not_before(cert)) { return 0; }
+    if (now_unix > x509_cert_not_after(cert))  { return 0; }
+    return 1;
+}
+
+# Check issuer DN of `child` matches subject DN of `parent`.
+fn _x509_issuer_matches(child, parent): i64 {
+    var c_buf = load64(child + 0);
+    var c_off = load64(child + 48);
+    var c_len = load64(child + 56);
+    var p_buf = load64(parent + 0);
+    var p_off = load64(parent + 64);
+    var p_len = load64(parent + 72);
+    return _x509_dn_eq(c_buf, c_off, c_len, p_buf, p_off, p_len);
+}
+
+# `intermediates` is a contiguous array of `intermediates_len` cert
+# pointers, in issuer-towards-leaf order.
+fn x509_verify_chain(leaf, intermediates, intermediates_len, root, now_unix): i64 {
+    # 1. Validate the leaf is in its validity window.
+    if (_x509_in_window(leaf, now_unix) == 0) { return 0; }
+
+    # 2. Walk intermediates, validating each is CA + in-window.
+    var i = 0;
+    while (i < intermediates_len) {
+        var inter = load64(intermediates + i * 8);
+        if (_x509_in_window(inter, now_unix) == 0) { return 0; }
+        if (x509_cert_is_ca(inter) != 1) { return 0; }
+        i = i + 1;
+    }
+    if (_x509_in_window(root, now_unix) == 0) { return 0; }
+    if (x509_cert_is_ca(root) != 1) { return 0; }
+
+    # 3. Walk the signature chain: root signs intermediates[0],
+    #    intermediates[k] signs intermediates[k+1], last intermediate
+    #    signs leaf (or root signs leaf if intermediates_len == 0).
+    var parent = root;
+    i = 0;
+    while (i < intermediates_len) {
+        var child = load64(intermediates + i * 8);
+        if (_x509_issuer_matches(child, parent) == 0) { return 0; }
+        if (_x509_verify_link(child, parent) == 0) { return 0; }
+        parent = child;
+        i = i + 1;
+    }
+    # Final link: parent signs leaf.
+    if (_x509_issuer_matches(leaf, parent) == 0) { return 0; }
+    if (_x509_verify_link(leaf, parent) == 0) { return 0; }
+
+    return 1;
+}

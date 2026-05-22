@@ -1,0 +1,264 @@
+# x509.tcyr — minimal X.509 cert-chain walker tests.
+#
+# Sigil 3.2.2 — bite 2 of the TEE attestation arc.
+#
+# Test groups:
+#   1. DER primitive walker — tag/length decode + bounds checking
+#   2. ASN.1 time decode — UTCTime, GeneralizedTime, range rejection
+#   3. x509_parse — root + leaf parsed from openssl-generated DER
+#   4. x509_verify_chain — green path + 6 negative cases
+#
+# Test certs were generated offline (sigil has no sign yet):
+#   openssl ecparam -name prime256v1 -genkey ... -out root.key
+#   openssl req -new -x509 -key root.key -sha256 -days 3650
+#     -addext basicConstraints=critical,CA:TRUE,pathlen:1
+#     -addext keyUsage=critical,keyCertSign,cRLSign  (root.crt)
+#   openssl req -new -key leaf.key ... -out leaf.csr
+#   openssl x509 -req -in leaf.csr -CA root.crt -CAkey root.key
+#     -sha256 -days 365 ... (leaf.crt)
+# DER bytes hex-dumped via `openssl x509 -outform DER | xxd -p -c1000`.
+
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/string.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fmt.cyr"
+include "lib/json.cyr"
+include "lib/sakshi.cyr"
+include "lib/chrono.cyr"
+include "lib/bigint.cyr"
+include "lib/ct.cyr"
+
+include "src/types.cyr"
+include "src/error.cyr"
+include "src/sha256.cyr"
+include "src/hex.cyr"
+include "src/sha512.cyr"
+include "src/bigint_ext.cyr"
+include "src/ed25519.cyr"
+include "src/ecdsa_p256.cyr"
+include "src/x509.cyr"
+
+# Test certs — generated 2026-05-22 (see file header comment).
+# Root validity:  2026-05-22 00:37:06 UTC → 2036-05-19 00:37:06 UTC
+# Leaf validity:  2026-05-22 00:37:06 UTC → 2027-05-22 00:37:06 UTC
+var ROOT_DER_HEX = "308201a130820148a003020102021438d027306f383dd1d498df28c0cab9abb6a26173300a06082a8648ce3d040302301d311b301906035504030c12536967696c205465737420526f6f74204341301e170d3236303532323030333730365a170d3336303531393030333730365a301d311b301906035504030c12536967696c205465737420526f6f742043413059301306072a8648ce3d020106082a8648ce3d030107034200044d9f804c6dc263817b4ac3d5a6f86be88ff2961103cee9ca304d6fcde5e37c7c3f5b953938324747f44e2bdd51d849ce61ba7c7dcd8c5e63f687f6f65a3c0a9ea3663064301d0603551d0e04160414c97b20ae5ba585c6752e0a9ba7200be5a658d768301f0603551d23041830168014c97b20ae5ba585c6752e0a9ba7200be5a658d76830120603551d130101ff040830060101ff020101300e0603551d0f0101ff040403020106300a06082a8648ce3d040302034700304402201f82729ebb77cca9b15528a89c8580537784e71e1a5face3040de63d9578ac7d02206ec8546b67b2c3448d038bd0d19f1c38845135f44b77ae75e163e95e1d17fe4a";
+
+var LEAF_DER_HEX = "308201993082013fa00302010202143a4b051073c53e3a443145eb11485caef9f09adc300a06082a8648ce3d040302301d311b301906035504030c12536967696c205465737420526f6f74204341301e170d3236303532323030333730365a170d3237303532323030333730365a301a3118301606035504030c0f536967696c2054657374204c6561663059301306072a8648ce3d020106082a8648ce3d03010703420004665d76a0781a7263dab8c5d88d2f7d2ed1028eaa116020b7602a71d9957a182f0513bbfdaca9bda7df5571dc08a24a6d974f71962bfd7b979509a4c48044dbaca360305e300c0603551d130101ff04023000300e0603551d0f0101ff040403020780301d0603551d0e04160414c0bd5bc3cf47d2b8869ab999263e9b5aae0b7842301f0603551d23041830168014c97b20ae5ba585c6752e0a9ba7200be5a658d768300a06082a8648ce3d040302034800304502202ee70f3665b4dd8c6cb9aadea0082dca0442c5304e72a08469248d5506e7bf45022100d0691fa7bcd1782f60d50346fc8a3730a200298dcd28319eff454205e593e728";
+
+# notBefore is 2026-05-22 00:37:06 UTC = 1779410226 (verified via `date -u -d`)
+# Leaf notAfter is 2027-05-22 00:37:06 UTC = 1810946226
+# Pick a date in the leaf validity window: 2026-06-15 00:00:00 UTC = 1781481600
+var NOW_IN_WINDOW = 1781481600;
+
+fn main() {
+    alloc_init();
+    _p256_init();
+
+    # ============================================================
+    # Group 1 — DER primitive walker
+    # ============================================================
+    test_group("der_walk");
+
+    # Tiny SEQUENCE: 30 03 02 01 05 (encodes INTEGER 5 inside)
+    var seq_demo = hex_decode("3003020105", 10);
+    var content_pos = 0;
+    var next_pos = 0;
+    var seq_len = der_walk(seq_demo, 5, 0, DER_TAG_SEQUENCE, &content_pos, &next_pos);
+    assert_eq(seq_len, 3, "outer sequence length");
+    assert_eq(content_pos, 2, "outer content begins at byte 2");
+    assert_eq(next_pos, 5, "outer TLV ends at byte 5");
+
+    # Walk INTEGER inside
+    var int_cp = 0;
+    var int_np = 0;
+    var int_len = der_walk(seq_demo, 5, content_pos, DER_TAG_INTEGER, &int_cp, &int_np);
+    assert_eq(int_len, 1, "inner integer length");
+    assert_eq(load8(seq_demo + int_cp) & 0xFF, 5, "inner integer value byte");
+
+    # Tag mismatch → -1
+    var bad = der_walk(seq_demo, 5, 0, DER_TAG_INTEGER, &content_pos, &next_pos);
+    assert_eq(bad, 0 - 1, "tag mismatch returns -1");
+
+    # OOB length: 30 05 02 01 05 (claims 5 content bytes but only 3 follow)
+    var truncated = hex_decode("3005020105", 10);
+    var t_cp = 0; var t_np = 0;
+    var t_ret = der_walk(truncated, 5, 0, DER_TAG_SEQUENCE, &t_cp, &t_np);
+    assert_eq(t_ret, 0 - 1, "OOB length rejected");
+
+    # Indefinite-length form (0x80) rejected.
+    var indef = hex_decode("3080020105", 10);
+    var i_cp = 0; var i_np = 0;
+    assert_eq(der_walk(indef, 5, 0, DER_TAG_SEQUENCE, &i_cp, &i_np), 0 - 1,
+        "indefinite-length form rejected");
+
+    # Long-form length: 30 81 03 02 01 05  (length = 3, encoded long-form)
+    var longform = hex_decode("308103020105", 12);
+    var l_cp = 0; var l_np = 0;
+    var l_len = der_walk(longform, 6, 0, DER_TAG_SEQUENCE, &l_cp, &l_np);
+    assert_eq(l_len, 3, "long-form length=3 decoded");
+    assert_eq(l_cp, 3, "long-form content_pos");
+    assert_eq(l_np, 6, "long-form next_pos");
+
+    # ============================================================
+    # Group 2 — ASN.1 time decode
+    # ============================================================
+    test_group("asn1 time decode");
+
+    # UTCTime "260522003706Z" → 2026-05-22 00:37:06 UTC.
+    # Expected epoch (verified `date -u -d "2026-05-22 00:37:06" +%s`): 1779410226
+    var utc_str = hex_decode("3236303532323030333730365a", 26);
+    var ut = _x509_parse_utctime(utc_str, 0, 13);
+    assert_eq(ut, 1779410226, "UTCTime 260522003706Z → epoch");
+
+    # UTCTime "490101000000Z" → 2049-01-01 (year < 50 ⇒ 20xx)
+    var utc_2049 = hex_decode("3439303130313030303030305a", 26);
+    var ut49 = _x509_parse_utctime(utc_2049, 0, 13);
+    # Expected: (79 years 1970→2049) × 365 + leap days, etc.
+    # Just sanity-check it is a positive value > now (≥ 2.5e9).
+    assert_eq(ut49 > 2400000000, 1, "UTCTime 2049 → far future");
+
+    # UTCTime "500101000000Z" → 1950 (year ≥ 50 ⇒ 19xx, before epoch).
+    # _x509_date_to_epoch rejects yr < 1970 → returns -1.
+    var utc_1950 = hex_decode("3530303130313030303030305a", 26);
+    assert_eq(_x509_parse_utctime(utc_1950, 0, 13), 0 - 1,
+        "UTCTime 1950 (pre-epoch) rejected");
+
+    # UTCTime with bad month
+    var utc_bad_mo = hex_decode("3236313330323030333730365a", 26);
+    assert_eq(_x509_parse_utctime(utc_bad_mo, 0, 13), 0 - 1,
+        "UTCTime month=13 rejected");
+
+    # UTCTime missing Z
+    var utc_no_z = hex_decode("32363035323230303337303658", 26);
+    assert_eq(_x509_parse_utctime(utc_no_z, 0, 13), 0 - 1,
+        "UTCTime missing trailing Z rejected");
+
+    # GeneralizedTime "20260522003706Z" → same instant.
+    var gt = hex_decode("32303236303532323030333730365a", 30);
+    var gtv = _x509_parse_gentime(gt, 0, 15);
+    assert_eq(gtv, 1779410226, "GeneralizedTime decoded");
+
+    # ============================================================
+    # Group 3 — x509_parse
+    # ============================================================
+    test_group("x509_parse — root and leaf");
+
+    var root_der = hex_decode(ROOT_DER_HEX, 842);
+    var leaf_der = hex_decode(LEAF_DER_HEX, 826);
+
+    var root = x509_cert_alloc();
+    var ok_root = x509_parse(root_der, 421, root);
+    assert_eq(ok_root, 1, "root cert parses");
+    assert_eq(x509_cert_is_ca(root), 1, "root has CA=TRUE");
+    assert_eq(x509_cert_path_len(root), 1, "root path_len = 1");
+    assert_eq(x509_cert_sig_algo(root), X509_SIG_ECDSA_SHA256, "root sig algo");
+
+    var leaf = x509_cert_alloc();
+    var ok_leaf = x509_parse(leaf_der, 413, leaf);
+    assert_eq(ok_leaf, 1, "leaf cert parses");
+    assert_eq(x509_cert_is_ca(leaf), 0, "leaf has CA=FALSE");
+    assert_eq(x509_cert_sig_algo(leaf), X509_SIG_ECDSA_SHA256, "leaf sig algo");
+
+    # Validity: root notBefore = 2026-05-22 00:37:06 UTC = 1779410226
+    assert_eq(x509_cert_not_before(root), 1779410226, "root notBefore");
+    # Root notAfter: 2036-05-19 00:37:06 UTC = 2094770226
+    assert_eq(x509_cert_not_after(root), 2094770226, "root notAfter");
+
+    # ============================================================
+    # Group 4 — x509_verify_chain (green path)
+    # ============================================================
+    test_group("x509_verify_chain — root signs leaf");
+
+    var intermediates = alloc(0);   # 0-length intermediates array
+    assert_eq(x509_verify_chain(leaf, intermediates, 0, root, NOW_IN_WINDOW), 1,
+        "root → leaf chain verifies");
+
+    # now_unix = 0 disables time check.
+    assert_eq(x509_verify_chain(leaf, intermediates, 0, root, 0), 1,
+        "now_unix=0 disables time check");
+
+    # ============================================================
+    # Group 5 — chain rejection: time
+    # ============================================================
+    test_group("x509_verify_chain — time-window rejection");
+
+    # Before leaf.notBefore (1779410226 - 1)
+    assert_eq(x509_verify_chain(leaf, intermediates, 0, root, 1779410225), 0,
+        "now < leaf.notBefore rejected");
+
+    # After leaf.notAfter (1810946226 + 1)
+    assert_eq(x509_verify_chain(leaf, intermediates, 0, root, 1810946227), 0,
+        "now > leaf.notAfter rejected");
+
+    # ============================================================
+    # Group 6 — chain rejection: signature tamper
+    # ============================================================
+    test_group("x509_verify_chain — signature tamper");
+
+    # Flip one bit in the middle of the leaf's TBS. The signature will
+    # no longer match. We mutate a byte inside the subject DN portion
+    # (clearly within TBS, doesn't break DER structure).
+    var leaf_der_tamper = alloc(413);
+    memcpy(leaf_der_tamper, leaf_der, 413);
+    # Subject DN sits after issuer + validity. Find a high byte to flip;
+    # byte 120 falls inside the subject's CN string.
+    store8(leaf_der_tamper + 120, (load8(leaf_der_tamper + 120) & 0xFF) ^ 0x01);
+    var leaf_tamper = x509_cert_alloc();
+    var ok_tamper = x509_parse(leaf_der_tamper, 413, leaf_tamper);
+    if (ok_tamper == 1) {
+        # Even if parse succeeded after the bit flip (likely yes, since
+        # the byte is inside an OCTET-STRING-like payload), the signature
+        # verification must fail.
+        assert_eq(x509_verify_chain(leaf_tamper, intermediates, 0, root, NOW_IN_WINDOW), 0,
+            "leaf with flipped TBS byte fails signature verify");
+    }
+    # If parse failed instead, the chain walker doesn't even get a
+    # chance — also acceptable. Either way the cert is rejected.
+
+    # ============================================================
+    # Group 7 — chain rejection: issuer/subject mismatch
+    # ============================================================
+    test_group("x509_verify_chain — DN mismatch");
+
+    # Swap leaf's issuer field for unrelated bytes by mutating the
+    # leaf cert in memory. We do this at the X509Cert struct level
+    # (cheaper than re-encoding the DER): point its issuer to the
+    # leaf's own subject DN, which doesn't match the root's subject.
+    var leaf_bad_issuer = x509_cert_alloc();
+    memcpy(leaf_bad_issuer, leaf, 256);
+    # Re-point issuer offsets to subject offsets (leaf's subject != root's subject).
+    store64(leaf_bad_issuer + 48, load64(leaf + 64));   # issuer_off = leaf.subject_off
+    store64(leaf_bad_issuer + 56, load64(leaf + 72));   # issuer_len = leaf.subject_len
+    assert_eq(x509_verify_chain(leaf_bad_issuer, intermediates, 0, root, NOW_IN_WINDOW), 0,
+        "issuer/subject DN mismatch rejected");
+
+    # ============================================================
+    # Group 8 — malformed input
+    # ============================================================
+    test_group("x509_parse — malformed input");
+
+    # Empty input
+    var empty = alloc(1);
+    var cnull = x509_cert_alloc();
+    assert_eq(x509_parse(empty, 0, cnull), 0, "empty input rejected");
+
+    # Truncated cert (first 50 bytes only)
+    assert_eq(x509_parse(root_der, 50, cnull), 0, "truncated cert rejected");
+
+    # First byte wrong (not SEQUENCE)
+    var bad_first = alloc(421);
+    memcpy(bad_first, root_der, 421);
+    store8(bad_first, 0x31);
+    assert_eq(x509_parse(bad_first, 421, cnull), 0, "wrong outer tag rejected");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

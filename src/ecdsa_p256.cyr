@@ -240,6 +240,59 @@ fn fp_p256_sq(r, a): i64 {
 }
 
 # ================================================================
+# Affine public-key validation — closes audit 2026-05-21 LOW-1.
+#
+# Verify that (x, y) satisfies the P-256 curve equation:
+#     y^2 ≡ x^3 - 3*x + b  (mod p)
+# and that both coordinates are in the field [0, p). Rejects the
+# point at infinity ((0, 0) treated as such here per SEC 1 §3.2.2),
+# off-curve points (invalid-curve attack, Bos et al. 2014), and
+# coordinates outside the canonical range.
+#
+# Returns 1 if (x, y) is a valid affine point on P-256, 0 otherwise.
+# x and y are 32-byte LE u256 limb buffers (the post-load_be form).
+# ================================================================
+
+var _onc_lhs = 0;
+var _onc_rhs = 0;
+var _onc_tmp = 0;
+var _onc_three_x = 0;
+var _onc_inited = 0;
+
+fn _onc_init(): i64 {
+    if (_onc_inited == 1) { return 0; }
+    _p256_init();
+    _onc_lhs = alloc(32);
+    _onc_rhs = alloc(32);
+    _onc_tmp = alloc(32);
+    _onc_three_x = alloc(32);
+    _onc_inited = 1;
+    return 0;
+}
+
+fn pt_is_on_curve(x, y): i64 {
+    _onc_init();
+    # Range check: 0 ≤ x < p and 0 ≤ y < p.
+    if (u256_cmp(x, _p256_p) >= 0) { return 0; }
+    if (u256_cmp(y, _p256_p) >= 0) { return 0; }
+    # Reject point at infinity (encoded as (0, 0) in affine).
+    if (u256_is_zero(x) == 1) {
+        if (u256_is_zero(y) == 1) { return 0; }
+    }
+    # lhs = y^2
+    fp_p256_sq(_onc_lhs, y);
+    # rhs = x^3 - 3x + b
+    fp_p256_sq(_onc_tmp, x);
+    fp_p256_mul(_onc_rhs, _onc_tmp, x);
+    fp_p256_add(_onc_tmp, x, x);
+    fp_p256_add(_onc_three_x, _onc_tmp, x);
+    fp_p256_sub(_onc_rhs, _onc_rhs, _onc_three_x);
+    fp_p256_add(_onc_rhs, _onc_rhs, _p256_b);
+    if (u256_eq(_onc_lhs, _onc_rhs) == 1) { return 1; }
+    return 0;
+}
+
+# ================================================================
 # Modular inversion: r = a^(p-2) mod p (Fermat's little theorem)
 #
 # Generic square-and-multiply over the 256-bit exponent p-2.
@@ -859,17 +912,13 @@ fn ecdsa_p256_verify(pk, msg, msg_len, sig): i64 {
     if (u256_cmp(_ecv_r, _p256_n) >= 0) { return 0; }
     if (u256_cmp(_ecv_s, _p256_n) >= 0) { return 0; }
 
-    # 2. Decode Q from pk.
+    # 2. Decode Q from pk and validate it is on the curve.
+    # Closes audit 2026-05-21 LOW-1 (invalid-curve attack — Bos et al.
+    # 2014). pt_is_on_curve also rejects (0,0) and out-of-range
+    # coordinates so the prior explicit checks are subsumed.
     u256_load_be(_ecv_qx, pk);
     u256_load_be(_ecv_qy, pk + 32);
-    # Reject Q at infinity / out-of-range. (Full on-curve + n*Q == O
-    # check is the consumer's pre-validation responsibility for now;
-    # we already reduce coordinates mod p so out-of-range Qx/Qy are
-    # taken as their reduced equivalents — caller should sanitise pk
-    # upstream when it comes from an untrusted channel.)
-    if (u256_is_zero(_ecv_qx) == 1) {
-        if (u256_is_zero(_ecv_qy) == 1) { return 0; }
-    }
+    if (pt_is_on_curve(_ecv_qx, _ecv_qy) == 0) { return 0; }
     pt_from_affine(_ecv_Q, _ecv_qx, _ecv_qy);
 
     # 3. e = SHA-256(msg) mod n.
