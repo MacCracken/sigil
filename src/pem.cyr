@@ -1,0 +1,326 @@
+# pem.cyr — minimal PEM decoder for embedded cert chains.
+#
+# Sigil 3.5 — bite 1 of the TEE-attestation completion arc
+# (origin: `docs/development/roadmap.md` "Road to v3.5"). The
+# 3.2.x parsers (`src/sgx.cyr`, `src/tdx.cyr`) record an
+# `qe_cert_data` byte range that, when `qe_cert_data_type == 5`,
+# holds a PEM-encoded PCK cert chain (typically root → ...→
+# leaf, 2–3 certs). SEV-SNP's VCEK chain is fetched out-of-band
+# from AMD KDS in a similar PEM shape. 3.5's *_verify_full
+# orchestrators want one decoder that turns those PEM bytes
+# into a (cert_ptr, der_len) array consumable by
+# `x509_parse` + `x509_verify_chain`.
+#
+# Scope (deliberately narrow):
+#   • Recognises ONLY `-----BEGIN CERTIFICATE-----` /
+#     `-----END CERTIFICATE-----` markers. Encrypted-PEM, RSA-key,
+#     EC-key, CSR markers are ignored / rejected.
+#   • Base64 alphabet is RFC 4648 §4 (standard, not URL-safe).
+#     `+`, `/` valid; `-`, `_` rejected.
+#   • Padding (`=`) accepted at the end of the body in 0/1/2-char
+#     forms per RFC 4648. Padding inside the body is rejected.
+#   • Whitespace (LF, CR, space, tab) inside the body is skipped
+#     transparently — real-world PEMs wrap at 64 cols.
+#   • No tolerance for extra content between blocks (e.g. embedded
+#     human-readable cert summaries from `openssl x509 -text`).
+#     The decoder allows arbitrary bytes BEFORE the first BEGIN
+#     marker and BETWEEN END/BEGIN-of-next-block (so trailing
+#     newlines / preamble are fine) but rejects any malformed
+#     marker sequencing.
+#
+# Threat model: the PEM bytes are fully attacker-controlled (they
+# travel from a remote untrusted host inside the TEE quote's
+# `qe_cert_data` region). Every byte read is bounds-checked
+# against `pem_len`; every byte write is bounds-checked against
+# `der_pool_size`; the chain count is bounds-checked against
+# `max_certs`. Any malformation returns -1 with the chain array
+# untouched beyond the malformed entry; the caller MUST treat
+# a non-positive return as a hard failure.
+#
+# Surface:
+#   fn pem_decode_certs_into(pem, pem_len, out_chain, max_certs,
+#                              der_pool, der_pool_size): i64
+#       — _into variant: caller provides the DER scratch pool.
+#         Returns count of decoded certs (≥ 1) on success, -1 on
+#         any malformed input. `out_chain` is a contiguous array
+#         of `max_certs * 16` bytes; each 16-byte entry is
+#         (der_ptr: i64, der_len: i64) with der_ptr pointing into
+#         der_pool. Entries beyond the returned count are
+#         untouched.
+#   fn pem_decode_certs(pem, pem_len, out_chain, max_certs): i64
+#       — convenience wrapper. Bump-allocates a der_pool sized to
+#         `pem_len` (a strict upper bound on the decoded DER) and
+#         delegates. Lifetime is the process; suitable for one-
+#         shot verify paths. See the LOW audit note in
+#         `docs/audit/2026-05-XX-audit.md`.
+#
+# Layout of out_chain entries (16 B each):
+#   0..7   der_ptr (absolute address into der_pool)
+#   8..15  der_len (bytes, > 0)
+
+# ================================================================
+# Format constants
+# ================================================================
+
+var PEM_BEGIN_CERT_LEN = 27;
+var PEM_END_CERT_LEN   = 25;
+
+# Base64 lookup table: 256 entries
+#   0..63  → base64 digit
+#   64     → `=` padding
+#   65     → whitespace (LF/CR/space/tab)
+#   66     → invalid
+var _pem_b64_table = 0;
+var _pem_begin     = 0;
+var _pem_end       = 0;
+var _pem_inited    = 0;
+
+fn _pem_init(): i64 {
+    if (_pem_inited == 1) { return 0; }
+
+    # Build the lookup table.
+    _pem_b64_table = alloc(256);
+    var i = 0;
+    while (i < 256) {
+        store8(_pem_b64_table + i, 66);   # default: invalid
+        i = i + 1;
+    }
+    # A-Z → 0..25
+    i = 0;
+    while (i < 26) {
+        store8(_pem_b64_table + 65 + i, i);
+        i = i + 1;
+    }
+    # a-z → 26..51
+    i = 0;
+    while (i < 26) {
+        store8(_pem_b64_table + 97 + i, 26 + i);
+        i = i + 1;
+    }
+    # 0-9 → 52..61
+    i = 0;
+    while (i < 10) {
+        store8(_pem_b64_table + 48 + i, 52 + i);
+        i = i + 1;
+    }
+    # `+` → 62, `/` → 63
+    store8(_pem_b64_table + 43, 62);
+    store8(_pem_b64_table + 47, 63);
+    # `=` → padding marker
+    store8(_pem_b64_table + 61, 64);
+    # whitespace: LF, CR, space, tab
+    store8(_pem_b64_table + 10, 65);
+    store8(_pem_b64_table + 13, 65);
+    store8(_pem_b64_table + 32, 65);
+    store8(_pem_b64_table + 9,  65);
+
+    # Marker strings (use raw bytes, not C-strings — we compare
+    # byte-by-byte over a known length).
+    _pem_begin = alloc(PEM_BEGIN_CERT_LEN);
+    var b = "-----BEGIN CERTIFICATE-----";
+    i = 0;
+    while (i < PEM_BEGIN_CERT_LEN) {
+        store8(_pem_begin + i, load8(b + i) & 0xFF);
+        i = i + 1;
+    }
+    _pem_end = alloc(PEM_END_CERT_LEN);
+    var e = "-----END CERTIFICATE-----";
+    i = 0;
+    while (i < PEM_END_CERT_LEN) {
+        store8(_pem_end + i, load8(e + i) & 0xFF);
+        i = i + 1;
+    }
+
+    _pem_inited = 1;
+    return 0;
+}
+
+# ================================================================
+# Helpers
+# ================================================================
+
+# Compare `len` bytes at buf+pos against marker[0..len]. Returns 1
+# if they match exactly, 0 otherwise. `pos + len` must be ≤ buf_len.
+fn _pem_match_at(buf, buf_len, pos, marker, len): i64 {
+    if (pos + len > buf_len) { return 0; }
+    var i = 0;
+    while (i < len) {
+        if ((load8(buf + pos + i) & 0xFF) != (load8(marker + i) & 0xFF)) {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# Search buf[start..buf_len] for the first occurrence of `marker`.
+# Returns the absolute offset on success, -1 if not found.
+fn _pem_find(buf, buf_len, start, marker, marker_len): i64 {
+    if (marker_len <= 0) { return 0 - 1; }
+    var i = start;
+    var end = buf_len - marker_len + 1;
+    while (i < end) {
+        if (_pem_match_at(buf, buf_len, i, marker, marker_len) == 1) {
+            return i;
+        }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+# Decode a single base64 body from pem[body_start..body_end) into
+# out (must have room for the worst-case output). Returns the
+# number of decoded bytes (> 0) on success, -1 on malformed input
+# (invalid char, padding inside body, wrong padding count, zero
+# body length). `out_max` is the maximum bytes the caller can
+# accept in `out` — if the decoded size would exceed it, returns
+# -1.
+fn _pem_b64_decode(pem, body_start, body_end, out, out_max): i64 {
+    var i = body_start;
+    var op = 0;
+    var quad[4];
+    var quad_n = 0;
+    var seen_pad = 0;
+
+    while (i < body_end) {
+        var c = load8(pem + i) & 0xFF;
+        i = i + 1;
+        var v = load8(_pem_b64_table + c) & 0xFF;
+
+        if (v == 65) { continue; }      # whitespace: skip
+        if (v == 66) { return 0 - 1; }   # invalid byte
+        if (v == 64) {
+            # Padding `=`. Allowed only in the final quad, after
+            # at least 2 alphabet chars in that quad. Once we see
+            # padding, only padding + whitespace may follow.
+            if (seen_pad == 0) {
+                if (quad_n < 2) { return 0 - 1; }
+                seen_pad = 1;
+            }
+            quad_n = quad_n + 1;
+            if (quad_n > 4) { return 0 - 1; }
+            store8(&quad + quad_n - 1, 64);
+        } else {
+            if (seen_pad == 1) { return 0 - 1; }  # alphabet after pad
+            quad_n = quad_n + 1;
+            if (quad_n > 4) { return 0 - 1; }
+            store8(&quad + quad_n - 1, v);
+        }
+
+        if (quad_n == 4) {
+            # Emit. Determine how many output bytes (1/2/3) by
+            # counting pads at the tail.
+            var pads = 0;
+            if ((load8(&quad + 3) & 0xFF) == 64) { pads = 1; }
+            if ((load8(&quad + 2) & 0xFF) == 64) { pads = 2; }
+            # All-pad or three-pad quads are malformed.
+            if (pads == 2) {
+                if ((load8(&quad + 3) & 0xFF) != 64) { return 0 - 1; }
+            }
+            var out_n = 3 - pads;
+            if (op + out_n > out_max) { return 0 - 1; }
+
+            var b0 = load8(&quad + 0) & 0xFF;
+            var b1 = load8(&quad + 1) & 0xFF;
+            var b2 = load8(&quad + 2) & 0xFF;
+            var b3 = load8(&quad + 3) & 0xFF;
+            store8(out + op, ((b0 << 2) | (b1 >> 4)) & 0xFF);
+            if (out_n >= 2) {
+                store8(out + op + 1, (((b1 & 0xF) << 4) | (b2 >> 2)) & 0xFF);
+            }
+            if (out_n >= 3) {
+                store8(out + op + 2, (((b2 & 0x3) << 6) | b3) & 0xFF);
+            }
+            op = op + out_n;
+            quad_n = 0;
+            # If we saw padding, no more data allowed (only WS).
+            if (seen_pad == 1) {
+                while (i < body_end) {
+                    var c2 = load8(pem + i) & 0xFF;
+                    var v2 = load8(_pem_b64_table + c2) & 0xFF;
+                    if (v2 != 65) { return 0 - 1; }
+                    i = i + 1;
+                }
+            }
+        }
+    }
+
+    # End of body. Must have consumed a whole number of quads.
+    if (quad_n != 0) { return 0 - 1; }
+    if (op == 0) { return 0 - 1; }   # empty body — reject
+
+    return op;
+}
+
+# ================================================================
+# Public surface
+# ================================================================
+
+# _into variant — caller-provided DER scratch pool.
+fn pem_decode_certs_into(pem, pem_len, out_chain, max_certs,
+                          der_pool, der_pool_size): i64 {
+    _pem_init();
+
+    if (pem_len < 0) { return 0 - 1; }
+    if (max_certs <= 0) { return 0 - 1; }
+    if (der_pool_size < 0) { return 0 - 1; }
+
+    var count = 0;
+    var pool_used = 0;
+    var cur = 0;
+
+    while (cur < pem_len) {
+        # Find next BEGIN marker.
+        var begin_off = _pem_find(pem, pem_len, cur, _pem_begin, PEM_BEGIN_CERT_LEN);
+        if (begin_off < 0) {
+            # No more BEGIN markers. Done — return whatever we
+            # have. (count == 0 is still a malformation case: a
+            # caller asking us to decode something with no BEGIN
+            # at all should hear about it.)
+            if (count == 0) { return 0 - 1; }
+            return count;
+        }
+
+        var body_start = begin_off + PEM_BEGIN_CERT_LEN;
+
+        # Find the matching END marker after body_start.
+        var end_off = _pem_find(pem, pem_len, body_start, _pem_end, PEM_END_CERT_LEN);
+        if (end_off < 0) { return 0 - 1; }   # unmatched BEGIN
+
+        # Decode base64 between body_start and end_off into the
+        # pool (sliced at pool_used).
+        if (count >= max_certs) { return 0 - 1; }
+        if (pool_used > der_pool_size) { return 0 - 1; }  # paranoid
+        var pool_avail = der_pool_size - pool_used;
+        var decoded = _pem_b64_decode(pem, body_start, end_off,
+                                       der_pool + pool_used, pool_avail);
+        if (decoded < 0) { return 0 - 1; }
+
+        # Record entry in the chain array.
+        store64(out_chain + count * 16,     der_pool + pool_used);
+        store64(out_chain + count * 16 + 8, decoded);
+        pool_used = pool_used + decoded;
+        count = count + 1;
+
+        cur = end_off + PEM_END_CERT_LEN;
+    }
+
+    if (count == 0) { return 0 - 1; }
+    return count;
+}
+
+# Convenience wrapper — bump-allocates a DER pool sized at
+# `pem_len` (strict upper bound: base64 expands by 4/3×, so DER ≤
+# (3/4) × PEM, plus a small overhead for markers/whitespace; pem_len
+# is conservative).
+#
+# NOTE (audit follow-up): the bump-allocator pool is freed only at
+# program exit. Long-running consumers (kavach attestation loop)
+# should call `pem_decode_certs_into` with their own pool to avoid
+# slow allocator drift; see roadmap 3.5 "_into-shape variants".
+fn pem_decode_certs(pem, pem_len, out_chain, max_certs): i64 {
+    if (pem_len <= 0) { return 0 - 1; }
+    var pool = alloc(pem_len);
+    return pem_decode_certs_into(pem, pem_len, out_chain, max_certs,
+                                   pool, pem_len);
+}

@@ -5,6 +5,123 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.4.0] — 2026-05-22
+
+TEE attestation completion. Closes the per-piece API gap from
+the 3.2.x arc: a downstream consumer (kavach attestation backend,
+ark publisher) can now call a single `*_verify_full` entry point
+on an SGX or TDX quote, pass in the Intel SGX Root CA, and get an
+end-to-end yes/no answer that walks the embedded PEM PCK chain,
+verifies it against the trust anchor, extracts the leaf pubkey,
+and chains into the three internal attestation signature checks.
+
+### Added
+
+- **`src/pem.cyr` — minimal PEM cert decoder.** New module
+  (~245 LoC) exposing `pem_decode_certs(pem, pem_len, out_chain,
+  max_certs)` and an `_into` variant
+  `pem_decode_certs_into(pem, pem_len, out_chain, max_certs,
+  der_pool, der_pool_size)` for caller-provided scratch. Decodes
+  one or more `-----BEGIN CERTIFICATE----- ... -----END
+  CERTIFICATE-----` PEM blocks (RFC 4648 §4 base64, whitespace
+  skipped, padding-as-end-marker only). Output is a contiguous
+  array of `(der_ptr, der_len)` 16-byte entries pointing into
+  the DER pool. All bounds checked at every step — attacker-
+  controlled input. 39-assertion test surface
+  (`tests/tcyr/pem.tcyr`) covers happy paths, padding variants,
+  multi-cert chains, whitespace tolerance, malformed input
+  rejection, and round-trip through `x509_verify_chain` against
+  the existing x509 test root+leaf fixtures.
+- **`sgx_quote_verify_full(quote, root_ca_der, root_ca_der_len,
+  now_unix)`.** End-to-end SGX DCAP v3 quote verify. Pipeline:
+  validates `cert_data_type == 5` (PCK PEM); decodes the PEM
+  chain via `pem_decode_certs`; parses each cert + the caller's
+  root anchor via `x509_parse`; drops the self-issued top-of-
+  chain if present (the embedded Intel SGX Root copy — trust is
+  anchored on the CALLER's `root_ca_der`); walks the chain via
+  `x509_verify_chain`; extracts the PCK pubkey from the leaf;
+  chains into `sgx_quote_verify_with_pck` for the three internal
+  sig checks (PCK→QE-report, AK binding, AK→quote-body). 11-
+  assertion test surface (`tests/tcyr/sgx_verify_full.tcyr`)
+  covers happy path, cert_data_type mismatch, time-window
+  rejection, wrong-root rejection, malformed-root rejection,
+  and quote-body tamper.
+- **`tdx_quote_verify_full(quote, root_ca_der, root_ca_der_len,
+  now_unix)`.** Structurally identical to SGX (TDX shares the
+  Intel PCK cert chain). Dispatches internally on `att_key_type`
+  for the P-256 vs P-384 AK verification path. 16-assertion
+  test surface (`tests/tcyr/tdx_verify_full.tcyr`) covers both
+  att_key_type variants happy path + the cross-cutting failure
+  modes.
+- **TDX `att_key_type = 3` (ECDSA P-384 / SHA-384) support.**
+  Parser dispatches per-variant on field widths
+  (`tdx_quote_ak_size` and `tdx_quote_ecdsa_sig_size`
+  accessors): AK and ECDSA sig grow from 64 B to 96 B each for
+  type=3; the QE report's own signature stays 64 B (Intel PCK
+  is P-256 across all variants). Verify orchestrator dispatches
+  on `att_key_type`:
+  - AK binding hash: `sha256` for type=2 (full 32 B digest),
+    `sha384` for type=3 (lower 32 B of the 48 B digest, per
+    Intel TDX 1.5 spec — the report_data slot is 64 B with
+    upper 32 B required-zero).
+  - AK→quote-body signature: `ecdsa_p256_verify` for type=2,
+    `ecdsa_p384_verify` for type=3.
+  P-256 fixture path remains byte-identical to 3.2.5; the new
+  P-384 fixture exercises the new path end-to-end.
+
+### Changed
+
+- **`src/tdx.cyr` — verify scratch enlargement.**
+  `_tdxv_binding_input` from 65600 → 65632 bytes (holds the
+  larger P-384 AK plus max-len qe_auth_data);
+  `_tdxv_binding_hash` from 32 → 48 bytes (full SHA-384 digest
+  buffer; only the lower 32 B are compared against
+  `qe_report.report_data[0:32]`).
+- **`src/lib.cyr` — include `src/pem.cyr`** between `x509.cyr`
+  and `sgx.cyr` (the consumer modules).
+
+### Deferred
+
+- **`snp_report_verify_full`** carries forward to a future
+  cycle. AMD's real VCEK leaf cert holds a 96-byte P-384
+  pubkey, which sigil's x509 parser (P-256-only SPKI today)
+  cannot extract. Closure depends on extending `x509.cyr` to
+  parse `secp384r1` `id-ecPublicKey` SPKIs and tracking
+  per-cert pubkey-width; that's its own scope item. Sigil's
+  per-piece API (`snp_report_parse` +
+  `snp_report_verify(report, vcek_pk)`) remains the supported
+  integration shape — callers handle their own X.509 chain
+  walk via whatever PKI surface fits AMD's chain (real chains
+  use RSA at the ARK/ASK links, also out of sigil's current
+  x509 scope).
+
+### Security
+
+- Audit pass at `docs/audit/2026-05-22-3.4.0-audit.md`. Zero
+  CRITICAL / HIGH / MEDIUM findings across ~485 lines of new
+  code in `pem.cyr` + the wrappers + the TDX P-384 dispatch.
+- Two LOW findings: bump-allocator lifetime in `*_verify_full`
+  (LOW-1) and `_pem_init` (LOW-2) — the same shape as the
+  3.2.x arc's four LOWs; all four close together at 3.6 with
+  the unified `_into` API.
+- Four INFO findings document scope cuts (SEV-SNP deferred,
+  in-quote root cert treatment, P-384 binding hash truncation,
+  chain-order assumption).
+
+### Roadmap renumber
+
+The original 3.4 cycle (parallel verify scratch refactor) and
+3.5 cycle (TEE completion) were swap-sequenced because:
+- 3.4-parallel had a "sequencing decision: open when forcing
+  function arrives" caveat and no consumer has surfaced.
+- 3.5-TEE had a similar caveat but the kavach integration
+  pressure has been present in spirit (closes the per-piece
+  API gap from the 3.2.x arc). Opened in this session.
+
+Post-renumber: 3.4 ships TEE completion (this entry); the
+parallel-verify work moves to roadmap "Road to v3.5" with its
+existing sequencing caveat. 3.6 perf tuning unchanged.
+
 ## [3.3.0] — 2026-05-22
 
 Cleanup / refactor cycle. The original 3.3 goal — drop

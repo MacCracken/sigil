@@ -375,3 +375,120 @@ fn sgx_quote_verify_with_pck(quote, pck_pk): i64 {
 
     return 1;
 }
+
+# ================================================================
+# sgx_quote_verify_full — end-to-end verify (3.5).
+#
+# Composes:
+#   1. cert_data_type check (must be PCK PEM, type 5)
+#   2. pem_decode_certs on the embedded qe_cert_data
+#   3. x509_parse on each cert + on caller-provided root CA
+#   4. x509_verify_chain anchored at caller's root
+#   5. extract leaf (PCK) pubkey
+#   6. sgx_quote_verify_with_pck against that key
+#
+# Intel's PCK cert chain order in qe_cert_data (DCAP v3):
+#   PCK leaf (cert[0])
+#     → PCK Platform CA / intermediate (cert[1..n-2])
+#       → Intel SGX Root CA (cert[n-1], self-issued)
+#
+# The in-quote root is informational: we anchor verification on the
+# CALLER-PROVIDED `root_ca_der` (the trust establishment lives at
+# the consumer's policy layer — kavach's keyring, ark's publisher
+# set, etc.). The in-quote root copy is recognised by being self-
+# issued (subject DN == issuer DN) and silently dropped from the
+# intermediate list before chain walk.
+#
+# `now_unix == 0` disables the time-window check on every cert in
+# the chain. Suitable when the verifier doesn't trust the host's
+# wall clock (the SGX/TDX TCB nonce carries freshness).
+#
+# Returns 1 only if every step succeeds; 0 on any failure (parse,
+# chain mismatch, signature failure, etc.). No partial-success
+# return values — matches the safety stance for attacker-controlled
+# input.
+#
+# NOTE (audit follow-up — 2026-05-22): this entry point uses the
+# bump allocator on every call: it decodes a PEM scratch pool
+# proportional to qe_cert_data_len, parses up to N certs (each
+# x509_cert_alloc + raw_sig alloc) and the root. For long-running
+# consumers (kavach attestation loop), per-call drift is ~5–8 KB.
+# Defer-to-3.6 carries the unified `_into` API that eliminates the
+# drift (matches the four 3.2.x LOW findings). Tracked in
+# `docs/audit/2026-05-22-audit.md`.
+# ================================================================
+
+# Max in-quote PCK certs we'll accept. Intel's PCK chain ships as
+# leaf + 1 intermediate + root = 3 certs. Allow 4 for defence in
+# depth against future spec deltas.
+var SGX_VERIFY_FULL_MAX_CERTS = 4;
+
+fn _sgx_cert_is_self_issued(c): i64 {
+    var buf = load64(c + 0);
+    var iss_off = load64(c + 48); var iss_len = load64(c + 56);
+    var sub_off = load64(c + 64); var sub_len = load64(c + 72);
+    return _x509_dn_eq(buf, iss_off, iss_len, buf, sub_off, sub_len);
+}
+
+fn sgx_quote_verify_full(quote, root_ca_der, root_ca_der_len, now_unix): i64 {
+    # Step 1 — cert_data_type must be PEM PCK chain.
+    if (sgx_quote_cert_data_type(quote) != SGX_CERT_TYPE_PCK_PEM) { return 0; }
+
+    # Step 2 — decode the in-quote PEM cert blob.
+    var cert_data = sgx_quote_cert_data_ptr(quote);
+    var cert_data_len = sgx_quote_cert_data_len(quote);
+    if (cert_data_len <= 0) { return 0; }
+
+    var chain[64];                # 4 entries × 16 bytes (ptr, len)
+    memset(&chain, 0, 64);
+    var n = pem_decode_certs(cert_data, cert_data_len,
+                              &chain, SGX_VERIFY_FULL_MAX_CERTS);
+    if (n < 1) { return 0; }
+
+    # Step 3 — parse each in-quote cert + the caller's root anchor.
+    var parsed[4];                # array of cert pointers
+    var i = 0;
+    while (i < n) {
+        var c = x509_cert_alloc();
+        var ptr = load64(&chain + i * 16);
+        var len = load64(&chain + i * 16 + 8);
+        if (x509_parse(ptr, len, c) != 1) { return 0; }
+        store64(&parsed + i * 8, c);
+        i = i + 1;
+    }
+    if (root_ca_der_len <= 0) { return 0; }
+    var root = x509_cert_alloc();
+    if (x509_parse(root_ca_der, root_ca_der_len, root) != 1) { return 0; }
+
+    # Step 4 — assemble (leaf, intermediates, root) for the chain
+    # walker. Leaf is chain[0]. If the top of the in-quote chain is
+    # self-issued, drop it (it's the embedded root copy). Remaining
+    # intermediates are reversed into issuer-towards-leaf order.
+    var leaf = load64(&parsed + 0);
+    var top_idx = n - 1;
+    if (n >= 2) {
+        var top = load64(&parsed + top_idx * 8);
+        if (_sgx_cert_is_self_issued(top) == 1) { top_idx = top_idx - 1; }
+    }
+
+    var inters[4];                # cert pointer array, max 4
+    memset(&inters, 0, 32);
+    var inters_n = 0;
+    i = top_idx;
+    while (i >= 1) {
+        store64(&inters + inters_n * 8, load64(&parsed + i * 8));
+        inters_n = inters_n + 1;
+        i = i - 1;
+    }
+
+    # Step 5 — chain walk anchored on caller's root.
+    if (x509_verify_chain(leaf, &inters, inters_n, root, now_unix) != 1) {
+        return 0;
+    }
+
+    # Step 6 — extract the leaf's pubkey and verify the quote
+    # against it. x509_cert_pubkey returns a pointer to the 64-byte
+    # raw Qx||Qy region inside the cert struct (offset +96).
+    var leaf_pk = x509_cert_pubkey(leaf);
+    return sgx_quote_verify_with_pck(quote, leaf_pk);
+}

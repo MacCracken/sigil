@@ -1,0 +1,274 @@
+# pem.tcyr — PEM decoder tests.
+#
+# Sigil 3.5 — bite 1 of the TEE-attestation completion arc.
+#
+# Test fixtures: the existing root + leaf P-256 certs from
+# `tests/tcyr/x509.tcyr` re-encoded as PEM (base64 + markers,
+# 64-col line breaks). The decoder round-trip must reproduce the
+# original DER bytes exactly so we can chain into x509_parse +
+# x509_verify_chain.
+
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/string.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fmt.cyr"
+include "lib/json.cyr"
+include "lib/sakshi.cyr"
+include "lib/chrono.cyr"
+include "lib/bigint.cyr"
+include "lib/ct.cyr"
+
+include "src/types.cyr"
+include "src/error.cyr"
+include "src/sha256.cyr"
+include "src/hex.cyr"
+include "src/sha512.cyr"
+include "src/bigint_ext.cyr"
+include "src/ecdsa_p256.cyr"
+include "src/x509.cyr"
+include "src/pem.cyr"
+
+# ------------------------------------------------------------------
+# Fixtures — generated 2026-05-22 by gen_pem_fixtures.py against the
+# existing x509.tcyr root + leaf DER. The PEMs use the 64-col line
+# break that `openssl x509` produces by default.
+# ------------------------------------------------------------------
+
+var ROOT_DER_HEX = "308201a130820148a003020102021438d027306f383dd1d498df28c0cab9abb6a26173300a06082a8648ce3d040302301d311b301906035504030c12536967696c205465737420526f6f74204341301e170d3236303532323030333730365a170d3336303531393030333730365a301d311b301906035504030c12536967696c205465737420526f6f742043413059301306072a8648ce3d020106082a8648ce3d030107034200044d9f804c6dc263817b4ac3d5a6f86be88ff2961103cee9ca304d6fcde5e37c7c3f5b953938324747f44e2bdd51d849ce61ba7c7dcd8c5e63f687f6f65a3c0a9ea3663064301d0603551d0e04160414c97b20ae5ba585c6752e0a9ba7200be5a658d768301f0603551d23041830168014c97b20ae5ba585c6752e0a9ba7200be5a658d76830120603551d130101ff040830060101ff020101300e0603551d0f0101ff040403020106300a06082a8648ce3d040302034700304402201f82729ebb77cca9b15528a89c8580537784e71e1a5face3040de63d9578ac7d02206ec8546b67b2c3448d038bd0d19f1c38845135f44b77ae75e163e95e1d17fe4a";
+var ROOT_DER_LEN = 421;
+
+var LEAF_DER_HEX = "308201993082013fa00302010202143a4b051073c53e3a443145eb11485caef9f09adc300a06082a8648ce3d040302301d311b301906035504030c12536967696c205465737420526f6f74204341301e170d3236303532323030333730365a170d3237303532323030333730365a301a3118301606035504030c0f536967696c2054657374204c6561663059301306072a8648ce3d020106082a8648ce3d03010703420004665d76a0781a7263dab8c5d88d2f7d2ed1028eaa116020b7602a71d9957a182f0513bbfdaca9bda7df5571dc08a24a6d974f71962bfd7b979509a4c48044dbaca360305e300c0603551d130101ff04023000300e0603551d0f0101ff040403020780301d0603551d0e04160414c0bd5bc3cf47d2b8869ab999263e9b5aae0b7842301f0603551d23041830168014c97b20ae5ba585c6752e0a9ba7200be5a658d768300a06082a8648ce3d040302034800304502202ee70f3665b4dd8c6cb9aadea0082dca0442c5304e72a08469248d5506e7bf45022100d0691fa7bcd1782f60d50346fc8a3730a200298dcd28319eff454205e593e728";
+var LEAF_DER_LEN = 413;
+
+var ROOT_PEM_HEX = "2d2d2d2d2d424547494e2043455254494649434154452d2d2d2d2d0a4d4949426f5443434155696741774942416749554f4e416e4d473834506448556d4e386f774d71357137616959584d77436759494b6f5a497a6a3045417749770a485445624d426b47413155454177775355326c6e615777675647567a644342536232393049454e424d423458445449324d4455794d6a41774d7a63774e6c6f580a44544d324d4455784f5441774d7a63774e6c6f77485445624d426b47413155454177775355326c6e615777675647567a644342536232393049454e424d466b770a457759484b6f5a497a6a3043415159494b6f5a497a6a30444151634451674145545a2b415447334359344637537350567076687236492f796c6845447a756e4b0a4d4531767a65586a6648772f573555354f444a48522f524f4b39315232456e4f596270386663324d586d5032682f6232576a774b6e714e6d4d475177485159440a5652304f42425945464d6c37494b3562705958476453344b6d366367432b576d574e646f4d42384741315564497751594d426141464d6c37494b3562705958470a6453344b6d366367432b576d574e646f4d42494741315564457745422f7751494d415942416638434151457744675944565230504151482f42415144416745470a4d416f4743437147534d343942414d43413063414d45514349422b4363703637643879707356556f714a794667464e33684f6365476c2b733477514e356a32560a654b783941694275794652725a374c4452493044693944526e7877346846453139457433726e5868592b6c654852662b53673d3d0a2d2d2d2d2d454e442043455254494649434154452d2d2d2d2d0a";
+var ROOT_PEM_LEN = 627;
+
+var LEAF_PEM_HEX = "2d2d2d2d2d424547494e2043455254494649434154452d2d2d2d2d0a4d4949426d54434341542b6741774942416749554f6b734645485046506a70454d5558724555686372766e776d747777436759494b6f5a497a6a3045417749770a485445624d426b47413155454177775355326c6e615777675647567a644342536232393049454e424d423458445449324d4455794d6a41774d7a63774e6c6f580a445449334d4455794d6a41774d7a63774e6c6f77476a45594d425947413155454177775055326c6e615777675647567a6443424d5a57466d4d466b77457759480a4b6f5a497a6a3043415159494b6f5a497a6a304441516344516741455a6c31326f486761636d5061754d58596a5339394c7445436a716f5259434333594370780a325a56364743384645377639724b6d3970393956636477496f6b70746c3039786c697639653565564361544567455462724b4e674d46347744415944565230540a4151482f424149774144414f42674e56485138424166384542414d4342344177485159445652304f42425945464d43395738505052394b34687071356d53592b0a6d317175433368434d42384741315564497751594d426141464d6c37494b3562705958476453344b6d366367432b576d574e646f4d416f4743437147534d34390a42414d43413067414d4555434943376e447a5a6c744e324d624c6d71337141494c636f4551735577546e4b6768476b6b6a565547353739464169454130476b660a70377a526543396731514e472f496f334d4b49414b59334e4b4447652f305643426557543579673d0a2d2d2d2d2d454e442043455254494649434154452d2d2d2d2d0a";
+var LEAF_PEM_LEN = 615;
+
+var CHAIN_PEM_HEX = "2d2d2d2d2d424547494e2043455254494649434154452d2d2d2d2d0a4d4949426f5443434155696741774942416749554f4e416e4d473834506448556d4e386f774d71357137616959584d77436759494b6f5a497a6a3045417749770a485445624d426b47413155454177775355326c6e615777675647567a644342536232393049454e424d423458445449324d4455794d6a41774d7a63774e6c6f580a44544d324d4455784f5441774d7a63774e6c6f77485445624d426b47413155454177775355326c6e615777675647567a644342536232393049454e424d466b770a457759484b6f5a497a6a3043415159494b6f5a497a6a30444151634451674145545a2b415447334359344637537350567076687236492f796c6845447a756e4b0a4d4531767a65586a6648772f573555354f444a48522f524f4b39315232456e4f596270386663324d586d5032682f6232576a774b6e714e6d4d475177485159440a5652304f42425945464d6c37494b3562705958476453344b6d366367432b576d574e646f4d42384741315564497751594d426141464d6c37494b3562705958470a6453344b6d366367432b576d574e646f4d42494741315564457745422f7751494d415942416638434151457744675944565230504151482f42415144416745470a4d416f4743437147534d343942414d43413063414d45514349422b4363703637643879707356556f714a794667464e33684f6365476c2b733477514e356a32560a654b783941694275794652725a374c4452493044693944526e7877346846453139457433726e5868592b6c654852662b53673d3d0a2d2d2d2d2d454e442043455254494649434154452d2d2d2d2d0a2d2d2d2d2d424547494e2043455254494649434154452d2d2d2d2d0a4d4949426d54434341542b6741774942416749554f6b734645485046506a70454d5558724555686372766e776d747777436759494b6f5a497a6a3045417749770a485445624d426b47413155454177775355326c6e615777675647567a644342536232393049454e424d423458445449324d4455794d6a41774d7a63774e6c6f580a445449334d4455794d6a41774d7a63774e6c6f77476a45594d425947413155454177775055326c6e615777675647567a6443424d5a57466d4d466b77457759480a4b6f5a497a6a3043415159494b6f5a497a6a304441516344516741455a6c31326f486761636d5061754d58596a5339394c7445436a716f5259434333594370780a325a56364743384645377639724b6d3970393956636477496f6b70746c3039786c697639653565564361544567455462724b4e674d46347744415944565230540a4151482f424149774144414f42674e56485138424166384542414d4342344177485159445652304f42425945464d43395738505052394b34687071356d53592b0a6d317175433368434d42384741315564497751594d426141464d6c37494b3562705958476453344b6d366367432b576d574e646f4d416f4743437147534d34390a42414d43413067414d4555434943376e447a5a6c744e324d624c6d71337141494c636f4551735577546e4b6768476b6b6a565547353739464169454130476b660a70377a526543396731514e472f496f334d4b49414b59334e4b4447652f305643426557543579673d0a2d2d2d2d2d454e442043455254494649434154452d2d2d2d2d0a";
+var CHAIN_PEM_LEN = 1242;
+
+# Helper: byte-by-byte equality.
+fn bytes_eq(a, b, len): i64 {
+    var i = 0;
+    while (i < len) {
+        if ((load8(a + i) & 0xFF) != (load8(b + i) & 0xFF)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn main() {
+    alloc_init();
+    _p256_init();
+
+    var root_der = hex_decode(ROOT_DER_HEX, 2 * ROOT_DER_LEN);
+    var leaf_der = hex_decode(LEAF_DER_HEX, 2 * LEAF_DER_LEN);
+    var root_pem = hex_decode(ROOT_PEM_HEX, 2 * ROOT_PEM_LEN);
+    var leaf_pem = hex_decode(LEAF_PEM_HEX, 2 * LEAF_PEM_LEN);
+    var chain_pem = hex_decode(CHAIN_PEM_HEX, 2 * CHAIN_PEM_LEN);
+
+    var chain[64];   # 4 entries × 16 bytes
+    memset(&chain, 0, 64);
+
+    # ============================================================
+    # Group 1 — Single-cert decode (root)
+    # ============================================================
+    test_group("pem_decode_certs — single cert (root)");
+
+    var n = pem_decode_certs(root_pem, ROOT_PEM_LEN, &chain, 4);
+    assert_eq(n, 1, "root PEM decodes to 1 cert");
+    var p0 = load64(&chain + 0);
+    var l0 = load64(&chain + 8);
+    assert_eq(l0, ROOT_DER_LEN, "root DER length matches");
+    assert_eq(bytes_eq(p0, root_der, ROOT_DER_LEN), 1, "root DER bytes round-trip");
+
+    # ============================================================
+    # Group 2 — Single-cert decode (leaf)
+    # ============================================================
+    test_group("pem_decode_certs — single cert (leaf)");
+
+    memset(&chain, 0, 64);
+    n = pem_decode_certs(leaf_pem, LEAF_PEM_LEN, &chain, 4);
+    assert_eq(n, 1, "leaf PEM decodes to 1 cert");
+    var pL = load64(&chain + 0);
+    var lL = load64(&chain + 8);
+    assert_eq(lL, LEAF_DER_LEN, "leaf DER length matches");
+    assert_eq(bytes_eq(pL, leaf_der, LEAF_DER_LEN), 1, "leaf DER bytes round-trip");
+
+    # ============================================================
+    # Group 3 — Multi-cert decode (chain)
+    # ============================================================
+    test_group("pem_decode_certs — chain (root then leaf)");
+
+    memset(&chain, 0, 64);
+    n = pem_decode_certs(chain_pem, CHAIN_PEM_LEN, &chain, 4);
+    assert_eq(n, 2, "chain PEM decodes to 2 certs");
+
+    var c0_ptr = load64(&chain + 0);
+    var c0_len = load64(&chain + 8);
+    var c1_ptr = load64(&chain + 16);
+    var c1_len = load64(&chain + 24);
+    assert_eq(c0_len, ROOT_DER_LEN, "chain[0] (root) DER length");
+    assert_eq(c1_len, LEAF_DER_LEN, "chain[1] (leaf) DER length");
+    assert_eq(bytes_eq(c0_ptr, root_der, ROOT_DER_LEN), 1, "chain[0] bytes match root DER");
+    assert_eq(bytes_eq(c1_ptr, leaf_der, LEAF_DER_LEN), 1, "chain[1] bytes match leaf DER");
+
+    # ============================================================
+    # Group 4 — Decoded chain verifies via x509_verify_chain
+    # ============================================================
+    test_group("pem_decode_certs — round-trip through x509_verify_chain");
+
+    var root_cert = x509_cert_alloc();
+    assert_eq(x509_parse(c0_ptr, c0_len, root_cert), 1, "decoded root parses");
+
+    var leaf_cert = x509_cert_alloc();
+    assert_eq(x509_parse(c1_ptr, c1_len, leaf_cert), 1, "decoded leaf parses");
+
+    var inters = alloc(0);
+    assert_eq(x509_verify_chain(leaf_cert, inters, 0, root_cert, 1781481600), 1,
+              "decoded leaf → root chain verifies (round-trip end-to-end)");
+
+    # ============================================================
+    # Group 5 — _into variant: caller-provided pool
+    # ============================================================
+    test_group("pem_decode_certs_into — caller pool");
+
+    var pool[2048];
+    memset(&pool, 0, 2048);
+    memset(&chain, 0, 64);
+    n = pem_decode_certs_into(chain_pem, CHAIN_PEM_LEN, &chain, 4, &pool, 2048);
+    assert_eq(n, 2, "_into decodes 2 certs with caller-provided pool");
+    # Pointers should land inside `pool`.
+    var p_into = load64(&chain + 0);
+    assert_eq(p_into >= &pool, 1, "_into entry pointer ≥ pool start");
+    assert_eq(p_into + load64(&chain + 8) <= &pool + 2048, 1,
+              "_into entry pointer + len within pool");
+
+    # ============================================================
+    # Group 6 — _into variant: pool too small
+    # ============================================================
+    test_group("pem_decode_certs_into — pool exhaustion");
+
+    var tiny[64];
+    memset(&tiny, 0, 64);
+    memset(&chain, 0, 64);
+    n = pem_decode_certs_into(chain_pem, CHAIN_PEM_LEN, &chain, 4, &tiny, 64);
+    assert_eq(n, 0 - 1, "_into rejects when pool can't hold decoded DER");
+
+    # ============================================================
+    # Group 7 — max_certs enforcement
+    # ============================================================
+    test_group("pem_decode_certs — max_certs enforcement");
+
+    memset(&chain, 0, 64);
+    n = pem_decode_certs(chain_pem, CHAIN_PEM_LEN, &chain, 1);
+    assert_eq(n, 0 - 1, "chain with 2 certs but max_certs=1 returns -1");
+
+    memset(&chain, 0, 64);
+    n = pem_decode_certs(root_pem, ROOT_PEM_LEN, &chain, 1);
+    assert_eq(n, 1, "single cert with max_certs=1 returns 1");
+
+    # ============================================================
+    # Group 8 — Malformed input rejection
+    # ============================================================
+    test_group("pem_decode_certs — malformed inputs");
+
+    # Empty input
+    var empty = alloc(1);
+    memset(&chain, 0, 64);
+    assert_eq(pem_decode_certs(empty, 0, &chain, 4), 0 - 1, "empty input rejected");
+
+    # No BEGIN marker
+    var no_begin = "no markers here just garbage bytes";
+    memset(&chain, 0, 64);
+    assert_eq(pem_decode_certs(no_begin, 34, &chain, 4), 0 - 1,
+              "input with no BEGIN marker rejected");
+
+    # BEGIN but no END
+    var no_end = alloc(50);
+    memcpy(no_end, "-----BEGIN CERTIFICATE-----\nAAAA\n", 33);
+    memset(&chain, 0, 64);
+    assert_eq(pem_decode_certs(no_end, 33, &chain, 4), 0 - 1,
+              "BEGIN without matching END rejected");
+
+    # Invalid base64 char inside body
+    var bad_b64 = alloc(80);
+    memcpy(bad_b64, "-----BEGIN CERTIFICATE-----\nAAAA*AAAA\n-----END CERTIFICATE-----\n", 64);
+    memset(&chain, 0, 64);
+    assert_eq(pem_decode_certs(bad_b64, 64, &chain, 4), 0 - 1,
+              "invalid base64 character rejected");
+
+    # Empty body between markers
+    var empty_body = alloc(80);
+    memcpy(empty_body, "-----BEGIN CERTIFICATE-----\n-----END CERTIFICATE-----\n", 54);
+    memset(&chain, 0, 64);
+    assert_eq(pem_decode_certs(empty_body, 54, &chain, 4), 0 - 1,
+              "empty body rejected");
+
+    # Excess padding (three `=` in final quad)
+    # 8 alphabet chars → 2 quads, but tail "===" is invalid.
+    var bad_pad = alloc(80);
+    memcpy(bad_pad, "-----BEGIN CERTIFICATE-----\nAAAA====\n-----END CERTIFICATE-----\n", 63);
+    memset(&chain, 0, 64);
+    assert_eq(pem_decode_certs(bad_pad, 63, &chain, 4), 0 - 1,
+              "excess padding rejected");
+
+    # Alphabet char after padding
+    var pad_then_alpha = alloc(80);
+    memcpy(pad_then_alpha, "-----BEGIN CERTIFICATE-----\nAAA=AAAA\n-----END CERTIFICATE-----\n", 63);
+    memset(&chain, 0, 64);
+    assert_eq(pem_decode_certs(pad_then_alpha, 63, &chain, 4), 0 - 1,
+              "alphabet char following padding rejected");
+
+    # ============================================================
+    # Group 9 — Padding variants (0/1/2 chars), known-good
+    # ============================================================
+    test_group("pem_decode_certs — padding variants");
+
+    # 0-pad (3-byte body). base64("foo") = "Zm9v"
+    var pem0 = alloc(80);
+    memcpy(pem0, "-----BEGIN CERTIFICATE-----\nZm9v\n-----END CERTIFICATE-----\n", 59);
+    memset(&chain, 0, 64);
+    n = pem_decode_certs(pem0, 59, &chain, 4);
+    assert_eq(n, 1, "0-padding (3-byte body) decodes");
+    var po = load64(&chain + 0);
+    var lo = load64(&chain + 8);
+    assert_eq(lo, 3, "decoded length = 3");
+    assert_eq(load8(po) & 0xFF, 0x66, "byte[0] = 'f'");
+    assert_eq(load8(po + 1) & 0xFF, 0x6F, "byte[1] = 'o'");
+    assert_eq(load8(po + 2) & 0xFF, 0x6F, "byte[2] = 'o'");
+
+    # 1-pad (2-byte body). base64("fo") = "Zm8="
+    var pem1 = alloc(80);
+    memcpy(pem1, "-----BEGIN CERTIFICATE-----\nZm8=\n-----END CERTIFICATE-----\n", 59);
+    memset(&chain, 0, 64);
+    n = pem_decode_certs(pem1, 59, &chain, 4);
+    assert_eq(n, 1, "1-padding (2-byte body) decodes");
+    assert_eq(load64(&chain + 8), 2, "decoded length = 2");
+    var p1 = load64(&chain + 0);
+    assert_eq(load8(p1) & 0xFF, 0x66, "byte[0] = 'f'");
+    assert_eq(load8(p1 + 1) & 0xFF, 0x6F, "byte[1] = 'o'");
+
+    # 2-pad (1-byte body). base64("f") = "Zg=="
+    var pem2 = alloc(80);
+    memcpy(pem2, "-----BEGIN CERTIFICATE-----\nZg==\n-----END CERTIFICATE-----\n", 59);
+    memset(&chain, 0, 64);
+    n = pem_decode_certs(pem2, 59, &chain, 4);
+    assert_eq(n, 1, "2-padding (1-byte body) decodes");
+    assert_eq(load64(&chain + 8), 1, "decoded length = 1");
+    var p2 = load64(&chain + 0);
+    assert_eq(load8(p2) & 0xFF, 0x66, "byte[0] = 'f'");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

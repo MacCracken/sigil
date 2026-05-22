@@ -20,11 +20,16 @@
 # the SGX cert chain so reusing kavach's external walk is the
 # natural fit.
 #
-# 3.2.5 supports att_key_type = 2 (ECDSA P-256 / SHA-256) only —
-# the deployment-dominant TDX 1.0 case. ECDSA P-384 / SHA-384
-# (att_key_type = 3) is the natural follow-up patch once a P-384
-# TDX deployment surfaces; the P-384 primitive landed at 3.2.4 so
-# the wiring is a small delta.
+# Both att_key_type variants are supported as of 3.5:
+#   • att_key_type = 2 (ECDSA P-256 / SHA-256) — TDX 1.0 default.
+#   • att_key_type = 3 (ECDSA P-384 / SHA-384) — TDX 1.5+.
+# In both cases the PCK chain itself is P-256 (Intel's PCK is
+# always P-256 across SGX and TDX); only the AK (which signs the
+# quote body) shifts curves. The AK→QE binding hash in
+# qe_report.report_data[0:32] uses SHA-256 for type=2 and the
+# lower 32 bytes of SHA-384 for type=3 (the upper 16 bytes are
+# unused — the 64-byte report_data slot is too small to carry the
+# full 48-byte SHA-384 digest, so the spec truncates).
 #
 # Surface:
 #   fn tdx_quote_parse(buf, buf_len, out): i64
@@ -33,7 +38,14 @@
 #       — three internal sig checks (PCK→QE-report, AK binding,
 #         AK→quote-body). PCK pubkey is 64 B raw Qx||Qy big-
 #         endian, externally validated by the caller's X.509
-#         chain walk.
+#         chain walk. Dispatches internally on att_key_type to
+#         the P-256 or P-384 AK path.
+#   fn tdx_quote_verify_full(quote, root_ca_der, root_ca_der_len,
+#                              now_unix): i64
+#       — end-to-end: parses the in-quote PEM PCK chain (must be
+#         cert_data_type 5), walks it anchored at the caller-
+#         provided Intel SGX Root CA, extracts the PCK pubkey
+#         from the leaf, and chains into tdx_quote_verify_with_pck.
 
 # ================================================================
 # Format constants
@@ -42,13 +54,26 @@
 var TDX_QUOTE_HEADER_SIZE        = 48;
 var TDX_QUOTE_BODY_SIZE          = 584;   # TD_QUOTE_BODY
 var TDX_QUOTE_SIGNED_PREFIX_SIZE = 632;   # header + body
+
+# Per-attestation-key widths. att_key_type=2 → P-256 (64 B); =3 → P-384 (96 B).
+var TDX_AK_SIZE_P256             = 64;
+var TDX_AK_SIZE_P384             = 96;
+var TDX_ECDSA_SIG_SIZE_P256      = 64;
+var TDX_ECDSA_SIG_SIZE_P384      = 96;
+
+# Legacy aliases retained for outside-module call sites that
+# already use the P-256 names (the original 3.2.5 surface).
 var TDX_AK_SIZE                  = 64;
 var TDX_ECDSA_SIG_SIZE           = 64;
+
 var TDX_MIN_QUOTE_SIZE           = 48 + 584 + 4 + 64 + 64 + 384 + 64 + 2 + 2 + 4;
 
 var TDX_QUOTE_VERSION_V4         = 4;
 var TDX_ATT_KEY_TYPE_ECDSA_P256  = 2;
+var TDX_ATT_KEY_TYPE_ECDSA_P384  = 3;
 var TDX_TEE_TYPE_TDX             = 0x81;
+# qe_cert_data_type 5 = PCK Cert Chain (PEM) — Intel DCAP spec.
+var TDX_CERT_TYPE_PCK_PEM        = 5;
 
 # Field offsets inside TD_QUOTE_BODY (per Intel TDX 1.0 quote spec).
 var TDX_BODY_OFF_TEE_TCB_SVN     = 0;
@@ -138,6 +163,18 @@ fn tdx_quote_xfam_ptr(q): i64           { return tdx_quote_td_body_ptr(q) + TDX_
 
 fn tdx_quote_ak_ptr(q): i64             { return load64(q + 0) + load64(q + 72); }
 fn tdx_quote_ecdsa_sig_ptr(q): i64      { return load64(q + 0) + load64(q + 64); }
+
+# Per-att_key_type widths. The signature section's `ecdsa_sig` and
+# `attestation_key` are 64 B each for type=2 (P-256) and 96 B each
+# for type=3 (P-384). All other fields are width-invariant.
+fn tdx_quote_ak_size(q): i64 {
+    if (load64(q + 24) == TDX_ATT_KEY_TYPE_ECDSA_P384) { return TDX_AK_SIZE_P384; }
+    return TDX_AK_SIZE_P256;
+}
+fn tdx_quote_ecdsa_sig_size(q): i64 {
+    if (load64(q + 24) == TDX_ATT_KEY_TYPE_ECDSA_P384) { return TDX_ECDSA_SIG_SIZE_P384; }
+    return TDX_ECDSA_SIG_SIZE_P256;
+}
 fn tdx_quote_qe_report_ptr(q): i64      { return load64(q + 0) + load64(q + 80); }
 fn tdx_quote_qe_report_sig_ptr(q): i64  { return load64(q + 0) + load64(q + 88); }
 fn tdx_quote_qe_auth_data_ptr(q): i64   { return load64(q + 0) + load64(q + 96); }
@@ -160,8 +197,18 @@ fn tdx_quote_parse(buf, buf_len, out): i64 {
     var tee_type     = _tdx_load_u32(buf, 4);
 
     if (version != TDX_QUOTE_VERSION_V4) { return 0; }
-    if (att_key_type != TDX_ATT_KEY_TYPE_ECDSA_P256) { return 0; }
+    if (att_key_type != TDX_ATT_KEY_TYPE_ECDSA_P256) {
+        if (att_key_type != TDX_ATT_KEY_TYPE_ECDSA_P384) { return 0; }
+    }
     if (tee_type != TDX_TEE_TYPE_TDX) { return 0; }
+
+    # Per-att_key_type field widths for ecdsa_sig and ak_pub.
+    var ak_w = TDX_AK_SIZE_P256;
+    var sig_w = TDX_ECDSA_SIG_SIZE_P256;
+    if (att_key_type == TDX_ATT_KEY_TYPE_ECDSA_P384) {
+        ak_w = TDX_AK_SIZE_P384;
+        sig_w = TDX_ECDSA_SIG_SIZE_P384;
+    }
 
     store64(out + 0,  buf);
     store64(out + 8,  buf_len);
@@ -178,8 +225,10 @@ fn tdx_quote_parse(buf, buf_len, out): i64 {
     var sig_data_off = sig_len_off + 4;
     if (sig_data_len < 0) { return 0; }
     if (sig_data_off + sig_data_len > buf_len) { return 0; }
-    var sig_min_fixed = TDX_ECDSA_SIG_SIZE + TDX_AK_SIZE
-                       + 384 + TDX_ECDSA_SIG_SIZE
+    # Fixed-part minimum depends on att_key_type. The QE report's
+    # own signature (qe_report_sig) is always 64 B (Intel PCK is
+    # P-256 across all variants); only ecdsa_sig + ak widen.
+    var sig_min_fixed = sig_w + ak_w + 384 + TDX_ECDSA_SIG_SIZE_P256
                        + 2 + 2 + 4;
     if (sig_data_len < sig_min_fixed) { return 0; }
 
@@ -188,18 +237,18 @@ fn tdx_quote_parse(buf, buf_len, out): i64 {
     var cur = sig_data_off;
     var sig_section_end = sig_data_off + sig_data_len;
 
-    # ecdsa_signature (64 B)
+    # ecdsa_signature (64 or 96 B per att_key_type)
     store64(out + 64, cur);
-    cur = cur + TDX_ECDSA_SIG_SIZE;
-    # attestation_key (64 B)
+    cur = cur + sig_w;
+    # attestation_key (64 or 96 B per att_key_type)
     store64(out + 72, cur);
-    cur = cur + TDX_AK_SIZE;
+    cur = cur + ak_w;
     # qe_report (384 B — SGX enclave report shape)
     store64(out + 80, cur);
     cur = cur + 384;
-    # qe_report_signature (64 B)
+    # qe_report_signature (64 B — always P-256, Intel PCK is P-256)
     store64(out + 88, cur);
-    cur = cur + TDX_ECDSA_SIG_SIZE;
+    cur = cur + TDX_ECDSA_SIG_SIZE_P256;
 
     # qe_auth_data: u16 size + bytes
     if (cur + 2 > sig_section_end) { return 0; }
@@ -240,9 +289,12 @@ var _tdxv_inited = 0;
 
 fn _tdxv_init(): i64 {
     if (_tdxv_inited == 1) { return 0; }
-    # Max binding input: AK (64) + qe_auth_data (≤ 65535).
-    _tdxv_binding_input = alloc(65600);
-    _tdxv_binding_hash  = alloc(32);
+    # Binding input must hold AK (96 max — P-384 case) + qe_auth_data (≤ 65535).
+    _tdxv_binding_input = alloc(96 + 65536);
+    # Binding hash: 32 B for SHA-256 (att_key_type=2), 48 B for SHA-384
+    # (att_key_type=3). The full SHA-384 digest is computed; only the
+    # lower 32 B are compared against qe_report.report_data[0:32].
+    _tdxv_binding_hash  = alloc(48);
     # Signed prefix: header (48) + TD body (584) = 632 bytes.
     _tdxv_quote_body    = alloc(TDX_QUOTE_SIGNED_PREFIX_SIZE);
     _tdxv_inited = 1;
@@ -252,31 +304,43 @@ fn _tdxv_init(): i64 {
 fn tdx_quote_verify_with_pck(quote, pck_pk): i64 {
     _tdxv_init();
 
+    var att_key_type = tdx_quote_att_key_type(quote);
+
     # Step 1 — PCK signs the QE report (384 B SGX enclave report shape).
+    # PCK is always P-256 across SGX/TDX variants.
     var qe_report = tdx_quote_qe_report_ptr(quote);
     var qe_report_sig = tdx_quote_qe_report_sig_ptr(quote);
     if (ecdsa_p256_verify(pck_pk, qe_report, 384, qe_report_sig) != 1) {
         return 0;
     }
 
-    # Step 2 — AK binding via SHA-256(AK || qe_auth_data) in qe_report.report_data.
+    # Step 2 — AK binding via H(AK || qe_auth_data) in qe_report.report_data.
+    # H is SHA-256 for att_key_type=2 (full 32-B digest) or SHA-384 for
+    # att_key_type=3 (lower 32 B of the 48-B digest — the report_data
+    # slot's first 32 bytes hold the binding; the slot's upper 32 bytes
+    # are required-zero in both variants).
     var ak  = tdx_quote_ak_ptr(quote);
+    var ak_w = tdx_quote_ak_size(quote);
     var aux = tdx_quote_qe_auth_data_ptr(quote);
     var aux_len = tdx_quote_qe_auth_data_len(quote);
     if (aux_len < 0) { return 0; }
     if (aux_len > 65536) { return 0; }
 
     var i = 0;
-    while (i < TDX_AK_SIZE) {
+    while (i < ak_w) {
         store8(_tdxv_binding_input + i, load8(ak + i) & 0xFF);
         i = i + 1;
     }
     i = 0;
     while (i < aux_len) {
-        store8(_tdxv_binding_input + TDX_AK_SIZE + i, load8(aux + i) & 0xFF);
+        store8(_tdxv_binding_input + ak_w + i, load8(aux + i) & 0xFF);
         i = i + 1;
     }
-    sha256(_tdxv_binding_input, TDX_AK_SIZE + aux_len, _tdxv_binding_hash);
+    if (att_key_type == TDX_ATT_KEY_TYPE_ECDSA_P384) {
+        sha384(_tdxv_binding_input, ak_w + aux_len, _tdxv_binding_hash);
+    } else {
+        sha256(_tdxv_binding_input, ak_w + aux_len, _tdxv_binding_hash);
+    }
 
     var rd = qe_report + TDX_QE_REPORT_OFF_REPORT_DATA;
     i = 0;
@@ -286,6 +350,9 @@ fn tdx_quote_verify_with_pck(quote, pck_pk): i64 {
         }
         i = i + 1;
     }
+    # Upper 32 B of report_data must be zero — defence-in-depth against
+    # an attacker stuffing extra bytes that downstream consumers might
+    # parse out of the 64-byte slot.
     i = 32;
     while (i < 64) {
         if ((load8(rd + i) & 0xFF) != 0) { return 0; }
@@ -293,15 +360,111 @@ fn tdx_quote_verify_with_pck(quote, pck_pk): i64 {
     }
 
     # Step 3 — AK signs the quote body (header || TD report body, 632 B).
+    # ecdsa_p256_verify for type=2, ecdsa_p384_verify for type=3.
     var buf = tdx_quote_buf(quote);
     memcpy(_tdxv_quote_body, buf, TDX_QUOTE_SIGNED_PREFIX_SIZE);
 
     var ecdsa_sig = tdx_quote_ecdsa_sig_ptr(quote);
-    if (ecdsa_p256_verify(ak, _tdxv_quote_body,
-                           TDX_QUOTE_SIGNED_PREFIX_SIZE,
-                           ecdsa_sig) != 1) {
-        return 0;
+    if (att_key_type == TDX_ATT_KEY_TYPE_ECDSA_P384) {
+        if (ecdsa_p384_verify(ak, _tdxv_quote_body,
+                               TDX_QUOTE_SIGNED_PREFIX_SIZE,
+                               ecdsa_sig) != 1) {
+            return 0;
+        }
+    } else {
+        if (ecdsa_p256_verify(ak, _tdxv_quote_body,
+                               TDX_QUOTE_SIGNED_PREFIX_SIZE,
+                               ecdsa_sig) != 1) {
+            return 0;
+        }
     }
 
     return 1;
+}
+
+# ================================================================
+# tdx_quote_verify_full — end-to-end verify (3.5).
+#
+# TDX shares the SGX PCK cert chain, so structurally identical to
+# `sgx_quote_verify_full`: parses the in-quote PEM PCK chain via
+# `pem_decode_certs`, anchors verification on the caller-provided
+# Intel SGX Root CA via `x509_verify_chain`, extracts the PCK
+# pubkey from the leaf and chains into `tdx_quote_verify_with_pck`.
+#
+# The internal verify automatically dispatches on att_key_type
+# (type=2 → P-256/SHA-256, type=3 → P-384/SHA-384), so both TDX 1.0
+# and TDX 1.5+ deployments traverse the same entry point.
+#
+# Same alloc-drift LOW as sgx_quote_verify_full carries here —
+# tracked in the same 2026-05-22 audit follow-up; closes when the
+# unified `_into` API lands in 3.6.
+# ================================================================
+
+var TDX_VERIFY_FULL_MAX_CERTS = 4;
+
+fn _tdx_cert_is_self_issued(c): i64 {
+    var buf = load64(c + 0);
+    var iss_off = load64(c + 48); var iss_len = load64(c + 56);
+    var sub_off = load64(c + 64); var sub_len = load64(c + 72);
+    return _x509_dn_eq(buf, iss_off, iss_len, buf, sub_off, sub_len);
+}
+
+fn tdx_quote_verify_full(quote, root_ca_der, root_ca_der_len, now_unix): i64 {
+    # Step 1 — cert_data_type must be PEM PCK chain.
+    if (tdx_quote_cert_data_type(quote) != TDX_CERT_TYPE_PCK_PEM) { return 0; }
+
+    var cert_data = tdx_quote_cert_data_ptr(quote);
+    var cert_data_len = tdx_quote_cert_data_len(quote);
+    if (cert_data_len <= 0) { return 0; }
+
+    # Step 2 — decode in-quote PEM cert blob.
+    var chain[64];
+    memset(&chain, 0, 64);
+    var n = pem_decode_certs(cert_data, cert_data_len,
+                              &chain, TDX_VERIFY_FULL_MAX_CERTS);
+    if (n < 1) { return 0; }
+
+    # Step 3 — parse each in-quote cert + caller's root.
+    var parsed[4];
+    var i = 0;
+    while (i < n) {
+        var c = x509_cert_alloc();
+        var ptr = load64(&chain + i * 16);
+        var len = load64(&chain + i * 16 + 8);
+        if (x509_parse(ptr, len, c) != 1) { return 0; }
+        store64(&parsed + i * 8, c);
+        i = i + 1;
+    }
+    if (root_ca_der_len <= 0) { return 0; }
+    var root = x509_cert_alloc();
+    if (x509_parse(root_ca_der, root_ca_der_len, root) != 1) { return 0; }
+
+    # Step 4 — assemble (leaf, intermediates, root). Drop self-issued
+    # top-of-chain if present (the in-quote root copy).
+    var leaf = load64(&parsed + 0);
+    var top_idx = n - 1;
+    if (n >= 2) {
+        var top = load64(&parsed + top_idx * 8);
+        if (_tdx_cert_is_self_issued(top) == 1) { top_idx = top_idx - 1; }
+    }
+
+    var inters[4];
+    memset(&inters, 0, 32);
+    var inters_n = 0;
+    i = top_idx;
+    while (i >= 1) {
+        store64(&inters + inters_n * 8, load64(&parsed + i * 8));
+        inters_n = inters_n + 1;
+        i = i - 1;
+    }
+
+    # Step 5 — chain walk anchored on caller's root.
+    if (x509_verify_chain(leaf, &inters, inters_n, root, now_unix) != 1) {
+        return 0;
+    }
+
+    # Step 6 — verify quote against leaf pubkey (dispatches internally
+    # on att_key_type for the P-256 vs P-384 AK path).
+    var leaf_pk = x509_cert_pubkey(leaf);
+    return tdx_quote_verify_with_pck(quote, leaf_pk);
 }

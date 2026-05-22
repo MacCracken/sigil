@@ -1,0 +1,160 @@
+# sgx_verify_full.tcyr — end-to-end verify orchestrator test.
+#
+# Sigil 3.5 — bite 2 of the TEE-attestation completion arc.
+#
+# Composes: pem_decode_certs → x509_parse (×n + root) →
+# x509_verify_chain → sgx_quote_verify_with_pck.
+#
+# Fixture origin (2026-05-22, scripts/sgx-verify-full-fixture.out
+# — kept as a build artifact, not regenerable from this file
+# alone): a synthesized DCAP v3 quote whose qe_cert_data carries a
+# real PEM cert chain (test PCK leaf + self-signed test root).
+# Leaf cert holds the PCK pubkey that signed the QE report; the
+# AK pubkey embedded in the quote signed the quote body.
+#
+# Test groups:
+#   1. sgx_quote_verify_full — happy path
+#   2. cert_data_type mismatch rejection
+#   3. PEM-decode failure rejection
+#   4. wrong root anchor rejection (chain walk fails)
+#   5. time-window rejection
+#   6. tampered quote rejection
+
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/string.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fmt.cyr"
+include "lib/json.cyr"
+include "lib/sakshi.cyr"
+include "lib/chrono.cyr"
+include "lib/bigint.cyr"
+include "lib/ct.cyr"
+
+include "src/types.cyr"
+include "src/error.cyr"
+include "src/sha256.cyr"
+include "src/hex.cyr"
+include "src/sha512.cyr"
+include "src/bigint_ext.cyr"
+include "src/ecdsa_p256.cyr"
+include "src/x509.cyr"
+include "src/pem.cyr"
+include "src/sgx.cyr"
+
+# ----------------------------------------------------------------
+# Synthesized fixture (2026-05-22 — scripts/sgx-verify-full-fixture.out)
+# ----------------------------------------------------------------
+
+var AK_PUB_HEX = "1b790b783f1e88745bd7f81ad2b902084c84fbfffff028934bf7faeb9703a162a2859cfc21232d01aaa982c9132a205140233473482d4594b2b357516d1bff3c";
+var PCK_PUB_HEX = "43f6bd678039ea95c4050e7486516b06528e16c552ff46ea5117cbfc4de2ae2d2f66636793492cdd688144d6290d1348fbfbbda40387e03b2ee592ee69ec5beb";
+
+var ROOT_DER_LEN = 425;
+var ROOT_DER_HEX = "308201a53082014aa00302010202146eb7f1bdf9e70eaf1a249c81e0dfef196f4d9b6c300a06082a8648ce3d040302301e311c301a06035504030c13536967696c20534758205465737420526f6f74301e170d3236303532323232313131365a170d3336303531393232313131365a301e311c301a06035504030c13536967696c20534758205465737420526f6f743059301306072a8648ce3d020106082a8648ce3d030107034200047cac643174559edf412ec1e6835e970f11e251e236ea753101221dbde033758b706f0124cccb503f0a1417b4742ad4792ca0741c40414a61a47402326db35cfea3663064301d0603551d0e04160414d8dc667128d3ab2da779b58cb5cad072bcd79294301f0603551d23041830168014d8dc667128d3ab2da779b58cb5cad072bcd7929430120603551d130101ff040830060101ff020101300e0603551d0f0101ff040403020106300a06082a8648ce3d0403020349003046022100de5497b9a682b6e56d6c23386f7ba5e0c604bcd921d5d5af4d62de74e267462f022100f086da5097b88c98655bd7c2aaa10c2be651b5031f294d8cbf3d01c3405b88a3";
+
+var QUOTE_LEN = 2310;
+var QUOTE_HEX = "03000200000000000800080011111111111111111111111111111111222222222222222222222222222222222222222211111111111111111111111111111111000000000000000000000000000000000000000000000000000000000000000001010101010101010101010101010101aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0000000000000000000000000000000000000000000000000000000000000000bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002a000700000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc520700001bc421a6a2d1a09a7c662c0a2fbfe3509f7fb9456cf841d3c21e1d87f2bcbf40efd164d481bf75c9bac891d98106c2cfc989a2b4602d67eb9bc56505576665fd1b790b783f1e88745bd7f81ad2b902084c84fbfffff028934bf7faeb9703a162a2859cfc21232d01aaa982c9132a205140233473482d4594b2b357516d1bff3c11111111111111111111111111111111000000000000000000000000000000000000000000000000000000000000000001010101010101010101010101010101dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd0000000000000000000000000000000000000000000000000000000000000000eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002a000700000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000fb648b40f3f688d08e6de8aceb1eda0b91828769ddef29d6b856b8eaedc1288600000000000000000000000000000000000000000000000000000000000000002ba9249153ac469bdf0764f2dd2e1d647e2dc1280110e353187f9dbb8e5fad398b32e7b48151e86841615a6b6242bd5214909422b221a81ac9042293e0614a07200077777777777777777777777777777777777777777777777777777777777777770500ea0400002d2d2d2d2d424547494e2043455254494649434154452d2d2d2d2d0a4d4949426f7a4343415569674177494241674955456a3462344b6165306c684d7046427434384a524c5a38522f494d77436759494b6f5a497a6a3045417749770a486a45634d426f47413155454177775455326c6e61577767553064594946526c63335167556d397664444165467730794e6a41314d6a49794d6a45784d545a610a467730794e7a41314d6a49794d6a45784d545a614d4349784944416542674e5642414d4d46314e705a326c7349464e48574342555a584e30494642445379424d0a5a57466d4d466b77457759484b6f5a497a6a3043415159494b6f5a497a6a30444151634451674145512f61395a3441353670584542513530686c4672426c4b4f0a467356532f3062715552664c2f453369726930765a6d4e6e6b306b7333576942524e597044524e492b2f753970414f4834447375355a4c756165786236364e670a4d46347744415944565230544151482f424149774144414f42674e56485138424166384542414d4342344177485159445652304f42425945464e33796f5331740a2b4c4d694e6b474b41682f5633353036555232394d42384741315564497751594d426141464e6a635a6e456f3036737470336d316a4c584b30484b3831354b550a4d416f4743437147534d343942414d4341306b414d45594349514479326e6145593470634e54552f5a66772f75726a424753442b773672614f6c707a5263372b0a50645168685149684149675368793746323434516d735961777266737744787335756c4b356848414b7874386f7055734351656a0a2d2d2d2d2d454e442043455254494649434154452d2d2d2d2d0a2d2d2d2d2d424547494e2043455254494649434154452d2d2d2d2d0a4d494942705443434155716741774942416749556272667876666e6e447138614a4a7942344e2f764757394e6d327777436759494b6f5a497a6a3045417749770a486a45634d426f47413155454177775455326c6e61577767553064594946526c63335167556d397664444165467730794e6a41314d6a49794d6a45784d545a610a4677307a4e6a41314d546b794d6a45784d545a614d4234784844416142674e5642414d4d45314e705a326c7349464e48574342555a584e3049464a76623351770a5754415442676371686b6a4f5051494242676771686b6a4f50514d4242774e4341415238724751786446576533304575776561445870635045654a52346a62710a645445424968323934444e31693342764153544d7931412f436851587448517131486b736f4851635145464b59615230416a4a7473317a2b6f3259775a4441640a42674e564851344546675155324e786d63536a547179326e6562574d7463725163727a586b705177487759445652306a42426777466f4155324e786d63536a540a7179326e6562574d7463725163727a586b70517745675944565230544151482f42416777426745422f7749424154414f42674e56485138424166384542414d430a41515977436759494b6f5a497a6a3045417749445351417752674968414e35556c376d6d6772626c6257776a4f47393770654447424c7a5a49645856723031690a336e54695a3059764169454138496261554a65346a4a686c573966437171454d4b2b5a5274514d664b55324d767a304277304262694b4d3d0a2d2d2d2d2d454e442043455254494649434154452d2d2d2d2d0a";
+
+# Cert validity window: notBefore = 2026-05-22 22:11:16 UTC,
+# notAfter (leaf) = 2027-05-22 22:11:16 UTC.
+var NOW_IN_WINDOW = 1782518400;     # 2026-06-15 — comfortably inside
+var NOW_PRE_WINDOW = 1748520000;    # 2025-05-29 — before notBefore
+var NOW_POST_WINDOW = 1820000000;   # 2027-09 — after leaf notAfter
+
+fn main() {
+    alloc_init();
+    _p256_init();
+
+    var quote_buf = hex_decode(QUOTE_HEX, 2 * QUOTE_LEN);
+    var root_der  = hex_decode(ROOT_DER_HEX, 2 * ROOT_DER_LEN);
+
+    var q = sgx_quote_alloc();
+    assert_eq(sgx_quote_parse(quote_buf, QUOTE_LEN, q), 1, "fixture quote parses");
+
+    # ============================================================
+    # Group 1 — Happy path
+    # ============================================================
+    test_group("sgx_quote_verify_full — happy path");
+    assert_eq(sgx_quote_verify_full(q, root_der, ROOT_DER_LEN, NOW_IN_WINDOW), 1,
+              "end-to-end verify against synthesized PEM chain");
+
+    # now_unix = 0 disables time-window check.
+    assert_eq(sgx_quote_verify_full(q, root_der, ROOT_DER_LEN, 0), 1,
+              "now_unix=0 disables time check (still verifies)");
+
+    # ============================================================
+    # Group 2 — cert_data_type mismatch
+    # ============================================================
+    test_group("sgx_quote_verify_full — cert_data_type mismatch");
+
+    # Forge a parsed quote with cert_data_type = 1 (PPID, not PCK PEM).
+    # Mutate the parsed struct — easier than rebuilding the quote.
+    var q_bad_type = sgx_quote_alloc();
+    memcpy(q_bad_type, q, 256);
+    store64(q_bad_type + 104, 1);    # cert_data_type slot
+    assert_eq(sgx_quote_verify_full(q_bad_type, root_der, ROOT_DER_LEN, NOW_IN_WINDOW), 0,
+              "non-PEM cert_data_type rejected");
+
+    # ============================================================
+    # Group 3 — Time-window rejection
+    # ============================================================
+    test_group("sgx_quote_verify_full — time-window rejection");
+
+    assert_eq(sgx_quote_verify_full(q, root_der, ROOT_DER_LEN, NOW_PRE_WINDOW), 0,
+              "now before leaf notBefore rejected");
+    assert_eq(sgx_quote_verify_full(q, root_der, ROOT_DER_LEN, NOW_POST_WINDOW), 0,
+              "now after leaf notAfter rejected");
+
+    # ============================================================
+    # Group 4 — Wrong root anchor
+    # ============================================================
+    test_group("sgx_quote_verify_full — wrong root anchor");
+
+    # Use the existing x509.tcyr root (not the one that signed our chain).
+    # Chain walk should fail at the issuer-DN match.
+    var WRONG_ROOT_HEX = "308201a130820148a003020102021438d027306f383dd1d498df28c0cab9abb6a26173300a06082a8648ce3d040302301d311b301906035504030c12536967696c205465737420526f6f74204341301e170d3236303532323030333730365a170d3336303531393030333730365a301d311b301906035504030c12536967696c205465737420526f6f742043413059301306072a8648ce3d020106082a8648ce3d030107034200044d9f804c6dc263817b4ac3d5a6f86be88ff2961103cee9ca304d6fcde5e37c7c3f5b953938324747f44e2bdd51d849ce61ba7c7dcd8c5e63f687f6f65a3c0a9ea3663064301d0603551d0e04160414c97b20ae5ba585c6752e0a9ba7200be5a658d768301f0603551d23041830168014c97b20ae5ba585c6752e0a9ba7200be5a658d76830120603551d130101ff040830060101ff020101300e0603551d0f0101ff040403020106300a06082a8648ce3d040302034700304402201f82729ebb77cca9b15528a89c8580537784e71e1a5face3040de63d9578ac7d02206ec8546b67b2c3448d038bd0d19f1c38845135f44b77ae75e163e95e1d17fe4a";
+    var wrong_root = hex_decode(WRONG_ROOT_HEX, 842);
+    assert_eq(sgx_quote_verify_full(q, wrong_root, 421, NOW_IN_WINDOW), 0,
+              "verify against unrelated root rejected");
+
+    # ============================================================
+    # Group 5 — Malformed root DER
+    # ============================================================
+    test_group("sgx_quote_verify_full — malformed root DER");
+
+    var bad_root = alloc(50);
+    memset(bad_root, 0xFF, 50);
+    assert_eq(sgx_quote_verify_full(q, bad_root, 50, NOW_IN_WINDOW), 0,
+              "malformed root DER rejected");
+
+    # Zero-length root.
+    assert_eq(sgx_quote_verify_full(q, root_der, 0, NOW_IN_WINDOW), 0,
+              "zero-length root rejected");
+
+    # ============================================================
+    # Group 6 — Tampered quote body
+    # ============================================================
+    test_group("sgx_quote_verify_full — quote tamper rejection");
+
+    # Flip a byte inside the enclave report body. AK→quote-body
+    # signature should fail.
+    var quote_t = alloc(QUOTE_LEN);
+    memcpy(quote_t, quote_buf, QUOTE_LEN);
+    # Flip mr_enclave[0] (header is 48 B, mr_enclave at body offset 64).
+    var mre_off = 48 + 64;
+    store8(quote_t + mre_off, (load8(quote_t + mre_off) & 0xFF) ^ 0x01);
+    var q_t = sgx_quote_alloc();
+    assert_eq(sgx_quote_parse(quote_t, QUOTE_LEN, q_t), 1, "tampered quote still parses");
+    assert_eq(sgx_quote_verify_full(q_t, root_der, ROOT_DER_LEN, NOW_IN_WINDOW), 0,
+              "tampered mr_enclave fails verify_full");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

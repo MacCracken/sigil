@@ -8,10 +8,20 @@ see [CHANGELOG.md](../../CHANGELOG.md). Closed cycles:
   X.509 → SGX → SEV-SNP → TDX → SGX seal).
 - [`3.2-scope.md`](3.2-scope.md) — 3.2.0 cycle history.
 - [`3.0-scope.md`](3.0-scope.md) — 3.0 cycle history.
+- **3.4 — TEE attestation completion** (shipped 2026-05-22). PEM
+  decoder + `sgx_quote_verify_full` + `tdx_quote_verify_full` +
+  TDX `att_key_type=3` (P-384/SHA-384) dispatch. Deferred:
+  `snp_report_verify_full` (carries the AMD VCEK P-384 SPKI
+  blocker — see "Backlog" below). See CHANGELOG 3.4.0 entry for
+  the full ship summary; `docs/audit/2026-05-22-3.4.0-audit.md`
+  for the audit pass.
 
 **Cyrius pin:** `6.0.1` (synced across `cyrius.cyml` and CI).
 
-## Road to v3.4 — caller-provided scratch for parallel verify
+## Road to v3.5 — caller-provided scratch for parallel verify
+
+(Renumbered from "Road to v3.4" when 3.4 shipped TEE completion
+ahead of the parallel-verify work. Content unchanged.)
 
 3.3 attempted to lift per-call working state out of module
 globals so the `_sigil_batch_mutex` could drop. The
@@ -39,7 +49,7 @@ cleanup/refactor: -190 LOC net across `sha256.cyr`,
 `sha_ni.cyr`, `verify.cyr`. The proper mutex-drop architecture
 is queued here.
 
-### 3.4 work items
+### 3.5 work items (renumbered from 3.4)
 
 - [ ] **Caller-provided crypto scratch.** Top-level entry
       points (`sha256`, `sha512`, `ed25519_verify`,
@@ -73,7 +83,7 @@ is queued here.
       Re-bench `sv_verify_batch_64` against the
       `v3.2.0-allocfree` baseline (422.867 ms @ 64
       artifacts). Target ≥ 3× at 4 workers. Add CSV row
-      `v3.4-parallel-crypto`.
+      `v3.5-parallel-crypto`.
 
 - [ ] **Inverse pass on the 3.3 in-function arrays.** Every
       `var X[N]` added in 3.3 becomes either a slice of the
@@ -82,81 +92,12 @@ is queued here.
       form had no functional advantage over named globals
       under concurrent access; 3.4 closes the loop.
 
-**Sequencing decision:** open 3.4 when there's a forcing
+**Sequencing decision:** open 3.5 when there's a forcing
 function — a downstream consumer hitting the serialised batch
 on the mutex's lock contention, or an AGNOS roadmap milestone
 that requires the parallel speedup. The refactor is invasive
 enough that it should be done in one focused sprint, not
 incrementally.
-
-## Road to v3.5 — TEE attestation completion
-
-3.2.x shipped the parsers and per-piece verify orchestrators
-across all three TEE backends, but left two surfaces caller-
-driven for scope reasons:
-
-- The X.509 chain walk from each format's embedded
-  `qe_cert_data` (PEM-encoded PCK chain for SGX/TDX, VCEK
-  chain for SEV-SNP) up to the format's root CA. Consumers
-  currently extract the cert bytes and walk via the existing
-  `x509_*` surface themselves.
-- TDX `att_key_type = 3` (ECDSA P-384 / SHA-384). 3.2.5
-  parses and verifies att_key_type = 2 only. The 3.2.4 P-384
-  primitive is in tree, so this is a small delta.
-
-3.5 lands both so a kavach attestation backend can call a
-single `*_verify_full(quote, root_ca)` and get an end-to-end
-yes/no answer.
-
-### 3.5 work items
-
-- [ ] **PEM decoder.** New `src/pem.cyr` (~150 lines). Parse
-      `-----BEGIN CERTIFICATE-----` / `-----END CERTIFICATE-----`
-      block sequences from the raw bytes; base64-decode each
-      block's body. Surface:
-      `pem_decode_certs(buf, buf_len, out_chain, max_certs)`
-      → returns the count of decoded DER blobs (or -1 on
-      malformed input). Bounds-checked at every step (this is
-      attacker-controlled input from the embedded cert data).
-
-- [ ] **`sgx_quote_verify_full(quote, intel_sgx_root_cert)`.**
-      Compose: decode `qe_cert_data` via the PEM decoder,
-      parse each cert via `x509_parse`, walk root → ... →
-      leaf via `x509_verify_chain`, extract leaf's pubkey,
-      call `sgx_quote_verify_with_pck`. Single end-to-end
-      answer.
-
-- [ ] **`snp_report_verify_full(report, ark_root_cert)`.**
-      Same shape against the ARK → ASK → VCEK chain. SEV-SNP
-      typically delivers the VCEK chain alongside the report
-      (out-of-band fetch from AMD KDS), so the entry point
-      takes both the report and the cert-chain bytes.
-
-- [ ] **`tdx_quote_verify_full(quote, intel_sgx_root_cert)`.**
-      TDX shares the SGX PCK chain, so structurally identical
-      to `sgx_quote_verify_full`.
-
-- [ ] **TDX att_key_type=3 (P-384 / SHA-384).** Extend
-      `src/tdx.cyr` to dispatch on att_key_type at parse
-      time: =2 → ECDSA P-256 / SHA-256 (existing), =3 → P-384
-      / SHA-384 (new). The signature section gains 32 bytes
-      per r/s and the AK doubles to 96 bytes; binding hash
-      still consumes only the lower 32 of the SHA-384 output
-      to fit `report_data[0:32]`.
-
-- [ ] **Closes the four LOW audit findings.** The PEM decoder
-      and the full-verify wrappers will allocate scratch
-      buffers; ship them with `_into`-shape variants from the
-      start so the 3.2.2 / 3.2.4 LOW-1 pattern doesn't
-      recur. Audit those modules' allocation discipline as
-      part of the same cycle.
-
-**Sequencing decision:** open 3.5 only when a real kavach
-integration milestone requires end-to-end verify against
-fixture data. Until then, the per-piece API in 3.2.x is
-sufficient and the test surface for `*_verify_full` would be
-synthesised against another synthesised cert chain — limited
-return on the verification it adds.
 
 ## Road to v3.6 — perf tuning: field arithmetic + alloc-free
 
@@ -173,8 +114,9 @@ The 3.2.x verify paths are correct but slow:
   `_p384_long_div_reduce`. Solinas word-level reduction
   drops the cost 20–50×.
 
-3.6 closes the four LOW audit findings (allocator-lifetime
-discipline) and lands Solinas reduction for both curves.
+3.6 closes the bump-allocator-lifetime LOW findings (now six
+across the 3.2.x + 3.4 cycles) and lands Solinas reduction for
+both curves.
 
 ### 3.6 work items
 
@@ -191,15 +133,19 @@ discipline) and lands Solinas reduction for both curves.
       shuffles) but the structure is identical. CSV row
       `v3.6-p384-solinas`.
 
-- [ ] **Unified `_into`-shape API.** Eliminate per-first-call
+- [ ] **Unified `_into`-shape API.** Eliminate per-call
       `alloc` in `x509_parse`, `_snp_v_init`, `_sgxv_init`,
-      `_tdxv_init`. Two patterns to choose between:
+      `_tdxv_init`, `_pem_init`, and the
+      `sgx_quote_verify_full` / `tdx_quote_verify_full`
+      orchestrators. Two patterns to choose between:
       caller-provides-scratch (matches 3.2.0's
-      `sv_verify_artifact_into`) or library-owns-pool. The
+      `sv_verify_artifact_into` and 3.4's
+      `pem_decode_certs_into`) or library-owns-pool. The
       former is cleaner for long-running consumers (kavach);
       the latter is simpler for one-shot use. Audit doc
       to pick the shape with input from kavach's actual call
-      patterns.
+      patterns. Closes six LOWs across the 3.2.2, 3.2.4, and
+      3.4 cycles.
 
 - [ ] **Re-run the full crypto bench suite.** Capture before /
       after rows for every verify-path bench. The 3.6 ship
@@ -219,6 +165,25 @@ INFO docs.
 
 Items with a clear shape but no forcing function. Land
 in-place when an adjacent edit touches the relevant module.
+
+- [ ] **`snp_report_verify_full` + x509 P-384 SPKI extraction.**
+      Deferred from 3.4. Sigil's x509 parser is P-256-only —
+      `_xp_parse_spki` accepts only `id-ecPublicKey +
+      prime256v1` and stores a 64-byte pubkey at cert offset
+      +96. AMD's real VCEK leaf cert is P-384 (96-byte pubkey),
+      which `snp_report_verify` needs. Closure requires:
+      (a) parse `secp384r1` (OID `1.3.132.0.34`) in
+      `_xp_parse_spki` and BIT-STRING-decode the 97-byte
+      uncompressed point; (b) track pubkey width per cert
+      (struct slot + accessor `x509_cert_pubkey_len`);
+      (c) dispatch `_x509_verify_link` on the issuer's pubkey
+      width (still requires the issuer cert to be P-256 for
+      ECDSA-SHA256 chain signatures — RSA-signed ARK/ASK links
+      are a separate scope item). Then a thin
+      `snp_report_verify_full(report, vcek_chain_pem,
+      vcek_chain_pem_len, ark_root_der, ark_root_der_len,
+      now_unix)` wrapper. Test fixture requires regenerating
+      a P-384-leaf test chain via openssl.
 
 - [ ] **Scatter-store for the fixed-base comb.** Distribute
       the 128-byte point entries across cache lines so a
