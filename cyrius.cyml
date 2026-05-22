@@ -62,6 +62,7 @@ modules = [
     "src/sgx.cyr",
     "src/sev_snp.cyr",
     "src/tdx.cyr",
+    "src/seal.cyr",
     "src/mldsa_params.cyr",
     "src/mldsa_reduce.cyr",
     "src/mldsa_ntt.cyr",

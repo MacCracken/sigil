@@ -1,0 +1,167 @@
+# seal.cyr — SGX sealing key derivation.
+#
+# Sigil 3.2.6 — bite 6 (closeout) of the TEE attestation arc
+# (origin: `docs/development/3.2-tee-arc.md`).
+#
+# Scope per the arc plan: a constrained KDF over a caller-provided
+# sealing root. Sigil can't call SGX's EGETKEY directly — that
+# instruction is only available inside an enclave on real SGX
+# hardware. Consumers obtain the sealing root via their runtime's
+# enclave entry (Gramine / Occlum / TDX TDG_MR_REPORT bridge) and
+# hand the resulting 32-byte CPU-derived secret to this module.
+#
+# What this module owns:
+#   • The KDF context (info-string layout, salt domain-separation
+#     tag) that binds a derived key to (policy, measurement, ISVSVN,
+#     caller-supplied key_id).
+#   • HKDF-SHA256 composition via the existing `hkdf` surface from
+#     `src/hkdf.cyr` (2.9.x — already audited).
+#   • Symmetric seal/unseal aliases (literally the same derivation;
+#     a deterministic KDF needs no inverse).
+#
+# What this module does NOT own:
+#   • The actual sealing operation (AES-GCM encrypt the user payload
+#     under the derived key) — the caller composes against
+#     `src/aes_gcm.cyr` once they have the key. Keeping the KDF
+#     surface narrow lets the caller pick their own AEAD nonce
+#     scheme and AAD layout without sigil prescribing one.
+#   • Authenticated reads of MRSIGNER / MRENCLAVE / ISVSVN — those
+#     come from a parsed SGX quote (3.2.3) or directly from the
+#     caller's enclave-side report. Sigil verifies the report; the
+#     caller drives the seal_key call with the verified fields.
+#
+# Surface:
+#   fn sgx_derive_seal_key(sealing_root, policy, measurement,
+#                          isvsvn, key_id, key_id_len, out_key)
+#       — 1 = ok, 0 = invalid policy / key_id_len.
+#   fn sgx_seal_key(...)    — alias for derive (seal-side caller).
+#   fn sgx_unseal_key(...)  — alias for derive (unseal-side caller).
+#
+# Reference: Intel SGX SDK sealing model (sgx_seal_data /
+# sgx_unseal_data). Sigil takes the EGETKEY-result as input rather
+# than emulating EGETKEY — that's a deliberate scope cut (sigil
+# has no access to the CPU's sealing-root register).
+
+# ================================================================
+# Constants
+# ================================================================
+
+# Policy: binds derived keys to either the enclave signer or the
+# specific enclave measurement. SGX historically called these
+# "POLICY_MRSIGNER" (re-deploys with the same signer can unseal)
+# and "POLICY_MRENCLAVE" (only this exact build can unseal).
+var SGX_SEAL_POLICY_MRSIGNER  = 0;
+var SGX_SEAL_POLICY_MRENCLAVE = 1;
+
+# Output key width — sigil currently fixes at 32 bytes (AES-256-GCM
+# native). A future bite that supports 16-byte AES-128 keys can
+# parameterise.
+var SGX_SEAL_KEY_SIZE         = 32;
+
+# Maximum caller-supplied `key_id` length. The info buffer is
+# stack-allocated below at a fixed size; cap key_id so info never
+# exceeds the scratch capacity. 256 bytes is generous for the
+# binding-tag use case (typical key_ids are ASCII labels under 64
+# bytes).
+var SGX_SEAL_MAX_KEY_ID       = 256;
+
+# Domain-separation salt — pins the KDF to sigil's seal surface so
+# the same sealing_root used in an unrelated HKDF call elsewhere
+# cannot derive the same key. v1 reserves room for future
+# protocol-level bumps.
+var SGX_SEAL_SALT             = "sigil-sgx-seal-v1";
+var SGX_SEAL_SALT_LEN         = 17;
+
+# Long-lived scratch (init-time alloc, reused per call).
+# Info layout (35 + key_id_len bytes):
+#   info[0]      policy (u8)
+#   info[1..3]   isvsvn (big-endian u16)
+#   info[3..35]  measurement (32 bytes)
+#   info[35..]   key_id
+var _seal_info     = 0;
+var _seal_inited   = 0;
+
+fn _seal_init(): i64 {
+    if (_seal_inited == 1) { return 0; }
+    # Max info size: 35 + SGX_SEAL_MAX_KEY_ID = 291 bytes.
+    _seal_info = alloc(35 + SGX_SEAL_MAX_KEY_ID);
+    _seal_inited = 1;
+    return 0;
+}
+
+# ================================================================
+# sgx_derive_seal_key — core KDF
+#
+# Inputs:
+#   sealing_root  — 32 bytes (the EGETKEY result, caller-supplied)
+#   policy        — SGX_SEAL_POLICY_MRSIGNER or _MRENCLAVE
+#   measurement   — 32 bytes (MRSIGNER for policy=0, MRENCLAVE for 1)
+#   isvsvn        — 16-bit unsigned (≥ 0, < 2^16)
+#   key_id        — caller-supplied binding bytes
+#   key_id_len    — length of key_id (0 ≤ len ≤ SGX_SEAL_MAX_KEY_ID)
+#   out_key       — 32-byte output buffer
+#
+# Returns 1 on success, 0 on input-range failure. The returned key
+# is the same byte sequence for identical inputs — both seal and
+# unseal call this fn with the same (measurement, isvsvn, key_id).
+# ================================================================
+
+fn sgx_derive_seal_key(sealing_root, policy, measurement, isvsvn,
+                       key_id, key_id_len, out_key): i64 {
+    _seal_init();
+
+    # Validate inputs.
+    if (policy != SGX_SEAL_POLICY_MRSIGNER) {
+        if (policy != SGX_SEAL_POLICY_MRENCLAVE) { return 0; }
+    }
+    if (isvsvn < 0) { return 0; }
+    if (isvsvn > 65535) { return 0; }
+    if (key_id_len < 0) { return 0; }
+    if (key_id_len > SGX_SEAL_MAX_KEY_ID) { return 0; }
+
+    # Build info buffer.
+    store8(_seal_info + 0, policy & 0xFF);
+    # ISVSVN big-endian (matches the on-wire convention used by SGX
+    # reports / quotes — keeps any future cross-checks against
+    # quote.report_body.isv_svn straightforward).
+    store8(_seal_info + 1, (isvsvn >> 8) & 0xFF);
+    store8(_seal_info + 2, isvsvn & 0xFF);
+    # Measurement (32 bytes).
+    var i = 0;
+    while (i < 32) {
+        store8(_seal_info + 3 + i, load8(measurement + i) & 0xFF);
+        i = i + 1;
+    }
+    # Caller-supplied key_id.
+    i = 0;
+    while (i < key_id_len) {
+        store8(_seal_info + 35 + i, load8(key_id + i) & 0xFF);
+        i = i + 1;
+    }
+
+    # HKDF-SHA256 over the constructed info. hkdf() returns 0 on
+    # success, non-zero on error; normalise to sigil's 1/0 convention.
+    var rc = hkdf(SGX_SEAL_SALT, SGX_SEAL_SALT_LEN,
+                  sealing_root, 32,
+                  _seal_info, 35 + key_id_len,
+                  out_key, SGX_SEAL_KEY_SIZE);
+    if (rc != 0) { return 0; }
+    return 1;
+}
+
+# Aliases — same operation, names match the arc plan's surface.
+# A deterministic KDF needs no inverse; "seal" and "unseal" are
+# semantic labels for the caller's surrounding AEAD encrypt/decrypt
+# step.
+
+fn sgx_seal_key(sealing_root, policy, measurement, isvsvn,
+                key_id, key_id_len, out_key): i64 {
+    return sgx_derive_seal_key(sealing_root, policy, measurement, isvsvn,
+                                key_id, key_id_len, out_key);
+}
+
+fn sgx_unseal_key(sealing_root, policy, measurement, isvsvn,
+                  key_id, key_id_len, out_key): i64 {
+    return sgx_derive_seal_key(sealing_root, policy, measurement, isvsvn,
+                                key_id, key_id_len, out_key);
+}

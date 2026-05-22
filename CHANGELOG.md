@@ -5,6 +5,103 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.2.6] — 2026-05-26
+
+Sixth and final bite of the 3.2.x TEE attestation arc
+([`docs/development/3.2-tee-arc.md`](docs/development/3.2-tee-arc.md)):
+**SGX sealing key derivation**. The smallest bite of the arc
+(~115 lines) — pure composition over the existing HKDF-SHA256
+surface (audited at 2.9.x). **Closes out the 3.2.x TEE
+attestation arc.**
+
+### Added
+
+- **`src/seal.cyr` — SGX sealing KDF (~115 lines).**
+  - `sgx_derive_seal_key(sealing_root, policy, measurement,
+    isvsvn, key_id, key_id_len, out_key)` — core derivation.
+    Builds an info string `policy(1B) || isvsvn_BE(2B) ||
+    measurement(32B) || key_id(var)` and runs HKDF-SHA256 over
+    it with the domain-separation salt `"sigil-sgx-seal-v1"`.
+    Output: a 32-byte derived key suitable for AES-256-GCM.
+  - `sgx_seal_key(...)` and `sgx_unseal_key(...)` — pure aliases
+    that delegate to `sgx_derive_seal_key`. A deterministic KDF
+    needs no inverse; "seal" and "unseal" are semantic labels
+    for the caller's surrounding AEAD encrypt / decrypt step
+    (composed against `aes_gcm.cyr`).
+  - Input validation: policy ∈ {0, 1}, isvsvn ∈ [0, 2^16),
+    key_id_len ∈ [0, 256]. Out-of-range values rejected.
+  - **Sigil cannot call SGX's `EGETKEY` directly** — the
+    sealing root is caller-provided (obtained via the runtime's
+    enclave-side bridge: Gramine / Occlum / TDX TDG_MR_REPORT).
+    This is a deliberate scope cut documented in the source
+    header and the audit (INFO-1).
+- **`tests/tcyr/seal.tcyr`** — 17 assertions across 4 groups:
+  cross-reference against direct HKDF (key bytes match), seal /
+  unseal symmetry, divergence on each of the 6 input fields
+  (policy / isvsvn / measurement / key_id bytes / key_id length
+  / sealing_root), and input-validation rejection cases including
+  boundary tests for zero-length and max-length key_id.
+
+### Security
+
+- Audit: `docs/audit/2026-05-26-audit.md`. **0 findings at any
+  severity** on the new surface. Two INFO items document
+  deliberate scope cuts (sealing-root provenance is the
+  caller's responsibility; AEAD wrapping is caller-driven via
+  `aes_gcm.cyr`).
+- CVE patterns checked: HKDF salt confusion (defended by fixed
+  domain-separation salt), cross-policy collision (defended by
+  policy-byte-first info layout), truncation collision (HKDF-
+  SHA256 not vulnerable on unambiguously-encoded info).
+
+### TEE attestation arc — closed
+
+The 3.2.x arc spans six tags (3.2.1 → 3.2.6) shipped 2026-05-21
+through 2026-05-26. Summary in `docs/audit/2026-05-26-audit.md`:
+**~3200 new lines of cryptographic and parsing code across the
+arc; zero CRITICAL / HIGH / MEDIUM audit findings**.
+
+Arc surface delivered:
+- `src/ecdsa_p256.cyr` — ECDSA P-256 verify
+- `src/ecdsa_p384.cyr` — ECDSA P-384 verify
+- `src/sha384.cyr` — SHA-384
+- `src/x509.cyr` — minimal X.509 v3 cert-chain walker (ECDSA-
+  with-SHA256, prime256v1 only)
+- `src/sgx.cyr` — Intel SGX DCAP v3 quote parser + verify
+  orchestrator
+- `src/sev_snp.cyr` — AMD SEV-SNP attestation report parser +
+  verify orchestrator
+- `src/tdx.cyr` — Intel TDX v4 TD-quote parser + verify
+  orchestrator
+- `src/seal.cyr` — SGX sealing key derivation
+
+Plus `pt_is_on_curve` (P-256) / `pt_p384_is_on_curve` (P-384)
+helpers that close the prior audit's Q-on-curve gap for
+externally-sourced public keys.
+
+### Open follow-ups tracked across the arc
+
+1. PEM decoder + integrated chain-walk wrappers for SGX /
+   SEV-SNP / TDX (currently caller-driven via the `x509_*`
+   surface). Single shared follow-up patch when an integration
+   surfaces a forcing function.
+2. ECDSA P-384 / SHA-384 variant of the TDX parser
+   (att_key_type = 3). Small delta now that the P-384 primitive
+   is in tree.
+3. Solinas word-level field reduction for both P-256 and P-384.
+   Bench tuning — the long-division reduction is correct but
+   slow (~136 ms / verify for P-256, ~3× that for P-384).
+4. Unified `_into`-shape API for parsers / verifiers that
+   currently allocate scratch on first call. Closes the four
+   LOW findings across the arc.
+
+None of these block any current downstream consumer.
+
+### Module wiring
+
+- `src/lib.cyr` includes `src/seal.cyr` after `src/tdx.cyr`.
+- `cyrius.cyml [lib].modules` lists the new module.
+
 ## [3.2.5] — 2026-05-25
 
 Fifth bite of the 3.2.x TEE attestation arc

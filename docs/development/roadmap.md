@@ -11,12 +11,13 @@ see [CHANGELOG.md](../../CHANGELOG.md). For in-flight cycle scope:
 
 **Cyrius pin:** `6.0.1` (synced across `cyrius.cyml` and CI).
 
-## Road to v3.2.x — TEE attestation arc
+## v3.2.x — TEE attestation arc ✅ COMPLETE (2026-05-21 → 2026-05-26)
 
-Patch series tracker in [`3.2-tee-arc.md`](3.2-tee-arc.md).
-Origin: [`issues/2026-05-10-kavach-sgx-sev-tdx-attestation-modules.md`](issues/2026-05-10-kavach-sgx-sev-tdx-attestation-modules.md)
-(kavach P1, sigil-side P3 — enhancement, no current forcing
-function). Each minor in the arc tags independently on `main`:
+All six bites shipped on consecutive days. Patch series tracker:
+[`3.2-tee-arc.md`](3.2-tee-arc.md). Closeout summary in
+[`docs/audit/2026-05-26-audit.md`](../audit/2026-05-26-audit.md):
+~3215 new lines of cryptographic and parsing code, **zero
+CRITICAL / HIGH / MEDIUM** audit findings across the arc.
 
 | Tag    | Module surface                                  | Unblocks |
 |--------|-------------------------------------------------|----------|
@@ -25,13 +26,23 @@ function). Each minor in the arc tags independently on `main`:
 | 3.2.3  | `src/sgx.cyr` — quote parse + verify ✅ (2026-05-23) | kavach SGX backend |
 | 3.2.4  | `src/sev_snp.cyr` — VCEK chain + report verify ✅ (2026-05-24) | kavach SEV backend |
 | 3.2.5  | `src/tdx.cyr` — TD-quote (shares SGX chain) ✅ (2026-05-25) | kavach TDX backend |
-| 3.2.6  | `src/seal.cyr` — SGX sealing (MRSIGNER/ISVSVN)  | kavach SGX persistence |
+| 3.2.6  | `src/seal.cyr` — SGX sealing (MRSIGNER/ISVSVN) ✅ (2026-05-26) | kavach SGX persistence |
 
-If the arc stalls (kavach roadmap shifts, or a higher-priority
-sigil item like ML-KEM-768 jumps the queue), the incomplete arc
-parks cleanly at the last shipped minor — no half-implemented
-module surface in tree. The 3.3 cycle (below) can open in
-parallel with or after this arc.
+**Open follow-ups carried forward from the arc** (none blocking
+any current consumer):
+
+- PEM decoder + integrated chain-walk wrappers for SGX / SEV-SNP
+  / TDX — currently caller-driven. Single shared follow-up patch.
+- ECDSA P-384 / SHA-384 variant of the TDX parser
+  (att_key_type=3). Small delta now that the P-384 primitive is
+  in tree.
+- Solinas word-level field reduction for both P-256 and P-384.
+  Bench tuning — long-division reduction is correct but slow
+  (~136 ms / verify for P-256, ~3× for P-384). Moved to
+  "Backlog — unscheduled" below.
+- Unified `_into`-shape API for parsers / verifiers that
+  currently retain scratch on first call (closes 4 LOW audit
+  findings across the arc).
 
 ## Road to v3.3 — per-worker crypto state
 

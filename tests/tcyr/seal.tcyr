@@ -1,0 +1,246 @@
+# seal.tcyr — SGX sealing key derivation tests.
+#
+# Sigil 3.2.6 — closeout bite of the TEE attestation arc.
+#
+# Test strategy:
+#   • Cross-reference: compute the expected key directly via sigil's
+#     own (already audited) `hkdf` function over a hand-built info
+#     string; confirm `sgx_derive_seal_key` matches byte-for-byte.
+#   • Symmetry: seal_key and unseal_key must produce identical
+#     output for identical inputs (the whole point of a determ-
+#     inistic KDF).
+#   • Divergence: each input field affects the output — flipping
+#     any of policy / measurement / isvsvn / key_id / sealing_root
+#     changes the derived key.
+#   • Input validation: invalid policy / out-of-range isvsvn /
+#     overlong key_id all rejected.
+#
+# Helper-split layout (per 3.2.4 audit INFO-3 + 3.2.5 confirmation).
+
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/string.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fmt.cyr"
+include "lib/json.cyr"
+include "lib/sakshi.cyr"
+include "lib/chrono.cyr"
+include "lib/bigint.cyr"
+include "lib/ct.cyr"
+
+include "src/types.cyr"
+include "src/error.cyr"
+include "src/sha256.cyr"
+include "src/hex.cyr"
+include "src/hmac.cyr"
+include "src/hkdf.cyr"
+include "src/seal.cyr"
+
+# Build the reference info string the same way `seal.cyr` does, then
+# run sigil's HKDF over it. This is what `sgx_derive_seal_key` should
+# match.
+fn build_reference_key(sealing_root, policy, measurement, isvsvn,
+                        key_id, key_id_len, out_key): i64 {
+    var info = alloc(35 + key_id_len);
+    store8(info + 0, policy & 0xFF);
+    store8(info + 1, (isvsvn >> 8) & 0xFF);
+    store8(info + 2, isvsvn & 0xFF);
+    var i = 0;
+    while (i < 32) {
+        store8(info + 3 + i, load8(measurement + i) & 0xFF);
+        i = i + 1;
+    }
+    i = 0;
+    while (i < key_id_len) {
+        store8(info + 35 + i, load8(key_id + i) & 0xFF);
+        i = i + 1;
+    }
+    return hkdf(SGX_SEAL_SALT, SGX_SEAL_SALT_LEN,
+                sealing_root, 32,
+                info, 35 + key_id_len,
+                out_key, 32);
+}
+
+fn keys_equal(a, b, n): i64 {
+    var i = 0;
+    while (i < n) {
+        if ((load8(a + i) & 0xFF) != (load8(b + i) & 0xFF)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn run_reference_test(): i64 {
+    test_group("sgx_derive_seal_key — matches direct HKDF reference");
+
+    # Fixed test vector. sealing_root is a 32-byte test pattern.
+    var sealing_root = alloc(32);
+    var i = 0;
+    while (i < 32) { store8(sealing_root + i, i & 0xFF); i = i + 1; }
+
+    var measurement = alloc(32);
+    i = 0;
+    while (i < 32) { store8(measurement + i, 0xA0 + (i & 0xFF)); i = i + 1; }
+
+    var key_id = "primary";          # 7-byte ASCII binding tag
+
+    var ref_key  = alloc(32);
+    var derived  = alloc(32);
+
+    build_reference_key(sealing_root, SGX_SEAL_POLICY_MRSIGNER, measurement,
+                        42, key_id, 7, ref_key);
+    sgx_derive_seal_key(sealing_root, SGX_SEAL_POLICY_MRSIGNER, measurement,
+                        42, key_id, 7, derived);
+
+    assert_eq(keys_equal(ref_key, derived, 32), 1,
+        "derived key == direct HKDF reference");
+    return 0;
+}
+
+fn run_symmetry_test(): i64 {
+    test_group("sgx_seal_key ↔ sgx_unseal_key — symmetric");
+
+    var sealing_root = alloc(32);
+    var measurement  = alloc(32);
+    var i = 0;
+    while (i < 32) {
+        store8(sealing_root + i, 0x55 ^ i);
+        store8(measurement + i,  0xAA ^ i);
+        i = i + 1;
+    }
+
+    var sealed   = alloc(32);
+    var unsealed = alloc(32);
+
+    sgx_seal_key(sealing_root, SGX_SEAL_POLICY_MRENCLAVE, measurement,
+                 7, "tag-v1", 6, sealed);
+    sgx_unseal_key(sealing_root, SGX_SEAL_POLICY_MRENCLAVE, measurement,
+                   7, "tag-v1", 6, unsealed);
+
+    assert_eq(keys_equal(sealed, unsealed, 32), 1,
+        "seal_key == unseal_key (deterministic KDF)");
+    return 0;
+}
+
+fn run_divergence_tests(): i64 {
+    test_group("sgx_derive_seal_key — each input field affects output");
+
+    var sealing_root = alloc(32);
+    var measurement  = alloc(32);
+    var i = 0;
+    while (i < 32) {
+        store8(sealing_root + i, 0x11);
+        store8(measurement + i,  0x22);
+        i = i + 1;
+    }
+
+    var base_key = alloc(32);
+    sgx_derive_seal_key(sealing_root, SGX_SEAL_POLICY_MRSIGNER, measurement,
+                         5, "kid", 3, base_key);
+
+    var v = alloc(32);
+
+    # Different policy
+    sgx_derive_seal_key(sealing_root, SGX_SEAL_POLICY_MRENCLAVE, measurement,
+                         5, "kid", 3, v);
+    assert_eq(keys_equal(base_key, v, 32), 0, "policy change → different key");
+
+    # Different ISVSVN
+    sgx_derive_seal_key(sealing_root, SGX_SEAL_POLICY_MRSIGNER, measurement,
+                         6, "kid", 3, v);
+    assert_eq(keys_equal(base_key, v, 32), 0, "isvsvn change → different key");
+
+    # Different measurement (flip one byte)
+    var m2 = alloc(32);
+    memcpy(m2, measurement, 32);
+    store8(m2, (load8(m2) & 0xFF) ^ 0x01);
+    sgx_derive_seal_key(sealing_root, SGX_SEAL_POLICY_MRSIGNER, m2,
+                         5, "kid", 3, v);
+    assert_eq(keys_equal(base_key, v, 32), 0, "measurement change → different key");
+
+    # Different key_id
+    sgx_derive_seal_key(sealing_root, SGX_SEAL_POLICY_MRSIGNER, measurement,
+                         5, "kit", 3, v);
+    assert_eq(keys_equal(base_key, v, 32), 0, "key_id bytes change → different key");
+
+    # Different key_id length (with same prefix)
+    sgx_derive_seal_key(sealing_root, SGX_SEAL_POLICY_MRSIGNER, measurement,
+                         5, "kid-extra", 9, v);
+    assert_eq(keys_equal(base_key, v, 32), 0, "key_id length change → different key");
+
+    # Different sealing root
+    var sr2 = alloc(32);
+    memcpy(sr2, sealing_root, 32);
+    store8(sr2, (load8(sr2) & 0xFF) ^ 0x01);
+    sgx_derive_seal_key(sr2, SGX_SEAL_POLICY_MRSIGNER, measurement,
+                         5, "kid", 3, v);
+    assert_eq(keys_equal(base_key, v, 32), 0, "sealing_root change → different key");
+    return 0;
+}
+
+fn run_validation_tests(): i64 {
+    test_group("sgx_derive_seal_key — input validation");
+
+    var sealing_root = alloc(32);
+    var measurement  = alloc(32);
+    memset(sealing_root, 0x11, 32);
+    memset(measurement, 0x22, 32);
+    var out = alloc(32);
+
+    # Valid baseline
+    assert_eq(sgx_derive_seal_key(sealing_root, SGX_SEAL_POLICY_MRSIGNER,
+                                    measurement, 0, "x", 1, out), 1,
+        "valid inputs → 1");
+
+    # Invalid policy
+    assert_eq(sgx_derive_seal_key(sealing_root, 2, measurement, 0, "x", 1, out), 0,
+        "policy=2 rejected");
+    assert_eq(sgx_derive_seal_key(sealing_root, 0 - 1, measurement, 0, "x", 1, out), 0,
+        "policy=-1 rejected");
+
+    # ISVSVN out of u16 range
+    assert_eq(sgx_derive_seal_key(sealing_root, SGX_SEAL_POLICY_MRSIGNER,
+                                    measurement, 0 - 1, "x", 1, out), 0,
+        "isvsvn=-1 rejected");
+    assert_eq(sgx_derive_seal_key(sealing_root, SGX_SEAL_POLICY_MRSIGNER,
+                                    measurement, 65536, "x", 1, out), 0,
+        "isvsvn=2^16 rejected");
+
+    # key_id_len out of range
+    assert_eq(sgx_derive_seal_key(sealing_root, SGX_SEAL_POLICY_MRSIGNER,
+                                    measurement, 0, "x", 0 - 1, out), 0,
+        "key_id_len=-1 rejected");
+    assert_eq(sgx_derive_seal_key(sealing_root, SGX_SEAL_POLICY_MRSIGNER,
+                                    measurement, 0, "x", SGX_SEAL_MAX_KEY_ID + 1, out), 0,
+        "key_id_len > max rejected");
+
+    # Boundary: zero-length key_id is permitted (just no caller binding).
+    assert_eq(sgx_derive_seal_key(sealing_root, SGX_SEAL_POLICY_MRSIGNER,
+                                    measurement, 0, "", 0, out), 1,
+        "key_id_len=0 accepted");
+
+    # Boundary: max-length key_id accepted.
+    var big_kid = alloc(SGX_SEAL_MAX_KEY_ID);
+    memset(big_kid, 0x77, SGX_SEAL_MAX_KEY_ID);
+    assert_eq(sgx_derive_seal_key(sealing_root, SGX_SEAL_POLICY_MRSIGNER,
+                                    measurement, 0, big_kid, SGX_SEAL_MAX_KEY_ID, out), 1,
+        "key_id_len=max accepted");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    run_reference_test();
+    run_symmetry_test();
+    run_divergence_tests();
+    run_validation_tests();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);
