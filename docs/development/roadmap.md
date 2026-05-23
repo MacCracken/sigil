@@ -189,14 +189,23 @@ in-place when an adjacent edit touches the relevant module.
       — without it CLMUL adds another `[rbp-N]`-coupled asm
       site to maintain.
 
-- [ ] **`secret var` ambient adoption.** ~20 `memset(..., 0,
+- [x] **`secret var` ambient adoption.** ~20 `memset(..., 0,
       ...)` sites across `src/hkdf.cyr` / `src/aes_gcm.cyr` /
       `src/mldsa.cyr` (counted post-3.0 merge); roughly 8 are
       true private-key / PRK / round-key / GHASH-state
       buffers, the rest intermediate scratch. `secret var`
       (cyrius 5.3.5) gives compiler-guaranteed zeroization.
-      Land in-place when a future edit touches one of those
-      call sites — no separate pass.
+      **Closed in 3.4.3:** `aes_gcm.cyr` was the last
+      unconverted module — 12 stack-local secret buffers
+      (GHASH H, GHASH state, AES-CTR keystream,
+      encrypt/decrypt tag, GHASH-mul scratch) moved to
+      `secret var`. The hkdf/hmac/ed25519/mldsa/trust
+      conversions already landed across earlier cycles.
+      Module-global workspace buffers (`_mldsa_ws_seedbuf`,
+      `_mldsa_sample_state`) and heap allocations
+      (`round_keys`) remain on explicit `memset` since
+      `secret var` is stack-scope only. Audit:
+      `docs/audit/2026-05-23-3.4.3-audit.md`.
 
 - [ ] **NI dispatch structural fix.** When the upstream
       cyrius `asm`-block global-symbol pseudo lands (issue

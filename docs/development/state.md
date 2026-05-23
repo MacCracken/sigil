@@ -12,10 +12,10 @@
 
 | Field | Value |
 |---|---|
-| Current version | **3.4.2** (`VERSION`) |
+| Current version | **3.4.3** (`VERSION`) |
 | Cyrius toolchain pin | **6.0.1** (`cyrius.cyml [package].cyrius`) |
-| Last release date | 2026-05-22 |
-| Last release audit | [`2026-05-22-3.4.2-audit.md`](../audit/2026-05-22-3.4.2-audit.md) |
+| Last release date | 2026-05-23 |
+| Last release audit | [`2026-05-23-3.4.3-audit.md`](../audit/2026-05-23-3.4.3-audit.md) |
 | Phase | Released, security hardening active |
 
 ## Test surface
@@ -31,6 +31,7 @@ Per-cycle assertion delta:
 - 3.4.0 ship: +66 (`pem.tcyr` 39, `sgx_verify_full.tcyr` 11, `tdx_verify_full.tcyr` 16)
 - 3.4.1 ship: +23 (`x509_p384.tcyr` 12, `snp_verify_full.tcyr` 11)
 - 3.4.2 ship: 0 (packaging-fix release; no source changes)
+- 3.4.3 ship: 0 (defense-in-depth refactor; `secret var` adoption on 12 aes_gcm stack locals — no test surface change)
 
 ## Consumers (AGNOS first-party)
 
@@ -49,6 +50,7 @@ Consumers that link or rely on sigil for trust verification:
 
 | Version | Date | Headline |
 |---|---|---|
+| 3.4.3 | 2026-05-23 | `secret var` adoption sweep on `src/aes_gcm.cyr` — 12 stack-local secret buffers (GHASH H/state, AES-CTR keystream, tag, GHASH mul scratch) gain compiler-emitted zeroization on every return including early-exit errors. Closes the "secret var ambient adoption" backlog item. |
 | 3.4.2 | 2026-05-22 | Packaging fix — `dist/sigil.cyr` regenerated from current source (was frozen at 3.2.0 era); `scripts/regen-dist.sh` shipped to replace the retired `cyrius distlib` subcommand. Doc-tree restructure rides along. |
 | 3.4.1 | 2026-05-22 | SEV-SNP attestation completion (x509 P-384 SPKI + `snp_report_verify_full`) |
 | 3.4.0 | 2026-05-22 | TEE attestation completion (PEM decoder, `sgx`/`tdx_quote_verify_full`, TDX `att_key_type=3`) |
@@ -61,7 +63,7 @@ back to v2.0.0.
 
 | Slot | State | Notes |
 |---|---|---|
-| Next cycle | Idle | No in-flight work post-3.4.1 ship |
+| Next cycle | Idle | No in-flight work post-3.4.3 ship; 3.5 and 3.6 remain gated on forcing functions per roadmap |
 
 When a cycle is opened, list each work-item bite here as it
 moves through `pending → in_progress → completed`. The release

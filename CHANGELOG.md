@@ -7,7 +7,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-(none — tip is 3.4.2)
+(none — tip is 3.4.3)
+
+## [3.4.3] — 2026-05-23
+
+`secret var` adoption pass on the AES-GCM AEAD path. Twelve
+stack-local secret buffers in `src/aes_gcm.cyr` (GHASH H subkey,
+GHASH running state, AES-CTR keystream, encrypt/decrypt tag, and
+the inner GHASH multiplication scratch) move from `var X[N];` +
+explicit end-of-function `memset(&X, 0, N)` to `secret var X[N];`
+(Cyrius 5.3.5+). The compiler now emits zeroization for every
+return path including early errors — the prior shape only zeroed
+on the happy path. No functional change; spec-tests unchanged at
+1178/0.
+
+This is the in-place "land when an adjacent edit touches the
+module" backlog item from the 3.4.1 audit follow-up list. Closure
+target was originally "land in-place"; bundled here as a focused
+defense-in-depth patch ahead of the 3.5 / 3.6 cycles (still gated
+on forcing functions per roadmap).
+
+### Changed
+
+- **`src/aes_gcm.cyr` — 12 stack-local conversions to `secret var`:**
+  - `_ghash_mul`: `v[16]` (working copy of H subkey).
+  - `_ghash_update`: `block[16]` (plaintext/ciphertext scratch),
+    `scratch[16]`, `scratch2[16]` (GHASH multiplication output).
+  - `_aes_gcm_ctr_xor`: `ks[16]` (AES-CTR keystream block —
+    leakage recovers plaintext).
+  - `aes_gcm_encrypt`: `h[16]` (GHASH subkey), `y[16]` (GHASH
+    state), `s[16]` (AES_K(J0) for tag).
+  - `aes_gcm_decrypt`: `h[16]`, `y[16]`, `s[16]`,
+    `expected_tag[16]`.
+
+  Heap-allocated `round_keys` (240 B `fl_alloc`) keeps its
+  explicit `memset` + `fl_free` — `secret var` is stack-scope
+  only. IV / counter / length / constant-zero blocks
+  (`j0`, `counter`, `len_block`, `zero_block`) are not key
+  material and keep their explicit end-`memset` calls as
+  defense-in-depth — applying the `secret var` keyword to
+  non-secret values would dilute its semantic.
+
+### Security
+
+- Closes the "secret var ambient adoption" backlog item from the
+  3.4.1 roadmap. The prior end-of-function `memset` pattern
+  zeroed buffers only on the happy-path return; with `secret
+  var`, the compiler emits zeroization on every return including
+  early-exit error paths (e.g. the `aad_len < 0` /
+  `pt_len < 0` validation rejects in encrypt/decrypt — which
+  previously left whatever stack content was already present).
+- Audit pass at `docs/audit/2026-05-23-3.4.3-audit.md`. Zero
+  CRITICAL / HIGH / MEDIUM / LOW findings; seven LOW findings
+  from prior cycles (bump-allocator lifetime) carry forward to
+  3.6 unchanged.
+
+### Performance
+
+- `aes_gcm_encrypt_1kb` 716 µs → 723 µs (+1.0%).
+- `aes_gcm_decrypt_1kb_valid` 715 µs → 729 µs (+2.0%).
+- `aes_gcm_decrypt_1kb_forged` 720 µs → 730 µs (+1.4%).
+
+  Deltas are run-to-run noise plus a small real cost from the
+  compiler-emitted zeroization on return. Within tolerance for
+  the security gain. Numbers logged to `benches/history.csv` as
+  `v3.4.3-secret-var-aesgcm`.
 
 ## [3.4.2] — 2026-05-22
 

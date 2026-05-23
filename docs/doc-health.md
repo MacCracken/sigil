@@ -6,8 +6,12 @@ type: state
 
 # Documentation Health — sigil
 
-> **Last refresh**: 2026-05-22 (v3.4.2 — doc sweep shipped
-> as ride-along on the dist-bundle regen patch release).
+> **Last refresh**: 2026-05-23 (v3.4.3 — `secret var` adoption
+> sweep on `src/aes_gcm.cyr`; new audit
+> `docs/audit/2026-05-23-3.4.3-audit.md`; backlog item
+> "secret var ambient adoption" marked closed in roadmap.md;
+> CHANGELOG / state.md / history.csv bumped). The 2026-05-22
+> v3.4.2 doc-sweep notes below remain accurate.
 > This pass added `docs/development/state.md`, `docs/adr/`
 > (README + template + 3 seed ADRs),
 > `docs/architecture/README.md`, `docs/sources.md`, and this
