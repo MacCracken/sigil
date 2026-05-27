@@ -220,6 +220,28 @@ in-place when an adjacent edit touches the relevant module.
       gate even after the structural fix lands — defence-in-
       depth.
 
+- [ ] **ChaCha20 + ChaCha20-Poly1305 AEAD.** TLS 1.3's second
+      mandatory AEAD ciphersuite (`TLS_CHACHA20_POLY1305_SHA256`,
+      RFC 8439). Poly1305 already ships; the ChaCha20 stream
+      cipher is the gap. Compose the two into the RFC 8439 AEAD
+      (encrypt/decrypt + tag). **Forcing function:** the cyrius
+      v6.2.x native-TLS arc (`lib/tls_native.cyr`, replacing the
+      `libssl`/fdlopen wrapper in `lib/tls.cyr`) needs this for the
+      kernel + sandhi consumers — a bare-metal AGNOS kernel has no
+      `libssl.so.3` to dlopen, so the protocol layer must drive
+      pure-Cyrius AEAD. Schedule into a sigil minor once the cyrius
+      native-TLS slot firms.
+
+- [ ] **X25519 key agreement.** TLS 1.3's default key-exchange
+      group (`x25519`, RFC 7748). The Curve25519 field arithmetic
+      already exists (ed25519 path); X25519 is the ECDH wrapper —
+      clamped scalar × base/peer point → shared secret. **Forcing
+      function:** same cyrius v6.2.x native-TLS arc. Companion to
+      the ChaCha20 item; together they gate the modern TLS 1.3
+      `ChaCha20-Poly1305 + X25519` suite. (AES-GCM + ECDSA-P256/P384
+      + X.509 already ship in sigil 3.4.x, so the RSA/AES suites are
+      already covered for the native stack.)
+
 ## Possible future surfaces
 
 Out-of-scope today; surface if a consumer asks for them.
