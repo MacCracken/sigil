@@ -61,7 +61,7 @@ are greenfield in this cycle.
       2026-05-27.* `src/chacha20.cyr`: `chacha20_block` +
       `chacha20_xor`, 20-round ARX permutation + counter-mode
       keystream. RFC §2.3.2 / §2.4.2 vectors pass. Audit:
-      `docs/audit/2026-05-27-3.5.1-audit.md`.
+      `docs/audit/2026-05-27-3.5-arc-audit.md`.
 
 - [x] **ChaCha20-Poly1305 AEAD (RFC 8439 §2.8).** *Shipped 3.5.2,
       2026-05-27.* `src/chacha20poly1305.cyr`:
@@ -79,17 +79,19 @@ are greenfield in this cycle.
       the Curve25519 field arithmetic in `src/bigint_ext.cyr`
       (`fp_add/sub/mul`, mod 2^255−19); clamped scalar × base/peer
       point → shared secret. RFC §5.2 + §6.1 vectors pass. Audit:
-      `docs/audit/2026-05-27-3.5.3-audit.md`.
+      `docs/audit/2026-05-27-3.5-arc-audit.md`.
 
 **Sequencing decision (closed):** Poly1305 (3.5.0) shipped as a
 self-contained primitive; ChaCha20 (3.5.1), the AEAD (3.5.2), and
 X25519 (3.5.3) followed in the same cycle on the maintainer's
 go-ahead (the native-TLS forcing function was treated as firm).
 The TLS 1.3 `ChaCha20-Poly1305 + X25519` suite is now
-feature-complete and shipped in sigil. **3.5.4 closeout** runs the
-CLAUDE.md Closeout Pass (full suite + bench, dead-code audit,
-stale-comment sweep, security re-scan, downstream check, doc sync,
-clean build) as the last patch of the 3.5 line before 3.6.0.
+feature-complete and shipped in sigil. **3.5.4 closeout (shipped
+2026-05-27)** ran the CLAUDE.md Closeout Pass (full suite + bench,
+dead-code audit, stale-comment sweep, security re-scan, downstream
+check, doc sync, clean build) and consolidated the four per-bite
+audits into `docs/audit/2026-05-27-3.5-arc-audit.md`. The 3.5 cycle
+is closed; next minor is 3.6 (parallel verify), then 3.7 (perf).
 
 ## Road to v3.6 — caller-provided scratch for parallel verify
 

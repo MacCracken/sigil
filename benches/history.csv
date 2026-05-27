@@ -131,3 +131,7 @@ timestamp,label,benchmark,estimate,unit
 2026-05-23T00:00:00Z,v3.4.3-secret-var-aesgcm,aes_gcm_encrypt_1kb,723,µs
 2026-05-23T00:00:00Z,v3.4.3-secret-var-aesgcm,aes_gcm_decrypt_1kb_valid,729,µs
 2026-05-23T00:00:00Z,v3.4.3-secret-var-aesgcm,aes_gcm_decrypt_1kb_forged,730,µs
+2026-05-27T00:00:00Z,v3.5.4-modern-crypto,chacha20_xor_1kb,43,µs
+2026-05-27T00:00:00Z,v3.5.4-modern-crypto,poly1305_mac_1kb,3,µs
+2026-05-27T00:00:00Z,v3.5.4-modern-crypto,chacha20poly1305_encrypt_1kb,52,µs
+2026-05-27T00:00:00Z,v3.5.4-modern-crypto,x25519_base,2.965,ms

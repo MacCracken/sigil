@@ -7,12 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-(none — tip is 3.5.3.) **Next: 3.5.4 — closeout.** The last patch
-of the 3.5 line before 3.6.0: a full P(-1) Scaffold Hardening /
-Closeout pass per CLAUDE.md — full suite + bench baseline,
-dead-code audit, stale-comment sweep, security re-scan,
-downstream-consumer build check, CHANGELOG/roadmap/state sync,
-version verify, clean-from-scratch build.
+(none — tip is 3.5.4. The 3.5 modern-crypto cycle is closed; 3.6
+parallel-verify and 3.7 perf/Solinas remain gated on forcing
+functions per `docs/development/roadmap.md`.)
+
+## [3.5.4] — 2026-05-27
+
+Closeout of the **3.5 cycle** — the last patch before 3.6.0. No
+source changes: a P(-1) Scaffold Hardening / Closeout pass per
+CLAUDE.md.
+
+### Changed
+
+- **Audit consolidation** — the four per-bite audit docs
+  (`2026-05-27-3.5.{0,1,2,3}-audit.md`) are merged into a single
+  arc audit `docs/audit/2026-05-27-3.5-arc-audit.md`; references in
+  `state.md` / `roadmap.md` repointed.
+- **Benchmarks** — `tests/bcyr/sigil.bcyr` gained ChaCha20 /
+  Poly1305 / AEAD / X25519 cases; `benches/history.csv` row
+  `v3.5.4-modern-crypto` (chacha20_xor_1kb 43 µs, poly1305_mac_1kb
+  3 µs, chacha20poly1305_encrypt_1kb 52 µs, x25519_base 2.965 ms).
+  Notable: the AEAD is ~13× faster than AES-256-GCM at 1 KB on the
+  dev host (AES-GCM's bit-by-bit GHASH dominates).
+- **Docs** — `doc-health.md` refreshed for the arc; `sources.md`,
+  `architecture/overview.md` module map, and ADR 0001/0003
+  cycle-renumber amendments synced.
+
+### Closeout verification
+
+Full suite **1197 assertions / 0 failures**; clean-from-scratch
+build OK; `cyrlint` gate green; security re-scan clean; the 3.5 arc
+is purely additive so consumers stay API-compatible. Full checklist
+in the arc audit.
 
 ## [3.5.3] — 2026-05-27
 

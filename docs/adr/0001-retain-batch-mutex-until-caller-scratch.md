@@ -3,6 +3,12 @@
 **Status**: Accepted
 **Date**: 2026-05-22
 
+> **Amendment (2026-05-27):** the dedicated parallel-verify cycle
+> referenced below as "3.5" was renumbered to **3.6** when the 3.5
+> slot was reassigned to the modern-crypto arc (Poly1305 / ChaCha20
+> / ChaCha20-Poly1305 / X25519, shipped 3.5.0–3.5.3). Read every
+> "3.5" cycle reference here as "3.6". The decision is unchanged.
+
 ## Context
 
 The 3.3 cycle opened with the goal of dropping

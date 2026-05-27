@@ -6,28 +6,27 @@ type: state
 
 # Documentation Health — sigil
 
-> **Last refresh**: 2026-05-23 (v3.4.3 — `secret var` adoption
-> sweep on `src/aes_gcm.cyr`; new audit
-> `docs/audit/2026-05-23-3.4.3-audit.md`; backlog item
-> "secret var ambient adoption" marked closed in roadmap.md;
-> CHANGELOG / state.md / history.csv bumped). The 2026-05-22
-> v3.4.2 doc-sweep notes below remain accurate.
-> This pass added `docs/development/state.md`, `docs/adr/`
-> (README + template + 3 seed ADRs),
-> `docs/architecture/README.md`, `docs/sources.md`, and this
-> ledger. Restructured `CLAUDE.md` to match agnosticos
-> `example_claude.md` template (durable-only content; state
-> pointer block; agnosticos planning links fixed
-> `applications/` → `planning/`). Rewrote `README.md`,
-> `CONTRIBUTING.md`, `SECURITY.md`, `docs/architecture/overview.md`
-> against current 3.4.x surface. **NEW**: `scripts/regen-dist.sh`
-> shipped to close the dist-bundle drift root cause (retired
-> `cyrius distlib` subcommand) — see audit
-> `2026-05-22-3.4.2-audit.md` INFO-1.
+> **Last refresh**: 2026-05-27 (**3.5 arc closeout — 3.5.4**).
+> The 3.5 modern-crypto arc shipped four new primitives — Poly1305
+> (3.5.0), ChaCha20 (3.5.1), ChaCha20-Poly1305 AEAD (3.5.2), X25519
+> (3.5.3) — completing the pure-Cyrius TLS 1.3 `ChaCha20-Poly1305 +
+> X25519` suite; 3.5.4 then ran the Closeout Pass. This sweep:
+> consolidated the four per-bite audits into a single
+> `docs/audit/2026-05-27-3.5-arc-audit.md` (deleted the per-bite
+> files; repointed `state.md` / `roadmap.md`); added
+> `src/{poly1305,chacha20,chacha20poly1305,x25519}.cyr` + matching
+> `tests/tcyr/*.tcyr` + `tests/bcyr/sigil.bcyr` cases +
+> `benches/history.csv` row `v3.5.4-modern-crypto`; extended
+> `sources.md` (ChaCha20, AEAD, RFC 7748); cyrius pin 6.0.1 →
+> 6.0.3; filed an upstream cyrius issue (secret/defer block-cap
+> 8 → 32). Amended ADR 0001 (parallel-verify "3.5" → 3.6) and ADR
+> 0003 (bump-alloc / Solinas "3.6" → 3.7) for the cycle renumber.
+> Prior refresh: 2026-05-23 (v3.4.3); see git history for the
+> 3.4.x sweep detail.
 >
 > **Refresh cadence**: when docs are touched, update the
 > affected row inline. Full audit at minor closeout
-> (next: 3.4.x → 3.5.0 close).
+> (next: 3.5.x → 3.6.0 close).
 >
 > **Scope**: this repo only (`sigil`) — the entire `docs/` tree
 > plus root-level files (README, CHANGELOG, CLAUDE.md, VERSION,
@@ -94,16 +93,16 @@ citation index for every crypto primitive.
 | File | Last touched | Status | Notes |
 |---|---|---|---|
 | `README.md` | 2026-05-22 | ✅ Fresh | Rewritten this sweep; trimmed module-list duplication against `docs/architecture/overview.md`. |
-| `CHANGELOG.md` | 2026-05-22 | ✅ Fresh | Source of truth per CLAUDE.md. Through 3.4.1. Refreshed every release. |
+| `CHANGELOG.md` | 2026-05-27 | ✅ Fresh | Source of truth per CLAUDE.md. Through 3.5.4. Refreshed every release. |
 | `CLAUDE.md` | 2026-05-22 | ✅ Fresh | Restructured to agnosticos `example_claude.md` template. Durable rules only — volatile state moved to `docs/development/state.md`. |
 | `CONTRIBUTING.md` | 2026-05-22 | ✅ Fresh | Rewritten this sweep — removed Rust/cargo references; Cyrius work loop + commit / hook rules from CLAUDE.md. |
 | `SECURITY.md` | 2026-05-22 | ✅ Fresh | Rewritten this sweep — supported versions table moved to 3.4.x / 3.3.x; full crypto-primitive surface (added ECDSA, AES-GCM, HKDF, ML-DSA, X.509, PEM). |
 | `CODE_OF_CONDUCT.md` | (per upstream) | 🔵 Evergreen | Standard contributor covenant. Refresh only when upstream covenant rev. |
 | `LICENSE` | (per upstream) | 🔵 Evergreen | GPL-3.0-only. |
-| `VERSION` | 2026-05-22 | ✅ Fresh | `3.4.1`. Bumped every release. |
-| `cyrius.cyml` | 2026-05-22 | ✅ Fresh | Added `pem.cyr` to `[lib].modules` (was missing — would have shipped a dist bundle without the PEM decoder). Added test-layout comment block. |
-| `scripts/regen-dist.sh` | 2026-05-22 | ✅ Fresh | **New at 3.4.2.** Replaces the retired `cyrius distlib` subcommand. Re-run when `[lib].modules` changes or when a listed module needs its update to land in the dist bundle. |
-| `dist/sigil.cyr` | 2026-05-22 | ✅ Fresh | Regenerated at 3.4.2. Bundle grew 9,457 → 14,086 lines after closing ten module additions of drift since 3.2.0. |
+| `VERSION` | 2026-05-27 | ✅ Fresh | `3.5.4`. Bumped every release. |
+| `cyrius.cyml` | 2026-05-27 | ✅ Fresh | 3.5 arc added `poly1305`, `chacha20`, `chacha20poly1305`, `x25519` to `[lib].modules`; toolchain pin bumped 6.0.1 → 6.0.3. (3.4.2 added `pem.cyr` + the test-layout comment block.) |
+| `scripts/regen-dist.sh` | 2026-05-27 | ✅ Fresh | New at 3.4.2 (replaces the retired `cyrius distlib`). 3.5 arc added the four new crypto modules to its `MODULES` list (kept in sync with `cyrius.cyml`). Re-run when `[lib].modules` changes. |
+| `dist/sigil.cyr` | 2026-05-27 | ✅ Fresh | Regenerated each 3.5.x bite. ~14,768 lines after the four crypto modules landed (14,086 at 3.4.2). |
 | `benchmarks-rust-v-cyrius.md` | (closed) | 🔵 Evergreen | Frozen cross-implementation perf baseline. CLAUDE.md (Current Status, retired) declares this archived comparison — not rebuilt per release. |
 
 ---
@@ -113,7 +112,7 @@ citation index for every crypto primitive.
 | File | Last touched | Status | Notes |
 |---|---|---|---|
 | `README.md` | 2026-05-22 | ✅ Fresh | New this sweep. Index + candidates for the first numbered notes (currently empty; promote from CLAUDE.md's "Known Cyrius Compiler Quirks" when a reader hits one from grep). |
-| `overview.md` | 2026-05-22 | ✅ Fresh | Rewritten this sweep — full 3.4.1 module map + TEE attestation data-flow narrative + parallel-batch verify framing. |
+| `overview.md` | 2026-05-27 | ✅ Fresh | Module map + TEE data-flow + parallel-batch framing; 3.5 arc added the four modern-crypto modules (poly1305, chacha20, chacha20poly1305, x25519) to the map. |
 
 ---
 
@@ -123,9 +122,9 @@ citation index for every crypto primitive.
 |---|---|---|---|
 | `README.md` | 2026-05-22 | ✅ Fresh | New this sweep. ADR index + conventions (per agnosticos template). |
 | `template.md` | 2026-05-22 | ✅ Fresh | New this sweep. Verbatim shape from `sit/docs/adr/template.md`. |
-| `0001-retain-batch-mutex-until-caller-scratch.md` | 2026-05-22 | ✅ Fresh / 🔵 Evergreen-ish | Captures the 3.3 → 3.5 mutex-drop deferral rationale. Re-read at 3.5 cycle open. |
+| `0001-retain-batch-mutex-until-caller-scratch.md` | 2026-05-27 | ✅ Fresh / 🔵 Evergreen-ish | Mutex-drop deferral rationale. **Amended 2026-05-27**: parallel-verify cycle renumbered 3.5 → 3.6 (the 3.5 slot became the modern-crypto arc). Re-read at 3.6 cycle open. |
 | `0002-mldsa-cmdline-gate.md` | 2026-05-22 | ✅ Fresh | Captures the `-D SIGIL_PQC` gate rationale (cyrius preprocessor 1 MB cap). Re-read when cyrius raises the cap. |
-| `0003-bump-alloc-drift-acceptable-until-3-6.md` | 2026-05-22 | ✅ Fresh | Captures the seven open LOW findings as a batched closure target. Re-read at 3.6 cycle open. |
+| `0003-bump-alloc-drift-acceptable-until-3-6.md` | 2026-05-27 | ✅ Fresh | Seven open LOW findings as a batched closure target. **Amended 2026-05-27**: cycle renumbered 3.6 → 3.7 (filename keeps its immutable NNNN index). Re-read at 3.7 cycle open. |
 
 ---
 
@@ -148,9 +147,12 @@ finding closes).
 | `2026-05-22-3.4.0-audit.md` | 2026-05-22 | 🔵 Dated artifact (3.4.0 closeout) |
 | `2026-05-22-3.4.1-audit.md` | 2026-05-22 | 🔵 Dated artifact (3.4.1 closeout) |
 | `2026-05-22-3.4.2-audit.md` | 2026-05-22 | 🔵 Dated artifact (3.4.2 closeout — packaging-fix release; INFO-only) |
+| `2026-05-23-3.4.3-audit.md` | 2026-05-23 | 🔵 Dated artifact (3.4.3 — `secret var` aes_gcm sweep) |
+| `2026-05-27-3.5-arc-audit.md` | 2026-05-27 | 🔵 Dated artifact (**3.5 arc, 3.5.0–3.5.4**) — consolidates the four per-bite audits; the per-bite `3.5.0/.1/.2/.3-audit.md` files were merged here and removed. |
 
 **Audit floor**: 7 open LOW findings (bump-allocator
-lifetime), batched closure at 3.6 per ADR 0003. Zero
+lifetime), batched closure at **3.7** per ADR 0003 (renumbered
+from 3.6 when the 3.5 slot became the modern-crypto arc). Zero
 CRITICAL / HIGH / MEDIUM outstanding.
 
 Naming convention note: multi-cycle days (e.g. 2026-05-22
@@ -164,8 +166,8 @@ form is reserved for the first cycle of a day.
 
 | File | Last touched | Status | Notes |
 |---|---|---|---|
-| `roadmap.md` | 2026-05-22 | ✅ Fresh | Cleaned this sweep — removed 3.4.x completed items (now in CHANGELOG + state.md), trimmed renumber breadcrumbs, bumped LOW count to 7. |
-| `state.md` | 2026-05-22 | ✅ Fresh | **New this sweep.** Live state snapshot — bumped every release. Replaces the volatile content that was previously inlined in CLAUDE.md. |
+| `roadmap.md` | 2026-05-27 | ✅ Fresh | 3.5 arc: new v3.5 crypto cycle (Poly1305/ChaCha20/AEAD/X25519, all shipped), parallel-verify slid to v3.6 and perf/Solinas to v3.7; 3.5.4 closeout note added. |
+| `state.md` | 2026-05-27 | ✅ Fresh | Live state snapshot — bumped every release. Through 3.5.4; in-flight slots show the shipped 3.5 bites + planned 3.6/3.7 gating. |
 | `3.0-handoff-2026-04-22.md` | 2026-04-22 | 📦 Archive | Frozen by design — closed-cycle handoff doc. |
 | `3.0-scope.md` | (closed) | 📦 Archive | Frozen by design — closed-cycle scope doc. |
 | `3.2-scope.md` | (closed) | 📦 Archive | Frozen by design — closed-cycle scope doc. |
@@ -200,7 +202,7 @@ internal observation). Archived when resolved.
 
 | File | Last touched | Status | Notes |
 |---|---|---|---|
-| `sources.md` | 2026-05-22 | ✅ Fresh | **New this sweep.** Consolidated RFC / FIPS / NIST / SEC1 / Intel SGX / Intel TDX / AMD SEV-SNP citation index for every primitive sigil implements. Required for domain crates per agnosticos first-party-standards. |
+| `sources.md` | 2026-05-27 | ✅ Fresh | RFC / FIPS / NIST / SEC1 / Intel / AMD citation index for every primitive. 3.5 arc added ChaCha20 + ChaCha20-Poly1305 (RFC 8439 §2.3/§2.4/§2.8) and X25519 (RFC 7748). |
 
 ---
 

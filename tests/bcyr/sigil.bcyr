@@ -24,9 +24,13 @@ include "lib/ct.cyr"
 include "src/hmac.cyr"
 include "src/hkdf.cyr"
 include "src/aes_gcm.cyr"
+include "src/poly1305.cyr"
+include "src/chacha20.cyr"
+include "src/chacha20poly1305.cyr"
 include "src/sha512.cyr"
 include "src/bigint_ext.cyr"
 include "src/ed25519.cyr"
+include "src/x25519.cyr"
 include "lib/keccak.cyr"
 include "src/mldsa_params.cyr"
 include "src/mldsa_reduce.cyr"
@@ -624,6 +628,61 @@ fn main() {
         ri = ri + 1;
     }
     vec_push(benches, b_ver);
+
+    # ============================================================
+    # 3.5 modern-crypto arc — ChaCha20 / Poly1305 / AEAD / X25519
+    # ============================================================
+    var cc_key = alloc(32); memset(cc_key, 0x42, 32);
+    var cc_nonce = alloc(12); memset(cc_nonce, 0x24, 12);
+    var cc_out = alloc(1024);
+
+    var b_cc = bench_new("chacha20_xor_1kb");
+    ri = 0;
+    while (ri < rounds) {
+        bench_batch_start(b_cc);
+        var bi = 0;
+        while (bi < 1000) { chacha20_xor(cc_key, cc_nonce, 1, data, 1024, cc_out); bi = bi + 1; }
+        bench_batch_stop(b_cc, 1000);
+        ri = ri + 1;
+    }
+    vec_push(benches, b_cc);
+
+    var poly_tag = alloc(16);
+    var b_poly = bench_new("poly1305_mac_1kb");
+    ri = 0;
+    while (ri < rounds) {
+        bench_batch_start(b_poly);
+        var bi = 0;
+        while (bi < 1000) { poly1305_mac(cc_key, data, 1024, poly_tag); bi = bi + 1; }
+        bench_batch_stop(b_poly, 1000);
+        ri = ri + 1;
+    }
+    vec_push(benches, b_poly);
+
+    var aead_tag = alloc(16);
+    var b_aead = bench_new("chacha20poly1305_encrypt_1kb");
+    ri = 0;
+    while (ri < rounds) {
+        bench_batch_start(b_aead);
+        var bi = 0;
+        while (bi < 1000) { chacha20poly1305_encrypt(cc_key, cc_nonce, data, 12, data, 1024, cc_out, aead_tag); bi = bi + 1; }
+        bench_batch_stop(b_aead, 1000);
+        ri = ri + 1;
+    }
+    vec_push(benches, b_aead);
+
+    var x_scalar = alloc(32); memset(x_scalar, 0x42, 32);
+    var x_out = alloc(32);
+    var b_x = bench_new("x25519_base");
+    ri = 0;
+    while (ri < rounds) {
+        bench_batch_start(b_x);
+        var bi = 0;
+        while (bi < 10) { x25519_base(x_scalar, x_out); bi = bi + 1; }
+        bench_batch_stop(b_x, 10);
+        ri = ri + 1;
+    }
+    vec_push(benches, b_x);
 
     # Report
     syscall(1, 1, "=== Sigil Benchmarks ===\n", 24);

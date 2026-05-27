@@ -3,6 +3,13 @@
 **Status**: Accepted
 **Date**: 2026-05-22
 
+> **Amendment (2026-05-27):** the unified `_into` / Solinas cycle
+> referenced below (and in the filename) as "3.6" was renumbered to
+> **3.7** — and the parallel-verify "3.5" to "3.6" — when the 3.5
+> slot was reassigned to the modern-crypto arc. Read "3.6" here as
+> "3.7". The seven-LOW audit floor and the decision are unchanged;
+> the ADR file is not renamed (NNNN index is immutable).
+
 ## Context
 
 Seven open LOW audit findings (one in 3.2.2, one in 3.2.4, two
