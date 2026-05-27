@@ -57,28 +57,36 @@ are greenfield in this cycle.
       that needs it. Key caveat documented in the module header:
       **one-time key — never reuse across two messages.**
 
-- [ ] **ChaCha20 stream cipher (RFC 8439 §2.4).** The 20-round
-      quarter-round permutation + counter-mode keystream. Gated on
-      the cyrius v6.2.x native-TLS slot.
+- [x] **ChaCha20 stream cipher (RFC 8439 §2.4).** *Shipped 3.5.1,
+      2026-05-27.* `src/chacha20.cyr`: `chacha20_block` +
+      `chacha20_xor`, 20-round ARX permutation + counter-mode
+      keystream. RFC §2.3.2 / §2.4.2 vectors pass. Audit:
+      `docs/audit/2026-05-27-3.5.1-audit.md`.
 
-- [ ] **ChaCha20-Poly1305 AEAD (RFC 8439 §2.8).** Compose: derive
-      the Poly1305 one-time key from the ChaCha20 keystream
+- [x] **ChaCha20-Poly1305 AEAD (RFC 8439 §2.8).** *Implemented
+      2026-05-27 (in `[Unreleased]`).* `src/chacha20poly1305.cyr`:
+      derive the Poly1305 one-time key from the ChaCha20 keystream
       (counter 0), authenticate `AAD || pad16 || ciphertext ||
-      pad16 || len(AAD)_le64 || len(ct)_le64`. This is the bite
-      that forces the Poly1305 streaming interface (or a
-      contiguous-buffer construction). Gated with ChaCha20.
+      pad16 || len(AAD)_le64 || len(ct)_le64`. Resolved the
+      "streaming vs contiguous-buffer" choice in favour of a
+      per-call `fl_alloc` mac-data buffer (correct allocator for
+      per-call scratch; does not touch the bump-allocator audit
+      floor). A streaming Poly1305 remains a future optimization
+      for very large messages. RFC §2.8.2 vector passes.
 
-- [ ] **X25519 key agreement (RFC 7748).** Montgomery-ladder ECDH
-      reusing the Curve25519 field arithmetic already in
-      `src/bigint_ext.cyr` (`fp_add/sub/mul`, mod 2^255−19):
-      clamped scalar × base/peer point → shared secret. Companion
-      to ChaCha20; together they gate the TLS 1.3
-      `ChaCha20-Poly1305 + X25519` suite. Gated on the same arc.
+- [x] **X25519 key agreement (RFC 7748).** *Implemented 2026-05-27
+      (in `[Unreleased]`).* `src/x25519.cyr`: Montgomery-ladder ECDH
+      reusing the Curve25519 field arithmetic in
+      `src/bigint_ext.cyr` (`fp_add/sub/mul`, mod 2^255−19); clamped
+      scalar × base/peer point → shared secret. RFC §5.2 + §6.1
+      vectors pass.
 
-**Sequencing decision:** Poly1305 (3.5.0) ships now as a
-self-contained primitive. ChaCha20, the AEAD composition, and
-X25519 land as the cyrius v6.2.x native-TLS slot firms — they have
-no consumer until the protocol layer drives them.
+**Sequencing decision (closed):** Poly1305 (3.5.0) shipped as a
+self-contained primitive; ChaCha20, the AEAD, and X25519 followed
+in the same cycle on the maintainer's go-ahead (the native-TLS
+forcing function was treated as firm). The TLS 1.3
+`ChaCha20-Poly1305 + X25519` suite is now feature-complete in
+sigil, pending release tags for the three `[Unreleased]` bites.
 
 ## Road to v3.6 — caller-provided scratch for parallel verify
 

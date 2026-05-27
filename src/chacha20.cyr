@@ -1,0 +1,167 @@
+# chacha20.cyr — ChaCha20 stream cipher (RFC 8439 §2.3 / §2.4)
+#
+# ChaCha20 is D. J. Bernstein's 256-bit stream cipher. It keys a
+# 4x4 matrix of 32-bit words — 4 constant words ("expand 32-byte
+# k"), 8 key words, a 32-bit block counter, and a 96-bit nonce —
+# then applies 20 rounds (10 column/diagonal double-rounds) of the
+# ARX quarter-round and adds the original state back to produce a
+# 64-byte keystream block. Encryption XORs the keystream into the
+# plaintext; decryption is the identical XOR.
+#
+# It is the cipher half of the ChaCha20-Poly1305 AEAD (RFC 8439
+# §2.8) — TLS 1.3's `TLS_CHACHA20_POLY1305_SHA256` suite — and the
+# source of the Poly1305 one-time key (block at counter 0).
+#
+# THREAD-SAFETY: the `chacha20_block` working state lives in
+# function-scope `var` arrays (Cyrius static globals, quirk #1);
+# each call fully writes them before reading, so serial use is
+# correct. Multi-threaded callers follow the per-worker-scratch
+# discipline of the v3.6 cycle — ChaCha20 is not yet on a parallel
+# path.
+#
+# Citation: RFC 8439 §2.1 (quarter round), §2.3 (block function),
+# §2.3.2 / §2.4.2 (test vectors). See docs/sources.md.
+
+# ================================================================
+# Little-endian 4-byte codec
+# ================================================================
+
+fn _chacha_u8to32le(p): i64 {
+    return (load8(p) & 0xFF)
+         | ((load8(p + 1) & 0xFF) << 8)
+         | ((load8(p + 2) & 0xFF) << 16)
+         | ((load8(p + 3) & 0xFF) << 24);
+}
+
+fn _chacha_u32to8le(p, v): i64 {
+    store8(p,     v & 0xFF);
+    store8(p + 1, (v >> 8) & 0xFF);
+    store8(p + 2, (v >> 16) & 0xFF);
+    store8(p + 3, (v >> 24) & 0xFF);
+    return 0;
+}
+
+# 32-bit left rotation. v is held in [0, 2^32); mask after the
+# shift-or so the result stays a clean 32-bit word.
+fn _chacha_rotl32(v, n): i64 {
+    return ((v << n) | (v >> (32 - n))) & 0xffffffff;
+}
+
+# ================================================================
+# Quarter round (RFC 8439 §2.1) over four words of the working
+# state array `ws` (16 i64 slots, one 32-bit word each).
+# ================================================================
+fn _chacha_qr(ws, a, b, c, d): i64 {
+    var va = load64(ws + a * 8);
+    var vb = load64(ws + b * 8);
+    var vc = load64(ws + c * 8);
+    var vd = load64(ws + d * 8);
+
+    va = (va + vb) & 0xffffffff; vd = _chacha_rotl32(vd ^ va, 16);
+    vc = (vc + vd) & 0xffffffff; vb = _chacha_rotl32(vb ^ vc, 12);
+    va = (va + vb) & 0xffffffff; vd = _chacha_rotl32(vd ^ va, 8);
+    vc = (vc + vd) & 0xffffffff; vb = _chacha_rotl32(vb ^ vc, 7);
+
+    store64(ws + a * 8, va);
+    store64(ws + b * 8, vb);
+    store64(ws + c * 8, vc);
+    store64(ws + d * 8, vd);
+    return 0;
+}
+
+# ================================================================
+# chacha20_block — one 64-byte keystream block
+#   key      — 32 bytes
+#   nonce    — 12 bytes (96-bit)
+#   counter  — 32-bit block counter
+#   out      — 64-byte keystream buffer (caller-allocated)
+# Returns 0.
+# ================================================================
+fn chacha20_block(key, nonce, counter, out): i64 {
+    secret var st[128];   # 16 words: constants | key | counter | nonce
+
+    # Constants — little-endian words of "expand 32-byte k".
+    store64(&st + 0,  0x61707865);
+    store64(&st + 8,  0x3320646e);
+    store64(&st + 16, 0x79622d32);
+    store64(&st + 24, 0x6b206574);
+
+    # Key words 4..11.
+    var i = 0;
+    while (i < 8) {
+        store64(&st + (4 + i) * 8, _chacha_u8to32le(key + i * 4));
+        i = i + 1;
+    }
+
+    # Block counter — word 12.
+    store64(&st + 12 * 8, counter & 0xffffffff);
+
+    # Nonce words 13..15.
+    i = 0;
+    while (i < 3) {
+        store64(&st + (13 + i) * 8, _chacha_u8to32le(nonce + i * 4));
+        i = i + 1;
+    }
+
+    # Working copy.
+    secret var ws[128];
+    memcpy(&ws, &st, 128);
+
+    # 20 rounds = 10 column+diagonal double-rounds.
+    var r = 0;
+    while (r < 10) {
+        _chacha_qr(&ws, 0, 4, 8, 12);
+        _chacha_qr(&ws, 1, 5, 9, 13);
+        _chacha_qr(&ws, 2, 6, 10, 14);
+        _chacha_qr(&ws, 3, 7, 11, 15);
+        _chacha_qr(&ws, 0, 5, 10, 15);
+        _chacha_qr(&ws, 1, 6, 11, 12);
+        _chacha_qr(&ws, 2, 7, 8, 13);
+        _chacha_qr(&ws, 3, 4, 9, 14);
+        r = r + 1;
+    }
+
+    # Add the original state and serialize little-endian.
+    i = 0;
+    while (i < 16) {
+        var v = (load64(&ws + i * 8) + load64(&st + i * 8)) & 0xffffffff;
+        _chacha_u32to8le(out + i * 4, v);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ================================================================
+# chacha20_xor — encrypt/decrypt `in_len` bytes
+#   Generates keystream from `counter` upward, one 64-byte block at
+#   a time, XORing into the input. Decryption calls this with the
+#   ciphertext (XOR is involutive). The counter increments per
+#   block mod 2^32.
+#   key/nonce/counter as chacha20_block; input/out are in_len bytes.
+# Returns 0.
+#
+# USAGE LIMIT: the 32-bit counter wraps after 2^32 blocks, so a
+# single (key, nonce) pair must encrypt at most 2^32 * 64 B = 256
+# GiB (RFC 8439 §2.4). Beyond that the keystream repeats. Far above
+# any sigil payload, but a hard cap the caller must respect — never
+# reuse a (key, nonce) across messages totalling more than that.
+# ================================================================
+fn chacha20_xor(key, nonce, counter, input, in_len, out): i64 {
+    secret var ks[64];
+    var done = 0;
+    var ctr = counter & 0xffffffff;
+    while (done < in_len) {
+        chacha20_block(key, nonce, ctr, &ks);
+        var n = in_len - done;
+        if (n > 64) { n = 64; }
+        var j = 0;
+        while (j < n) {
+            store8(out + done + j,
+                   (load8(input + done + j) ^ load8(&ks + j)) & 0xFF);
+            j = j + 1;
+        }
+        ctr = (ctr + 1) & 0xffffffff;
+        done = done + 64;
+    }
+    return 0;
+}

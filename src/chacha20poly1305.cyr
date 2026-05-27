@@ -1,0 +1,131 @@
+# chacha20poly1305.cyr — ChaCha20-Poly1305 AEAD (RFC 8439 §2.8)
+#
+# The IETF AEAD construction: ChaCha20 (src/chacha20.cyr) for
+# confidentiality, Poly1305 (src/poly1305.cyr) for authenticity.
+# This is TLS 1.3's `TLS_CHACHA20_POLY1305_SHA256` suite and the
+# pure-Cyrius alternative to AES-256-GCM (src/aes_gcm.cyr) for the
+# native-TLS arc.
+#
+# Construction (RFC 8439 §2.8):
+#   1. one-time Poly1305 key = first 32 bytes of the ChaCha20
+#      keystream block at counter 0 (key, nonce).
+#   2. ciphertext = ChaCha20(key, nonce, counter=1, plaintext).
+#   3. mac_data = AAD || pad16(AAD) || ct || pad16(ct)
+#                 || le64(len AAD) || le64(len ct).
+#   4. tag = Poly1305(one-time key, mac_data).
+# Decryption recomputes and verifies the tag in constant time
+# BEFORE releasing plaintext (AEAD contract — matches aes_gcm).
+#
+# The per-message Poly1305 key is fresh per (key, nonce), so the
+# one-time-key contract of src/poly1305.cyr is satisfied by
+# construction — the caller must still never reuse a nonce under
+# one key (standard AEAD requirement).
+#
+# Citation: RFC 8439 §2.8 (AEAD), §2.8.2 (test vector). See
+# docs/sources.md.
+
+# Bytes of zero-padding needed to round `n` up to a 16-byte
+# multiple (0 when already aligned).
+fn _cp_pad16len(n): i64 {
+    var rem = n % 16;
+    if (rem == 0) { return 0; }
+    return 16 - rem;
+}
+
+# Store `v` as 8 little-endian bytes at p (mac-data length field).
+fn _cp_store_le64(p, v): i64 {
+    var i = 0;
+    while (i < 8) {
+        store8(p + i, (v >> (i * 8)) & 0xFF);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Derive the one-time Poly1305 key: first 32 bytes of the ChaCha20
+# keystream block at counter 0.
+fn _cp_keygen(key, nonce, otk_out): i64 {
+    secret var block[64];
+    chacha20_block(key, nonce, 0, &block);
+    memcpy(otk_out, &block, 32);
+    return 0;
+}
+
+# Compute the Poly1305 tag over the RFC 8439 §2.8 mac_data layout.
+# mac_data is built in a per-call fl_alloc scratch buffer (public
+# data — AAD + ciphertext — so no zeroization needed) and freed
+# before return.
+fn _cp_tag(otk, aad, aad_len, ct, ct_len, tag_out): i64 {
+    var aad_pad = _cp_pad16len(aad_len);
+    var ct_pad = _cp_pad16len(ct_len);
+    var mac_len = aad_len + aad_pad + ct_len + ct_pad + 16;
+
+    var md = fl_alloc(mac_len);
+    memset(md, 0, mac_len);           # zero-fills both pad regions
+
+    var off = 0;
+    memcpy(md + off, aad, aad_len);
+    off = off + aad_len + aad_pad;
+    memcpy(md + off, ct, ct_len);
+    off = off + ct_len + ct_pad;
+    _cp_store_le64(md + off, aad_len);
+    off = off + 8;
+    _cp_store_le64(md + off, ct_len);
+
+    poly1305_mac(otk, md, mac_len, tag_out);
+    fl_free(md);
+    return 0;
+}
+
+# ================================================================
+# chacha20poly1305_encrypt
+#   key      — 32 bytes
+#   nonce    — 12 bytes (96-bit)
+#   aad      — aad_len bytes of additional authenticated data
+#   pt       — plaintext, pt_len bytes
+#   ct_out   — ciphertext, pt_len bytes (caller-allocated)
+#   tag_out  — 16-byte tag (caller-allocated)
+# Returns ERR_NONE, or ERR_INVALID_INPUT on a negative length.
+# ================================================================
+fn chacha20poly1305_encrypt(key, nonce, aad, aad_len, pt, pt_len, ct_out, tag_out): i64 {
+    if (aad_len < 0) { return ERR_INVALID_INPUT; }
+    if (pt_len < 0) { return ERR_INVALID_INPUT; }
+
+    secret var otk[32];
+    _cp_keygen(key, nonce, &otk);
+
+    chacha20_xor(key, nonce, 1, pt, pt_len, ct_out);
+    _cp_tag(&otk, aad, aad_len, ct_out, pt_len, tag_out);
+    return ERR_NONE;
+}
+
+# ================================================================
+# chacha20poly1305_decrypt
+#   key/nonce/aad as above; ct/ct_len the received ciphertext;
+#   tag the received 16-byte tag; pt_out the recovered plaintext
+#   (caller-allocated, ct_len bytes).
+# Returns:
+#   ERR_NONE on success (pt_out populated).
+#   ERR_INTEGRITY_MISMATCH on tag mismatch (pt_out zeroed, plaintext
+#       NOT released — AEAD contract).
+#   ERR_INVALID_INPUT on a negative length.
+# ================================================================
+fn chacha20poly1305_decrypt(key, nonce, aad, aad_len, ct, ct_len, tag, pt_out): i64 {
+    if (aad_len < 0) { return ERR_INVALID_INPUT; }
+    if (ct_len < 0) { return ERR_INVALID_INPUT; }
+
+    secret var otk[32];
+    _cp_keygen(key, nonce, &otk);
+
+    # Verify the tag over the received ciphertext BEFORE deriving
+    # plaintext. Constant-time compare via the stdlib ct_eq_bytes.
+    secret var expected[16];
+    _cp_tag(&otk, aad, aad_len, ct, ct_len, &expected);
+    if (ct_eq_bytes(&expected, tag, 16) == 0) {
+        memset(pt_out, 0, ct_len);
+        return ERR_INTEGRITY_MISMATCH;
+    }
+
+    chacha20_xor(key, nonce, 1, ct, ct_len, pt_out);
+    return ERR_NONE;
+}

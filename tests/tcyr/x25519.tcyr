@@ -1,0 +1,88 @@
+# x25519.tcyr — X25519 ECDH key agreement (RFC 7748)
+#
+# Vectors:
+#   1-2. RFC 7748 §5.2 — single scalar-mult vectors (scalar, u) →
+#        output u-coordinate. Anchors clamping, u decoding, the
+#        Montgomery ladder, and final inversion.
+#   3-6. RFC 7748 §6.1 — full Diffie-Hellman: derive Alice's and
+#        Bob's public keys from the base point, then confirm both
+#        sides compute the same shared secret.
+
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fmt.cyr"
+include "lib/json.cyr"
+include "lib/sakshi.cyr"
+include "lib/chrono.cyr"
+include "lib/bigint.cyr"
+
+include "src/types.cyr"
+include "src/error.cyr"
+include "src/hex.cyr"
+include "src/bigint_ext.cyr"
+include "src/x25519.cyr"
+
+fn main() {
+    alloc_init();
+
+    # ============================================================
+    # RFC 7748 §5.2 — vector 1
+    # ============================================================
+    test_group("X25519 §5.2 vector 1");
+    var k1[32];
+    hex_decode_into("a546e36bf0527c9d3b16154b82465edd62144c0ac1fc5a18506a2244ba449ac4", 64, &k1);
+    var u1[32];
+    hex_decode_into("e6db6867583030db3594c1a424b15f7c726624ec26b3353b10a903a6d0ab1c4c", 64, &u1);
+    var r1[32];
+    x25519(&k1, &u1, &r1);
+    assert_streq(hex_encode(&r1, 32), "c3da55379de9c6908e94ea4df28d084f32eccf03491c71f754b4075577a28552", "rfc7748 5.2 v1");
+
+    # ============================================================
+    # RFC 7748 §5.2 — vector 2
+    # ============================================================
+    test_group("X25519 §5.2 vector 2");
+    var k2[32];
+    hex_decode_into("4b66e9d4d1b4673c5ad22691957d6af5c11b6421e0ea01d42ca4169e7918ba0d", 64, &k2);
+    var u2[32];
+    hex_decode_into("e5210f12786811d3f4b7959d0538ae2c31dbe7106fc03c3efc4cd549c715a493", 64, &u2);
+    var r2[32];
+    x25519(&k2, &u2, &r2);
+    assert_streq(hex_encode(&r2, 32), "95cbde9476e8907d7aade45cb4b873f88b595a68799fa152e6f8f7647aac7957", "rfc7748 5.2 v2");
+
+    # ============================================================
+    # RFC 7748 §6.1 — Diffie-Hellman
+    # ============================================================
+    test_group("X25519 §6.1 public keys");
+    var alice_priv[32];
+    hex_decode_into("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a", 64, &alice_priv);
+    var bob_priv[32];
+    hex_decode_into("5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb", 64, &bob_priv);
+
+    var alice_pub[32];
+    x25519_base(&alice_priv, &alice_pub);
+    assert_streq(hex_encode(&alice_pub, 32), "8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a", "alice pub");
+
+    var bob_pub[32];
+    x25519_base(&bob_priv, &bob_pub);
+    assert_streq(hex_encode(&bob_pub, 32), "de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f", "bob pub");
+
+    test_group("X25519 §6.1 shared secret");
+    var shared_ab[32];
+    x25519(&alice_priv, &bob_pub, &shared_ab);
+    assert_streq(hex_encode(&shared_ab, 32), "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742", "alice*bob_pub");
+
+    var shared_ba[32];
+    x25519(&bob_priv, &alice_pub, &shared_ba);
+    assert_streq(hex_encode(&shared_ba, 32), "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742", "bob*alice_pub");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

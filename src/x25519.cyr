@@ -1,0 +1,154 @@
+# x25519.cyr — X25519 Diffie-Hellman key agreement (RFC 7748)
+#
+# X25519 is ECDH on Curve25519 in Montgomery form
+#   v^2 = u^3 + 486662*u^2 + u   over GF(2^255 - 19).
+# It is an x-coordinate-only scalar multiplication: given a 32-byte
+# scalar and a 32-byte u-coordinate, the Montgomery ladder computes
+# scalar·u and returns the resulting u-coordinate. This is TLS
+# 1.3's default key-exchange group (`x25519`).
+#
+# The field arithmetic is reused wholesale from src/bigint_ext.cyr
+# (`fp_add/sub/mul/sq/inv`, all mod 2^255-19) — the same primitives
+# that back Ed25519. X25519 adds only the Montgomery ladder, the
+# RFC 7748 scalar clamp, and the constant-time conditional swap.
+#
+# CONSTANT-TIME: the ladder is the classic Montgomery double-and-
+# add with a `cswap` driven by an arithmetic mask, so the sequence
+# of field operations is independent of the secret scalar bits.
+#
+# ZEROIZATION: all working state — the clamped scalar and every
+# ladder field element — lives in a single `secret var` scratch
+# block (`W`), zeroized by the compiler on return. (One block, not
+# eighteen: Cyrius caps a function at 8 `secret`/`defer` blocks, and
+# a single sliced block is also the shape the v3.6 caller-scratch
+# cycle wants.) Named pointer locals slice W for readability. Cap
+# raise filed upstream:
+# https://github.com/MacCracken/cyrius/blob/main/docs/development/issues/2026-05-27-secret-defer-block-per-fn-cap.md
+#
+# THREAD-SAFETY: `W` is a function-scope `var` array (Cyrius static
+# global, quirk #1); each x25519 call reinitializes it up front, so
+# serial use is correct. Not yet on a parallel path.
+#
+# Citation: RFC 7748 §5 (the ladder + clamp), §5.2 / §6.1 (test
+# vectors). a24 = (486662 - 2) / 4 = 121665. See docs/sources.md.
+
+# Constant-time conditional swap of two field elements (4 limbs).
+# When swap==1 the mask is all-ones and the xor-swap exchanges a/b;
+# when swap==0 the mask is zero and both are left unchanged.
+fn _x25519_cswap(swap, a, b): i64 {
+    var mask = 0 - swap;
+    var i = 0;
+    while (i < 4) {
+        var t = mask & (load64(a + i * 8) ^ load64(b + i * 8));
+        store64(a + i * 8, load64(a + i * 8) ^ t);
+        store64(b + i * 8, load64(b + i * 8) ^ t);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ================================================================
+# x25519 — scalar·u on Curve25519
+#   scalar — 32-byte little-endian secret scalar
+#   u_in   — 32-byte little-endian u-coordinate (peer public key)
+#   out    — 32-byte little-endian result u-coordinate
+# Returns 0.
+# ================================================================
+fn x25519(scalar, u_in, out): i64 {
+    # Single zeroized scratch block; 18 field-element slots.
+    secret var W[576];
+    memset(&W, 0, 576);
+    var x_1 = &W + 0;
+    var x_2 = &W + 32;
+    var z_2 = &W + 64;
+    var x_3 = &W + 96;
+    var z_3 = &W + 128;
+    var A   = &W + 160;
+    var AA  = &W + 192;
+    var B   = &W + 224;
+    var BB  = &W + 256;
+    var E   = &W + 288;
+    var C   = &W + 320;
+    var D   = &W + 352;
+    var DA  = &W + 384;
+    var CB  = &W + 416;
+    var t0  = &W + 448;
+    var t1  = &W + 480;
+    var a24 = &W + 512;
+    var k   = &W + 544;
+
+    # Clamp the scalar (RFC 7748 §5): clear the low 3 bits, clear
+    # the top bit, set the second-highest bit.
+    memcpy(k, scalar, 32);
+    store8(k, load8(k) & 248);
+    store8(k + 31, (load8(k + 31) & 127) | 64);
+
+    # Decode the u-coordinate: mask off the most significant bit,
+    # then load little-endian into limb form. (Plain `var` — public
+    # peer data, and arrays that aren't `secret`/`defer` don't count
+    # against the 8-block cap.)
+    var ub[32];
+    memcpy(&ub, u_in, 32);
+    store8(&ub + 31, load8(&ub + 31) & 127);
+    u256_load_le(x_1, &ub);
+
+    # Ladder state: (x_2,z_2) = (1,0), (x_3,z_3) = (u,1).
+    store64(x_2, 1);
+    memcpy(x_3, x_1, 32);
+    store64(z_3, 1);
+
+    # a24 = 121665.
+    store64(a24, 121665);
+
+    var swap = 0;
+    var t = 254;
+    while (t >= 0) {
+        var k_t = ((load8(k + (t >> 3)) & 0xFF) >> (t & 7)) & 1;
+        swap = swap ^ k_t;
+        _x25519_cswap(swap, x_2, x_3);
+        _x25519_cswap(swap, z_2, z_3);
+        swap = k_t;
+
+        # Differential add-and-double (RFC 7748 §5).
+        fp_add(A, x_2, z_2);        # A  = x2 + z2
+        fp_sq(AA, A);               # AA = A^2
+        fp_sub(B, x_2, z_2);        # B  = x2 - z2
+        fp_sq(BB, B);               # BB = B^2
+        fp_sub(E, AA, BB);          # E  = AA - BB
+        fp_add(C, x_3, z_3);        # C  = x3 + z3
+        fp_sub(D, x_3, z_3);        # D  = x3 - z3
+        fp_mul(DA, D, A);           # DA = D * A
+        fp_mul(CB, C, B);           # CB = C * B
+        fp_add(t0, DA, CB);         # x3 = (DA + CB)^2
+        fp_sq(x_3, t0);
+        fp_sub(t1, DA, CB);         # z3 = x1 * (DA - CB)^2
+        fp_sq(t1, t1);
+        fp_mul(z_3, x_1, t1);
+        fp_mul(x_2, AA, BB);        # x2 = AA * BB
+        fp_mul(t0, a24, E);         # z2 = E * (AA + a24 * E)
+        fp_add(t0, AA, t0);
+        fp_mul(z_2, E, t0);
+
+        t = t - 1;
+    }
+    # Undo the final pending swap.
+    _x25519_cswap(swap, x_2, x_3);
+    _x25519_cswap(swap, z_2, z_3);
+
+    # Result = x_2 / z_2 = x_2 * z_2^(p-2).
+    fp_inv(t0, z_2);
+    fp_mul(t1, x_2, t0);
+    u256_store_le(out, t1);
+    return 0;
+}
+
+# ================================================================
+# x25519_base — public key from a secret scalar: scalar · 9
+#   The Curve25519 base point has u-coordinate 9.
+# ================================================================
+fn x25519_base(scalar, out): i64 {
+    var base[32];
+    memset(&base, 0, 32);
+    store8(&base, 9);
+    return x25519(scalar, &base, out);
+}

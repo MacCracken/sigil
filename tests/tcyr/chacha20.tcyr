@@ -1,0 +1,82 @@
+# chacha20.tcyr — ChaCha20 stream cipher (RFC 8439 §2.3 / §2.4)
+#
+# Vectors:
+#   1. RFC 8439 §2.3.2 — block-function keystream. Key 00..1f,
+#      nonce 00:00:00:09:00:00:00:4a:00:00:00:00, counter 1. The
+#      64-byte serialized block is the published keystream. This
+#      directly anchors state setup + the 20-round permutation +
+#      little-endian serialization.
+#   2. RFC 8439 §2.4.2 — the "sunscreen" encryption vector. Same
+#      key, nonce 00:00:00:00:00:00:00:4a:00:00:00:00, counter 1,
+#      114-byte plaintext → published ciphertext. Exercises the
+#      XOR layer and per-block counter increment (3 blocks).
+#   3. Round-trip — encrypt then re-XOR with the same parameters
+#      recovers the plaintext (keystream XOR is involutive). No
+#      hardcoded vector; catches counter / length-handling bugs.
+
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fmt.cyr"
+include "lib/json.cyr"
+include "lib/sakshi.cyr"
+include "lib/chrono.cyr"
+
+include "src/types.cyr"
+include "src/error.cyr"
+include "src/hex.cyr"
+include "src/chacha20.cyr"
+
+fn main() {
+    alloc_init();
+
+    var key[32];
+    hex_decode_into("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f", 64, &key);
+
+    # ============================================================
+    # RFC 8439 §2.3.2 — block-function keystream
+    # ============================================================
+    test_group("ChaCha20 block §2.3.2");
+    var nonce232[12];
+    hex_decode_into("000000090000004a00000000", 24, &nonce232);
+    var ks[64];
+    chacha20_block(&key, &nonce232, 1, &ks);
+    var ks_hex = hex_encode(&ks, 64);
+    assert_streq(ks_hex,
+        "10f1e7e4d13b5915500fdd1fa32071c4c7d1f4c733c068030422aa9ac3d46c4ed2826446079faa0914c2d705d98b02a2b5129cd1de164eb9cbd083e8a2503c4e",
+        "rfc8439 2.3.2 keystream");
+
+    # ============================================================
+    # RFC 8439 §2.4.2 — sunscreen encryption
+    # ============================================================
+    test_group("ChaCha20 encrypt §2.4.2");
+    var nonce242[12];
+    hex_decode_into("000000000000004a00000000", 24, &nonce242);
+    var pt = "Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it.";
+    var ct[114];
+    chacha20_xor(&key, &nonce242, 1, pt, 114, &ct);
+    var ct_hex = hex_encode(&ct, 114);
+    assert_streq(ct_hex,
+        "6e2e359a2568f98041ba0728dd0d6981e97e7aec1d4360c20a27afccfd9fae0bf91b65c5524733ab8f593dabcd62b3571639d624e65152ab8f530c359f0861d807ca0dbf500d6a6156a38e088a22b65e52bc514d16ccf806818ce91ab77937365af90bbf74a35be6b40b8eedf2785e42874d",
+        "rfc8439 2.4.2 sunscreen ct");
+
+    # ============================================================
+    # Round-trip — decrypt is the same XOR
+    # ============================================================
+    test_group("ChaCha20 round-trip");
+    var back[114];
+    chacha20_xor(&key, &nonce242, 1, &ct, 114, &back);
+    var back_hex = hex_encode(&back, 114);
+    var pt_hex = hex_encode(pt, 114);
+    assert_streq(back_hex, pt_hex, "decrypt recovers plaintext");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

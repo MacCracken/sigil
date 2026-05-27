@@ -36,10 +36,13 @@ src/hkdf.cyr
 src/aes_ni.cyr
 src/aes_gcm.cyr
 src/poly1305.cyr
+src/chacha20.cyr
+src/chacha20poly1305.cyr
 src/sha512.cyr
 src/sha384.cyr
 src/bigint_ext.cyr
 src/ed25519.cyr
+src/x25519.cyr
 src/ecdsa_p256.cyr
 src/ecdsa_p384.cyr
 src/x509.cyr

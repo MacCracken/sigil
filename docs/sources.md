@@ -83,7 +83,35 @@ their specs inline; this file is the cross-module overview.
   decomposition this implementation follows.
   - https://github.com/floodyberry/poly1305-donna
 
+### ChaCha20 stream cipher — `src/chacha20.cyr`
+
+- **RFC 8439** — ChaCha20 and Poly1305 for IETF Protocols
+  (2018-06). §2.1 quarter round, §2.3 block function, §2.3.2 /
+  §2.4.2 test vectors.
+  - https://www.rfc-editor.org/rfc/rfc8439
+- **D. J. Bernstein — "ChaCha, a variant of Salsa20"** (2008): the
+  original cipher.
+  - https://cr.yp.to/chacha/chacha-20080128.pdf
+
+### ChaCha20-Poly1305 AEAD — `src/chacha20poly1305.cyr`
+
+- **RFC 8439** §2.8 — the IETF AEAD construction (one-time-key
+  derivation, mac-data layout); §2.8.2 test vector.
+  - https://www.rfc-editor.org/rfc/rfc8439
+- TLS 1.3 ciphersuite `TLS_CHACHA20_POLY1305_SHA256` (RFC 8446
+  §B.4).
+
 ## Asymmetric primitives
+
+### X25519 key agreement — `src/x25519.cyr` (with `src/bigint_ext.cyr` for field arithmetic)
+
+- **RFC 7748** — Elliptic Curves for Security (2016-01). §5 the
+  Montgomery ladder + scalar clamp; §5.2 / §6.1 test vectors.
+  - https://www.rfc-editor.org/rfc/rfc7748
+- **D. J. Bernstein — "Curve25519: new Diffie-Hellman speed
+  records"** (PKC 2006). The original X25519 design.
+  - https://cr.yp.to/ecdh/curve25519-20060209.pdf
+- Constant-time Montgomery ladder with masked `cswap`.
 
 ### Ed25519 — `src/ed25519.cyr` (with `src/bigint_ext.cyr` for field arithmetic)
 

@@ -7,7 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-(none — tip is 3.5.0)
+Continues the **3.5 cycle — modern AEAD + key agreement
+primitives**. ChaCha20 shipped in 3.5.1; the AEAD and X25519 remain
+here pending their release tags (intended 3.5.2, 3.5.3),
+completing the pure-Cyrius TLS 1.3 `ChaCha20-Poly1305 + X25519`
+suite. Each is validated against its published RFC test vectors.
+
+### Added
+
+- **ChaCha20-Poly1305 AEAD (RFC 8439 §2.8)** —
+  `src/chacha20poly1305.cyr`: `chacha20poly1305_encrypt` +
+  `chacha20poly1305_decrypt`. Poly1305 one-time key derived from
+  the counter-0 ChaCha20 block; ciphertext from counter 1; tag over
+  `aad || pad16 || ct || pad16 || le64(aad_len) || le64(ct_len)`.
+  Decrypt verifies the tag in constant time (`ct_eq_bytes`) before
+  releasing plaintext, returning `ERR_INTEGRITY_MISMATCH` on
+  mismatch — same AEAD contract and return shape as
+  `aes_gcm_decrypt`. Tests (`tests/tcyr/chacha20poly1305.tcyr`,
+  +5): §2.8.2 vector (ciphertext + tag), round-trip, tamper-reject.
+
+- **X25519 key agreement (RFC 7748)** — `src/x25519.cyr`: `x25519`
+  (scalar·u) + `x25519_base` (scalar·9 public-key derivation).
+  Montgomery ladder reusing the Curve25519 field arithmetic in
+  `src/bigint_ext.cyr` (`fp_*`, mod 2^255−19); constant-time
+  `cswap`; RFC 7748 scalar clamp. All ladder state lives in one
+  `secret var` scratch block, zeroized on return. Tests
+  (`tests/tcyr/x25519.tcyr`, +6): §5.2 vectors 1-2 and §6.1
+  Diffie-Hellman (public-key derivation + both-sides shared
+  secret).
+
+## [3.5.1] — 2026-05-27
+
+The 3.5 cycle's second bite — the ChaCha20 stream cipher, the
+prerequisite for the ChaCha20-Poly1305 AEAD. Validated against the
+RFC 8439 block-function and encryption test vectors.
+
+### Added
+
+- **ChaCha20 stream cipher (RFC 8439 §2.3 / §2.4)** —
+  `src/chacha20.cyr`: `chacha20_block` (one 64-byte keystream
+  block) + `chacha20_xor` (encrypt/decrypt with per-block counter
+  increment). 20-round ARX permutation in 32-bit-word arithmetic.
+  RFC 8439 §2.4 usage cap documented in the module (≤ 256 GiB per
+  key/nonce — the 32-bit counter wraps beyond that). Tests
+  (`tests/tcyr/chacha20.tcyr`, +3): §2.3.2 keystream vector, §2.4.2
+  "sunscreen" ciphertext, encrypt/decrypt round-trip.
 
 ## [3.5.0] — 2026-05-27
 
