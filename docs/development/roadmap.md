@@ -63,8 +63,8 @@ are greenfield in this cycle.
       keystream. RFC §2.3.2 / §2.4.2 vectors pass. Audit:
       `docs/audit/2026-05-27-3.5.1-audit.md`.
 
-- [x] **ChaCha20-Poly1305 AEAD (RFC 8439 §2.8).** *Implemented
-      2026-05-27 (in `[Unreleased]`).* `src/chacha20poly1305.cyr`:
+- [x] **ChaCha20-Poly1305 AEAD (RFC 8439 §2.8).** *Shipped 3.5.2,
+      2026-05-27.* `src/chacha20poly1305.cyr`:
       derive the Poly1305 one-time key from the ChaCha20 keystream
       (counter 0), authenticate `AAD || pad16 || ciphertext ||
       pad16 || len(AAD)_le64 || len(ct)_le64`. Resolved the

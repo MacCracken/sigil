@@ -8,10 +8,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 Continues the **3.5 cycle — modern AEAD + key agreement
-primitives**. ChaCha20 shipped in 3.5.1; the AEAD and X25519 remain
-here pending their release tags (intended 3.5.2, 3.5.3),
-completing the pure-Cyrius TLS 1.3 `ChaCha20-Poly1305 + X25519`
-suite. Each is validated against its published RFC test vectors.
+primitives**. ChaCha20 (3.5.1) and the ChaCha20-Poly1305 AEAD
+(3.5.2) have shipped; X25519 remains here pending its release tag
+(intended 3.5.3), completing the pure-Cyrius TLS 1.3
+`ChaCha20-Poly1305 + X25519` suite. Validated against its published
+RFC test vectors.
+
+### Added
+
+- **X25519 key agreement (RFC 7748)** — `src/x25519.cyr`: `x25519`
+  (scalar·u) + `x25519_base` (scalar·9 public-key derivation).
+  Montgomery ladder reusing the Curve25519 field arithmetic in
+  `src/bigint_ext.cyr` (`fp_*`, mod 2^255−19); constant-time
+  `cswap`; RFC 7748 scalar clamp. All ladder state lives in one
+  `secret var` scratch block, zeroized on return. Tests
+  (`tests/tcyr/x25519.tcyr`, +6): §5.2 vectors 1-2 and §6.1
+  Diffie-Hellman (public-key derivation + both-sides shared
+  secret).
+
+## [3.5.2] — 2026-05-27
+
+The 3.5 cycle's third bite — the ChaCha20-Poly1305 AEAD, composing
+the 3.5.1 cipher with the 3.5.0 MAC into TLS 1.3's
+`TLS_CHACHA20_POLY1305_SHA256` construction.
 
 ### Added
 
@@ -25,16 +44,6 @@ suite. Each is validated against its published RFC test vectors.
   mismatch — same AEAD contract and return shape as
   `aes_gcm_decrypt`. Tests (`tests/tcyr/chacha20poly1305.tcyr`,
   +5): §2.8.2 vector (ciphertext + tag), round-trip, tamper-reject.
-
-- **X25519 key agreement (RFC 7748)** — `src/x25519.cyr`: `x25519`
-  (scalar·u) + `x25519_base` (scalar·9 public-key derivation).
-  Montgomery ladder reusing the Curve25519 field arithmetic in
-  `src/bigint_ext.cyr` (`fp_*`, mod 2^255−19); constant-time
-  `cswap`; RFC 7748 scalar clamp. All ladder state lives in one
-  `secret var` scratch block, zeroized on return. Tests
-  (`tests/tcyr/x25519.tcyr`, +6): §5.2 vectors 1-2 and §6.1
-  Diffie-Hellman (public-key derivation + both-sides shared
-  secret).
 
 ## [3.5.1] — 2026-05-27
 
