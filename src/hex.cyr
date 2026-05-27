@@ -4,6 +4,8 @@
 # Hex encode: bytes -> lowercase hex C-string
 # ================================================================
 
+# Encodes `len` raw bytes as a freshly-allocated, NUL-terminated
+# lowercase hex C-string (2*len + 1 bytes). Returns the string pointer.
 fn hex_encode(bytes, len): i64 {
     var out = alloc(len * 2 + 1);
     var i = 0;
@@ -90,12 +92,14 @@ fn hex_decode_into(hex_str, hex_len, out): i64 {
 # Convenience: hash bytes to hex string
 # ================================================================
 
+# SHA-256 of `len` bytes, returned as a 64-char lowercase hex C-string.
 fn sha256_hex(data, len): i64 {
     var digest[32];
     sha256(data, len, &digest);
     return hex_encode(&digest, 32);
 }
 
+# SHA-512 of `len` bytes, returned as a 128-char lowercase hex C-string.
 fn sha512_hex(data, len): i64 {
     var digest[64];
     sha512(data, len, &digest);

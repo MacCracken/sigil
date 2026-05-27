@@ -36,7 +36,6 @@
 # ikm_len : length of IKM in bytes
 # prk_out : caller-provided 32-byte output buffer; receives the PRK
 # Returns 0 on success, non-zero on input-validation failure.
-
 fn hkdf_extract(salt, salt_len, ikm, ikm_len, prk_out): i64 {
     if (salt_len < 0) { return (0 - 1); }
     if (ikm_len < 0) { return (0 - 1); }
@@ -84,6 +83,10 @@ var _hkdf_out_len = 0;
 var _hkdf_produced = 0;
 var _hkdf_counter = 0;
 
+# Expands `prk` into `out_len` bytes of output keying material bound to
+# `info` (RFC 5869 §2.3). Returns 0 on success, -1 on negative-length
+# input, -2 when out_len exceeds the 255*32 = 8160-byte HashLen cap.
+# Every HMAC intermediate is zeroized before return.
 fn hkdf_expand(prk, prk_len, info, info_len, out, out_len): i64 {
     if (prk_len < 0) { return (0 - 1); }
     if (info_len < 0) { return (0 - 1); }
@@ -176,7 +179,6 @@ fn hkdf_expand(prk, prk_len, info, info_len, out, out_len): i64 {
 #   0   on success
 #  -1   on negative-length input
 #  -2   on out_len > 255*32
-
 fn hkdf(salt, salt_len, ikm, ikm_len, info, info_len, out, out_len): i64 {
     # PRK is key material. `secret var` handles zeroization on
     # every return path (both rc1 error and rc2 success/error).

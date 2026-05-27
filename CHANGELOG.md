@@ -7,9 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-(none — tip is 3.5.4. The 3.5 modern-crypto cycle is closed; 3.6
+(none — tip is 3.5.5. The 3.5 modern-crypto cycle is closed; 3.6
 parallel-verify and 3.7 perf/Solinas remain gated on forcing
 functions per `docs/development/roadmap.md`.)
+
+## [3.5.5] — 2026-05-27
+
+Documentation pass on the consumer-facing bundle API — a
+prerequisite for upstreaming sigil into the main Cyrius language.
+No source-logic changes; doc comments only.
+
+### Changed
+
+- **Doc-comment coverage** — `cyrius doc --check dist/sigil.cyr`
+  went from **76 undocumented → 0** (88 public functions, all
+  documented). Added concise doc comments immediately above every
+  previously-undocumented public function the bundle doc-checker
+  surfaces, across seven modules:
+  - `src/types.cyr` (49) — enum-name helpers, `TrustPolicy` /
+    `TrustCheck` / `TrustedArtifact` / `VerificationResult` /
+    `SigilStats` constructors and field accessors.
+  - `src/sha256.cyr` (14) — FIPS 180-4 round helpers (`rotr32`,
+    `shr32`, `Ch`/`Maj`/`Σ`/`σ`), `sha256_global_init`, the
+    streaming `init`/`transform`/`update`/`finalize`, and the
+    one-shot `sha256`.
+  - `src/error.cyr` (6) — `sigil_is_ok`/`is_err`, `sigil_err`
+    constructor + accessors + free.
+  - `src/hex.cyr` (3) — `hex_encode`, `sha256_hex`, `sha512_hex`.
+  - `src/hkdf.cyr` (2) — `hkdf_extract`, `hkdf_expand` (rich
+    RFC 5869 blocks already present; the blank line separating them
+    from `fn` was bridged so the checker associates them).
+  - `src/hmac.cyr` (1) — `hmac_sha256`.
+  - `src/sha_ni.cyr` (1) — `sha_ni_available`.
+- **Dist regenerated** — `dist/sigil.cyr` rebuilt via
+  `scripts/regen-dist.sh` so the bundle carries the new doc
+  comments and the `3.5.5` version header.
+
+### Verification
+
+Full suite **1197 assertions / 0 failures** (43 `.tcyr` files,
+unchanged — no test surface touched); smoke build clean;
+`cyrius doc --check dist/sigil.cyr` reports 0 undocumented (exit 0).
 
 ## [3.5.4] — 2026-05-27
 

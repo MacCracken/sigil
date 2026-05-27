@@ -12,22 +12,28 @@
 
 | Field | Value |
 |---|---|
-| Current version | **3.5.4** (`VERSION`) |
+| Current version | **3.5.5** (`VERSION`) |
 | Cyrius toolchain pin | **6.0.3** (`cyrius.cyml [package].cyrius`) |
 | Last release date | 2026-05-27 |
 | Last release audit | [`2026-05-27-3.5-arc-audit.md`](../audit/2026-05-27-3.5-arc-audit.md) |
-| Phase | Released; **3.5 cycle CLOSED** (3.5.0–3.5.4) — TLS 1.3 `ChaCha20-Poly1305 + X25519` suite complete; closeout done. Next minor: 3.6 (parallel verify) / 3.7 (perf), both gated on forcing functions. |
+| Phase | Released; **3.5 cycle CLOSED** (3.5.0–3.5.4) — TLS 1.3 `ChaCha20-Poly1305 + X25519` suite complete; closeout done. 3.5.5 is a doc-comment patch (bundle API `cyrius doc --check`: 0 undocumented) toward upstreaming into the main Cyrius language. Next minor: 3.6 (parallel verify) / 3.7 (perf), both gated on forcing functions. |
 
 ## Test surface
 
 | Metric | Value |
 |---|---|
-| `.tcyr` test files | 41 |
+| `.tcyr` test files | 43 |
 | Total assertions | **1197**, 0 failures |
 | Benchmark suite | `benches/` — see `benches/history.csv` |
 
+> Counting note: 3 `*_verify_full.tcyr` tests print their
+> `N passed` line to stderr; capture with `2>&1` or the total
+> undercounts by 38 (sgx 11 + tdx 16 + snp 11). 1197 is the
+> stderr-inclusive total across all 43 files.
+
 Per-cycle assertion delta:
 
+- 3.5.5 ship: 0 (doc-comment pass — 76 bundle-API functions documented; `cyrius doc --check dist/sigil.cyr` 76→0; no test surface change)
 - 3.5.4 ship: 0 (closeout — arc-audit consolidation + bench cases + doc sync; no test surface change)
 - 3.5.3 ship: +6 (`x25519.tcyr` 6 — RFC 7748 §5.2 vectors 1-2 + §6.1 Diffie-Hellman)
 - 3.5.2 ship: +5 (`chacha20poly1305.tcyr` 5 — RFC 8439 §2.8.2 ciphertext + tag, round-trip, tamper-reject)
@@ -55,6 +61,7 @@ Consumers that link or rely on sigil for trust verification:
 
 | Version | Date | Headline |
 |---|---|---|
+| 3.5.5 | 2026-05-27 | Bundle-API doc-comment pass — `cyrius doc --check dist/sigil.cyr` 76 undocumented → 0 (88 public fns). Doc comments added across `types`/`sha256`/`error`/`hex`/`hkdf`/`hmac`/`sha_ni`; dist regenerated. Prerequisite for upstreaming sigil into the main Cyrius language. No source-logic change. |
 | 3.5.4 | 2026-05-27 | Closeout of the 3.5 cycle — consolidated the four per-bite audits into `docs/audit/2026-05-27-3.5-arc-audit.md`; added ChaCha20/Poly1305/AEAD/X25519 bench cases (`history.csv` row `v3.5.4-modern-crypto`); refreshed `doc-health.md` + `overview.md` map + ADR 0001/0003 renumber amendments. No source change. |
 | 3.5.3 | 2026-05-27 | X25519 key agreement (RFC 7748) — `src/x25519.cyr`: `x25519` + `x25519_base`, Montgomery ladder over the `bigint_ext` Curve25519 field arithmetic, constant-time `cswap`. Closes the 3.5 cycle; the TLS 1.3 `ChaCha20-Poly1305 + X25519` suite is now sigil-native. Audit: `docs/audit/2026-05-27-3.5-arc-audit.md`. |
 | 3.5.2 | 2026-05-27 | ChaCha20-Poly1305 AEAD (RFC 8439 §2.8) — `src/chacha20poly1305.cyr`: `chacha20poly1305_encrypt` + constant-time-verifying `chacha20poly1305_decrypt`. Composes the 3.5.1 cipher + 3.5.0 MAC into TLS 1.3's `TLS_CHACHA20_POLY1305_SHA256`. Audit: `docs/audit/2026-05-27-3.5-arc-audit.md`. |

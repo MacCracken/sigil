@@ -23,6 +23,11 @@
 # HMAC-SHA256
 # ================================================================
 
+# Computes HMAC-SHA256 (RFC 2104) over `msg` under `key`, writing the
+# 32-byte MAC to `out`. Keys longer than the 64-byte block are first
+# SHA-256-hashed per the spec; shorter keys are zero-padded. The K'
+# / ipad / opad scratch buffers are `secret var` and zeroized on
+# return. Returns 0.
 fn hmac_sha256(key, key_len, msg, msg_len, out): i64 {
     # Step 1: Derive K' (64 bytes). `secret var` guarantees the
     # buffer is zeroed on function exit (Cyrius 5.3.5+). The init

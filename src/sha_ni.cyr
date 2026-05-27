@@ -50,6 +50,10 @@ var _sha_ni_probe_out = 0;      # 8-byte scratch for the probe's *out param
 # happy path.
 var _sha_ni_st_ctx[144];
 
+# Runtime SHA-NI capability gate. Returns 1 if the CPU advertises the
+# SHA extensions (CPUID leaf 7 EBX bit 29) AND the hardware compress
+# reproduces the FIPS 180-4 "abc" digest; 0 otherwise. Result is
+# cached after the first probe (one CPUID + self-test per process).
 fn sha_ni_available(): i64 {
     if (_sha_ni_cache != 2) { return _sha_ni_cache; }
     if (_sha_ni_probe_out == 0) { _sha_ni_probe_out = alloc(8); }

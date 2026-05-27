@@ -23,10 +23,13 @@ var MASK32 = 0xFFFFFFFF;
 # Bitwise helpers (32-bit)
 # ================================================================
 
+# 32-bit circular right rotation of `x` by `n` bits (result masked
+# to 32 bits). FIPS 180-4 §3.2 ROTR^n.
 fn rotr32(x, n): i64 {
     return ((x >> n) | ((x << (32 - n)) & MASK32)) & MASK32;
 }
 
+# 32-bit logical right shift of `x` by `n` bits. FIPS 180-4 §3.2 SHR^n.
 fn shr32(x, n): i64 {
     return (x >> n) & MASK32;
 }
@@ -35,26 +38,32 @@ fn shr32(x, n): i64 {
 # SHA-256 sub-functions
 # ================================================================
 
+# SHA-256 Ch(x,y,z) choice function (FIPS 180-4 §4.1.2).
 fn sha256_ch(x, y, z): i64 {
     return ((x & y) ^ ((x ^ MASK32) & z)) & MASK32;
 }
 
+# SHA-256 Maj(x,y,z) majority function (FIPS 180-4 §4.1.2).
 fn sha256_maj(x, y, z): i64 {
     return ((x & y) ^ (x & z) ^ (y & z)) & MASK32;
 }
 
+# SHA-256 big-sigma-0 (Σ0) of `x` (FIPS 180-4 §4.1.2).
 fn sha256_bsig0(x): i64 {
     return (rotr32(x, 2) ^ rotr32(x, 13) ^ rotr32(x, 22)) & MASK32;
 }
 
+# SHA-256 big-sigma-1 (Σ1) of `x` (FIPS 180-4 §4.1.2).
 fn sha256_bsig1(x): i64 {
     return (rotr32(x, 6) ^ rotr32(x, 11) ^ rotr32(x, 25)) & MASK32;
 }
 
+# SHA-256 small-sigma-0 (σ0) of `x` (FIPS 180-4 §4.1.2).
 fn sha256_ssig0(x): i64 {
     return (rotr32(x, 7) ^ rotr32(x, 18) ^ shr32(x, 3)) & MASK32;
 }
 
+# SHA-256 small-sigma-1 (σ1) of `x` (FIPS 180-4 §4.1.2).
 fn sha256_ssig1(x): i64 {
     return (rotr32(x, 17) ^ rotr32(x, 19) ^ shr32(x, 10)) & MASK32;
 }
@@ -66,6 +75,9 @@ fn sha256_ssig1(x): i64 {
 var _sha256_K = 0;
 var _sha256_inited = 0;
 
+# Lazily allocates and fills the 64-entry SHA-256 round-constant table
+# K[0..63] (FIPS 180-4 §4.2.2). Idempotent — runs the fill once per
+# process; subsequent calls return immediately. Returns 0.
 fn sha256_global_init(): i64 {
     if (_sha256_inited == 1) { return 0; }
 
@@ -148,6 +160,9 @@ fn sha256_global_init(): i64 {
 #   +128 buf_len  (8 bytes)
 #   +136 total_len (8 bytes)
 
+# Allocates a 144-byte SHA-256 context from the freelist and seeds it
+# with the FIPS 180-4 initial hash values. Returns the context pointer;
+# free with fl_free after sha256_finalize.
 fn sha256_init(): i64 {
     var ctx = fl_alloc(144);
     return sha256_init_into(ctx);
@@ -193,6 +208,10 @@ fn sha256_init_into(ctx): i64 {
 # parallel-verify hot path. Read-only globals (_sha256_K) remain
 # shared and safe under concurrent read.
 
+# Compresses one 64-byte message block held in `ctx`'s block buffer
+# into the running hash state (FIPS 180-4 §6.2.2). Dispatches to the
+# SHA-NI hardware path when available, else the software round loop.
+# Returns 0.
 fn sha256_transform(ctx): i64 {
     # SHA-NI dispatch wire-point (2.9.2 foundation).
     # When sha256_transform_ni returns 0 it has fully transformed
@@ -280,6 +299,9 @@ fn sha256_transform(ctx): i64 {
 # Update — feed data into the hash context
 # ================================================================
 
+# Feeds `len` bytes at `data` into the streaming hash context `ctx`,
+# buffering any partial trailing block and compressing full 64-byte
+# blocks as they accumulate. May be called repeatedly. Returns 0.
 fn sha256_update(ctx, data, len): i64 {
     var buf_len = load64(ctx + 128);
     var total = load64(ctx + 136);
@@ -322,6 +344,9 @@ fn sha256_update(ctx, data, len): i64 {
 # Finalize — pad and produce 32-byte digest
 # ================================================================
 
+# Applies FIPS 180-4 §5.1.1 padding (0x80, zero fill, 64-bit big-endian
+# length), runs the final compression, and writes the 32-byte digest to
+# `out` in big-endian order. Consumes `ctx` (caller frees it). Returns 0.
 fn sha256_finalize(ctx, out): i64 {
     var buf_len = load64(ctx + 128);
     var total_bits = load64(ctx + 136) * 8;
@@ -367,6 +392,9 @@ fn sha256_finalize(ctx, out): i64 {
 # Convenience — hash data in one shot
 # ================================================================
 
+# One-shot SHA-256: hashes `len` bytes at `data` and writes the 32-byte
+# digest to `out`. Allocates, drives, and frees a context internally.
+# Returns 0.
 fn sha256(data, len, out): i64 {
     var ctx = sha256_init();
     sha256_update(ctx, data, len);

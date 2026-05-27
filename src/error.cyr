@@ -21,11 +21,13 @@ enum SigilError {
 # Error predicates
 # ================================================================
 
+# Returns 1 if `code` is ERR_NONE (success), 0 otherwise.
 fn sigil_is_ok(code): i64 {
     if (code == ERR_NONE) { return 1; }
     return 0;
 }
 
+# Returns 1 if `code` is any non-ERR_NONE error code, 0 otherwise.
 fn sigil_is_err(code): i64 {
     if (code != ERR_NONE) { return 1; }
     return 0;
@@ -38,6 +40,8 @@ fn sigil_is_err(code): i64 {
 #   +0   code   (i64, ERR_* constant)
 #   +8   msg    (C-string pointer)
 
+# Allocates a 16-byte error object holding `code` and `msg` (a C-string
+# pointer). Returns the object pointer; free with sigil_err_free.
 fn sigil_err(code, msg): i64 {
     var e = fl_alloc(16);
     store64(e, code);
@@ -45,6 +49,9 @@ fn sigil_err(code, msg): i64 {
     return e;
 }
 
+# Returns the ERR_* code stored in error object `e`.
 fn sigil_err_code(e): i64 { return load64(e); }
+# Returns the message C-string pointer stored in error object `e`.
 fn sigil_err_msg(e): i64 { return load64(e + 8); }
+# Frees an error object allocated by sigil_err. Returns 0.
 fn sigil_err_free(e): i64 { fl_free(e); return 0; }
