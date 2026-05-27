@@ -74,19 +74,22 @@ are greenfield in this cycle.
       floor). A streaming Poly1305 remains a future optimization
       for very large messages. RFC §2.8.2 vector passes.
 
-- [x] **X25519 key agreement (RFC 7748).** *Implemented 2026-05-27
-      (in `[Unreleased]`).* `src/x25519.cyr`: Montgomery-ladder ECDH
-      reusing the Curve25519 field arithmetic in
-      `src/bigint_ext.cyr` (`fp_add/sub/mul`, mod 2^255−19); clamped
-      scalar × base/peer point → shared secret. RFC §5.2 + §6.1
-      vectors pass.
+- [x] **X25519 key agreement (RFC 7748).** *Shipped 3.5.3,
+      2026-05-27.* `src/x25519.cyr`: Montgomery-ladder ECDH reusing
+      the Curve25519 field arithmetic in `src/bigint_ext.cyr`
+      (`fp_add/sub/mul`, mod 2^255−19); clamped scalar × base/peer
+      point → shared secret. RFC §5.2 + §6.1 vectors pass. Audit:
+      `docs/audit/2026-05-27-3.5.3-audit.md`.
 
 **Sequencing decision (closed):** Poly1305 (3.5.0) shipped as a
-self-contained primitive; ChaCha20, the AEAD, and X25519 followed
-in the same cycle on the maintainer's go-ahead (the native-TLS
-forcing function was treated as firm). The TLS 1.3
-`ChaCha20-Poly1305 + X25519` suite is now feature-complete in
-sigil, pending release tags for the three `[Unreleased]` bites.
+self-contained primitive; ChaCha20 (3.5.1), the AEAD (3.5.2), and
+X25519 (3.5.3) followed in the same cycle on the maintainer's
+go-ahead (the native-TLS forcing function was treated as firm).
+The TLS 1.3 `ChaCha20-Poly1305 + X25519` suite is now
+feature-complete and shipped in sigil. **3.5.4 closeout** runs the
+CLAUDE.md Closeout Pass (full suite + bench, dead-code audit,
+stale-comment sweep, security re-scan, downstream check, doc sync,
+clean build) as the last patch of the 3.5 line before 3.6.0.
 
 ## Road to v3.6 — caller-provided scratch for parallel verify
 

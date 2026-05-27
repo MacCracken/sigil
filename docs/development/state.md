@@ -12,11 +12,11 @@
 
 | Field | Value |
 |---|---|
-| Current version | **3.5.2** (`VERSION`) |
+| Current version | **3.5.3** (`VERSION`) |
 | Cyrius toolchain pin | **6.0.3** (`cyrius.cyml [package].cyrius`) |
 | Last release date | 2026-05-27 |
-| Last release audit | [`2026-05-27-3.5.2-audit.md`](../audit/2026-05-27-3.5.2-audit.md) |
-| Phase | Released; **3.5 cycle open** — Poly1305 (3.5.0) + ChaCha20 (3.5.1) + ChaCha20-Poly1305 AEAD (3.5.2) shipped; X25519 implemented in `[Unreleased]`, awaiting tag (intended 3.5.3) |
+| Last release audit | [`2026-05-27-3.5.3-audit.md`](../audit/2026-05-27-3.5.3-audit.md) |
+| Phase | Released; **3.5 cycle feature-complete** — Poly1305 (3.5.0) + ChaCha20 (3.5.1) + AEAD (3.5.2) + X25519 (3.5.3) shipped (TLS 1.3 suite complete). **Next: 3.5.4 closeout**, then 3.6.0. |
 
 ## Test surface
 
@@ -28,7 +28,7 @@
 
 Per-cycle assertion delta:
 
-- 3.5.x (`[Unreleased]`): +6 (`x25519.tcyr` 6 — RFC 7748 §5.2/§6.1)
+- 3.5.3 ship: +6 (`x25519.tcyr` 6 — RFC 7748 §5.2 vectors 1-2 + §6.1 Diffie-Hellman)
 - 3.5.2 ship: +5 (`chacha20poly1305.tcyr` 5 — RFC 8439 §2.8.2 ciphertext + tag, round-trip, tamper-reject)
 - 3.5.1 ship: +3 (`chacha20.tcyr` 3 — RFC 8439 §2.3.2 keystream + §2.4.2 sunscreen + round-trip)
 - 3.5.0 ship: +5 (`poly1305.tcyr` 5 — RFC 8439 §2.5.2 canonical vector + all-zero + r=0 property + constant-time verify)
@@ -54,6 +54,7 @@ Consumers that link or rely on sigil for trust verification:
 
 | Version | Date | Headline |
 |---|---|---|
+| 3.5.3 | 2026-05-27 | X25519 key agreement (RFC 7748) — `src/x25519.cyr`: `x25519` + `x25519_base`, Montgomery ladder over the `bigint_ext` Curve25519 field arithmetic, constant-time `cswap`. Closes the 3.5 cycle; the TLS 1.3 `ChaCha20-Poly1305 + X25519` suite is now sigil-native. Audit: `docs/audit/2026-05-27-3.5.3-audit.md`. |
 | 3.5.2 | 2026-05-27 | ChaCha20-Poly1305 AEAD (RFC 8439 §2.8) — `src/chacha20poly1305.cyr`: `chacha20poly1305_encrypt` + constant-time-verifying `chacha20poly1305_decrypt`. Composes the 3.5.1 cipher + 3.5.0 MAC into TLS 1.3's `TLS_CHACHA20_POLY1305_SHA256`. Audit: `docs/audit/2026-05-27-3.5.2-audit.md`. |
 | 3.5.1 | 2026-05-27 | ChaCha20 stream cipher (RFC 8439 §2.3/§2.4) — `src/chacha20.cyr`: `chacha20_block` + `chacha20_xor`, 20-round ARX, constant-time by construction. Second bite of the 3.5 cycle; prereq for the ChaCha20-Poly1305 AEAD. Audit: `docs/audit/2026-05-27-3.5.1-audit.md`. |
 | 3.5.0 | 2026-05-27 | Poly1305 one-time MAC (RFC 8439 §2.5) — `src/poly1305.cyr`: `poly1305_mac` + constant-time `poly1305_verify`, 26-bit-limb donna form (no 128-bit path), constant-time freeze. Opens the 3.5 AEAD + key-agreement cycle; ships standalone ahead of the cyrius native-TLS arc. Cyrius pin bumped 6.0.1 → 6.0.3. Audit: `docs/audit/2026-05-27-3.5.0-audit.md`. |
@@ -73,7 +74,8 @@ back to v2.0.0.
 | 3.5.0 — Poly1305 MAC | **Shipped** 2026-05-27 | `src/poly1305.cyr` + `tests/tcyr/poly1305.tcyr` (5 assertions). RFC 8439 §2.5 one-time MAC, 26-bit-limb donna form, constant-time freeze. |
 | 3.5.1 — ChaCha20 | **Shipped** 2026-05-27 | `src/chacha20.cyr` (+3 tests). RFC 8439 §2.3/§2.4, 20-round ARX, constant-time. |
 | 3.5.2 — ChaCha20-Poly1305 AEAD | **Shipped** 2026-05-27 | `src/chacha20poly1305.cyr` (+5 tests). RFC 8439 §2.8, constant-time tag verify, plaintext withheld until authenticated. |
-| 3.5.x — X25519 | **Implemented** (in `[Unreleased]`) | `src/x25519.cyr` (+6 tests). RFC 7748 Montgomery ladder over `bigint_ext` fp arithmetic. Awaiting release tag. |
+| 3.5.3 — X25519 | **Shipped** 2026-05-27 | `src/x25519.cyr` (+6 tests). RFC 7748 Montgomery ladder over `bigint_ext` fp arithmetic, constant-time `cswap`. |
+| 3.5.4 — closeout | **Planned (next)** | Closeout Pass per CLAUDE.md before 3.6.0: full suite + bench baseline, dead-code audit, stale-comment sweep, security re-scan, downstream-consumer build check, doc sync, version verify, clean-from-scratch build. Also a candidate slot to refresh `docs/doc-health.md` (last swept 2026-05-23). |
 | 3.6 / 3.7 | Gated | Parallel verify (3.6) and perf tuning / Solinas (3.7) remain gated on forcing functions per roadmap. |
 
 When a cycle is opened, list each work-item bite here as it

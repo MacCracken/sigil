@@ -7,12 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Continues the **3.5 cycle — modern AEAD + key agreement
-primitives**. ChaCha20 (3.5.1) and the ChaCha20-Poly1305 AEAD
-(3.5.2) have shipped; X25519 remains here pending its release tag
-(intended 3.5.3), completing the pure-Cyrius TLS 1.3
-`ChaCha20-Poly1305 + X25519` suite. Validated against its published
-RFC test vectors.
+(none — tip is 3.5.3.) **Next: 3.5.4 — closeout.** The last patch
+of the 3.5 line before 3.6.0: a full P(-1) Scaffold Hardening /
+Closeout pass per CLAUDE.md — full suite + bench baseline,
+dead-code audit, stale-comment sweep, security re-scan,
+downstream-consumer build check, CHANGELOG/roadmap/state sync,
+version verify, clean-from-scratch build.
+
+## [3.5.3] — 2026-05-27
+
+Closes the **3.5 cycle — modern AEAD + key agreement primitives**.
+X25519 completes the pure-Cyrius TLS 1.3 `ChaCha20-Poly1305 +
+X25519` suite — cipher (3.5.1), AEAD (3.5.2), MAC (3.5.0), and now
+key agreement are all sigil-native.
 
 ### Added
 
