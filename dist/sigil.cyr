@@ -2612,14 +2612,14 @@ fn aes_gcm_decrypt(key, iv, aad, aad_len, ct, ct_len, tag, pt_out): i64 {
 # (RFC 8439 §2.8), but ships here standalone ahead of that arc — a
 # MAC primitive has no dependency on ChaCha20 or TLS.
 #
-# ┌─ SECURITY CONTRACT ───────────────────────────────────────────┐
-# │ ONE-TIME KEY. The 32-byte key MUST be unique per message.     │
-# │ Authenticating two distinct messages under the same key lets  │
-# │ an attacker recover r and forge tags (RFC 8439 §2.6). Unlike  │
-# │ HMAC (src/hmac.cyr), Poly1305 is NOT a reusable-key MAC. For  │
-# │ the AEAD, the one-time key is derived fresh from the ChaCha20 │
-# │ keystream (counter 0) per nonce.                              │
-# └───────────────────────────────────────────────────────────────┘
+# === SECURITY CONTRACT: ONE-TIME KEY ===========================
+# The 32-byte key MUST be unique per message. Authenticating two
+# distinct messages under the same key lets an attacker recover r
+# and forge tags (RFC 8439 §2.6). Unlike HMAC (src/hmac.cyr),
+# Poly1305 is NOT a reusable-key MAC. For the AEAD, the one-time
+# key is derived fresh from the ChaCha20 keystream (counter 0) per
+# nonce.
+# ===============================================================
 #
 # Implementation: the 26-bit-limb ("poly1305-donna") form. Five
 # 26-bit limbs keep every intermediate product below 2^59, so the
