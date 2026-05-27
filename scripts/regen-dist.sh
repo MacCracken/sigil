@@ -35,6 +35,7 @@ src/hmac.cyr
 src/hkdf.cyr
 src/aes_ni.cyr
 src/aes_gcm.cyr
+src/poly1305.cyr
 src/sha512.cyr
 src/sha384.cyr
 src/bigint_ext.cyr

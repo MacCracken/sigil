@@ -12,22 +12,23 @@
 
 | Field | Value |
 |---|---|
-| Current version | **3.4.3** (`VERSION`) |
-| Cyrius toolchain pin | **6.0.1** (`cyrius.cyml [package].cyrius`) |
-| Last release date | 2026-05-23 |
-| Last release audit | [`2026-05-23-3.4.3-audit.md`](../audit/2026-05-23-3.4.3-audit.md) |
-| Phase | Released, security hardening active |
+| Current version | **3.5.0** (`VERSION`) |
+| Cyrius toolchain pin | **6.0.3** (`cyrius.cyml [package].cyrius`) |
+| Last release date | 2026-05-27 |
+| Last release audit | [`2026-05-27-3.5.0-audit.md`](../audit/2026-05-27-3.5.0-audit.md) |
+| Phase | Released; **3.5 cycle open** — Poly1305 shipped (3.5.0); ChaCha20 / AEAD / X25519 gated on the cyrius native-TLS arc |
 
 ## Test surface
 
 | Metric | Value |
 |---|---|
-| `.tcyr` test files | 37 |
-| Total assertions | **1178**, 0 failures |
+| `.tcyr` test files | 38 |
+| Total assertions | **1183**, 0 failures |
 | Benchmark suite | `benches/` — see `benches/history.csv` |
 
 Per-cycle assertion delta:
 
+- 3.5.0 ship: +5 (`poly1305.tcyr` 5 — RFC 8439 §2.5.2 canonical vector + all-zero + r=0 property + constant-time verify)
 - 3.4.0 ship: +66 (`pem.tcyr` 39, `sgx_verify_full.tcyr` 11, `tdx_verify_full.tcyr` 16)
 - 3.4.1 ship: +23 (`x509_p384.tcyr` 12, `snp_verify_full.tcyr` 11)
 - 3.4.2 ship: 0 (packaging-fix release; no source changes)
@@ -50,6 +51,7 @@ Consumers that link or rely on sigil for trust verification:
 
 | Version | Date | Headline |
 |---|---|---|
+| 3.5.0 | 2026-05-27 | Poly1305 one-time MAC (RFC 8439 §2.5) — `src/poly1305.cyr`: `poly1305_mac` + constant-time `poly1305_verify`, 26-bit-limb donna form (no 128-bit path), constant-time freeze. Opens the 3.5 AEAD + key-agreement cycle; ships standalone ahead of the cyrius native-TLS arc. Cyrius pin bumped 6.0.1 → 6.0.3. Audit: `docs/audit/2026-05-27-3.5.0-audit.md`. |
 | 3.4.3 | 2026-05-23 | `secret var` adoption sweep on `src/aes_gcm.cyr` — 12 stack-local secret buffers (GHASH H/state, AES-CTR keystream, tag, GHASH mul scratch) gain compiler-emitted zeroization on every return including early-exit errors. Closes the "secret var ambient adoption" backlog item. |
 | 3.4.2 | 2026-05-22 | Packaging fix — `dist/sigil.cyr` regenerated from current source (was frozen at 3.2.0 era); `scripts/regen-dist.sh` shipped to replace the retired `cyrius distlib` subcommand. Doc-tree restructure rides along. |
 | 3.4.1 | 2026-05-22 | SEV-SNP attestation completion (x509 P-384 SPKI + `snp_report_verify_full`) |
@@ -63,7 +65,9 @@ back to v2.0.0.
 
 | Slot | State | Notes |
 |---|---|---|
-| Next cycle | Idle | No in-flight work post-3.4.3 ship; 3.5 and 3.6 remain gated on forcing functions per roadmap |
+| 3.5.0 — Poly1305 MAC | **Shipped** 2026-05-27 | `src/poly1305.cyr` + `tests/tcyr/poly1305.tcyr` (5 assertions). RFC 8439 §2.5 one-time MAC, 26-bit-limb donna form, constant-time freeze. |
+| 3.5.x — ChaCha20 / ChaCha20-Poly1305 AEAD / X25519 | Pending | Gated on the cyrius v6.2.x native-TLS slot per roadmap. |
+| 3.6 / 3.7 | Gated | Parallel verify (3.6) and perf tuning / Solinas (3.7) remain gated on forcing functions per roadmap. |
 
 When a cycle is opened, list each work-item bite here as it
 moves through `pending → in_progress → completed`. The release
@@ -79,7 +83,7 @@ CI fleet, list the hosts here.
 ## Audit floor
 
 Seven open LOW findings of the same shape (bump-allocator
-lifetime across per-call init paths) carry forward to the v3.6
+lifetime across per-call init paths) carry forward to the v3.7
 unified `_into` API cycle:
 
 - 3.2.2 LOW-1: `x509_parse` raw_sig alloc
@@ -93,7 +97,10 @@ Zero CRITICAL / HIGH / MEDIUM findings outstanding.
 
 ## Open architectural blockers
 
-None on the critical path. Roadmap cycles 3.5 (parallel verify)
-and 3.6 (perf tuning) both have explicit "open when forcing
+None on the critical path. Roadmap cycles 3.6 (parallel verify)
+and 3.7 (perf tuning) both have explicit "open when forcing
 function arrives" sequencing decisions; neither has triggered
-as of 3.4.1.
+as of the 3.5 open. The 3.5 cycle itself (modern AEAD + key
+agreement) is open: Poly1305 lands standalone now, while
+ChaCha20 / AEAD / X25519 stay gated on the cyrius v6.2.x
+native-TLS slot.

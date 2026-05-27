@@ -7,7 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-(none — tip is 3.4.3)
+(none — tip is 3.5.0)
+
+## [3.5.0] — 2026-05-27
+
+Opens the **3.5 cycle — modern AEAD + key agreement primitives**.
+The cyrius v6.2.x native-TLS arc needs a pure-Cyrius TLS 1.3
+`ChaCha20-Poly1305 + X25519` suite (a bare-metal AGNOS kernel has
+no `libssl.so.3` to dlopen). Poly1305 is the MAC half and has no
+dependency on ChaCha20 or TLS, so it ships first, standalone; the
+ChaCha20 stream cipher, the AEAD composition, and X25519 stay
+gated on the native-TLS slot (see `docs/development/roadmap.md`).
+
+### Added
+
+- **Poly1305 one-time MAC (RFC 8439 §2.5)** — `src/poly1305.cyr`:
+  - `poly1305_mac(key, msg, msg_len, out)` — 16-byte tag over a
+    message under a 32-byte one-time key.
+  - `poly1305_verify(key, msg, msg_len, tag)` — recompute-and-
+    compare in constant time via the stdlib `ct_eq_bytes`.
+  - Implemented in the 26-bit-limb (`poly1305-donna`) form: every
+    intermediate product stays below 2^59, so the whole reduction
+    mod 2^130−5 runs in signed i64 with no 128-bit arithmetic
+    path. The final freeze is **constant-time** (mask-select, no
+    branch on the key-derived accumulator) per sigil's
+    constant-time-on-secret-data rule.
+  - **One-time-key contract** documented in the module header:
+    unlike HMAC, a Poly1305 key must never authenticate two
+    distinct messages (RFC 8439 §2.6). For the AEAD the one-time
+    key is derived fresh from the ChaCha20 keystream per nonce.
+  - Tests (`tests/tcyr/poly1305.tcyr`, +5 assertions): RFC 8439
+    §2.5.2 canonical worked example (exercises full + partial
+    blocks and the carry chain), RFC 8439 A.3 #1 all-zero vector,
+    the r=0 → tag=s property, and verify accept/reject.
+
+### Changed
+
+- **Cyrius toolchain pin bumped `6.0.1` → `6.0.3`** across
+  `cyrius.cyml` and CI (`.github/workflows/ci.yml`). Clears the
+  cycc-6.0.3 vs pin-6.0.1 toolchain-drift warning. No source
+  impact; full suite green.
+- **Roadmap restructure** — the v3.5 slot is now the AEAD +
+  key-agreement cycle (above); the prior parallel-verify cycle
+  slid to v3.6 and the perf-tuning / Solinas cycle to v3.7. The
+  earlier backlog note that claimed "Poly1305 already ships" was
+  corrected — it did not; only a descriptive comment existed in
+  `src/aes_gcm.cyr`.
 
 ## [3.4.3] — 2026-05-23
 

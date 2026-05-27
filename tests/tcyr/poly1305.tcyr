@@ -1,0 +1,89 @@
+# poly1305.tcyr — Poly1305 one-time MAC (RFC 8439 §2.5)
+#
+# Vectors:
+#   1. RFC 8439 §2.5.2 worked example — the canonical anchor.
+#      A 34-byte message exercises two full 16-byte blocks plus a
+#      2-byte partial final block AND the full mod-2^130-5 carry
+#      chain in one shot.
+#   2. RFC 8439 A.3 #1 — all-zero key + 64-byte all-zero message
+#      → all-zero tag (r=0, s=0 degenerate).
+#   3. r=0 property — key = 16 zero bytes || s. With r=0 the
+#      accumulator stays 0 across every block, so the tag is
+#      exactly s (little-endian). Confirms the final s-addition
+#      and that blocks are actually processed.
+#   4. poly1305_verify — constant-time tag check accepts the
+#      correct tag and rejects a single-bit-flipped tag.
+
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fmt.cyr"
+include "lib/json.cyr"
+include "lib/sakshi.cyr"
+include "lib/chrono.cyr"
+include "lib/ct.cyr"
+
+include "src/types.cyr"
+include "src/error.cyr"
+include "src/hex.cyr"
+include "src/poly1305.cyr"
+
+fn main() {
+    alloc_init();
+
+    # ============================================================
+    # RFC 8439 §2.5.2 — canonical worked example
+    # ============================================================
+    test_group("Poly1305 RFC 8439 §2.5.2");
+    var key[32];
+    hex_decode_into("85d6be7857556d337f4452fe42d506a80103808afb0db2fd4abff6af4149f51b", 64, &key);
+    var tag[16];
+    poly1305_mac(&key, "Cryptographic Forum Research Group", 34, &tag);
+    var tag_hex = hex_encode(&tag, 16);
+    assert_streq(tag_hex, "a8061dc1305136c6c22b8baf0c0127a9", "rfc8439 2.5.2 tag");
+
+    # ============================================================
+    # RFC 8439 A.3 #1 — all-zero key + message → all-zero tag
+    # ============================================================
+    test_group("Poly1305 all-zero");
+    var zkey[32];
+    memset(&zkey, 0, 32);
+    var zmsg[64];
+    memset(&zmsg, 0, 64);
+    var ztag[16];
+    poly1305_mac(&zkey, &zmsg, 64, &ztag);
+    var ztag_hex = hex_encode(&ztag, 16);
+    assert_streq(ztag_hex, "00000000000000000000000000000000", "all-zero tag");
+
+    # ============================================================
+    # r = 0 property — tag == s (the second half of the key)
+    # ============================================================
+    test_group("Poly1305 r=0 -> tag=s");
+    var rkey[32];
+    hex_decode_into("000000000000000000000000000000000102030405060708090a0b0c0d0e0f10", 64, &rkey);
+    var rtag[16];
+    poly1305_mac(&rkey, "Cryptographic Forum Research Group", 34, &rtag);
+    var rtag_hex = hex_encode(&rtag, 16);
+    assert_streq(rtag_hex, "0102030405060708090a0b0c0d0e0f10", "r=0 tag equals s");
+
+    # ============================================================
+    # poly1305_verify — accept correct, reject tampered
+    # ============================================================
+    test_group("Poly1305 verify");
+    var vtag[16];
+    poly1305_mac(&key, "Cryptographic Forum Research Group", 34, &vtag);
+    assert_eq(poly1305_verify(&key, "Cryptographic Forum Research Group", 34, &vtag), 1, "verify accepts good tag");
+    # Flip one bit of the tag — must reject.
+    store8(&vtag, load8(&vtag) ^ 0x01);
+    assert_eq(poly1305_verify(&key, "Cryptographic Forum Research Group", 34, &vtag), 0, "verify rejects bad tag");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

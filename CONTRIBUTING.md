@@ -15,7 +15,7 @@ cyrius build programs/smoke.cyr build/sigil
 
 ## Cyrius Toolchain
 
-Sigil pins **cyrius `6.0.1`** across `cyrius.cyml` and CI. Match
+Sigil pins **cyrius `6.0.3`** across `cyrius.cyml` and CI. Match
 that pin locally — installing a newer cyrius is fine, but builds
 should be run against the pinned version for reproducible
 diagnostics. The pinned cyrius release notes are in

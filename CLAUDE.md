@@ -155,7 +155,7 @@ Run a closeout pass before tagging `x.Y.0` or `x.0.0`. Ship as the last patch of
 
 Most cc3-era workarounds documented in earlier sigil versions are now resolved under cc5/cc6. Quirks still worth knowing live as numbered architecture notes under [`docs/architecture/`](docs/architecture/) so they're discoverable from the affected module's docs:
 
-1. **`var X[N]` inside a function is a static global, not a stack-local** — confirmed by cyrius `src/frontend/parse_fn.cyr:2886` and `tests/tcyr/var_array_semantics.tcyr`. Same-function array reuse across sequential calls works iff each call fully writes the buffer before reading; concurrent threads share the array. This blocks dropping the `_sigil_batch_mutex` until 3.5 lands caller-provided scratch. Scalar `var x = ...` locals ARE per-call.
+1. **`var X[N]` inside a function is a static global, not a stack-local** — confirmed by cyrius `src/frontend/parse_fn.cyr:2886` and `tests/tcyr/var_array_semantics.tcyr`. Same-function array reuse across sequential calls works iff each call fully writes the buffer before reading; concurrent threads share the array. This blocks dropping the `_sigil_batch_mutex` until 3.6 lands caller-provided scratch. Scalar `var x = ...` locals ARE per-call.
 2. **`fl_alloc` vs bump `alloc` discipline** — `fl_alloc` + `fl_free` for per-call scratch; `alloc()` for init-once tables that live the whole program. Never `free()` an `alloc()` block — separate heaps.
 3. **`var buf[N]` is N bytes, not N elements** — for 80 i64 values declare `var buf[640]`. Intentional, not a bug.
 4. **Reserved keywords as identifiers** — `match`, `in`, `default`, `shared`, `object`, `case`, `else` all reject as variable / field / fn names.

@@ -69,6 +69,20 @@ their specs inline; this file is the cross-module overview.
   - https://www.intel.com/content/dam/doc/white-paper/advanced-encryption-standard-new-instructions-set-paper.pdf
 - **CPUID Leaf 1 ECX bit 25** — `AESNI` feature flag.
 
+### Poly1305 one-time MAC — `src/poly1305.cyr`
+
+- **RFC 8439** — ChaCha20 and Poly1305 for IETF Protocols
+  (2018-06). §2.5 defines the MAC; §2.5.2 is the worked example;
+  Appendix A.3 carries the test vectors.
+  - https://www.rfc-editor.org/rfc/rfc8439
+- **D. J. Bernstein — "The Poly1305-AES message-authentication
+  code"** (FSE 2005): the original construction and the
+  one-time-key security argument.
+  - https://cr.yp.to/mac/poly1305-20050329.pdf
+- **poly1305-donna** (public-domain reference): the 26-bit-limb
+  decomposition this implementation follows.
+  - https://github.com/floodyberry/poly1305-donna
+
 ## Asymmetric primitives
 
 ### Ed25519 — `src/ed25519.cyr` (with `src/bigint_ext.cyr` for field arithmetic)

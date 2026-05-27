@@ -23,9 +23,64 @@ see [CHANGELOG.md](../../CHANGELOG.md). Closed cycles:
     replacement. 2026-05-22 doc-tree restructure rides along.
     Audit: `docs/audit/2026-05-22-3.4.2-audit.md`.
 
-**Cyrius pin:** `6.0.1` (synced across `cyrius.cyml` and CI).
+**Cyrius pin:** `6.0.3` (synced across `cyrius.cyml` and CI).
 
-## Road to v3.5 — caller-provided scratch for parallel verify
+## Road to v3.5 — modern AEAD + key agreement primitives
+
+The cyrius v6.2.x native-TLS arc (`lib/tls_native.cyr`, replacing
+the `libssl`/fdlopen wrapper in `lib/tls.cyr`) needs pure-Cyrius
+AEAD + key agreement for the kernel + sandhi consumers — a
+bare-metal AGNOS kernel has no `libssl.so.3` to dlopen, so the
+protocol layer must drive sigil-owned primitives. This cycle lands
+the TLS 1.3 `ChaCha20-Poly1305 + X25519` suite. (AES-256-GCM +
+ECDSA-P256/P384 + X.509 already ship in 3.4.x, so the AES suite is
+already covered for the native stack.)
+
+**Correction (carried from the backlog promotion):** the earlier
+backlog note claimed "Poly1305 already ships." It does not — the
+only `poly1305` reference in the tree was a descriptive comment in
+`src/aes_gcm.cyr` (the GCM tag length). Both Poly1305 and ChaCha20
+are greenfield in this cycle.
+
+### 3.5 work items
+
+- [x] **3.5.0 — Poly1305 one-time MAC (RFC 8439 §2.5).**
+      *Shipped 2026-05-27.* Standalone authenticator in `src/poly1305.cyr`:
+      `poly1305_mac(out, msg, msg_len, key)` over the 32-byte
+      one-time key. **Ships ahead of the TLS arc** — a MAC
+      primitive needs no forcing function. Implemented as the
+      26-bit-limb (`poly1305-donna`) reduction so every
+      intermediate product stays inside a signed i64 (no 128-bit
+      path), with constant-time final reduction (mask-select, no
+      branch on the key-derived accumulator). One-shot first;
+      streaming `init`/`update`/`finish` deferred to the AEAD bite
+      that needs it. Key caveat documented in the module header:
+      **one-time key — never reuse across two messages.**
+
+- [ ] **ChaCha20 stream cipher (RFC 8439 §2.4).** The 20-round
+      quarter-round permutation + counter-mode keystream. Gated on
+      the cyrius v6.2.x native-TLS slot.
+
+- [ ] **ChaCha20-Poly1305 AEAD (RFC 8439 §2.8).** Compose: derive
+      the Poly1305 one-time key from the ChaCha20 keystream
+      (counter 0), authenticate `AAD || pad16 || ciphertext ||
+      pad16 || len(AAD)_le64 || len(ct)_le64`. This is the bite
+      that forces the Poly1305 streaming interface (or a
+      contiguous-buffer construction). Gated with ChaCha20.
+
+- [ ] **X25519 key agreement (RFC 7748).** Montgomery-ladder ECDH
+      reusing the Curve25519 field arithmetic already in
+      `src/bigint_ext.cyr` (`fp_add/sub/mul`, mod 2^255−19):
+      clamped scalar × base/peer point → shared secret. Companion
+      to ChaCha20; together they gate the TLS 1.3
+      `ChaCha20-Poly1305 + X25519` suite. Gated on the same arc.
+
+**Sequencing decision:** Poly1305 (3.5.0) ships now as a
+self-contained primitive. ChaCha20, the AEAD composition, and
+X25519 land as the cyrius v6.2.x native-TLS slot firms — they have
+no consumer until the protocol layer drives them.
+
+## Road to v3.6 — caller-provided scratch for parallel verify
 
 Drop `_sigil_batch_mutex` by threading caller-provided scratch
 through every crypto primitive. The 3.3 cleanup cycle confirmed
@@ -35,7 +90,7 @@ function-scope globals**, not per-call stack arrays (see
 entry); concurrent workers therefore race on shared module state
 unless scratch is threaded through explicitly.
 
-### 3.5 work items
+### 3.6 work items
 
 - [ ] **Caller-provided crypto scratch.** Top-level entry
       points (`sha256`, `sha512`, `ed25519_verify`,
@@ -69,7 +124,7 @@ unless scratch is threaded through explicitly.
       Re-bench `sv_verify_batch_64` against the
       `v3.2.0-allocfree` baseline (422.867 ms @ 64
       artifacts). Target ≥ 3× at 4 workers. Add CSV row
-      `v3.5-parallel-crypto`.
+      `v3.6-parallel-crypto`.
 
 - [ ] **Inverse pass on the 3.3 in-function arrays.** Every
       `var X[N]` added in 3.3 becomes either a slice of the
@@ -78,14 +133,14 @@ unless scratch is threaded through explicitly.
       form had no functional advantage over named globals
       under concurrent access; 3.4 closes the loop.
 
-**Sequencing decision:** open 3.5 when there's a forcing
+**Sequencing decision:** open 3.6 when there's a forcing
 function — a downstream consumer hitting the serialised batch
 on the mutex's lock contention, or an AGNOS roadmap milestone
 that requires the parallel speedup. The refactor is invasive
 enough that it should be done in one focused sprint, not
 incrementally.
 
-## Road to v3.6 — perf tuning: field arithmetic + alloc-free
+## Road to v3.7 — perf tuning: field arithmetic + alloc-free
 
 The 3.2.x verify paths are correct but slow:
 
@@ -100,24 +155,24 @@ The 3.2.x verify paths are correct but slow:
   `_p384_long_div_reduce`. Solinas word-level reduction
   drops the cost 20–50×.
 
-3.6 closes the bump-allocator-lifetime LOW findings (now seven
+3.7 closes the bump-allocator-lifetime LOW findings (now seven
 across the 3.2.x + 3.4 cycles) and lands Solinas reduction for
 both curves.
 
-### 3.6 work items
+### 3.7 work items
 
 - [ ] **Solinas reduction for P-256.** Word-level reduction
       against `p256 = 2^256 − 2^224 + 2^192 + 2^96 − 1` per
       FIPS 186-4 Appendix D / NIST SP 800-186. Replace
       `_p256_long_div_reduce` with the new pipeline.
       Re-bench against the `v3.2.1` baseline; target ≤ 10 ms
-      / verify. CSV row `v3.6-p256-solinas`.
+      / verify. CSV row `v3.7-p256-solinas`.
 
 - [ ] **Solinas reduction for P-384.** Same shape against
       `p384 = 2^384 − 2^128 − 2^96 + 2^32 − 1`. The P-384
       Solinas decomposition is wider (more word-level
       shuffles) but the structure is identical. CSV row
-      `v3.6-p384-solinas`.
+      `v3.7-p384-solinas`.
 
 - [ ] **Unified `_into`-shape API.** Eliminate per-call
       `alloc` in `x509_parse`, `_snp_v_init`, `_sgxv_init`,
@@ -134,13 +189,13 @@ both curves.
       and 3.4.1 cycles.
 
 - [ ] **Re-run the full crypto bench suite.** Capture before /
-      after rows for every verify-path bench. The 3.6 ship
+      after rows for every verify-path bench. The 3.7 ship
       target: `ecdsa_p256_verify` and `ecdsa_p384_verify`
       both ≤ 10 ms / verify on the dev host. SEV-SNP / TDX
       verify rows benefit transitively from the P-256 /
       P-384 speedup; cross-check the deltas are clean.
 
-**Sequencing decision:** open 3.6 only if a downstream
+**Sequencing decision:** open 3.7 only if a downstream
 consumer surfaces a latency complaint (kavach's batch-
 attestation flow, ark's signature-heavy publisher workflow).
 Until then, the verify path is fast enough for one-shot
@@ -220,27 +275,10 @@ in-place when an adjacent edit touches the relevant module.
       gate even after the structural fix lands — defence-in-
       depth.
 
-- [ ] **ChaCha20 + ChaCha20-Poly1305 AEAD.** TLS 1.3's second
-      mandatory AEAD ciphersuite (`TLS_CHACHA20_POLY1305_SHA256`,
-      RFC 8439). Poly1305 already ships; the ChaCha20 stream
-      cipher is the gap. Compose the two into the RFC 8439 AEAD
-      (encrypt/decrypt + tag). **Forcing function:** the cyrius
-      v6.2.x native-TLS arc (`lib/tls_native.cyr`, replacing the
-      `libssl`/fdlopen wrapper in `lib/tls.cyr`) needs this for the
-      kernel + sandhi consumers — a bare-metal AGNOS kernel has no
-      `libssl.so.3` to dlopen, so the protocol layer must drive
-      pure-Cyrius AEAD. Schedule into a sigil minor once the cyrius
-      native-TLS slot firms.
-
-- [ ] **X25519 key agreement.** TLS 1.3's default key-exchange
-      group (`x25519`, RFC 7748). The Curve25519 field arithmetic
-      already exists (ed25519 path); X25519 is the ECDH wrapper —
-      clamped scalar × base/peer point → shared secret. **Forcing
-      function:** same cyrius v6.2.x native-TLS arc. Companion to
-      the ChaCha20 item; together they gate the modern TLS 1.3
-      `ChaCha20-Poly1305 + X25519` suite. (AES-GCM + ECDSA-P256/P384
-      + X.509 already ship in sigil 3.4.x, so the RSA/AES suites are
-      already covered for the native stack.)
+> The **ChaCha20 + ChaCha20-Poly1305 AEAD** and **X25519 key
+> agreement** items were promoted out of this backlog into the
+> [Road to v3.5](#road-to-v35--modern-aead--key-agreement-primitives)
+> cycle (2026-05-27).
 
 ## Possible future surfaces
 

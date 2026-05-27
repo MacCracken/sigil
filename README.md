@@ -12,7 +12,7 @@ revocation management.
 Cyrius (ported from Rust v1.0.0; original Rust source removed in
 2.7.0). Zero external dependencies.
 
-**Cyrius pin:** `6.0.1` (synced across `cyrius.cyml` and CI).
+**Cyrius pin:** `6.0.3` (synced across `cyrius.cyml` and CI).
 
 ## Crypto stack
 
