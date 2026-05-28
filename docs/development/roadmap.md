@@ -105,6 +105,54 @@ cross-verified HKDF vectors (+19 assertions). Toolchain pin bumped
 6.0.3 → 6.0.12. Resolves
 `docs/development/issues/2026-05-28-cyrius-tls-native-needs-hkdf-sha384.md`.
 
+## Planned — v3.5.7 (audit / security / hardening close-out)
+
+3.5.6 shipped HMAC-SHA384 + HKDF-SHA384 as a post-closeout
+forcing-function patch — additive crypto landed *after* the 3.5.4
+Closeout Pass, so it never went through a dedicated audit/bench
+gate. 3.5.7 is that gate: a small hardening + close-out tag that
+re-runs the CLAUDE.md Closeout Pass over the 3.5.5/3.5.6 deltas and
+absorbs any other small repairs/additions surfaced before 3.6
+opens. This is also the **last patch of the 3.5 minor** — it should
+ship clean before any 3.6 (parallel-verify) work begins.
+
+**Sequencing:** hold open as the catch-all 3.5.x slot. If cyrius (or
+any consumer) surfaces another small additive/repair need against
+the modern-crypto surface, fold it in here rather than spinning a
+separate tag; promote to 3.6 only when the parallel-verify forcing
+function is firm.
+
+### 3.5.7 work items
+
+- [ ] **Dedicated security audit doc for the 3.5.6 primitives.**
+      File `docs/audit/2026-05-2x-3.5.6-hmac-hkdf-sha384-audit.md`
+      covering `src/hmac_sha384.cyr` + `src/hkdf_sha384.cyr`:
+      constant-time review (no secret-dependent branch — the only
+      branch is the public `key_len > 128` key-hash path),
+      buffer-size verification (`kprime384[128]`, 48-byte digests,
+      `48 + info_len + 1` scratch), `secret var` + `memset`
+      zeroization on every secret buffer before free, and the
+      255×48 = 12240 OKM cap. Inline review at implementation time
+      was clean; this formalises it per the "audit before release"
+      rule the 3.5.6 patch deferred.
+- [ ] **Bench rows for the SHA-384 MAC/KDF.** Add
+      `hmac_sha384` + `hkdf_sha384` cases to `benches/sigil.bcyr`
+      and a `benches/history.csv` row (e.g. `v3.5.7-sha384-kdf`),
+      matching the per-primitive bench cadence the 3.5.0–3.5.3
+      bites consolidated at the 3.5.4 closeout.
+- [ ] **Doc-health refresh.** `docs/doc-health.md` was last swept
+      at the 3.5.4 closeout; neither 3.5.5 (doc pass) nor 3.5.6
+      (HKDF-SHA384) bumped it. Refresh the ledger dates + the
+      `sources.md` / `state.md` / `CHANGELOG.md` rows so it reflects
+      the 3.5.5/3.5.6 state.
+- [ ] **Closeout Pass over the 3.5.5/3.5.6 delta.** Full suite (44
+      files / 1216 assertions), dead-code audit, stale-comment
+      sweep, security re-scan, downstream check (consumers in
+      `state.md` still build against 3.5.7), clean build from
+      scratch, version verify.
+- [ ] **(catch-all)** Any other small modern-crypto repair or
+      additive request that lands before 3.6 opens.
+
 ## Road to v3.6 — caller-provided scratch for parallel verify
 
 Drop `_sigil_batch_mutex` by threading caller-provided scratch

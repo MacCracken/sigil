@@ -16,7 +16,7 @@
 | Cyrius toolchain pin | **6.0.12** (`cyrius.cyml [package].cyrius`) |
 | Last release date | 2026-05-28 |
 | Last release audit | [`2026-05-27-3.5-arc-audit.md`](../audit/2026-05-27-3.5-arc-audit.md) |
-| Phase | Released; **3.5 cycle CLOSED** (3.5.0–3.5.4). 3.5.5 doc-comment patch toward upstreaming. 3.5.6 adds HMAC-SHA384 + HKDF-SHA384 (`src/hmac_sha384.cyr`, `src/hkdf_sha384.cyr`) — a forcing-function for the cyrius native TLS 1.3 arc (unblocks held cyrius v6.0.13 `TLS_AES_256_GCM_SHA384` key schedule); see resolved issue `docs/development/issues/2026-05-28-cyrius-tls-native-needs-hkdf-sha384.md`. Next minor: 3.6 (parallel verify) / 3.7 (perf), both gated on forcing functions. |
+| Phase | Released; **3.5 cycle CLOSED** (3.5.0–3.5.4). 3.5.5 doc-comment patch toward upstreaming. 3.5.6 adds HMAC-SHA384 + HKDF-SHA384 (`src/hmac_sha384.cyr`, `src/hkdf_sha384.cyr`) — a forcing-function for the cyrius native TLS 1.3 arc (unblocks held cyrius v6.0.13 `TLS_AES_256_GCM_SHA384` key schedule); see resolved issue `docs/development/issues/2026-05-28-cyrius-tls-native-needs-hkdf-sha384.md`. Next tag: **3.5.7** — planned audit/security/hardening close-out (held open as the catch-all 3.5.x slot: 3.5.6 audit doc + SHA-384 MAC/KDF bench rows + doc-health refresh + Closeout Pass over the 3.5.5/3.5.6 delta). Then 3.6 (parallel verify) / 3.7 (perf), both gated on forcing functions. |
 
 ## Test surface
 
