@@ -42,9 +42,10 @@ until then).
   PKCS#8 end-to-end (seed → derive public key → sign/verify), P-256
   /P-384 SEC1 + PKCS#8 scalar parse, curve/OID/truncation rejection,
   and the PEM layer for all five EC/Ed25519 forms + the RSA sentinel.
-  Fixtures under `tests/data/privkey/` are regenerated from the exact
-  DER bytes the test embeds, so the DER and PEM layers cross-check the
-  same keys.
+  PEM blocks are inlined in the test (the repo `.gitignore` excludes
+  `*.pem`, so fixtures can't be committed); each base64 body is the
+  same key as the matching DER vector, so the two layers cross-check
+  the same keys.
 
 ### Changed
 

@@ -16,6 +16,7 @@ include "lib/assert.cyr"
 include "lib/alloc.cyr"
 include "lib/freelist.cyr"
 include "lib/str.cyr"
+include "lib/string.cyr"
 include "lib/vec.cyr"
 include "lib/hashmap.cyr"
 include "lib/syscalls.cyr"
@@ -122,48 +123,50 @@ fn main() {
 
     # ============================================================
     # PEM layer — pem_decode_privkey, auto-detecting label + algo.
-    # Fixtures in tests/data/privkey/ are the same keys as the DER
-    # vectors above (regenerated from those exact DER bytes).
+    # PEM blocks are inlined (the repo's .gitignore excludes *.pem,
+    # so fixtures can't be committed); each base64 body is the same
+    # key as the matching DER vector above.
     # ============================================================
     test_group("pem_decode_privkey label + algo dispatch");
 
-    var pem_buf[2048];
     var kout[48];
     var algo = 0;
 
     # Ed25519 PKCS#8
-    var n1 = file_read_all("tests/data/privkey/ed25519_pk8.pem", &pem_buf, 2048);
-    assert_eq(pem_decode_privkey(&pem_buf, n1, &kout, 48, &algo), 32, "PEM ed25519 rc=32");
+    var ed_pem = "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIDmYQ81rjqW6Awn+Wzj+TdJx7mXyDzmkjvx9dQPAd18S\n-----END PRIVATE KEY-----\n";
+    assert_eq(pem_decode_privkey(ed_pem, strlen(ed_pem), &kout, 48, &algo), 32, "PEM ed25519 rc=32");
     assert_eq(algo, SIG_PRIVKEY_ED25519, "PEM ed25519 algo");
     assert_streq(hex_encode(&kout, 32), "399843cd6b8ea5ba0309fe5b38fe4dd271ee65f20f39a48efc7d7503c0775f12", "PEM ed25519 seed");
 
     # P-256 SEC1
-    var n2 = file_read_all("tests/data/privkey/p256_sec1.pem", &pem_buf, 2048);
-    assert_eq(pem_decode_privkey(&pem_buf, n2, &kout, 48, &algo), 32, "PEM p256 SEC1 rc=32");
+    var p256_sec1_pem = "-----BEGIN EC PRIVATE KEY-----\nMHcCAQEEIFfw6k4o/cNmYGu+CR17ul2W+VPOChbZEnZ2AhmJtPO8oAoGCCqGSM49AwEHoUQDQgAEoGXqm/Xb/sBCHC1JTvoSppbBvD/LsiLVzxGMrqqqr5uV9VaocGg3Eomd3aWmUVDhT2+FRAA+IEyy5qD8ijItuQ==\n-----END EC PRIVATE KEY-----\n";
+    assert_eq(pem_decode_privkey(p256_sec1_pem, strlen(p256_sec1_pem), &kout, 48, &algo), 32, "PEM p256 SEC1 rc=32");
     assert_eq(algo, SIG_PRIVKEY_ECDSA_P256, "PEM p256 SEC1 algo");
     assert_streq(hex_encode(&kout, 32), p256_d, "PEM p256 SEC1 scalar");
 
     # P-256 PKCS#8
-    var n3 = file_read_all("tests/data/privkey/p256_pk8.pem", &pem_buf, 2048);
-    assert_eq(pem_decode_privkey(&pem_buf, n3, &kout, 48, &algo), 32, "PEM p256 PKCS#8 rc=32");
+    var p256_pk8_pem = "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgV/DqTij9w2Zga74JHXu6XZb5U84KFtkSdnYCGYm087yhRANCAASgZeqb9dv+wEIcLUlO+hKmlsG8P8uyItXPEYyuqqqvm5X1VqhwaDcSiZ3dpaZRUOFPb4VEAD4gTLLmoPyKMi25\n-----END PRIVATE KEY-----\n";
+    assert_eq(pem_decode_privkey(p256_pk8_pem, strlen(p256_pk8_pem), &kout, 48, &algo), 32, "PEM p256 PKCS#8 rc=32");
     assert_eq(algo, SIG_PRIVKEY_ECDSA_P256, "PEM p256 PKCS#8 algo");
     assert_streq(hex_encode(&kout, 32), p256_d, "PEM p256 PKCS#8 scalar");
 
     # P-384 SEC1
-    var n4 = file_read_all("tests/data/privkey/p384_sec1.pem", &pem_buf, 2048);
-    assert_eq(pem_decode_privkey(&pem_buf, n4, &kout, 48, &algo), 48, "PEM p384 SEC1 rc=48");
+    var p384_sec1_pem = "-----BEGIN EC PRIVATE KEY-----\nMIGkAgEBBDBdL/ejaEnmhFylFYThKNm20k0E/S52oxOBuBgNUrXhNZXKC+CGxOXoNQ3xzKUzjQCgBwYFK4EEACKhZANiAASRDh0CEVZXL//rzCyMb9FhjtsfojUMpUPpMWgmZnYEOedt5BU+6C9fFEsAogfe+6ypuTBP9u0C8wSwDejNvQVIRnMWSg5BFx0UnzjjzcqBUo21jREDJUCDjYaJqxl7ZNk=\n-----END EC PRIVATE KEY-----\n";
+    assert_eq(pem_decode_privkey(p384_sec1_pem, strlen(p384_sec1_pem), &kout, 48, &algo), 48, "PEM p384 SEC1 rc=48");
     assert_eq(algo, SIG_PRIVKEY_ECDSA_P384, "PEM p384 SEC1 algo");
     assert_streq(hex_encode(&kout, 48), p384_d, "PEM p384 SEC1 scalar");
 
     # P-384 PKCS#8
-    var n5 = file_read_all("tests/data/privkey/p384_pk8.pem", &pem_buf, 2048);
-    assert_eq(pem_decode_privkey(&pem_buf, n5, &kout, 48, &algo), 48, "PEM p384 PKCS#8 rc=48");
+    var p384_pk8_pem = "-----BEGIN PRIVATE KEY-----\nMIG2AgEAMBAGByqGSM49AgEGBSuBBAAiBIGeMIGbAgEBBDBdL/ejaEnmhFylFYThKNm20k0E/S52oxOBuBgNUrXhNZXKC+CGxOXoNQ3xzKUzjQChZANiAASRDh0CEVZXL//rzCyMb9FhjtsfojUMpUPpMWgmZnYEOedt5BU+6C9fFEsAogfe+6ypuTBP9u0C8wSwDejNvQVIRnMWSg5BFx0UnzjjzcqBUo21jREDJUCDjYaJqxl7ZNk=\n-----END PRIVATE KEY-----\n";
+    assert_eq(pem_decode_privkey(p384_pk8_pem, strlen(p384_pk8_pem), &kout, 48, &algo), 48, "PEM p384 PKCS#8 rc=48");
     assert_eq(algo, SIG_PRIVKEY_ECDSA_P384, "PEM p384 PKCS#8 algo");
     assert_streq(hex_encode(&kout, 48), p384_d, "PEM p384 PKCS#8 scalar");
 
-    # RSA PKCS#1 — recognized but unsupported until 3.5.10.
-    var n6 = file_read_all("tests/data/privkey/rsa_pk1.pem", &pem_buf, 2048);
-    assert_eq(pem_decode_privkey(&pem_buf, n6, &kout, 48, &algo), 0 - SIG_PRIVKEY_RSA, "PEM RSA returns sentinel");
+    # RSA PKCS#1 — label recognized, parser unsupported until 3.5.10.
+    # The body need only be valid base64; the RSA path returns the
+    # sentinel before parsing the DER content.
+    var rsa_pem = "-----BEGIN RSA PRIVATE KEY-----\nAAAA\n-----END RSA PRIVATE KEY-----\n";
+    assert_eq(pem_decode_privkey(rsa_pem, strlen(rsa_pem), &kout, 48, &algo), 0 - SIG_PRIVKEY_RSA, "PEM RSA returns sentinel");
     assert_eq(algo, SIG_PRIVKEY_RSA, "PEM RSA algo tag");
 
     return assert_summary();

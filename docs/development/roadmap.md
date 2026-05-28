@@ -186,7 +186,8 @@ fold into that final closeout's delta.
       malformed blob. **End-to-end tested:** Ed25519 via
       `ed25519_keypair` (derived pubkey match) + sign/verify; ECDSA by
       scalar match against known vectors; +33 assertions
-      (`tests/tcyr/privkey.tcyr` + fixtures `tests/data/privkey/`).
+      (`tests/tcyr/privkey.tcyr`, self-contained — PEM blocks inlined
+      since `.gitignore` excludes `*.pem`).
       Audit: `docs/audit/2026-05-28-3.5.8-privkey-parsers-audit.md`.
       Callers own the destination buffer and should declare it
       `secret var`. **Cyrius forcing slots:** v6.0.15 (client cert,
