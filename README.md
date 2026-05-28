@@ -12,24 +12,27 @@ revocation management.
 Cyrius (ported from Rust v1.0.0; original Rust source removed in
 2.7.0). Zero external dependencies.
 
-**Cyrius pin:** `6.0.3` (synced across `cyrius.cyml` and CI).
+**Cyrius pin:** `6.0.14` (synced across `cyrius.cyml` and CI).
 
 ## Crypto stack
 
 All cryptography implemented in Cyrius — no external dependencies:
 
 - **Ed25519** (RFC 8032) — asymmetric signing/verification
-- **ECDSA P-256** (FIPS 186-4) — SEC1 curve secp256r1 verify
-- **ECDSA P-384** (FIPS 186-4) — SEC1 curve secp384r1 verify
-- **SHA-256** (FIPS 180-4) — content hashing
-- **SHA-384** (FIPS 180-4) — paired with P-384 ECDSA and TDX att_key_type=3
-- **SHA-512** (FIPS 180-4) — Ed25519 key expansion
-- **HMAC-SHA256** (RFC 2104) — keyed hashing
-- **HKDF-SHA256** (RFC 5869) — key derivation
-- **AES-256-GCM** (FIPS 197 + NIST SP 800-38D) — AEAD with AES-NI
-  dispatch (runtime-detected)
+- **ECDSA P-256 / P-384** (FIPS 186-4) — secp256r1 / secp384r1
+  verify **and** RFC 6979 deterministic signing (raw + DER)
+- **X25519** (RFC 7748) — Curve25519 ECDH key agreement
+- **SHA-256 / SHA-384 / SHA-512** (FIPS 180-4) — hashing
+- **HMAC-SHA256 / HMAC-SHA384** (RFC 2104 / FIPS 198-1) — keyed hashing
+- **HKDF-SHA256 / HKDF-SHA384** (RFC 5869) — key derivation
+- **AES-256-GCM / AES-128-GCM** (FIPS 197 + NIST SP 800-38D) — AEAD
+  with runtime-detected AES-NI dispatch
+- **ChaCha20-Poly1305** (RFC 8439) — AEAD (ChaCha20 cipher +
+  Poly1305 one-time MAC)
 - **ML-DSA-65** (FIPS 204) — post-quantum signing, gated behind
   `-D SIGIL_PQC` until the cyrius preprocessor cap raises
+- **Private-key parsers** — PEM + DER for ECDSA P-256/P-384 (SEC1 /
+  PKCS#8) and Ed25519 (PKCS#8); X.509 + PEM cert parsing
 - **Constant-time comparison** — bitwise-OR accumulation; no
   early-exit branches on secret data
 - **Cryptographic RNG** — `/dev/urandom` with short-read validation
@@ -40,11 +43,17 @@ All cryptography implemented in Cyrius — no external dependencies:
 
 - **`sha256.cyr`**, **`sha384.cyr`**, **`sha512.cyr`** — hashing
 - **`sha_ni.cyr`** — SHA-256-NI hardware dispatch (runtime probe)
-- **`hmac.cyr`**, **`hkdf.cyr`** — keyed hashing and key derivation
-- **`bigint_ext.cyr`** — 256-bit field arithmetic for Ed25519
+- **`hmac.cyr`**, **`hkdf.cyr`** — HMAC/HKDF-SHA256
+- **`hmac_sha384.cyr`**, **`hkdf_sha384.cyr`** — HMAC/HKDF-SHA384
+- **`bigint_ext.cyr`** — 256-bit field arithmetic for Ed25519/X25519
 - **`ed25519.cyr`** — Ed25519 signatures
+- **`x25519.cyr`** — X25519 ECDH key agreement
 - **`ecdsa_p256.cyr`**, **`ecdsa_p384.cyr`** — ECDSA verify
-- **`aes_gcm.cyr`**, **`aes_ni.cyr`** — AES-256-GCM AEAD
+- **`ecdsa_sign.cyr`** — ECDSA P-256/P-384 RFC 6979 deterministic sign
+- **`privkey.cyr`** — EC + Ed25519 private-key parsers (PEM + DER)
+- **`aes_gcm.cyr`**, **`aes_ni.cyr`** — AES-256/128-GCM AEAD
+- **`chacha20.cyr`**, **`poly1305.cyr`**, **`chacha20poly1305.cyr`**
+  — ChaCha20-Poly1305 AEAD
 - **`mldsa_*.cyr`** — ML-DSA-65 (PQC, opt-in)
 - **`hex.cyr`** — hex encode/decode
 
@@ -111,9 +120,9 @@ for the full module map and data flow.
 
 ## Tests
 
-1178 assertions across 37 test files, 0 failures (3.4.1 baseline).
-The TEE attestation arc and 3.4 cycle ship with synthesised
-end-to-end fixtures regeneratable from `scripts/*.out`.
+1284 assertions across 47 test files, 0 failures (3.5.9). Crypto
+suites use published known-answer vectors (RFC / FIPS / NIST); the
+TEE attestation arc ships synthesised end-to-end fixtures.
 
 ```sh
 cyrius build programs/smoke.cyr build/sigil   # full build
@@ -122,13 +131,17 @@ for t in tests/tcyr/*.tcyr; do cyrius test "$t"; done
 
 ## Roadmap
 
-Open cycles (gated on forcing functions):
-
-- **v3.5** — parallel verify (drop `_sigil_batch_mutex` via
-  caller-provided crypto scratch).
-- **v3.6** — perf tuning: Solinas word-level field reduction for
+- **v3.5.x — cyrius native-TLS arc support** (in progress). Shipped:
+  modern AEAD + key agreement (Poly1305/ChaCha20/AEAD/X25519,
+  HMAC/HKDF-SHA384), AES-128-GCM, EC + Ed25519 private-key parsers,
+  ECDSA P-256/P-384 deterministic signing. Remaining: RSA
+  (PKCS#1 v1.5 + PSS, with the bignum engine), TLS 1.2 PRF, cycle
+  closeout.
+- **v3.6** — parallel verify: drop `_sigil_batch_mutex` via
+  caller-provided crypto scratch (gated on a forcing function).
+- **v3.7** — perf tuning: Solinas word-level field reduction for
   P-256/P-384 (target ≤ 10 ms/verify) + unified `_into` API
-  (closes seven open bump-allocator LOWs).
+  (closes the open bump-allocator LOWs).
 
 See [`docs/development/roadmap.md`](docs/development/roadmap.md)
 for the active backlog and possible future surfaces.

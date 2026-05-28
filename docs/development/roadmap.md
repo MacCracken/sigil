@@ -22,196 +22,47 @@ see [CHANGELOG.md](../../CHANGELOG.md). Closed cycles:
     retired); `scripts/regen-dist.sh` shipped as the
     replacement. 2026-05-22 doc-tree restructure rides along.
     Audit: `docs/audit/2026-05-22-3.4.2-audit.md`.
+- **3.5.0–3.5.6 — modern AEAD + key agreement** (shipped
+  2026-05-27/28): Poly1305 → ChaCha20 → ChaCha20-Poly1305 AEAD →
+  X25519, then a post-closeout HMAC-SHA384 + HKDF-SHA384 patch.
+  Completes the TLS 1.3 ChaCha20-Poly1305-SHA256 +
+  AES-256-GCM-SHA384 suites with X25519 key share. Audit:
+  `docs/audit/2026-05-27-3.5-arc-audit.md`. Per-version detail in
+  [CHANGELOG.md](../../CHANGELOG.md).
 
 **Cyrius pin:** `6.0.14` (synced across `cyrius.cyml` and CI).
 
-## Road to v3.5 — modern AEAD + key agreement primitives
+## v3.5.x — cyrius native-TLS arc support (in progress)
 
-The cyrius v6.2.x native-TLS arc (`lib/tls_native.cyr`, replacing
-the `libssl`/fdlopen wrapper in `lib/tls.cyr`) needs pure-Cyrius
-AEAD + key agreement for the kernel + sandhi consumers — a
-bare-metal AGNOS kernel has no `libssl.so.3` to dlopen, so the
-protocol layer must drive sigil-owned primitives. This cycle lands
-the TLS 1.3 `ChaCha20-Poly1305 + X25519` suite. (AES-256-GCM +
-ECDSA-P256/P384 + X.509 already ship in 3.4.x, so the AES suite is
-already covered for the native stack.)
+The cyrius native-TLS arc needs sigil-side crypto one slot at a time
+across cyrius v6.0.14 → .34
+([`issues/2026-05-28-cyrius-tls-arc-full-audit.md`](issues/2026-05-28-cyrius-tls-arc-full-audit.md),
+five line items). Sigil ships them as ordered 3.5.x bites; cyrius
+bumps its pin and resumes the held slot at each tag. Each crypto bite
+carries its own per-bite audit doc; the cycle-wide **Closeout Pass is
+held as the last 3.5.x tag (3.5.12)**.
 
-**Correction (carried from the backlog promotion):** the earlier
-backlog note claimed "Poly1305 already ships." It does not — the
-only `poly1305` reference in the tree was a descriptive comment in
-`src/aes_gcm.cyr` (the GCM tag length). Both Poly1305 and ChaCha20
-are greenfield in this cycle.
+> **Catch-all slot:** fold any small additive/repair need against the
+> modern-crypto surface into the nearest unshipped bite or a new 3.5.x
+> slot **ahead of** the closeout — never after it.
 
-### 3.5 work items
+### Shipped (per-version detail in [CHANGELOG.md](../../CHANGELOG.md))
 
-- [x] **3.5.0 — Poly1305 one-time MAC (RFC 8439 §2.5).**
-      *Shipped 2026-05-27.* Standalone authenticator in `src/poly1305.cyr`:
-      `poly1305_mac(out, msg, msg_len, key)` over the 32-byte
-      one-time key. **Ships ahead of the TLS arc** — a MAC
-      primitive needs no forcing function. Implemented as the
-      26-bit-limb (`poly1305-donna`) reduction so every
-      intermediate product stays inside a signed i64 (no 128-bit
-      path), with constant-time final reduction (mask-select, no
-      branch on the key-derived accumulator). One-shot first;
-      streaming `init`/`update`/`finish` deferred to the AEAD bite
-      that needs it. Key caveat documented in the module header:
-      **one-time key — never reuse across two messages.**
+- **3.5.7 — AES-128-GCM** (`src/aes_gcm.cyr` + 10-round AES-NI path).
+  RFC 8446 §9.1 mandatory `TLS_AES_128_GCM_SHA256`. Unblocked cyrius
+  v6.0.14. Audit: `docs/audit/2026-05-28-3.5.7-aes128-gcm-audit.md`.
+- **3.5.8 — EC + Ed25519 private-key parsers** (`src/privkey.cyr`):
+  `ecdsa_p256/p384_privkey_from_der` (SEC1 / PKCS#8),
+  `ed25519_privkey_from_der` (PKCS#8), `pem_decode_privkey`. RSA label
+  recognized → parser deferred to 3.5.10. Unblocked cyrius v6.0.15/.23
+  key loading. Audit:
+  `docs/audit/2026-05-28-3.5.8-privkey-parsers-audit.md`.
+- **3.5.9 — ECDSA P-256/P-384 sign** (`src/ecdsa_sign.cyr`): RFC 6979
+  deterministic-k, raw `r||s` + DER. Unblocked cyrius v6.0.17/.25
+  CertificateVerify. Audit:
+  `docs/audit/2026-05-28-3.5.9-ecdsa-sign-audit.md`.
 
-- [x] **ChaCha20 stream cipher (RFC 8439 §2.4).** *Shipped 3.5.1,
-      2026-05-27.* `src/chacha20.cyr`: `chacha20_block` +
-      `chacha20_xor`, 20-round ARX permutation + counter-mode
-      keystream. RFC §2.3.2 / §2.4.2 vectors pass. Audit:
-      `docs/audit/2026-05-27-3.5-arc-audit.md`.
-
-- [x] **ChaCha20-Poly1305 AEAD (RFC 8439 §2.8).** *Shipped 3.5.2,
-      2026-05-27.* `src/chacha20poly1305.cyr`:
-      derive the Poly1305 one-time key from the ChaCha20 keystream
-      (counter 0), authenticate `AAD || pad16 || ciphertext ||
-      pad16 || len(AAD)_le64 || len(ct)_le64`. Resolved the
-      "streaming vs contiguous-buffer" choice in favour of a
-      per-call `fl_alloc` mac-data buffer (correct allocator for
-      per-call scratch; does not touch the bump-allocator audit
-      floor). A streaming Poly1305 remains a future optimization
-      for very large messages. RFC §2.8.2 vector passes.
-
-- [x] **X25519 key agreement (RFC 7748).** *Shipped 3.5.3,
-      2026-05-27.* `src/x25519.cyr`: Montgomery-ladder ECDH reusing
-      the Curve25519 field arithmetic in `src/bigint_ext.cyr`
-      (`fp_add/sub/mul`, mod 2^255−19); clamped scalar × base/peer
-      point → shared secret. RFC §5.2 + §6.1 vectors pass. Audit:
-      `docs/audit/2026-05-27-3.5-arc-audit.md`.
-
-**Sequencing decision (closed):** Poly1305 (3.5.0) shipped as a
-self-contained primitive; ChaCha20 (3.5.1), the AEAD (3.5.2), and
-X25519 (3.5.3) followed in the same cycle on the maintainer's
-go-ahead (the native-TLS forcing function was treated as firm).
-The TLS 1.3 `ChaCha20-Poly1305 + X25519` suite is now
-feature-complete and shipped in sigil. **3.5.4 closeout (shipped
-2026-05-27)** ran the CLAUDE.md Closeout Pass (full suite + bench,
-dead-code audit, stale-comment sweep, security re-scan, downstream
-check, doc sync, clean build) and consolidated the four per-bite
-audits into `docs/audit/2026-05-27-3.5-arc-audit.md`. The 3.5 cycle
-is closed; next minor is 3.6 (parallel verify), then 3.7 (perf).
-
-**3.5.6 — HMAC-SHA384 + HKDF-SHA384 (shipped 2026-05-28).** A
-post-closeout forcing-function patch: the cyrius native-TLS arc held
-its v6.0.13 (Mini-arc A.4, TLS 1.3 key schedule) because the
-`TLS_AES_256_GCM_SHA384` (0x1302) ciphersuite drives its RFC 8446
-§7.1 key schedule off HKDF-SHA384, which sigil had not yet exposed
-(only the SHA-256 variants). Added `hmac_sha384` (`src/hmac_sha384.cyr`)
-+ `hkdf_extract_sha384` / `hkdf_expand_sha384` / `hkdf_sha384`
-(`src/hkdf_sha384.cyr`) — pure additive surface, RFC 4231 §4 + 3
-cross-verified HKDF vectors (+19 assertions). Toolchain pin bumped
-6.0.3 → 6.0.12. Resolves
-`docs/development/issues/2026-05-28-cyrius-tls-native-needs-hkdf-sha384.md`.
-
-## Planned — v3.5.7 → v3.5.12 (cyrius native-TLS arc support)
-
-The 3.5.6 HKDF-SHA384 ship closed the **first** cyrius native-TLS
-forcing function. A follow-on filing —
-[`issues/2026-05-28-cyrius-tls-arc-full-audit.md`](issues/2026-05-28-cyrius-tls-arc-full-audit.md)
-— cross-walks the **remaining** sigil-side gaps the cyrius arc hits
-one slot at a time across cyrius v6.0.14 → .34. Rather than file each
-at its forcing slot (the per-slot-piecemeal pattern the issue itself
-calls out), sigil schedules the five line items as separate, ordered
-3.5.x bites; cyrius bumps its pin and resumes the held slot at each
-tag.
-
-The five items are independent and additive (existing-shape surface,
-**except RSA** — line item 2 — which needs a general bignum modexp
-engine sigil does not have yet; `src/bigint_ext.cyr` is Curve25519
-field arithmetic mod 2²⁵⁵−19 only, not a general RSA modulus engine.
-See the 3.5.10 note). They are sequenced by (a) cyrius
-forcing-function order and (b) internal dependency — the private-key
-parsers (3.5.8) land **before** the sign paths (3.5.9/3.5.10) that
-consume their opaque handles.
-
-**Each crypto bite carries its own per-bite security audit doc**
-(`docs/audit/YYYY-MM-DD-*.md`, Work Loop step 7). The cycle-wide
-**Closeout Pass is held as the last 3.5.x tag (3.5.12)** — it ships
-only after every other item lands, and is the last patch of the 3.5
-minor before 3.6 (parallel verify) opens. The 3.5.5/3.5.6 retro-audit
-+ bench + doc-health items (previously scoped to a standalone 3.5.7)
-fold into that final closeout's delta.
-
-> **Catch-all slot:** if cyrius (or any consumer) surfaces another
-> small additive/repair need against the modern-crypto surface before
-> 3.6 opens, fold it into the nearest unshipped bite or insert a new
-> 3.5.x slot **ahead of** the closeout — never after it. Promote to
-> 3.6 only when the parallel-verify forcing function is firm.
-
-### 3.5.7 — AES-128-GCM (issue line item 1) — **shipped 2026-05-28**
-
-- [x] **`aes_128_key_expand` / `aes_128_gcm_encrypt` /
-      `aes_128_gcm_decrypt`.** *Shipped 3.5.7.* `TLS_AES_128_GCM_SHA256`
-      (0x1301) is the RFC 8446 §9.1 **mandatory** TLS 1.3 ciphersuite;
-      also unblocks the four `TLS_*_WITH_AES_128_GCM_SHA256` 1.2
-      suites. AES-128 differs from AES-256 only in the key schedule
-      (10 rounds / 176-byte round-key table vs 14 / 240); the block
-      transform, GHASH, CTR mode, and GCM framing are shared and
-      parametrized on the round count `nr`. Added the 10-round
-      `aes128_encrypt_block_ni` AES-NI path (`src/aes_ni.cyr`), gated
-      by a FIPS 197 §C.1 boot self-test alongside the existing §C.3
-      check. Mirrors the AES-256-GCM surface byte-for-byte; AES-256
-      behaviour/signatures unchanged. +15 assertions
-      (`tests/tcyr/aes128_gcm.tcyr`, canonical GCM AES-128 Test Cases
-      1–4 + decrypt/forged-tag/empty roundtrips). Bench rows
-      `v3.5.7-aes128-gcm` in `tests/bcyr/sigil.bcyr` + `history.csv`.
-      Audit: `docs/audit/2026-05-28-3.5.7-aes128-gcm-audit.md`.
-      Toolchain pin bumped 6.0.12 → 6.0.14.
-      **Cyrius forcing slot:** v6.0.14 (Mini-arc A.5, ciphersuite
-      negotiation) — now unblocked.
-
-### 3.5.8 — EC + Ed25519 private-key parsers, PEM + DER (issue line item 4, EC/Ed part) — **shipped 2026-05-28**
-
-> **Scope correction (2026-05-28):** the original triage put the RSA
-> private-key parser here too, but an RSA key has no representation in
-> sigil until the bignum/key type lands with the engine in **3.5.10** —
-> parsing into a type that doesn't exist yet is a backwards dependency.
-> The RSA private-key parser therefore moves to 3.5.10 (bundled with the
-> engine that can hold and test it). 3.5.8 ships only the parsers whose
-> key types already exist and are end-to-end testable today.
-
-- [x] **`ecdsa_p256_privkey_from_der` / `ecdsa_p384_privkey_from_der`
-      (SEC1 / PKCS#8), `ed25519_privkey_from_der` (PKCS#8 / RFC 8410),
-      `pem_decode_privkey` (auto-detect label + algo).** *Shipped
-      3.5.8 in `src/privkey.cyr`.* Parses to the raw private scalar /
-      seed the existing sign paths and the 3.5.9 ECDSA sign accept.
-      Reuses `der_walk` (`src/x509.cyr`) + the `pem.cyr` base64
-      decoder / marker search. The version INTEGER discriminates SEC1
-      (1) from PKCS#8 (0); algorithm + curve OIDs are full-byte
-      validated. `pem_decode_privkey` recognizes the `RSA PRIVATE KEY`
-      label and returns `0 - SIG_PRIVKEY_RSA` (recognized, parser
-      arrives in 3.5.10) so a caller can tell it apart from a
-      malformed blob. **End-to-end tested:** Ed25519 via
-      `ed25519_keypair` (derived pubkey match) + sign/verify; ECDSA by
-      scalar match against known vectors; +33 assertions
-      (`tests/tcyr/privkey.tcyr`, self-contained — PEM blocks inlined
-      since `.gitignore` excludes `*.pem`).
-      Audit: `docs/audit/2026-05-28-3.5.8-privkey-parsers-audit.md`.
-      Callers own the destination buffer and should declare it
-      `secret var`. **Cyrius forcing slots:** v6.0.15 (client cert,
-      optional) / v6.0.23 (server state machine — load cert + key).
-
-### 3.5.9 — ECDSA P-256 + P-384 sign (issue line item 3) — **shipped 2026-05-28**
-
-- [x] **`ecdsa_p256_sign` / `_der`, `ecdsa_p384_sign` / `_der`.**
-      *Shipped 3.5.9 in `src/ecdsa_sign.cyr`.* Deterministic-k
-      (RFC 6979 §3.2, HMAC_DRBG over the curve hash) — raw `r||s`
-      (64 / 96 byte) + DER-encoded forms (TLS 1.3 CertificateVerify
-      shape). Hashes the message internally (SHA-256 / SHA-384).
-      Consumes the scalars `src/privkey.cyr` (3.5.8) parses; pairs
-      with the existing `ecdsa_p256_verify` / `ecdsa_p384_verify`.
-      Reuses each curve's mod-n scalar arithmetic + `pt_scalarmul`;
-      carry-correct add-mod-n (the lib `u256_addmod` drops the
-      2^256 carry). Nonce path zeroized in a single `secret var`
-      block. +20 assertions — exact RFC 6979 A.2.5/A.2.6 vectors
-      (independently reproduced), determinism, sign→verify roundtrips,
-      DER structure. Benches `v3.5.9-ecdsa-sign` (P-256 74 ms / P-384
-      179 ms — slow pending the v3.7 Solinas reduction). Audit:
-      `docs/audit/2026-05-28-3.5.9-ecdsa-sign-audit.md`. **Cyrius
-      forcing slots:** v6.0.17 (CertificateVerify) / v6.0.25 (server
-      ServerHello + key share) — now unblocked.
+### Remaining
 
 ### 3.5.10 — RSA signature surface (issue line item 2) — **Large**
 
