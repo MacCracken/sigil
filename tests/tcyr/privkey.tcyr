@@ -1,0 +1,173 @@
+# privkey.tcyr — EC + Ed25519 private-key DER parser vectors.
+#
+# Vectors generated with OpenSSL (openssl genpkey / ecparam / pkcs8)
+# and hardcoded here; the DER bytes and their expected scalar/seed +
+# public-key components are fixed once committed. Each parser is
+# checked for:
+#   - correct scalar/seed extraction (assert vs the known bytes);
+#   - Ed25519 end-to-end: parsed seed → ed25519_keypair derives the
+#     known public key, and a sign/verify roundtrip succeeds;
+#   - curve / OID / truncation rejection (negative cases).
+#
+# DER lengths (bytes): ed=48, p256 SEC1=121, p256 PKCS#8=138,
+# p384 SEC1=167, p384 PKCS#8=185.
+
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fmt.cyr"
+include "lib/json.cyr"
+include "lib/sakshi.cyr"
+include "lib/chrono.cyr"
+include "lib/bigint.cyr"
+
+include "src/types.cyr"
+include "src/error.cyr"
+include "src/sha256.cyr"
+include "src/hex.cyr"
+include "lib/ct.cyr"
+include "src/sha512.cyr"
+include "src/sha384.cyr"
+include "src/bigint_ext.cyr"
+include "src/ed25519.cyr"
+include "src/ecdsa_p256.cyr"
+include "src/ecdsa_p384.cyr"
+include "src/x509.cyr"
+include "src/pem.cyr"
+include "src/privkey.cyr"
+
+fn main() {
+    alloc_init();
+
+    # ============================================================
+    # Ed25519 PKCS#8 (RFC 8410) → 32-byte seed, end-to-end
+    # ============================================================
+    test_group("Ed25519 PKCS#8 seed parse + derive + sign");
+
+    var ed_der = hex_decode("302e020100300506032b657004220420399843cd6b8ea5ba0309fe5b38fe4dd271ee65f20f39a48efc7d7503c0775f12", 96);
+    var seed[32];
+    var rc_ed = ed25519_privkey_from_der(ed_der, 48, &seed);
+    assert_eq(rc_ed, 0, "ed25519 parse rc=0");
+    var seed_hex = hex_encode(&seed, 32);
+    assert_streq(seed_hex, "399843cd6b8ea5ba0309fe5b38fe4dd271ee65f20f39a48efc7d7503c0775f12", "ed25519 seed bytes");
+
+    # Parsed seed must derive the known public key.
+    var sk[64];
+    var pk[32];
+    ed25519_keypair(&seed, &sk, &pk);
+    var pk_hex = hex_encode(&pk, 32);
+    assert_streq(pk_hex, "b62e4a8bb7677708c1ef533bfb822d019cf682b6df7b996c49137bd79c0e8f40", "ed25519 derived pubkey");
+
+    # Sign + verify roundtrip with the parsed key.
+    var msg = hex_decode("deadbeef", 8);
+    var sig[64];
+    ed25519_sign(&sk, msg, 4, &sig);
+    assert_eq(ed25519_verify(&pk, msg, 4, &sig), 1, "ed25519 sign/verify roundtrip");
+
+    # ============================================================
+    # ECDSA P-256 — SEC1 (EC PRIVATE KEY) + PKCS#8
+    # ============================================================
+    test_group("ECDSA P-256 SEC1 + PKCS#8 scalar parse");
+
+    var p256_d = "57f0ea4e28fdc366606bbe091d7bba5d96f953ce0a16d9127676021989b4f3bc";
+
+    var p256_sec1 = hex_decode("3077020101042057f0ea4e28fdc366606bbe091d7bba5d96f953ce0a16d9127676021989b4f3bca00a06082a8648ce3d030107a14403420004a065ea9bf5dbfec0421c2d494efa12a696c1bc3fcbb222d5cf118caeaaaaaf9b95f556a870683712899ddda5a65150e14f6f8544003e204cb2e6a0fc8a322db9", 242);
+    var d256a[32];
+    assert_eq(ecdsa_p256_privkey_from_der(p256_sec1, 121, &d256a), 0, "p256 SEC1 rc=0");
+    assert_streq(hex_encode(&d256a, 32), p256_d, "p256 SEC1 scalar");
+
+    var p256_pk8 = hex_decode("308187020100301306072a8648ce3d020106082a8648ce3d030107046d306b020101042057f0ea4e28fdc366606bbe091d7bba5d96f953ce0a16d9127676021989b4f3bca14403420004a065ea9bf5dbfec0421c2d494efa12a696c1bc3fcbb222d5cf118caeaaaaaf9b95f556a870683712899ddda5a65150e14f6f8544003e204cb2e6a0fc8a322db9", 276);
+    var d256b[32];
+    assert_eq(ecdsa_p256_privkey_from_der(p256_pk8, 138, &d256b), 0, "p256 PKCS#8 rc=0");
+    assert_streq(hex_encode(&d256b, 32), p256_d, "p256 PKCS#8 scalar");
+
+    # ============================================================
+    # ECDSA P-384 — SEC1 + PKCS#8
+    # ============================================================
+    test_group("ECDSA P-384 SEC1 + PKCS#8 scalar parse");
+
+    var p384_d = "5d2ff7a36849e6845ca51584e128d9b6d24d04fd2e76a31381b8180d52b5e13595ca0be086c4e5e8350df1cca5338d00";
+
+    var p384_sec1 = hex_decode("3081a402010104305d2ff7a36849e6845ca51584e128d9b6d24d04fd2e76a31381b8180d52b5e13595ca0be086c4e5e8350df1cca5338d00a00706052b81040022a16403620004910e1d021156572fffebcc2c8c6fd1618edb1fa2350ca543e931682666760439e76de4153ee82f5f144b00a207defbaca9b9304ff6ed02f304b00de8cdbd05484673164a0e41171d149f38e3cdca81528db58d11032540838d8689ab197b64d9", 334);
+    var d384a[48];
+    assert_eq(ecdsa_p384_privkey_from_der(p384_sec1, 167, &d384a), 0, "p384 SEC1 rc=0");
+    assert_streq(hex_encode(&d384a, 48), p384_d, "p384 SEC1 scalar");
+
+    var p384_pk8 = hex_decode("3081b6020100301006072a8648ce3d020106052b8104002204819e30819b02010104305d2ff7a36849e6845ca51584e128d9b6d24d04fd2e76a31381b8180d52b5e13595ca0be086c4e5e8350df1cca5338d00a16403620004910e1d021156572fffebcc2c8c6fd1618edb1fa2350ca543e931682666760439e76de4153ee82f5f144b00a207defbaca9b9304ff6ed02f304b00de8cdbd05484673164a0e41171d149f38e3cdca81528db58d11032540838d8689ab197b64d9", 370);
+    var d384b[48];
+    assert_eq(ecdsa_p384_privkey_from_der(p384_pk8, 185, &d384b), 0, "p384 PKCS#8 rc=0");
+    assert_streq(hex_encode(&d384b, 48), p384_d, "p384 PKCS#8 scalar");
+
+    # ============================================================
+    # Negative cases — curve / OID / truncation rejection
+    # ============================================================
+    test_group("parser rejection paths");
+
+    # Wrong-curve parser on the other curve's key → reject.
+    var dwrong[48];
+    assert_eq(ecdsa_p384_privkey_from_der(p256_sec1, 121, &dwrong), 0 - 1, "p384 parser rejects p256 key");
+    assert_eq(ecdsa_p256_privkey_from_der(p384_sec1, 167, &dwrong), 0 - 1, "p256 parser rejects p384 key");
+
+    # Ed25519 parser on an EC key → OID mismatch reject.
+    var seed_bad[32];
+    assert_eq(ed25519_privkey_from_der(p256_pk8, 138, &seed_bad), 0 - 1, "ed25519 parser rejects EC key");
+
+    # Truncated DER (claim a length shorter than the structure needs).
+    assert_eq(ed25519_privkey_from_der(ed_der, 10, &seed_bad), 0 - 1, "ed25519 parser rejects truncated DER");
+
+    # ============================================================
+    # PEM layer — pem_decode_privkey, auto-detecting label + algo.
+    # Fixtures in tests/data/privkey/ are the same keys as the DER
+    # vectors above (regenerated from those exact DER bytes).
+    # ============================================================
+    test_group("pem_decode_privkey label + algo dispatch");
+
+    var pem_buf[2048];
+    var kout[48];
+    var algo = 0;
+
+    # Ed25519 PKCS#8
+    var n1 = file_read_all("tests/data/privkey/ed25519_pk8.pem", &pem_buf, 2048);
+    assert_eq(pem_decode_privkey(&pem_buf, n1, &kout, 48, &algo), 32, "PEM ed25519 rc=32");
+    assert_eq(algo, SIG_PRIVKEY_ED25519, "PEM ed25519 algo");
+    assert_streq(hex_encode(&kout, 32), "399843cd6b8ea5ba0309fe5b38fe4dd271ee65f20f39a48efc7d7503c0775f12", "PEM ed25519 seed");
+
+    # P-256 SEC1
+    var n2 = file_read_all("tests/data/privkey/p256_sec1.pem", &pem_buf, 2048);
+    assert_eq(pem_decode_privkey(&pem_buf, n2, &kout, 48, &algo), 32, "PEM p256 SEC1 rc=32");
+    assert_eq(algo, SIG_PRIVKEY_ECDSA_P256, "PEM p256 SEC1 algo");
+    assert_streq(hex_encode(&kout, 32), p256_d, "PEM p256 SEC1 scalar");
+
+    # P-256 PKCS#8
+    var n3 = file_read_all("tests/data/privkey/p256_pk8.pem", &pem_buf, 2048);
+    assert_eq(pem_decode_privkey(&pem_buf, n3, &kout, 48, &algo), 32, "PEM p256 PKCS#8 rc=32");
+    assert_eq(algo, SIG_PRIVKEY_ECDSA_P256, "PEM p256 PKCS#8 algo");
+    assert_streq(hex_encode(&kout, 32), p256_d, "PEM p256 PKCS#8 scalar");
+
+    # P-384 SEC1
+    var n4 = file_read_all("tests/data/privkey/p384_sec1.pem", &pem_buf, 2048);
+    assert_eq(pem_decode_privkey(&pem_buf, n4, &kout, 48, &algo), 48, "PEM p384 SEC1 rc=48");
+    assert_eq(algo, SIG_PRIVKEY_ECDSA_P384, "PEM p384 SEC1 algo");
+    assert_streq(hex_encode(&kout, 48), p384_d, "PEM p384 SEC1 scalar");
+
+    # P-384 PKCS#8
+    var n5 = file_read_all("tests/data/privkey/p384_pk8.pem", &pem_buf, 2048);
+    assert_eq(pem_decode_privkey(&pem_buf, n5, &kout, 48, &algo), 48, "PEM p384 PKCS#8 rc=48");
+    assert_eq(algo, SIG_PRIVKEY_ECDSA_P384, "PEM p384 PKCS#8 algo");
+    assert_streq(hex_encode(&kout, 48), p384_d, "PEM p384 PKCS#8 scalar");
+
+    # RSA PKCS#1 — recognized but unsupported until 3.5.10.
+    var n6 = file_read_all("tests/data/privkey/rsa_pk1.pem", &pem_buf, 2048);
+    assert_eq(pem_decode_privkey(&pem_buf, n6, &kout, 48, &algo), 0 - SIG_PRIVKEY_RSA, "PEM RSA returns sentinel");
+    assert_eq(algo, SIG_PRIVKEY_RSA, "PEM RSA algo tag");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

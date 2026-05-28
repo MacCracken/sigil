@@ -49,6 +49,7 @@ src/ecdsa_p256.cyr
 src/ecdsa_p384.cyr
 src/x509.cyr
 src/pem.cyr
+src/privkey.cyr
 src/sgx.cyr
 src/sev_snp.cyr
 src/tdx.cyr

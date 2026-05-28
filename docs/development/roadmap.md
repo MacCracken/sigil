@@ -162,19 +162,34 @@ fold into that final closeout's delta.
       **Cyrius forcing slot:** v6.0.14 (Mini-arc A.5, ciphersuite
       negotiation) — now unblocked.
 
-### 3.5.8 — Private-key parsers, PEM + DER (issue line item 4)
+### 3.5.8 — EC + Ed25519 private-key parsers, PEM + DER (issue line item 4, EC/Ed part) — **shipped 2026-05-28**
 
-- [ ] **`rsa_privkey_from_der` (PKCS#1 / PKCS#8),
-      `ecdsa_p256_privkey_from_der` / `ecdsa_p384_privkey_from_der`
+> **Scope correction (2026-05-28):** the original triage put the RSA
+> private-key parser here too, but an RSA key has no representation in
+> sigil until the bignum/key type lands with the engine in **3.5.10** —
+> parsing into a type that doesn't exist yet is a backwards dependency.
+> The RSA private-key parser therefore moves to 3.5.10 (bundled with the
+> engine that can hold and test it). 3.5.8 ships only the parsers whose
+> key types already exist and are end-to-end testable today.
+
+- [x] **`ecdsa_p256_privkey_from_der` / `ecdsa_p384_privkey_from_der`
       (SEC1 / PKCS#8), `ed25519_privkey_from_der` (PKCS#8 / RFC 8410),
-      `pem_decode_privkey` (auto-detect algo from header).** Produces
-      opaque private-key handles the 3.5.9/3.5.10 sign fns accept.
-      Reuses the existing `der_walk` / `der_skip` + `pem_decode_certs`
-      shapes. Needed before any server-side key can come online
-      (`tls_native_new_server(cert_chain, …, key, key_len)`). Both
-      PEM (Let's Encrypt + CA tooling) and raw DER (embedded) paths
-      required. `secret var` on all parsed key material; per-bite
-      audit doc. **Cyrius forcing slots:** v6.0.15 (client cert,
+      `pem_decode_privkey` (auto-detect label + algo).** *Shipped
+      3.5.8 in `src/privkey.cyr`.* Parses to the raw private scalar /
+      seed the existing sign paths and the 3.5.9 ECDSA sign accept.
+      Reuses `der_walk` (`src/x509.cyr`) + the `pem.cyr` base64
+      decoder / marker search. The version INTEGER discriminates SEC1
+      (1) from PKCS#8 (0); algorithm + curve OIDs are full-byte
+      validated. `pem_decode_privkey` recognizes the `RSA PRIVATE KEY`
+      label and returns `0 - SIG_PRIVKEY_RSA` (recognized, parser
+      arrives in 3.5.10) so a caller can tell it apart from a
+      malformed blob. **End-to-end tested:** Ed25519 via
+      `ed25519_keypair` (derived pubkey match) + sign/verify; ECDSA by
+      scalar match against known vectors; +33 assertions
+      (`tests/tcyr/privkey.tcyr` + fixtures `tests/data/privkey/`).
+      Audit: `docs/audit/2026-05-28-3.5.8-privkey-parsers-audit.md`.
+      Callers own the destination buffer and should declare it
+      `secret var`. **Cyrius forcing slots:** v6.0.15 (client cert,
       optional) / v6.0.23 (server state machine — load cert + key).
 
 ### 3.5.9 — ECDSA P-256 + P-384 sign (issue line item 3)
@@ -205,14 +220,19 @@ fold into that final closeout's delta.
       items this is *not* existing-shape — sigil has no general
       bignum modexp engine (`bigint_ext` is Curve25519-only). Expect
       to split into sub-tags if it does not fit one patch, e.g.
-      `3.5.10` general big-integer modexp engine + PKCS#1 v1.5 verify
-      (the most interop-load-bearing path), then `3.5.10a/.11`-shaped
-      follow-ons for PSS (MGF1) + the sign paths. Each sub-bite gets
-      its own audit doc (Montgomery/modexp constant-time, padding
-      oracle hygiene on verify, blinding on sign). Consumes the RSA
-      handle from 3.5.8. **Cyrius forcing slots:** v6.0.17 / v6.0.25
-      (verify + sign for CertificateVerify) and v6.0.29–.34 (1.2 RSA
-      suites).
+      `3.5.10` general big-integer modexp engine + the RSA key type +
+      `rsa_privkey_from_der` (PKCS#1 / PKCS#8) + `rsa_pubkey_from_*` +
+      PKCS#1 v1.5 verify (the most interop-load-bearing path), then
+      `3.5.10a/.11`-shaped follow-ons for PSS (MGF1) + the sign paths.
+      Each sub-bite gets its own audit doc (Montgomery/modexp
+      constant-time, padding-oracle hygiene on verify, blinding on
+      sign). **Owns the RSA private-key parser** (moved here from
+      3.5.8 — it needs the bignum key type defined in this bite to
+      parse into and a sign/verify path to test against; the 3.5.8
+      `pem_decode_privkey` already routes the `RSA PRIVATE KEY` header
+      to a stub that this bite fills in). **Cyrius forcing slots:**
+      v6.0.17 / v6.0.25 (verify + sign for CertificateVerify) and
+      v6.0.29–.34 (1.2 RSA suites).
 
 ### 3.5.11 — TLS 1.2 PRF (issue line item 5, optional)
 

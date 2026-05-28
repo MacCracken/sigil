@@ -25,12 +25,19 @@ tag. Tracking: [`docs/development/roadmap.md`](../roadmap.md) §
 
 | Issue line item | Sigil tag | Cyrius forcing slot |
 |---|---|---|
-| 1. AES-128-GCM | **3.5.7** | v6.0.14 |
-| 4. Private-key parsers (PEM+DER) | **3.5.8** | v6.0.15 / .23 |
+| 1. AES-128-GCM | **3.5.7** (shipped 2026-05-28) | v6.0.14 |
+| 4. Private-key parsers — EC + Ed25519 part | **3.5.8** | v6.0.15 / .23 |
 | 3. ECDSA P-256/P-384 sign | **3.5.9** | v6.0.17 / .25 |
-| 2. RSA sign+verify (PKCS#1 v1.5 + PSS) | **3.5.10** (Large — likely splits) | v6.0.17 / .25 / .29–.34 |
+| 2. RSA sign+verify (PKCS#1 v1.5 + PSS) **+ 4. RSA private-key parser** | **3.5.10** (Large — likely splits) | v6.0.17 / .25 / .29–.34 |
 | 5. TLS 1.2 PRF (optional) | **3.5.11** (ship-or-decline) | v6.0.29–.34 |
 | — Closeout Pass | **3.5.12** (last 3.5.x tag) | — |
+
+> **Line-item-4 split (2026-05-28):** the RSA private-key parser moved
+> from 3.5.8 to 3.5.10. RSA keys have no representation in sigil until
+> the bignum/key type lands with the engine in 3.5.10, so the parser
+> bundles there (where it can parse into a real type and be tested
+> against sign/verify). 3.5.8 ships the EC + Ed25519 parsers, whose key
+> types already exist and are end-to-end testable today.
 
 **Notes carried into the roadmap:**
 - Line 2 (RSA) is the one item that is **not** existing-shape:

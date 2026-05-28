@@ -7,7 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-(none — tip is 3.5.7.)
+(none — tip is 3.5.8.)
+
+## [3.5.8] — 2026-05-28
+
+EC + Ed25519 private-key parsers (PEM + DER) — the first half of
+issue line item 4
+(`docs/development/issues/2026-05-28-cyrius-tls-arc-full-audit.md`),
+needed before any TLS server key can come online. Pure additive
+surface; the RSA private-key parser is deferred to 3.5.10 (it needs
+the bignum/key type that lands with the RSA engine — `pem_decode_privkey`
+recognizes the RSA label and returns a dedicated unsupported sentinel
+until then).
+
+### Added
+
+- **`src/privkey.cyr`** — new module:
+  - `ed25519_privkey_from_der(der, der_len, seed_out)` — PKCS#8 /
+    RFC 8410 → 32-byte seed.
+  - `ecdsa_p256_privkey_from_der` / `ecdsa_p384_privkey_from_der` —
+    SEC1 (RFC 5915) **or** PKCS#8 (RFC 5208) → the private scalar `d`
+    as fixed-length big-endian (32 / 48 bytes), matching the byte
+    order `ecdsa_p256_verify` / `ecdsa_p384_verify` and the 3.5.9
+    sign path consume. The version INTEGER discriminates the
+    containers; embedded curve OIDs are full-byte validated.
+  - `pem_decode_privkey(pem, pem_len, key_out, key_max, out_algo)` —
+    auto-detects the PEM label (`EC PRIVATE KEY` / `PRIVATE KEY` /
+    `RSA PRIVATE KEY`) and, for PKCS#8, the algorithm from the algid
+    OID. Returns the key byte count (32/48) + a `SIG_PRIVKEY_*` tag,
+    or `0 - SIG_PRIVKEY_RSA` for the recognized-but-unsupported RSA
+    case. Reuses the base64 decoder + marker search from
+    `src/pem.cyr` (no duplication).
+- **Tests** (`tests/tcyr/privkey.tcyr`, +33 assertions) — Ed25519
+  PKCS#8 end-to-end (seed → derive public key → sign/verify), P-256
+  /P-384 SEC1 + PKCS#8 scalar parse, curve/OID/truncation rejection,
+  and the PEM layer for all five EC/Ed25519 forms + the RSA sentinel.
+  Fixtures under `tests/data/privkey/` are regenerated from the exact
+  DER bytes the test embeds, so the DER and PEM layers cross-check the
+  same keys.
+
+### Changed
+
+- **Dist regenerated** — `dist/sigil.cyr` rebuilt via
+  `scripts/regen-dist.sh` with the new module;
+  `cyrius doc --check dist/sigil.cyr` reports **0 undocumented**.
+  Full suite (46 files, 1264 assertions) green. Toolchain pin
+  unchanged (cyrius 6.0.14).
 
 ## [3.5.7] — 2026-05-28
 
