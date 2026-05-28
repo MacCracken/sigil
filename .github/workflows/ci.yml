@@ -11,20 +11,41 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  CYRIUS_VERSION: "6.0.12"
-
 jobs:
+  # ── Toolchain pin ──
+  # Single source of truth for the cyrius version is
+  # `cyrius.cyml [package].cyrius` (CLAUDE.md: do not hardcode the
+  # toolchain version anywhere else). This job parses it once and
+  # exposes it as an output every other job consumes via `needs`.
+  setup:
+    name: Resolve toolchain pin
+    runs-on: ubuntu-latest
+    outputs:
+      cyrius_version: ${{ steps.pin.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read Cyrius pin from cyrius.cyml
+        id: pin
+        run: |
+          PIN=$(grep '^cyrius = ' cyrius.cyml | head -1 | sed 's/cyrius = "\(.*\)"/\1/')
+          if [ -z "$PIN" ]; then
+            echo "ERROR: could not parse [package].cyrius pin from cyrius.cyml"
+            exit 1
+          fi
+          echo "version=$PIN" >> "$GITHUB_OUTPUT"
+          echo "Cyrius pin: $PIN"
+
   # ── Build ──
   build:
     name: Build smoke
     runs-on: ubuntu-latest
+    needs: setup
     steps:
       - uses: actions/checkout@v4
-      - name: Install Cyrius ${{ env.CYRIUS_VERSION }}
+      - name: Install Cyrius ${{ needs.setup.outputs.cyrius_version }}
         run: |
           curl -sSf https://raw.githubusercontent.com/MacCracken/cyrius/main/scripts/install.sh | \
-            CYRIUS_VERSION="${CYRIUS_VERSION}" sh
+            CYRIUS_VERSION="${{ needs.setup.outputs.cyrius_version }}" sh
           echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
       - name: Resolve deps
         run: cyrius deps
@@ -40,12 +61,13 @@ jobs:
   test:
     name: Test suite
     runs-on: ubuntu-latest
+    needs: setup
     steps:
       - uses: actions/checkout@v4
-      - name: Install Cyrius ${{ env.CYRIUS_VERSION }}
+      - name: Install Cyrius ${{ needs.setup.outputs.cyrius_version }}
         run: |
           curl -sSf https://raw.githubusercontent.com/MacCracken/cyrius/main/scripts/install.sh | \
-            CYRIUS_VERSION="${CYRIUS_VERSION}" sh
+            CYRIUS_VERSION="${{ needs.setup.outputs.cyrius_version }}" sh
           echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
       - name: Resolve deps
         run: cyrius deps
@@ -67,12 +89,13 @@ jobs:
   lint:
     name: cyrlint
     runs-on: ubuntu-latest
+    needs: setup
     steps:
       - uses: actions/checkout@v4
-      - name: Install Cyrius ${{ env.CYRIUS_VERSION }}
+      - name: Install Cyrius ${{ needs.setup.outputs.cyrius_version }}
         run: |
           curl -sSf https://raw.githubusercontent.com/MacCracken/cyrius/main/scripts/install.sh | \
-            CYRIUS_VERSION="${CYRIUS_VERSION}" sh
+            CYRIUS_VERSION="${{ needs.setup.outputs.cyrius_version }}" sh
           echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
       - name: Resolve deps
         run: cyrius deps
@@ -145,12 +168,13 @@ jobs:
   benchmarks:
     name: Benchmarks
     runs-on: ubuntu-latest
+    needs: setup
     steps:
       - uses: actions/checkout@v4
-      - name: Install Cyrius ${{ env.CYRIUS_VERSION }}
+      - name: Install Cyrius ${{ needs.setup.outputs.cyrius_version }}
         run: |
           curl -sSf https://raw.githubusercontent.com/MacCracken/cyrius/main/scripts/install.sh | \
-            CYRIUS_VERSION="${CYRIUS_VERSION}" sh
+            CYRIUS_VERSION="${{ needs.setup.outputs.cyrius_version }}" sh
           echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
       - name: Resolve deps
         run: cyrius deps
@@ -161,12 +185,13 @@ jobs:
   fuzz:
     name: Fuzz (quick)
     runs-on: ubuntu-latest
+    needs: setup
     steps:
       - uses: actions/checkout@v4
-      - name: Install Cyrius ${{ env.CYRIUS_VERSION }}
+      - name: Install Cyrius ${{ needs.setup.outputs.cyrius_version }}
         run: |
           curl -sSf https://raw.githubusercontent.com/MacCracken/cyrius/main/scripts/install.sh | \
-            CYRIUS_VERSION="${CYRIUS_VERSION}" sh
+            CYRIUS_VERSION="${{ needs.setup.outputs.cyrius_version }}" sh
           echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
       - name: Resolve deps
         run: cyrius deps
