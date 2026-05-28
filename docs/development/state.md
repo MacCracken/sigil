@@ -12,18 +12,18 @@
 
 | Field | Value |
 |---|---|
-| Current version | **3.5.6** (`VERSION`) |
+| Current version | **3.5.7** (`VERSION`) |
 | Cyrius toolchain pin | **6.0.14** (`cyrius.cyml [package].cyrius`) |
 | Last release date | 2026-05-28 |
-| Last release audit | [`2026-05-27-3.5-arc-audit.md`](../audit/2026-05-27-3.5-arc-audit.md) |
-| Phase | Released; **3.5 cycle CLOSED** (3.5.0–3.5.4). 3.5.5 doc-comment patch toward upstreaming. 3.5.6 added HMAC-SHA384 + HKDF-SHA384 — first cyrius native-TLS forcing function (unblocked held cyrius v6.0.13 `TLS_AES_256_GCM_SHA384` key schedule); resolved issue `docs/development/issues/2026-05-28-cyrius-tls-native-needs-hkdf-sha384.md`. **3.5.x line now extended for the rest of the cyrius native-TLS arc** (issue `2026-05-28-cyrius-tls-arc-full-audit.md`, 5 line items): **3.5.7** AES-128-GCM → **3.5.8** private-key parsers (PEM+DER) → **3.5.9** ECDSA P-256/P-384 sign → **3.5.10** RSA sign+verify (Large/splittable) → **3.5.11** TLS 1.2 PRF (optional) → **3.5.12** closeout (held as the last 3.5.x tag, runs the Closeout Pass over the whole 3.5.5–3.5.11 delta + the deferred 3.5.6 audit). Then 3.6 (parallel verify) / 3.7 (perf), both gated on forcing functions. |
+| Last release audit | [`2026-05-28-3.5.7-aes128-gcm-audit.md`](../audit/2026-05-28-3.5.7-aes128-gcm-audit.md) |
+| Phase | Released; **3.5 cycle CLOSED** (3.5.0–3.5.4). 3.5.5 doc-comment patch. 3.5.6 added HMAC-SHA384 + HKDF-SHA384 (first cyrius native-TLS forcing function). **3.5.7 (current) added AES-128-GCM** (`aes_128_key_expand` / `aes_128_gcm_encrypt` / `aes_128_gcm_decrypt` + 10-round AES-NI path) — RFC 8446 §9.1 mandatory `TLS_AES_128_GCM_SHA256` (0x1301); issue `2026-05-28-cyrius-tls-arc-full-audit.md` line item 1. **3.5.x line continues for the rest of the cyrius native-TLS arc**: **3.5.8** private-key parsers (PEM+DER) → **3.5.9** ECDSA P-256/P-384 sign → **3.5.10** RSA sign+verify (Large/splittable) → **3.5.11** TLS 1.2 PRF (optional) → **3.5.12** closeout (last 3.5.x tag; Closeout Pass over the whole 3.5.5–3.5.11 delta + the deferred 3.5.6 audit). Then 3.6 (parallel verify) / 3.7 (perf), both gated on forcing functions. |
 
 ## Test surface
 
 | Metric | Value |
 |---|---|
-| `.tcyr` test files | 44 |
-| Total assertions | **1216**, 0 failures |
+| `.tcyr` test files | 45 |
+| Total assertions | **1231**, 0 failures |
 | Benchmark suite | `benches/` — see `benches/history.csv` |
 
 > Counting note: 3 `*_verify_full.tcyr` tests print their
@@ -33,6 +33,7 @@
 
 Per-cycle assertion delta:
 
+- 3.5.7 ship: +15 (`aes128_gcm.tcyr` 15 — canonical GCM AES-128 Test Cases 1–4 (empty / single-block / 4-block / AAD+partial) + decrypt roundtrip + one-bit tag-flip rejection with pt_out-zeroed checks + empty roundtrip)
 - 3.5.6 ship: +19 (`hkdf_sha384.tcyr` 19 — RFC 4231 §4 HMAC-SHA384 TC1–4/6/7 + 3 HKDF-SHA384 vectors cross-verified vs Python `hmac`/`hashlib` and `openssl kdf` + cap/zero-length edges)
 - 3.5.5 ship: 0 (doc-comment pass — 76 bundle-API functions documented; `cyrius doc --check dist/sigil.cyr` 76→0; no test surface change)
 - 3.5.4 ship: 0 (closeout — arc-audit consolidation + bench cases + doc sync; no test surface change)
@@ -62,6 +63,7 @@ Consumers that link or rely on sigil for trust verification:
 
 | Version | Date | Headline |
 |---|---|---|
+| 3.5.7 | 2026-05-28 | AES-128-GCM (`src/aes_gcm.cyr` + `src/aes_ni.cyr`) — `aes_128_key_expand` (16-byte key → 176-byte / 11-key schedule, Nk=4/Nr=10) + `aes_128_gcm_encrypt` / `aes_128_gcm_decrypt`, mirroring the AES-256 surface; 10-round `aes128_encrypt_block_ni` AES-NI path gated by a FIPS 197 §C.1 boot self-test. RFC 8446 §9.1 mandatory `TLS_AES_128_GCM_SHA256` (0x1301) + the four TLS 1.2 `*_WITH_AES_128_GCM_SHA256` suites. Block/CTR/GCM machinery parametrized on round count; AES-256 path unchanged. +15 assertions. Cyrius pin 6.0.12 → 6.0.14. First of the 5 line items in `docs/development/issues/2026-05-28-cyrius-tls-arc-full-audit.md`. Audit: `docs/audit/2026-05-28-3.5.7-aes128-gcm-audit.md`. |
 | 3.5.6 | 2026-05-28 | HMAC-SHA384 + HKDF-SHA384 (`src/hmac_sha384.cyr`, `src/hkdf_sha384.cyr`) — `hmac_sha384` (FIPS 198-1 / RFC 4231, 128-byte block / 48-byte digest) + `hkdf_extract_sha384` / `hkdf_expand_sha384` / `hkdf_sha384` (RFC 5869, max OKM 255×48). Forcing-function for the cyrius native TLS 1.3 arc — unblocks held cyrius v6.0.13 `TLS_AES_256_GCM_SHA384` (0x1302) key schedule. +19 assertions (RFC 4231 §4 + 3 cross-verified HKDF vectors). Cyrius pin 6.0.3 → 6.0.12. Resolves `docs/development/issues/2026-05-28-cyrius-tls-native-needs-hkdf-sha384.md`. |
 | 3.5.5 | 2026-05-27 | Bundle-API doc-comment pass — `cyrius doc --check dist/sigil.cyr` 76 undocumented → 0 (88 public fns). Doc comments added across `types`/`sha256`/`error`/`hex`/`hkdf`/`hmac`/`sha_ni`; dist regenerated. Prerequisite for upstreaming sigil into the main Cyrius language. No source-logic change. |
 | 3.5.4 | 2026-05-27 | Closeout of the 3.5 cycle — consolidated the four per-bite audits into `docs/audit/2026-05-27-3.5-arc-audit.md`; added ChaCha20/Poly1305/AEAD/X25519 bench cases (`history.csv` row `v3.5.4-modern-crypto`); refreshed `doc-health.md` + `overview.md` map + ADR 0001/0003 renumber amendments. No source change. |
@@ -84,7 +86,7 @@ back to v2.0.0.
 |---|---|---|
 | 3.5 cycle (3.5.0–3.5.4) | **Closed** 2026-05-27 | Modern-crypto arc — Poly1305, ChaCha20, ChaCha20-Poly1305 AEAD, X25519, + closeout. TLS 1.3 suite complete. Per-bite rows trimmed on minor close; see CHANGELOG + `docs/audit/2026-05-27-3.5-arc-audit.md`. |
 | 3.5.6 | **Shipped** 2026-05-28 | HMAC-SHA384 + HKDF-SHA384 — first cyrius native-TLS forcing function. |
-| 3.5.7 — AES-128-GCM | pending | `aes_128_key_expand` / `aes_128_gcm_encrypt` / `_decrypt`. RFC 8446 §9.1 mandatory `TLS_AES_128_GCM_SHA256` + 4 TLS 1.2 suites. Cyrius slot v6.0.14. |
+| 3.5.7 — AES-128-GCM | **Shipped** 2026-05-28 | `aes_128_key_expand` / `aes_128_gcm_encrypt` / `_decrypt` + 10-round AES-NI. RFC 8446 §9.1 mandatory `TLS_AES_128_GCM_SHA256` + 4 TLS 1.2 suites. Cyrius slot v6.0.14 unblocked. |
 | 3.5.8 — private-key parsers | pending | PEM + DER for RSA / ECDSA P-256/P-384 / Ed25519 → opaque handles. Prereq for the sign paths. Cyrius v6.0.15 / .23. |
 | 3.5.9 — ECDSA sign | pending | `ecdsa_p256_sign` / `ecdsa_p384_sign` (+`_der`), RFC 6979 deterministic-k. Cyrius v6.0.17 / .25. |
 | 3.5.10 — RSA sign+verify | pending | PKCS#1 v1.5 + PSS, SHA-256/384. **Large/splittable** — needs a general bignum modexp engine (`bigint_ext` is Curve25519-only). Cyrius v6.0.17 / .25 / .29–.34. |

@@ -7,7 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-(none — tip is 3.5.6.)
+(none — tip is 3.5.7.)
+
+## [3.5.7] — 2026-05-28
+
+AES-128-GCM — first of the five scheduled additions for the cyrius
+native-TLS arc (issue
+`docs/development/issues/2026-05-28-cyrius-tls-arc-full-audit.md`,
+line item 1). `TLS_AES_128_GCM_SHA256` (0x1301) is the RFC 8446 §9.1
+**mandatory** TLS 1.3 ciphersuite; this also unblocks the four TLS
+1.2 `*_WITH_AES_128_GCM_SHA256` suites. Pure additive public surface
+— AES-256-GCM behaviour and signatures are unchanged. Toolchain pin
+bumped to cyrius 6.0.14.
+
+### Added
+
+- **AES-128-GCM** (`src/aes_gcm.cyr`, FIPS 197 + NIST SP 800-38D) —
+  `aes_128_key_expand(key, round_keys)` (16-byte key → 176-byte /
+  11-key schedule, Nk=4 / Nr=10), `aes_128_gcm_encrypt` /
+  `aes_128_gcm_decrypt` mirroring the AES-256 surface byte-for-byte.
+  AES-128 differs from AES-256 only in the key schedule and round
+  count; the block transform, GHASH, CTR mode, and GCM framing are
+  shared and now parametrized on the round count.
+- **AES-128 AES-NI path** (`src/aes_ni.cyr`) —
+  `aes128_encrypt_block_ni` (10-round AESENC/AESENCLAST pipeline
+  over the 11-key schedule). The boot self-test now validates
+  **both** the AES-256 (FIPS 197 §C.3) and AES-128 (§C.1) NI vectors
+  before going live; either diverging routes both key sizes to the
+  software path.
+- **Tests** (`tests/tcyr/aes128_gcm.tcyr`, +15 assertions) — the
+  canonical GCM AES-128 known-answer vectors (McGrew & Viega / NIST
+  Test Cases 1–4: empty, single-block, 4-block, and AAD +
+  partial-final-block), plus a decrypt roundtrip, a one-bit
+  tag-flip rejection with the AEAD no-plaintext-leak check, and an
+  empty-message roundtrip.
+
+### Changed
+
+- **Block-encrypt + GCM driver parametrized on round count** — the
+  software block transform (`_aes_encrypt_block_sw(…, nr)`), CTR
+  helper, and GCM encrypt/decrypt drivers now take an `nr` parameter
+  (14 = AES-256, 10 = AES-128); the public `aes_gcm_encrypt` /
+  `aes_gcm_decrypt` are thin wrappers fixing `nr = 14`. No behaviour
+  change to the AES-256 path (15-assertion `aes_gcm.tcyr` + 5-assertion
+  `aes_ni.tcyr` suites unchanged and green).
+- **Toolchain pin** — cyrius `6.0.12` → `6.0.14`
+  (`cyrius.cyml [package].cyrius`). Full suite (45 files, 1231
+  assertions) green; clean build clean.
+- **Dist regenerated** — `dist/sigil.cyr` rebuilt via
+  `scripts/regen-dist.sh`; `cyrius doc --check dist/sigil.cyr`
+  reports **0 undocumented**.
 
 ## [3.5.6] — 2026-05-28
 

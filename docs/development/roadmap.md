@@ -140,20 +140,27 @@ fold into that final closeout's delta.
 > 3.5.x slot **ahead of** the closeout — never after it. Promote to
 > 3.6 only when the parallel-verify forcing function is firm.
 
-### 3.5.7 — AES-128-GCM (issue line item 1)
+### 3.5.7 — AES-128-GCM (issue line item 1) — **shipped 2026-05-28**
 
-- [ ] **`aes_128_key_expand` / `aes_128_gcm_encrypt` /
-      `aes_128_gcm_decrypt`.** `TLS_AES_128_GCM_SHA256` (0x1301) is
-      the RFC 8446 §9.1 **mandatory** TLS 1.3 ciphersuite; also
-      unblocks the four `TLS_*_WITH_AES_128_GCM_SHA256` 1.2 suites.
-      AES-128 differs from AES-256 only in the key schedule (10
-      rounds / 176-byte round-key table vs 14 / 240); the block
-      encrypt/decrypt walk the table by round count and are shared.
-      16-byte block in both variants. Mirrors the existing
-      AES-256-GCM surface byte-for-byte. Per-bite audit doc + bench
-      rows (`benches/sigil.bcyr`, `history.csv` row `v3.5.7-aes128-gcm`).
+- [x] **`aes_128_key_expand` / `aes_128_gcm_encrypt` /
+      `aes_128_gcm_decrypt`.** *Shipped 3.5.7.* `TLS_AES_128_GCM_SHA256`
+      (0x1301) is the RFC 8446 §9.1 **mandatory** TLS 1.3 ciphersuite;
+      also unblocks the four `TLS_*_WITH_AES_128_GCM_SHA256` 1.2
+      suites. AES-128 differs from AES-256 only in the key schedule
+      (10 rounds / 176-byte round-key table vs 14 / 240); the block
+      transform, GHASH, CTR mode, and GCM framing are shared and
+      parametrized on the round count `nr`. Added the 10-round
+      `aes128_encrypt_block_ni` AES-NI path (`src/aes_ni.cyr`), gated
+      by a FIPS 197 §C.1 boot self-test alongside the existing §C.3
+      check. Mirrors the AES-256-GCM surface byte-for-byte; AES-256
+      behaviour/signatures unchanged. +15 assertions
+      (`tests/tcyr/aes128_gcm.tcyr`, canonical GCM AES-128 Test Cases
+      1–4 + decrypt/forged-tag/empty roundtrips). Bench rows
+      `v3.5.7-aes128-gcm` in `tests/bcyr/sigil.bcyr` + `history.csv`.
+      Audit: `docs/audit/2026-05-28-3.5.7-aes128-gcm-audit.md`.
+      Toolchain pin bumped 6.0.12 → 6.0.14.
       **Cyrius forcing slot:** v6.0.14 (Mini-arc A.5, ciphersuite
-      negotiation — ships 2/3 suites without it).
+      negotiation) — now unblocked.
 
 ### 3.5.8 — Private-key parsers, PEM + DER (issue line item 4)
 

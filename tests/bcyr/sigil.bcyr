@@ -482,6 +482,42 @@ fn main() {
     vec_push(benches, b_gcm_forged);
 
     # ============================================================
+    # AES-128-GCM key expansion — 16-byte key → 176-byte schedule
+    # ============================================================
+    var b_aes128_kx = bench_new("aes128_key_expansion");
+    var aes128_key = hex_decode("feffe9928665731c6d6a8f9467308308", 32);
+    var aes128_rk = fl_alloc(176);
+    ri = 0;
+    while (ri < rounds) {
+        bench_batch_start(b_aes128_kx);
+        var bi = 0;
+        while (bi < 1000) {
+            aes_128_key_expand(aes128_key, aes128_rk);
+            bi = bi + 1;
+        }
+        bench_batch_stop(b_aes128_kx, 1000);
+        ri = ri + 1;
+    }
+    vec_push(benches, b_aes128_kx);
+
+    # ============================================================
+    # AES-128-GCM encrypt 1 KB — 10-round CTR path + GHASH
+    # ============================================================
+    var b_gcm128_enc = bench_new("aes_128_gcm_encrypt_1kb");
+    ri = 0;
+    while (ri < rounds) {
+        bench_batch_start(b_gcm128_enc);
+        var bi = 0;
+        while (bi < 100) {
+            aes_128_gcm_encrypt(aes128_key, gcm_iv, 0, 0, gcm_pt, 1024, gcm_ct, gcm_tag);
+            bi = bi + 1;
+        }
+        bench_batch_stop(b_gcm128_enc, 100);
+        ri = ri + 1;
+    }
+    vec_push(benches, b_gcm128_enc);
+
+    # ============================================================
     # HKDF-SHA256 extract — PRK = HMAC(salt, IKM) over 64B IKM + 32B salt
     # ============================================================
     var b_hkdf_extract = bench_new("hkdf_extract");
