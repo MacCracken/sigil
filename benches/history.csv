@@ -137,3 +137,5 @@ timestamp,label,benchmark,estimate,unit
 2026-05-27T00:00:00Z,v3.5.4-modern-crypto,x25519_base,2.965,ms
 2026-05-28T00:00:00Z,v3.5.7-aes128-gcm,aes128_key_expansion,707,ns
 2026-05-28T00:00:00Z,v3.5.7-aes128-gcm,aes_128_gcm_encrypt_1kb,728,µs
+2026-05-28T00:00:00Z,v3.5.9-ecdsa-sign,ecdsa_p256_sign,74.444,ms
+2026-05-28T00:00:00Z,v3.5.9-ecdsa-sign,ecdsa_p384_sign,179.169,ms

@@ -28,9 +28,14 @@ include "src/poly1305.cyr"
 include "src/chacha20.cyr"
 include "src/chacha20poly1305.cyr"
 include "src/sha512.cyr"
+include "src/sha384.cyr"
+include "src/hmac_sha384.cyr"
 include "src/bigint_ext.cyr"
 include "src/ed25519.cyr"
 include "src/x25519.cyr"
+include "src/ecdsa_p256.cyr"
+include "src/ecdsa_p384.cyr"
+include "src/ecdsa_sign.cyr"
 include "lib/keccak.cyr"
 include "src/mldsa_params.cyr"
 include "src/mldsa_reduce.cyr"
@@ -719,6 +724,36 @@ fn main() {
         ri = ri + 1;
     }
     vec_push(benches, b_x);
+
+    # ============================================================
+    # ECDSA deterministic sign (RFC 6979) — P-256 + P-384
+    # ============================================================
+    var ecs_msg = "sample";
+    var ecs_d256 = hex_decode("c9afa9d845ba75166b5c215767b1d6934e50c3db36e89b127b8a622b120f6721", 64);
+    var ecs_sig256 = alloc(64);
+    var b_ecs256 = bench_new("ecdsa_p256_sign");
+    ri = 0;
+    while (ri < rounds) {
+        bench_batch_start(b_ecs256);
+        var bi = 0;
+        while (bi < 10) { ecdsa_p256_sign(ecs_d256, ecs_msg, 6, ecs_sig256); bi = bi + 1; }
+        bench_batch_stop(b_ecs256, 10);
+        ri = ri + 1;
+    }
+    vec_push(benches, b_ecs256);
+
+    var ecs_d384 = hex_decode("6b9d3dad2e1b8c1c05b19875b6659f4de23c3b667bf297ba9aa47740787137d896d5724e4c70a825f872c9ea60d2edf5", 96);
+    var ecs_sig384 = alloc(96);
+    var b_ecs384 = bench_new("ecdsa_p384_sign");
+    ri = 0;
+    while (ri < rounds) {
+        bench_batch_start(b_ecs384);
+        var bi = 0;
+        while (bi < 10) { ecdsa_p384_sign(ecs_d384, ecs_msg, 6, ecs_sig384); bi = bi + 1; }
+        bench_batch_stop(b_ecs384, 10);
+        ri = ri + 1;
+    }
+    vec_push(benches, b_ecs384);
 
     # Report
     syscall(1, 1, "=== Sigil Benchmarks ===\n", 24);

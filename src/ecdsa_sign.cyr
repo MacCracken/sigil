@@ -1,0 +1,390 @@
+# ecdsa_sign.cyr — ECDSA P-256 / P-384 signing with RFC 6979
+# deterministic nonces. Issue line item 3 of the cyrius native-TLS
+# arc (3.5.9). Pairs with the existing ecdsa_p256_verify /
+# ecdsa_p384_verify and consumes the private scalars parsed by
+# src/privkey.cyr (3.5.8).
+#
+# Construction (SEC 1 §4.1.3 + RFC 6979 §3.2):
+#   e   = leftmost qlen bits of H(m), reduced mod n
+#   k   = RFC 6979 deterministic nonce (HMAC_DRBG over the curve hash)
+#   R   = k·G ; r = R.x mod n
+#   s   = k^(-1) · (e + r·d) mod n
+#   sig = r || s  (raw, big-endian, fixed length) or DER SEQUENCE.
+#
+# Determinism (RFC 6979) removes the catastrophic dependence on a
+# per-signature random nonce — a repeated or biased k leaks the
+# private key (PS3 / Sony 2010). The nonce is derived from (d, H(m))
+# via HMAC_DRBG keyed on the curve's hash (SHA-256 for P-256,
+# SHA-384 for P-384), so signing is a pure function of key + message.
+#
+# Security floor (CLAUDE.md § Security Hardening):
+#   - The nonce k, the HMAC_DRBG state (K, V), the private scalar, and
+#     every (e + r·d) / k^(-1) intermediate live in `secret var` stack
+#     buffers, zeroized on scope exit. r and s are public outputs.
+#   - Scalar inversion / multiply reuse the curve's existing mod-n
+#     primitives (fn_p256_inv / fn_p256_mul, etc.).
+#   - add-mod-n is carry-correct (the lib `u256_addmod` drops the
+#     2^256 carry, which is wrong for the P-256/P-384 scalar field
+#     where n ≈ 2^256 and a+b can exceed 2^256 — see _ecs_addmod_*).
+
+# ================================================================
+# Carry-correct scalar add mod n
+# ================================================================
+# r = (a + b) mod n, for a, b < n (n < 2^256). a+b can be up to
+# 2n-2 > 2^256, so the 2^256 carry from u256_add MUST be honored.
+# When carry == 1 the true sum is 2^256 + low; since a,b < n the low
+# limbs are < n, so a single `u256_sub(r, r, n)` (which borrows and
+# wraps, adding 2^256-n) yields the correct residue in [0, n).
+fn _ecs_addmod_n_p256(r, a, b): i64 {
+    var carry = u256_add(r, a, b);
+    if (carry == 1) {
+        u256_sub(r, r, _p256_n);
+    } else {
+        if (u256_cmp(r, _p256_n) >= 0) { u256_sub(r, r, _p256_n); }
+    }
+    return 0;
+}
+
+fn _ecs_addmod_n_p384(r, a, b): i64 {
+    var carry = u384_add(r, a, b);
+    if (carry == 1) {
+        u384_sub(r, r, _p384_n);
+    } else {
+        if (u384_cmp(r, _p384_n) >= 0) { u384_sub(r, r, _p384_n); }
+    }
+    return 0;
+}
+
+# ================================================================
+# RFC 6979 §3.2 — deterministic nonce (P-256 / HMAC-SHA256)
+# ================================================================
+# d_be:  32-byte big-endian private scalar (int2octets(x)).
+# h1oct: 32-byte big-endian bits2octets(H(m)) = int2octets(e mod n).
+# k_out: 32-byte big-endian nonce in [1, n-1].
+# Returns 0 on success, -1 if no valid nonce within the retry bound.
+#
+# qlen == hlen == 256 for this curve/hash pair, so each HMAC round
+# yields exactly one qlen block (T = V), and bits2int(T) = T.
+
+# data = V(32) || sep(1) || d(32) || h1(32)  →  97 bytes
+fn _rfc6979_build_p256(data, V, sep, d, h1): i64 {
+    memcpy(data, V, 32);
+    store8(data + 32, sep & 0xFF);
+    memcpy(data + 33, d, 32);
+    memcpy(data + 65, h1, 32);
+    return 0;
+}
+
+fn _rfc6979_k_p256(d_be, h1oct, k_out): i64 {
+    secret var V[32];
+    secret var K[32];
+    secret var Kt[32];
+    secret var Vt[32];
+    secret var data[97];
+    secret var d1[33];     # V || 0x00 (for the regen step)
+    secret var kint[32];
+
+    var i = 0;
+    while (i < 32) { store8(&V + i, 0x01); store8(&K + i, 0x00); i = i + 1; }
+
+    # K = HMAC_K(V || 0x00 || int2octets(x) || bits2octets(h1))
+    _rfc6979_build_p256(&data, &V, 0x00, d_be, h1oct);
+    hmac_sha256(&K, 32, &data, 97, &Kt);
+    memcpy(&K, &Kt, 32);
+    # V = HMAC_K(V)
+    hmac_sha256(&K, 32, &V, 32, &Vt);
+    memcpy(&V, &Vt, 32);
+    # K = HMAC_K(V || 0x01 || int2octets(x) || bits2octets(h1))
+    _rfc6979_build_p256(&data, &V, 0x01, d_be, h1oct);
+    hmac_sha256(&K, 32, &data, 97, &Kt);
+    memcpy(&K, &Kt, 32);
+    # V = HMAC_K(V)
+    hmac_sha256(&K, 32, &V, 32, &Vt);
+    memcpy(&V, &Vt, 32);
+
+    var tries = 0;
+    while (tries < 256) {
+        # T = HMAC_K(V) (one block = qlen)
+        hmac_sha256(&K, 32, &V, 32, &Vt);
+        memcpy(&V, &Vt, 32);
+        # k = bits2int(T); accept iff 1 <= k <= n-1.
+        u256_load_be(&kint, &V);
+        if (u256_is_zero(&kint) == 0) {
+            if (u256_cmp(&kint, _p256_n) < 0) {
+                u256_store_be(k_out, &kint);
+                return 0;
+            }
+        }
+        # Reject: K = HMAC_K(V || 0x00); V = HMAC_K(V).
+        memcpy(&d1, &V, 32);
+        store8(&d1 + 32, 0x00);
+        hmac_sha256(&K, 32, &d1, 33, &Kt);
+        memcpy(&K, &Kt, 32);
+        hmac_sha256(&K, 32, &V, 32, &Vt);
+        memcpy(&V, &Vt, 32);
+        tries = tries + 1;
+    }
+    return 0 - 1;
+}
+
+# ================================================================
+# RFC 6979 §3.2 — deterministic nonce (P-384 / HMAC-SHA384)
+# ================================================================
+# 48-byte HMAC-SHA384 blocks; qlen == hlen == 384.
+
+# data = V(48) || sep(1) || d(48) || h1(48)  →  145 bytes
+fn _rfc6979_build_p384(data, V, sep, d, h1): i64 {
+    memcpy(data, V, 48);
+    store8(data + 48, sep & 0xFF);
+    memcpy(data + 49, d, 48);
+    memcpy(data + 97, h1, 48);
+    return 0;
+}
+
+fn _rfc6979_k_p384(d_be, h1oct, k_out): i64 {
+    secret var V[48];
+    secret var K[48];
+    secret var Kt[48];
+    secret var Vt[48];
+    secret var data[145];
+    secret var d1[49];
+    secret var kint[48];
+
+    var i = 0;
+    while (i < 48) { store8(&V + i, 0x01); store8(&K + i, 0x00); i = i + 1; }
+
+    _rfc6979_build_p384(&data, &V, 0x00, d_be, h1oct);
+    hmac_sha384(&K, 48, &data, 145, &Kt);
+    memcpy(&K, &Kt, 48);
+    hmac_sha384(&K, 48, &V, 48, &Vt);
+    memcpy(&V, &Vt, 48);
+    _rfc6979_build_p384(&data, &V, 0x01, d_be, h1oct);
+    hmac_sha384(&K, 48, &data, 145, &Kt);
+    memcpy(&K, &Kt, 48);
+    hmac_sha384(&K, 48, &V, 48, &Vt);
+    memcpy(&V, &Vt, 48);
+
+    var tries = 0;
+    while (tries < 256) {
+        hmac_sha384(&K, 48, &V, 48, &Vt);
+        memcpy(&V, &Vt, 48);
+        u384_load_be(&kint, &V);
+        if (u384_is_zero(&kint) == 0) {
+            if (u384_cmp(&kint, _p384_n) < 0) {
+                u384_store_be(k_out, &kint);
+                return 0;
+            }
+        }
+        memcpy(&d1, &V, 48);
+        store8(&d1 + 48, 0x00);
+        hmac_sha384(&K, 48, &d1, 49, &Kt);
+        memcpy(&K, &Kt, 48);
+        hmac_sha384(&K, 48, &V, 48, &Vt);
+        memcpy(&V, &Vt, 48);
+        tries = tries + 1;
+    }
+    return 0 - 1;
+}
+
+# ================================================================
+# Point scratch (allocated once; G and R are public data)
+# ================================================================
+var _ecs256_inited = 0;
+var _ecs256_G = 0;
+var _ecs256_R = 0;
+
+fn _ecs256_init(): i64 {
+    if (_ecs256_inited == 1) { return 0; }
+    _p256_init();
+    _ecs256_G = pt_alloc();
+    _ecs256_R = pt_alloc();
+    pt_from_affine(_ecs256_G, _p256_gx, _p256_gy);
+    _ecs256_inited = 1;
+    return 0;
+}
+
+var _ecs384_inited = 0;
+var _ecs384_G = 0;
+var _ecs384_R = 0;
+
+fn _ecs384_init(): i64 {
+    if (_ecs384_inited == 1) { return 0; }
+    _p384_init();
+    _ecs384_G = alloc(144);
+    _ecs384_R = alloc(144);
+    pt384_from_affine(_ecs384_G, _p384_gx, _p384_gy);
+    _ecs384_inited = 1;
+    return 0;
+}
+
+# ================================================================
+# ecdsa_p256_sign — raw r||s (64 bytes, big-endian)
+# ================================================================
+# d_be: 32-byte big-endian private scalar in [1, n-1].
+# Hashes msg with SHA-256 internally (matches ecdsa_p256_verify).
+# Returns 0 on success, -1 on failure (degenerate r/s or no nonce).
+fn ecdsa_p256_sign(d_be, msg, msg_len, sig_out): i64 {
+    _ecs256_init();
+
+    # One secret scratch block (cyrius caps secret/defer blocks at 8
+    # per function); carve 13 × 32-byte slots by offset. Zeroized on
+    # scope exit. All slots hold key-derived or intermediate values.
+    secret var sc[416];
+    var digest = &sc + 0;
+    var e      = &sc + 32;
+    var h1oct  = &sc + 64;
+    var k      = &sc + 96;
+    var kint   = &sc + 128;
+    var kinv   = &sc + 160;
+    var dint   = &sc + 192;
+    var rint   = &sc + 224;
+    var sint   = &sc + 256;
+    var rd     = &sc + 288;
+    var hpd    = &sc + 320;
+    var Rx     = &sc + 352;
+    var Ry     = &sc + 384;
+
+    # e = SHA-256(msg) as BE int, reduced mod n.
+    sha256(msg, msg_len, digest);
+    u256_load_be(e, digest);
+    if (u256_cmp(e, _p256_n) >= 0) { u256_sub(e, e, _p256_n); }
+    # bits2octets(H(m)) = int2octets(e mod n)
+    u256_store_be(h1oct, e);
+
+    # k = RFC 6979 deterministic nonce.
+    if (_rfc6979_k_p256(d_be, h1oct, k) != 0) { return 0 - 1; }
+    u256_load_be(kint, k);
+
+    # R = k·G ; r = R.x mod n.
+    pt_scalarmul(_ecs256_R, kint, _ecs256_G);
+    if (pt_is_infinity(_ecs256_R) == 1) { return 0 - 1; }
+    pt_to_affine(Rx, Ry, _ecs256_R);
+    fn_p256_reduce256(rint, Rx);
+    if (u256_is_zero(rint) == 1) { return 0 - 1; }
+
+    # s = k^(-1) · (e + r·d) mod n.
+    u256_load_be(dint, d_be);
+    fn_p256_mul(rd, rint, dint);
+    _ecs_addmod_n_p256(hpd, e, rd);
+    fn_p256_inv(kinv, kint);
+    fn_p256_mul(sint, kinv, hpd);
+    if (u256_is_zero(sint) == 1) { return 0 - 1; }
+
+    u256_store_be(sig_out, rint);
+    u256_store_be(sig_out + 32, sint);
+    return 0;
+}
+
+# ================================================================
+# ecdsa_p384_sign — raw r||s (96 bytes, big-endian)
+# ================================================================
+fn ecdsa_p384_sign(d_be, msg, msg_len, sig_out): i64 {
+    _ecs384_init();
+
+    # Single secret scratch (8-block cap); 13 × 48-byte slots.
+    secret var sc[624];
+    var digest = &sc + 0;
+    var e      = &sc + 48;
+    var h1oct  = &sc + 96;
+    var k      = &sc + 144;
+    var kint   = &sc + 192;
+    var kinv   = &sc + 240;
+    var dint   = &sc + 288;
+    var rint   = &sc + 336;
+    var sint   = &sc + 384;
+    var rd     = &sc + 432;
+    var hpd    = &sc + 480;
+    var Rx     = &sc + 528;
+    var Ry     = &sc + 576;
+
+    sha384(msg, msg_len, digest);
+    u384_load_be(e, digest);
+    if (u384_cmp(e, _p384_n) >= 0) { u384_sub(e, e, _p384_n); }
+    u384_store_be(h1oct, e);
+
+    if (_rfc6979_k_p384(d_be, h1oct, k) != 0) { return 0 - 1; }
+    u384_load_be(kint, k);
+
+    pt384_scalarmul(_ecs384_R, kint, _ecs384_G);
+    if (pt384_is_infinity(_ecs384_R) == 1) { return 0 - 1; }
+    pt384_to_affine(Rx, Ry, _ecs384_R);
+    fn_p384_reduce384(rint, Rx);
+    if (u384_is_zero(rint) == 1) { return 0 - 1; }
+
+    u384_load_be(dint, d_be);
+    fn_p384_mul(rd, rint, dint);
+    _ecs_addmod_n_p384(hpd, e, rd);
+    fn_p384_inv(kinv, kint);
+    fn_p384_mul(sint, kinv, hpd);
+    if (u384_is_zero(sint) == 1) { return 0 - 1; }
+
+    u384_store_be(sig_out, rint);
+    u384_store_be(sig_out + 48, sint);
+    return 0;
+}
+
+# ================================================================
+# DER encoding — SEQUENCE { INTEGER r, INTEGER s }
+# ================================================================
+# Emit one minimal DER INTEGER from a `len`-byte big-endian value:
+# strip leading zero bytes (keep at least one), prepend 0x00 when the
+# top bit of the leading byte is set. Returns bytes written.
+fn _ecs_der_emit_int(out, val, len): i64 {
+    var start = 0;
+    var done = 0;
+    while (done == 0) {
+        if (start >= len - 1) { done = 1; }
+        else {
+            if ((load8(val + start) & 0xFF) != 0) { done = 1; }
+            else { start = start + 1; }
+        }
+    }
+    var vlen = len - start;
+    var pad = 0;
+    if ((load8(val + start) & 0xFF) >= 0x80) { pad = 1; }
+    var p = 0;
+    store8(out + p, 0x02); p = p + 1;
+    store8(out + p, (vlen + pad) & 0xFF); p = p + 1;
+    if (pad == 1) { store8(out + p, 0x00); p = p + 1; }
+    var i = 0;
+    while (i < vlen) {
+        store8(out + p, load8(val + start + i) & 0xFF);
+        p = p + 1;
+        i = i + 1;
+    }
+    return p;
+}
+
+# Wrap a raw r||s signature (each `comp_len` BE bytes) as DER. Returns
+# the DER byte length, or -1 if it would exceed `out_max`. For P-256
+# /P-384 the total content is < 128 bytes, so the SEQUENCE length is
+# always single-byte.
+fn _ecs_der_from_raw(sig, comp_len, out, out_max): i64 {
+    var body[110];
+    var bp = 0;
+    bp = bp + _ecs_der_emit_int(&body + bp, sig, comp_len);
+    bp = bp + _ecs_der_emit_int(&body + bp, sig + comp_len, comp_len);
+    var total = 2 + bp;
+    if (total > out_max) { return 0 - 1; }
+    store8(out + 0, 0x30);
+    store8(out + 1, bp & 0xFF);
+    memcpy(out + 2, &body, bp);
+    return total;
+}
+
+# ecdsa_p256_sign_der — DER-encoded signature (TLS 1.3 CertificateVerify
+# form, RFC 8446 §4.2.3 ecdsa_secp256r1_sha256). Returns the DER byte
+# length, or -1 on failure / insufficient `out_max`.
+fn ecdsa_p256_sign_der(d_be, msg, msg_len, out, out_max): i64 {
+    secret var sig[64];
+    if (ecdsa_p256_sign(d_be, msg, msg_len, &sig) != 0) { return 0 - 1; }
+    return _ecs_der_from_raw(&sig, 32, out, out_max);
+}
+
+# ecdsa_p384_sign_der — DER-encoded P-384 signature
+# (ecdsa_secp384r1_sha384). Returns the DER byte length, or -1.
+fn ecdsa_p384_sign_der(d_be, msg, msg_len, out, out_max): i64 {
+    secret var sig[96];
+    if (ecdsa_p384_sign(d_be, msg, msg_len, &sig) != 0) { return 0 - 1; }
+    return _ecs_der_from_raw(&sig, 48, out, out_max);
+}

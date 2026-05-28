@@ -193,19 +193,25 @@ fold into that final closeout's delta.
       `secret var`. **Cyrius forcing slots:** v6.0.15 (client cert,
       optional) / v6.0.23 (server state machine — load cert + key).
 
-### 3.5.9 — ECDSA P-256 + P-384 sign (issue line item 3)
+### 3.5.9 — ECDSA P-256 + P-384 sign (issue line item 3) — **shipped 2026-05-28**
 
-- [ ] **`ecdsa_p256_sign` / `_der`, `ecdsa_p384_sign` / `_der`.**
-      Deterministic-k (RFC 6979) for side-channel hygiene; raw
-      `r||s` (64 / 96 byte) + DER-encoded forms. TLS 1.3
-      CertificateVerify uses the DER form. cyrius hashes the
-      transcript with `sha256`/`sha384` before calling sign. Consumes
-      the ECDSA handles from 3.5.8; pairs with the existing
-      `ecdsa_p256_verify` / `ecdsa_p384_verify`. Constant-time review
-      of the nonce path is the load-bearing audit item; per-bite
-      audit doc + bench rows. **Cyrius forcing slots:** v6.0.17
-      (CertificateVerify path) / v6.0.25 (server ServerHello + key
-      share).
+- [x] **`ecdsa_p256_sign` / `_der`, `ecdsa_p384_sign` / `_der`.**
+      *Shipped 3.5.9 in `src/ecdsa_sign.cyr`.* Deterministic-k
+      (RFC 6979 §3.2, HMAC_DRBG over the curve hash) — raw `r||s`
+      (64 / 96 byte) + DER-encoded forms (TLS 1.3 CertificateVerify
+      shape). Hashes the message internally (SHA-256 / SHA-384).
+      Consumes the scalars `src/privkey.cyr` (3.5.8) parses; pairs
+      with the existing `ecdsa_p256_verify` / `ecdsa_p384_verify`.
+      Reuses each curve's mod-n scalar arithmetic + `pt_scalarmul`;
+      carry-correct add-mod-n (the lib `u256_addmod` drops the
+      2^256 carry). Nonce path zeroized in a single `secret var`
+      block. +20 assertions — exact RFC 6979 A.2.5/A.2.6 vectors
+      (independently reproduced), determinism, sign→verify roundtrips,
+      DER structure. Benches `v3.5.9-ecdsa-sign` (P-256 74 ms / P-384
+      179 ms — slow pending the v3.7 Solinas reduction). Audit:
+      `docs/audit/2026-05-28-3.5.9-ecdsa-sign-audit.md`. **Cyrius
+      forcing slots:** v6.0.17 (CertificateVerify) / v6.0.25 (server
+      ServerHello + key share) — now unblocked.
 
 ### 3.5.10 — RSA signature surface (issue line item 2) — **Large**
 

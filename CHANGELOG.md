@@ -7,7 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-(none — tip is 3.5.8.)
+(none — tip is 3.5.9.)
+
+## [3.5.9] — 2026-05-28
+
+ECDSA P-256/P-384 signing with RFC 6979 deterministic nonces — issue
+line item 3 of the cyrius native-TLS arc. Pairs with the existing
+verify path and consumes the private scalars `src/privkey.cyr` (3.5.8)
+parses, so cyrius can now sign TLS 1.3 CertificateVerify with an EC
+server/client cert. Pure additive surface.
+
+### Added
+
+- **`src/ecdsa_sign.cyr`** — new module:
+  - `ecdsa_p256_sign(d, msg, msg_len, sig_out)` /
+    `ecdsa_p384_sign(...)` — raw `r‖s` (64 / 96 bytes, big-endian).
+    Hashes the message internally (SHA-256 / SHA-384), matching the
+    verify entry points.
+  - `ecdsa_p256_sign_der` / `ecdsa_p384_sign_der` — DER
+    `SEQUENCE { INTEGER r, INTEGER s }` (the TLS 1.3
+    CertificateVerify / RFC 8446 §4.2.3 form). Returns the DER byte
+    length.
+  - RFC 6979 §3.2 deterministic nonce via HMAC_DRBG keyed on the
+    curve hash (`hmac_sha256` / `hmac_sha384`) — signing is a pure
+    function of (key, message), eliminating the catastrophic
+    per-signature RNG dependence. Reuses each curve's mod-n scalar
+    arithmetic (`fn_p256_inv`/`fn_p256_mul`, etc.) and `pt_scalarmul`.
+  - A carry-correct scalar add-mod-n (the lib `u256_addmod` drops the
+    2^256 carry, which is wrong for the P-256/P-384 scalar field
+    where `n ≈ 2^256`).
+- **Tests** (`tests/tcyr/ecdsa_sign.tcyr`, +20 assertions) — exact
+  `(r‖s)` for the RFC 6979 Appendix A.2.5 (P-256/SHA-256) and A.2.6
+  (P-384/SHA-384) "sample"/"test" vectors (independently reproduced
+  with a stdlib-only Python RFC 6979 implementation before
+  embedding), determinism, sign→verify roundtrips (raw + DER), and
+  DER structure.
+- **Benches** — `ecdsa_p256_sign` (74 ms) + `ecdsa_p384_sign`
+  (179 ms) in `tests/bcyr/sigil.bcyr` + `history.csv` row
+  `v3.5.9-ecdsa-sign`. (Dominated by the textbook long-division
+  reduction; the v3.7 Solinas work improves both.)
+
+### Changed
+
+- **Dist regenerated** — `dist/sigil.cyr` rebuilt;
+  `cyrius doc --check` reports **0 undocumented**. Full suite (47
+  files, 1284 assertions) green. Toolchain pin unchanged (cyrius
+  6.0.14). Audit:
+  `docs/audit/2026-05-28-3.5.9-ecdsa-sign-audit.md`.
 
 ## [3.5.8] — 2026-05-28
 

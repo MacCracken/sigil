@@ -47,6 +47,7 @@ src/ed25519.cyr
 src/x25519.cyr
 src/ecdsa_p256.cyr
 src/ecdsa_p384.cyr
+src/ecdsa_sign.cyr
 src/x509.cyr
 src/pem.cyr
 src/privkey.cyr
