@@ -40,6 +40,17 @@ their specs inline; this file is the cross-module overview.
   requirements).
   - https://csrc.nist.gov/publications/detail/fips/198/1/final
 
+### HMAC-SHA384 — `src/hmac_sha384.cyr`
+
+- **RFC 2104** / **FIPS 198-1** — same HMAC construction as
+  SHA-256, over SHA-384's **128-byte** block / **48-byte** digest.
+- **RFC 4231** — Identifiers and Test Vectors for HMAC-SHA-224,
+  HMAC-SHA-256, HMAC-SHA-384, and HMAC-SHA-512 (2005-12). §4 Test
+  Cases 1–7 are sigil's regression vectors (`tests/tcyr/
+  hkdf_sha384.tcyr`; TC5 truncation omitted — sigil emits the full
+  48-byte tag).
+  - https://www.rfc-editor.org/rfc/rfc4231.txt
+
 ### HKDF-SHA256 — `src/hkdf.cyr`
 
 - **RFC 5869** — HMAC-based Extract-and-Expand Key Derivation
@@ -49,6 +60,21 @@ their specs inline; this file is the cross-module overview.
   Methods in Key-Establishment Schemes (2020-08). Validates
   HKDF for FIPS-mode key derivation.
   - https://csrc.nist.gov/publications/detail/sp/800-56c/rev-2/final
+
+### HKDF-SHA384 — `src/hkdf_sha384.cyr`
+
+- **RFC 5869** — same HKDF extract/expand construction over
+  HMAC-SHA384 (HashLen = 48, max OKM = 255×48 = 12240 bytes).
+- **RFC 8446 §7.1** — TLS 1.3 key schedule; the
+  `TLS_AES_256_GCM_SHA384` (0x1302) ciphersuite drives its key
+  schedule off HKDF-SHA384. This is the consumer (cyrius native
+  TLS arc) that motivated the 3.5.6 addition.
+  - https://www.rfc-editor.org/rfc/rfc8446.txt#section-7.1
+- **RFC 8448 §4** — published byte-for-byte TLS 1.3 handshake using
+  `TLS_AES_256_GCM_SHA384`; cyrius verifies its key schedule
+  against it. Sigil's own HKDF-SHA384 vectors were cross-verified
+  against Python `hmac`/`hashlib` and `openssl kdf`.
+  - https://www.rfc-editor.org/rfc/rfc8448.txt#section-4
 
 ### AES-256-GCM — `src/aes_gcm.cyr`
 

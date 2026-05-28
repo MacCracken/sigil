@@ -7,9 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-(none — tip is 3.5.5. The 3.5 modern-crypto cycle is closed; 3.6
-parallel-verify and 3.7 perf/Solinas remain gated on forcing
-functions per `docs/development/roadmap.md`.)
+(none — tip is 3.5.6.)
+
+## [3.5.6] — 2026-05-28
+
+HMAC-SHA384 + HKDF-SHA384 — a forcing-function addition for the
+cyrius native TLS 1.3 arc. Cyrius held its v6.0.13 (Mini-arc A.4,
+TLS 1.3 key schedule) pending these primitives: the
+`TLS_AES_256_GCM_SHA384` (0x1302) ciphersuite derives its RFC 8446
+§7.1 key schedule off HKDF-SHA384, which sigil did not yet expose
+(only the SHA-256 variants shipped). Pure additive public surface —
+no breakage, no removal. Toolchain pin bumped to cyrius 6.0.12.
+
+### Added
+
+- **HMAC-SHA384** (`src/hmac_sha384.cyr`, FIPS 198-1 / RFC 4231 §3)
+  — `hmac_sha384(key, key_len, msg, msg_len, out48)`. Standard
+  ipad/opad construction over SHA-384's **128-byte block** and
+  **48-byte digest** (NOT 64/32 — every size constant cascades from
+  the larger block; keys > 128 bytes are SHA-384-hashed first).
+  K′/ipad/opad scratch are `secret var`, zeroized on return.
+- **HKDF-SHA384** (`src/hkdf_sha384.cyr`, RFC 5869 over HMAC-SHA384)
+  — `hkdf_extract_sha384` / `hkdf_expand_sha384` / `hkdf_sha384`
+  (combined one-shot). HashLen = 48, max OKM = 255×48 = **12240
+  bytes**. Empty salt → 48 zero bytes (§2.2); PRK + every HMAC
+  intermediate zeroized; loop count derived from public `out_len`
+  (no branch on secret data). Mirrors `src/hkdf.cyr`'s structure
+  and the global-scratch discipline.
+- **Tests** (`tests/tcyr/hkdf_sha384.tcyr`, +19 assertions) — RFC
+  4231 §4 HMAC-SHA384 Test Cases 1–4, 6, 7 (TC6/TC7 exercise the
+  >128-byte key-hash path; TC5 truncation omitted as sigil emits
+  the full tag), plus three HKDF-SHA384 vectors cross-verified
+  against Python `hmac`/`hashlib` **and** `openssl kdf -kdfopt
+  digest:SHA384 … HKDF`, plus the 255×48 cap and zero-length edges.
+
+### Changed
+
+- **Toolchain pin** — cyrius `6.0.3` → `6.0.12`
+  (`cyrius.cyml [package].cyrius`). Full suite (44 files, 1216
+  assertions) green; clean build clean.
+- **Dist regenerated** — `dist/sigil.cyr` rebuilt via
+  `scripts/regen-dist.sh` with the two new modules;
+  `cyrius doc --check dist/sigil.cyr` reports **0 undocumented**.
 
 ## [3.5.5] — 2026-05-27
 

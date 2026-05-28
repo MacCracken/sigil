@@ -1,0 +1,86 @@
+# hmac_sha384.cyr — HMAC-SHA384 (FIPS 198-1 / RFC 4231 §3)
+#
+# Companion to `src/hmac.cyr`'s HMAC-SHA256. Split into its own
+# module because it depends on `src/sha384.cyr`, which is included
+# AFTER `src/hmac.cyr` / `src/hkdf.cyr` in the dependency order
+# (`src/lib.cyr`) — sha384 layers on sha512's compression core. This
+# module therefore lives after sha384 in the include chain.
+#
+# Added at 3.5.6 for the cyrius native TLS 1.3 arc: the
+# `TLS_AES_256_GCM_SHA384` (0x1302) ciphersuite drives its RFC 8446
+# §7.1 key schedule off HKDF-SHA384, whose extract/expand primitive
+# is HMAC-SHA384. See `docs/development/issues/2026-05-28-cyrius-tls-
+# native-needs-hkdf-sha384.md`.
+#
+# HMAC(K, m) = H((K' xor opad) || H((K' xor ipad) || m))
+# where:
+#   K' = H(K) if len(K) > B, else K padded to B bytes
+#   ipad = 0x36 repeated B times
+#   opad = 0x5c repeated B times
+#
+# THE WRINKLE: SHA-384's block size B is **128 bytes**, not 64 like
+# SHA-256. The digest is **48 bytes**, not 32. Copying the SHA-256
+# variant and only swapping the hash function produces wrong output
+# — every block/digest constant below cascades from B=128 / L=48.
+
+# ================================================================
+# HMAC-SHA384
+# ================================================================
+
+# Computes HMAC-SHA384 (FIPS 198-1 / RFC 4231 §3) over `msg` under
+# `key`, writing the 48-byte MAC to `out48`. Keys longer than the
+# 128-byte block are first SHA-384-hashed per the spec (yielding 48
+# bytes, zero-padded to 128); shorter keys are zero-padded. The K' /
+# ipad / opad scratch buffers are `secret var` and zeroized on
+# return. Returns 0.
+fn hmac_sha384(key, key_len, msg, msg_len, out48): i64 {
+    # Step 1: Derive K' (128 bytes — the SHA-384 block size).
+    # `secret var` zeroes the buffer on function exit (Cyrius 5.3.5+).
+    # The init memset is retained because the key_len <= 128 branch
+    # relies on the upper bytes being zero.
+    secret var kprime384[128];
+    memset(&kprime384, 0, 128);
+
+    if (key_len > 128) {
+        # Key longer than block — replace with its 48-byte hash.
+        sha384(key, key_len, &kprime384);
+        # kprime384 is now 48 bytes of hash + 80 bytes of zeros.
+    } else {
+        memcpy(&kprime384, key, key_len);
+        # Rest already zeroed.
+    }
+
+    # Step 2: inner = SHA-384((K' xor ipad) || message)
+    secret var ipad384[128];
+    var i = 0;
+    while (i < 128) {
+        store8(&ipad384 + i, (load8(&kprime384 + i) & 0xFF) ^ 0x36);
+        i = i + 1;
+    }
+
+    var inner_ctx = sha384_init();
+    sha384_update(inner_ctx, &ipad384, 128);
+    sha384_update(inner_ctx, msg, msg_len);
+    var inner_hash384[48];
+    sha384_finalize(inner_ctx, &inner_hash384);
+    fl_free(inner_ctx);
+
+    # Step 3: outer = SHA-384((K' xor opad) || inner)
+    secret var opad384[128];
+    i = 0;
+    while (i < 128) {
+        store8(&opad384 + i, (load8(&kprime384 + i) & 0xFF) ^ 0x5c);
+        i = i + 1;
+    }
+
+    var outer_ctx = sha384_init();
+    sha384_update(outer_ctx, &opad384, 128);
+    sha384_update(outer_ctx, &inner_hash384, 48);
+    sha384_finalize(outer_ctx, out48);
+    fl_free(outer_ctx);
+
+    # kprime384 / ipad384 / opad384 are `secret var` — zeroed on
+    # return by the compiler. inner_hash384 is a public digest; left
+    # as a plain var (no security need to clear).
+    return 0;
+}

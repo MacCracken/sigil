@@ -23,7 +23,7 @@ see [CHANGELOG.md](../../CHANGELOG.md). Closed cycles:
     replacement. 2026-05-22 doc-tree restructure rides along.
     Audit: `docs/audit/2026-05-22-3.4.2-audit.md`.
 
-**Cyrius pin:** `6.0.3` (synced across `cyrius.cyml` and CI).
+**Cyrius pin:** `6.0.12` (synced across `cyrius.cyml` and CI).
 
 ## Road to v3.5 — modern AEAD + key agreement primitives
 
@@ -92,6 +92,18 @@ dead-code audit, stale-comment sweep, security re-scan, downstream
 check, doc sync, clean build) and consolidated the four per-bite
 audits into `docs/audit/2026-05-27-3.5-arc-audit.md`. The 3.5 cycle
 is closed; next minor is 3.6 (parallel verify), then 3.7 (perf).
+
+**3.5.6 — HMAC-SHA384 + HKDF-SHA384 (shipped 2026-05-28).** A
+post-closeout forcing-function patch: the cyrius native-TLS arc held
+its v6.0.13 (Mini-arc A.4, TLS 1.3 key schedule) because the
+`TLS_AES_256_GCM_SHA384` (0x1302) ciphersuite drives its RFC 8446
+§7.1 key schedule off HKDF-SHA384, which sigil had not yet exposed
+(only the SHA-256 variants). Added `hmac_sha384` (`src/hmac_sha384.cyr`)
++ `hkdf_extract_sha384` / `hkdf_expand_sha384` / `hkdf_sha384`
+(`src/hkdf_sha384.cyr`) — pure additive surface, RFC 4231 §4 + 3
+cross-verified HKDF vectors (+19 assertions). Toolchain pin bumped
+6.0.3 → 6.0.12. Resolves
+`docs/development/issues/2026-05-28-cyrius-tls-native-needs-hkdf-sha384.md`.
 
 ## Road to v3.6 — caller-provided scratch for parallel verify
 

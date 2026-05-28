@@ -12,27 +12,28 @@
 
 | Field | Value |
 |---|---|
-| Current version | **3.5.5** (`VERSION`) |
-| Cyrius toolchain pin | **6.0.3** (`cyrius.cyml [package].cyrius`) |
-| Last release date | 2026-05-27 |
+| Current version | **3.5.6** (`VERSION`) |
+| Cyrius toolchain pin | **6.0.12** (`cyrius.cyml [package].cyrius`) |
+| Last release date | 2026-05-28 |
 | Last release audit | [`2026-05-27-3.5-arc-audit.md`](../audit/2026-05-27-3.5-arc-audit.md) |
-| Phase | Released; **3.5 cycle CLOSED** (3.5.0–3.5.4) — TLS 1.3 `ChaCha20-Poly1305 + X25519` suite complete; closeout done. 3.5.5 is a doc-comment patch (bundle API `cyrius doc --check`: 0 undocumented) toward upstreaming into the main Cyrius language. Next minor: 3.6 (parallel verify) / 3.7 (perf), both gated on forcing functions. |
+| Phase | Released; **3.5 cycle CLOSED** (3.5.0–3.5.4). 3.5.5 doc-comment patch toward upstreaming. 3.5.6 adds HMAC-SHA384 + HKDF-SHA384 (`src/hmac_sha384.cyr`, `src/hkdf_sha384.cyr`) — a forcing-function for the cyrius native TLS 1.3 arc (unblocks held cyrius v6.0.13 `TLS_AES_256_GCM_SHA384` key schedule); see resolved issue `docs/development/issues/2026-05-28-cyrius-tls-native-needs-hkdf-sha384.md`. Next minor: 3.6 (parallel verify) / 3.7 (perf), both gated on forcing functions. |
 
 ## Test surface
 
 | Metric | Value |
 |---|---|
-| `.tcyr` test files | 43 |
-| Total assertions | **1197**, 0 failures |
+| `.tcyr` test files | 44 |
+| Total assertions | **1216**, 0 failures |
 | Benchmark suite | `benches/` — see `benches/history.csv` |
 
 > Counting note: 3 `*_verify_full.tcyr` tests print their
 > `N passed` line to stderr; capture with `2>&1` or the total
-> undercounts by 38 (sgx 11 + tdx 16 + snp 11). 1197 is the
-> stderr-inclusive total across all 43 files.
+> undercounts by 38 (sgx 11 + tdx 16 + snp 11). 1216 is the
+> stderr-inclusive total across all 44 files.
 
 Per-cycle assertion delta:
 
+- 3.5.6 ship: +19 (`hkdf_sha384.tcyr` 19 — RFC 4231 §4 HMAC-SHA384 TC1–4/6/7 + 3 HKDF-SHA384 vectors cross-verified vs Python `hmac`/`hashlib` and `openssl kdf` + cap/zero-length edges)
 - 3.5.5 ship: 0 (doc-comment pass — 76 bundle-API functions documented; `cyrius doc --check dist/sigil.cyr` 76→0; no test surface change)
 - 3.5.4 ship: 0 (closeout — arc-audit consolidation + bench cases + doc sync; no test surface change)
 - 3.5.3 ship: +6 (`x25519.tcyr` 6 — RFC 7748 §5.2 vectors 1-2 + §6.1 Diffie-Hellman)
@@ -61,6 +62,7 @@ Consumers that link or rely on sigil for trust verification:
 
 | Version | Date | Headline |
 |---|---|---|
+| 3.5.6 | 2026-05-28 | HMAC-SHA384 + HKDF-SHA384 (`src/hmac_sha384.cyr`, `src/hkdf_sha384.cyr`) — `hmac_sha384` (FIPS 198-1 / RFC 4231, 128-byte block / 48-byte digest) + `hkdf_extract_sha384` / `hkdf_expand_sha384` / `hkdf_sha384` (RFC 5869, max OKM 255×48). Forcing-function for the cyrius native TLS 1.3 arc — unblocks held cyrius v6.0.13 `TLS_AES_256_GCM_SHA384` (0x1302) key schedule. +19 assertions (RFC 4231 §4 + 3 cross-verified HKDF vectors). Cyrius pin 6.0.3 → 6.0.12. Resolves `docs/development/issues/2026-05-28-cyrius-tls-native-needs-hkdf-sha384.md`. |
 | 3.5.5 | 2026-05-27 | Bundle-API doc-comment pass — `cyrius doc --check dist/sigil.cyr` 76 undocumented → 0 (88 public fns). Doc comments added across `types`/`sha256`/`error`/`hex`/`hkdf`/`hmac`/`sha_ni`; dist regenerated. Prerequisite for upstreaming sigil into the main Cyrius language. No source-logic change. |
 | 3.5.4 | 2026-05-27 | Closeout of the 3.5 cycle — consolidated the four per-bite audits into `docs/audit/2026-05-27-3.5-arc-audit.md`; added ChaCha20/Poly1305/AEAD/X25519 bench cases (`history.csv` row `v3.5.4-modern-crypto`); refreshed `doc-health.md` + `overview.md` map + ADR 0001/0003 renumber amendments. No source change. |
 | 3.5.3 | 2026-05-27 | X25519 key agreement (RFC 7748) — `src/x25519.cyr`: `x25519` + `x25519_base`, Montgomery ladder over the `bigint_ext` Curve25519 field arithmetic, constant-time `cswap`. Closes the 3.5 cycle; the TLS 1.3 `ChaCha20-Poly1305 + X25519` suite is now sigil-native. Audit: `docs/audit/2026-05-27-3.5-arc-audit.md`. |

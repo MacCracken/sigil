@@ -40,6 +40,8 @@ src/chacha20.cyr
 src/chacha20poly1305.cyr
 src/sha512.cyr
 src/sha384.cyr
+src/hmac_sha384.cyr
+src/hkdf_sha384.cyr
 src/bigint_ext.cyr
 src/ed25519.cyr
 src/x25519.cyr
