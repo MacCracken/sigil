@@ -19,6 +19,8 @@ include "lib/bench.cyr"
 include "lib/bigint.cyr"
 include "lib/ct.cyr"
 
+include "lib/thread_local.cyr"
+include "src/crypto_scratch.cyr"
 include "src/types.cyr"
 include "src/error.cyr"
 include "src/sha_ni.cyr"

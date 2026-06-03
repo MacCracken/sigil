@@ -1007,35 +1007,36 @@ fn sv_save_trust_store(sv, path): i64 {
 # (`tests/tcyr/batch_parallel.tcyr`, `tests/bcyr/batch_parallel.bcyr`)
 # exercise it without a build flag.
 #
-# Threading safety contract (3.3 in progress):
+# Threading safety contract (mutex-free since 3.6):
 # - 3.0 serialised the whole `sv_verify_artifact` call inside a
 #   batch mutex because the call chain hit `alloc` / `vec_push` /
 #   `fl_alloc` / `vec_new`, none of which are thread-safe under
-#   cyrius (CLAUDE.md quirk #7). Throughput parity with serial
-#   under cyrius 5.7.48 — the mutex covered the dominant
-#   `ed25519_verify` + `sha256_transform` work.
+#   cyrius (CLAUDE.md quirk #7). The mutex covered the dominant
+#   `ed25519_verify` + `sha256_transform` work, so the parallel
+#   path gave throughput parity with serial — no real speedup.
 # - 3.2.0 lifted all per-artifact allocs out of the worker:
 #   `sv_verify_artifact_into(sv, path, type, scratch)` runs
 #   alloc-free against a pre-allocated `VerifyScratch` pool.
 #   Workers do not touch `alloc` / `fl_alloc` / `vec_new` /
 #   `vec_grow`. The batch mutex still wrapped each artifact
 #   because the crypto modules used module-global working state.
-# - 3.3 attempt #1 (this cycle): refactored crypto-module working
-#   state from explicit named globals (`_sha_a`, `_sha256_W`,
-#   `_ga_*`, `_fpi_*`, etc.) into function-local `var X[N]`
-#   arrays. Discovery via cyrius source (parse_fn.cyr:2886) and
-#   confirmed by `tests/tcyr/var_array_semantics.tcyr`:
-#   **`var X[N]` inside a function in cyrius is a static
-#   function-scope global**, NOT a stack-local. The refactor was
-#   functionally equivalent to the pre-3.3 named globals — same
-#   race semantics under concurrent workers.
-# - Mutex stays for now. The proper 3.3 architecture is
-#   caller-provided scratch parameters threaded through every
-#   crypto entry point: each worker pre-allocates a per-worker
-#   crypto-scratch block on the main thread, then passes it
-#   down through ed25519_verify → fp_mul → u512_mod_p → ...
-#   That's a multi-module signature-change pass, queued for a
-#   future cycle (re-scope as 3.3.x or 3.4).
+# - 3.3 confirmed (`tests/tcyr/var_array_semantics.tcyr`, cyrius
+#   parse_fn.cyr) that **`var X[N]` inside a function is a static
+#   function-scope global**, NOT a stack-local (CLAUDE.md quirk
+#   #1) — so the crypto primitives' transient working arrays are
+#   shared across threads. That was the sole remaining reason for
+#   the mutex, and the mutex-drop was deferred until there was a
+#   way to give each worker its own working state.
+# - 3.6 drops the mutex. cyrius 6.0.52 shipped thread-local storage
+#   (lib/thread_local.cyr); src/crypto_scratch.cyr uses it to give
+#   each worker a private *bank* (lane) of every racing crypto
+#   array (sha256/sha512 schedules, the SHA-NI block scratch, and
+#   the Ed25519 field/group/verify temporaries). Each worker calls
+#   `crypto_bank_set` once at entry; the primitives slice their
+#   working buffers by `cbank()`. ge_identity was also made
+#   alloc-free (it called u256_from → alloc). With disjoint banks
+#   and no worker-side alloc, the inner verify is data-race-free
+#   and runs fully parallel. See src/crypto_scratch.cyr.
 # - `map_get` on the trust store is the only worker-side access
 #   to a shared container. Safe under the documented contract
 #   that no thread calls `map_set` on the trust store during a
@@ -1045,7 +1046,6 @@ fn sv_save_trust_store(sv, path): i64 {
 #   do the same.
 # - Audit emission lifts to the main thread post-join.
 
-var _sigil_batch_mutex = 0;
 var _SIGIL_BATCH_PARALLEL_THRESHOLD = 4;
 var _SIGIL_BATCH_WORKERS = 4;
 
@@ -1063,6 +1063,13 @@ fn _batch_worker(arg): i64 {
     var end = load64(arg + 24);
     var slots = load64(arg + 32);
     var scratch_base = load64(arg + 40);
+    # Per-thread crypto bank (3.6): claim this worker's lane in the
+    # banked crypto scratch (src/crypto_scratch.cyr) so sha*/ed25519/
+    # fp_* never collide with sibling workers. thread_create's
+    # CLONE_SETTLS already installed a zeroed TLS block; we only write
+    # the bank index into the slot. This is what lets the inner
+    # `sv_verify_artifact_into` run mutex-free.
+    crypto_bank_set(load64(arg + 48));
     var i = start;
     while (i < end) {
         var path = load64(artifacts + i * 16);
@@ -1074,9 +1081,7 @@ fn _batch_worker(arg): i64 {
         # lifetime — same address-stability contract as the
         # pre-3.2.0 fl_alloc'd vrs.
         var my_scratch = scratch_base + i * _VSC_SIZE;
-        mutex_lock(_sigil_batch_mutex);
         var vr = sv_verify_artifact_into(sv, path, atype, my_scratch);
-        mutex_unlock(_sigil_batch_mutex);
         store64(slots + i * 8, vr);
         i = i + 1;
     }
@@ -1085,21 +1090,32 @@ fn _batch_worker(arg): i64 {
 
 fn sv_verify_batch(sv, artifacts, count): i64 {
     if (count >= _SIGIL_BATCH_PARALLEL_THRESHOLD) {
-        if (_sigil_batch_mutex == 0) { _sigil_batch_mutex = mutex_new(); }
-        # Pre-warm crypto module init on the main thread so the
-        # lazy `_*_inited` guards don't race across workers
-        # (CLAUDE.md quirk #7: alloc/fl_alloc are not thread-
-        # safe). Cheap on hot paths — each guard short-circuits
-        # after first call. Defence-in-depth alongside the
-        # batch mutex — workers never hit a cold init.
+        # Pre-warm crypto module init on the main thread so the lazy
+        # `_*_inited` guards don't race across workers, and any
+        # init-time `alloc` (curve constants, K-tables, the fixed-base
+        # comb) happens single-threaded (CLAUDE.md quirk #7:
+        # alloc/fl_alloc are not thread-safe). Each guard short-
+        # circuits after first call.
         ed25519_init();
         sha256_global_init();
         sha512_global_init();
         # Warm the SHA-NI CPUID probe + self-test so the cache and
         # the K-table allocation happen on the main thread.
         sha_ni_available();
+        # Install the main thread's TLS block so the banked crypto
+        # scratch (src/crypto_scratch.cyr) is well-defined here and in
+        # any serial fallback. Workers get their own block via
+        # CLONE_SETTLS. This — plus the per-worker bank assignment
+        # below — replaces the 3.2-era `_sigil_batch_mutex` that used
+        # to serialise every artifact (dropped in 3.6).
+        crypto_tls_main_init();
         var workers = _SIGIL_BATCH_WORKERS;
         if (count < workers) { workers = count; }
+        # Each worker needs a distinct crypto bank (1..workers); bank 0
+        # is reserved for the main/serial path. Clamp so the bank index
+        # can never exceed the scratch width (defence in depth — the
+        # default 4 workers sit well inside SIGIL_CRYPTO_BANKS = 8).
+        if (workers > SIGIL_CRYPTO_BANKS - 1) { workers = SIGIL_CRYPTO_BANKS - 1; }
 
         # Pre-allocate everything on main thread before spawn —
         # stdlib `alloc` / `fl_alloc` is not thread-safe (CLAUDE.md
@@ -1110,7 +1126,7 @@ fn sv_verify_batch(sv, artifacts, count): i64 {
         # heap-allocated path is comparable — same per-artifact
         # struct surface, just in one contiguous block.
         var slots = alloc(count * 8);
-        var args = alloc(workers * 48);
+        var args = alloc(workers * 56);   # 7 slots: +48 = crypto bank
         var ts = alloc(workers * 8);
         var scratch_pool = alloc(count * _VSC_SIZE);
         var pi = 0;
@@ -1134,13 +1150,14 @@ fn sv_verify_batch(sv, artifacts, count): i64 {
             var pstart = wi * per;
             var pend = pstart + per;
             if (pend > count) { pend = count; }
-            var a = args + wi * 48;
+            var a = args + wi * 56;
             store64(a, sv);
             store64(a + 8, artifacts);
             store64(a + 16, pstart);
             store64(a + 24, pend);
             store64(a + 32, slots);
             store64(a + 40, scratch_pool);
+            store64(a + 48, wi + 1);   # crypto bank (1..workers; bank 0 = main)
             store64(ts + wi * 8, thread_create(&_batch_worker, a));
             wi = wi + 1;
         }

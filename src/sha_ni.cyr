@@ -523,9 +523,13 @@ fn sha256_transform_ni(ctx): i64 {
     if (_sha_ni_K == 0) { _sha_ni_init(); }
     # Per-call working area. 80 bytes needed; over-allocate by 16
     # so we can align the base to a 16-byte boundary (PSHUFB / PADDD
-    # m128 reads of buf+0/+16/+64 require alignment).
-    var raw[96];
-    var buf = _sha_ni_align16(&raw);
+    # m128 reads of buf+0/+16/+64 require alignment). Banked per
+    # thread (3.6): each batch worker writes its own 96-byte lane so
+    # concurrent compresses never stomp this shared static scratch
+    # (CLAUDE.md quirk #1). 96 is a multiple of 16, so each lane stays
+    # 16-aligned and `_sha_ni_align16` is a no-op within it.
+    var raw[768];   # 96 * SIGIL_CRYPTO_BANKS
+    var buf = _sha_ni_align16(&raw + cbank() * 96);
     memcpy(buf + 64, _sha_ni_bswap_src, 16);
     _sha_ni_compress_one(ctx, buf, _sha_ni_K);
     return 0;

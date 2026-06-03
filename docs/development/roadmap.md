@@ -30,7 +30,7 @@ see [CHANGELOG.md](../../CHANGELOG.md). Closed cycles:
   `docs/audit/2026-05-27-3.5-arc-audit.md`. Per-version detail in
   [CHANGELOG.md](../../CHANGELOG.md).
 
-**Cyrius pin:** `6.0.14` (synced across `cyrius.cyml` and CI).
+**Cyrius pin:** `6.0.52` (synced across `cyrius.cyml` and CI).
 
 ## v3.5.x — cyrius native-TLS arc support (in progress)
 
@@ -63,6 +63,15 @@ held as the last 3.5.x tag (3.5.12)**.
   `docs/audit/2026-05-28-3.5.9-ecdsa-sign-audit.md`.
 
 ### Remaining
+
+> **Renumbered into the 3.6.x line (2026-06-03).** 3.6.0 opened the
+> 3.6 line early to land parallel verify (cyrius 6.0.52 shipped the
+> thread-local storage that unblocked it — see "Road to v3.6" below,
+> now **shipped**). The three unshipped cyrius-native-TLS items below
+> therefore carry forward as **3.6.x** tags (RSA → TLS 1.2 PRF →
+> closeout), keeping their ordering and forcing slots. Section titles
+> left as `3.5.x` for blame continuity; track them as 3.6.x in
+> `state.md`.
 
 ### 3.5.10 — RSA signature surface (issue line item 2) — **Large**
 
@@ -140,65 +149,50 @@ the 3.5.6 forcing-function patch deferred.
       cyrius build`), version verify (`VERSION` == `cyrius.cyml` ==
       tag).
 
-## Road to v3.6 — caller-provided scratch for parallel verify
+## v3.6 — parallel verify (SHIPPED 3.6.0, 2026-06-03)
 
-Drop `_sigil_batch_mutex` by threading caller-provided scratch
-through every crypto primitive. The 3.3 cleanup cycle confirmed
-that in-function `var X[N]` declarations are **static
-function-scope globals**, not per-call stack arrays (see
-`tests/tcyr/var_array_semantics.tcyr` and the CHANGELOG 3.3.0
-entry); concurrent workers therefore race on shared module state
-unless scratch is threaded through explicitly.
+Dropped `_sigil_batch_mutex` so `sv_verify_batch` runs the crypto
+concurrently across workers. **3.42×** at 64 artifacts / 4 workers
+(422.867 ms → 123.563 ms vs `v3.2.0-allocfree`); `batch_parallel.tcyr`
+stays 228/228 mutex-off (35/35 clean runs); CSV row
+`v3.6-parallel-crypto`. Audit:
+`docs/audit/2026-06-03-3.6.0-parallel-verify-audit.md`.
 
-### 3.6 work items
+**Forcing function:** cyrius **6.0.52** shipped thread-local storage
+(`lib/thread_local.cyr`), which made the cheaper mechanism below
+possible.
 
-- [ ] **Caller-provided crypto scratch.** Top-level entry
-      points (`sha256`, `sha512`, `ed25519_verify`,
-      `ed25519_sign`, `aes_gcm_encrypt`, `aes_gcm_decrypt`,
-      `hash_file_into`) gain a scratch-buffer parameter
-      sized to the deepest call-chain working-set (rough
-      estimate ~3 KB per concurrent caller). Each function
-      slices its working buffers out of the scratch by
-      documented offset; the offset layout lives in a header
-      comment in each module.
+**What actually shipped vs the original sketch.** The 3.3-era plan was
+to thread a *caller-provided scratch pointer* through every crypto
+primitive (≈14 signatures + every caller — invasive, error-prone).
+With TLS available, 3.6 instead gave each worker a private **bank**
+(lane) of every racing `var X[N]`: the array is widened to `[N*8]` and
+sliced by `cbank()*N`, where `cbank()` reads the worker's bank index
+from a thread-local slot (`src/crypto_scratch.cyr`). **No signature
+changes, no caller changes, no cross-function offset map** — each
+function owns its array; lanes are disjoint by construction. `var X[N]`
+remaining a static function-scope global (CLAUDE.md quirk #1, still
+true under cycc 6.0.52) is *accommodated*, not fought. `ge_identity`
+was also made alloc-free (it called `u256_from` → `alloc`, which would
+race once the mutex was gone).
 
-- [ ] **Thread scratch through the call chain.** Every
-      `fp_mul`, `fp_pow`, `fp_inv`, `u512_mod_p`,
-      `u256_mul_full`, `ge_add`, `ge_double`,
-      `ge_scalarmult`, `ge_scalarmult_base`,
-      `_ge_table_select`, `sha256_transform`,
-      `sha512_transform`, `sc_reduce`, `sc_muladd` signature
-      gains a scratch parameter. This is mechanical but
-      invasive — each fn signature changes, each caller
-      updates.
+### Follow-up — revisit when cyrius threading matures
 
-- [ ] **Per-worker scratch pool in `sv_verify_batch`.**
-      Pre-allocate `workers * CRYPTO_SCRATCH_SIZE` bytes on
-      the main thread before fan-out, same shape as the
-      existing `count * _VSC_SIZE` artifact-scratch pool.
-      Pass the per-worker scratch pointer to `_batch_worker`
-      via the args struct.
-
-- [ ] **Drop `_sigil_batch_mutex`.** Run
-      `batch_parallel.tcyr` mutex-off — must stay 228/228.
-      Re-bench `sv_verify_batch_64` against the
-      `v3.2.0-allocfree` baseline (422.867 ms @ 64
-      artifacts). Target ≥ 3× at 4 workers. Add CSV row
-      `v3.6-parallel-crypto`.
-
-- [ ] **Inverse pass on the 3.3 in-function arrays.** Every
-      `var X[N]` added in 3.3 becomes either a slice of the
-      scratch buffer or, where the array is truly read-only
-      after init, lifts back to a module global. The 3.3
-      form had no functional advantage over named globals
-      under concurrent access; 3.4 closes the loop.
-
-**Sequencing decision:** open 3.6 when there's a forcing
-function — a downstream consumer hitting the serialised batch
-on the mutex's lock contention, or an AGNOS roadmap milestone
-that requires the parallel speedup. The refactor is invasive
-enough that it should be done in one focused sprint, not
-incrementally.
+- [ ] **Retire the bank-indexing workaround if cyrius grows native
+      per-thread arrays.** The bank scheme exists only because `var
+      X[N]` is a static function-scope global and cyrius TLS is
+      slot-based (no `threadlocal var X[N]` qualifier). If a future
+      cyrius lands a true stack-local or thread-local *array*
+      qualifier — or otherwise makes per-call/per-thread arrays the
+      default — collapse the `[N*8]` banks back to plain `var X[N]`
+      and drop `src/crypto_scratch.cyr`. **Check the cyrius language
+      on each toolchain bump; adopt if the current bank approach
+      proves inadequate** (e.g. the ~8× `.bss` growth or the per-call
+      `cbank()` read becomes a real cost, or a consumer wants parallel
+      *signing*, which would need the `secret var` paths banked too —
+      unsafe under the current scope-exit-zeroizes-all-lanes shape).
+      File as an upstream forcing-function candidate against cyrius if
+      a milestone needs it.
 
 ## Road to v3.7 — perf tuning: field arithmetic + alloc-free
 

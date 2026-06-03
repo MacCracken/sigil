@@ -222,7 +222,12 @@ fn sha256_transform(ctx): i64 {
         if (sha256_transform_ni(ctx) == 0) { return 0; }
     }
 
-    var W[512];           # 64 message-schedule words × 8 bytes
+    # Message schedule, banked per thread (3.6): `var W[N]` is a
+    # static function-scope global (CLAUDE.md quirk #1), so concurrent
+    # batch workers must each use their own lane to avoid stomping the
+    # schedule mid-compress. `Wb` is this thread's 512-byte lane.
+    var W[4096];          # 64 words × 8 bytes × SIGIL_CRYPTO_BANKS
+    var Wb = &W + cbank() * 512;
     var buf = ctx + 64;
 
     # Prepare message schedule W[0..15] from block (big-endian).
@@ -233,20 +238,20 @@ fn sha256_transform(ctx): i64 {
         | ((load8(buf + off + 1) & 0xFF) << 16)
         | ((load8(buf + off + 2) & 0xFF) << 8)
         | (load8(buf + off + 3) & 0xFF);
-        store64(&W + i * 8, w & MASK32);
+        store64(Wb + i * 8, w & MASK32);
         i = i + 1;
     }
 
     # Extend W[16..63].
     i = 16;
     while (i < 64) {
-        var w16 = load64(&W + (i - 16) * 8);
-        var w15 = load64(&W + (i - 15) * 8);
-        var w7 = load64(&W + (i - 7) * 8);
-        var w2 = load64(&W + (i - 2) * 8);
+        var w16 = load64(Wb + (i - 16) * 8);
+        var w15 = load64(Wb + (i - 15) * 8);
+        var w7 = load64(Wb + (i - 7) * 8);
+        var w2 = load64(Wb + (i - 2) * 8);
         var s0 = sha256_ssig0(w15);
         var s1 = sha256_ssig1(w2);
-        store64(&W + i * 8, (w16 + s0 + w7 + s1) & MASK32);
+        store64(Wb + i * 8, (w16 + s0 + w7 + s1) & MASK32);
         i = i + 1;
     }
 
@@ -267,7 +272,7 @@ fn sha256_transform(ctx): i64 {
         t1 = (t1 + sha256_bsig1(e)) & MASK32;
         t1 = (t1 + sha256_ch(e, f, g)) & MASK32;
         t1 = (t1 + load64(_sha256_K + i * 8)) & MASK32;
-        t1 = (t1 + load64(&W + i * 8)) & MASK32;
+        t1 = (t1 + load64(Wb + i * 8)) & MASK32;
 
         var t2 = sha256_bsig0(a);
         t2 = (t2 + sha256_maj(a, b, c)) & MASK32;

@@ -38,13 +38,16 @@ fn ge_z(p): i64 { return p + 64; }
 fn ge_t(p): i64 { return p + 96; }
 
 fn ge_identity(p): i64 {
-    # Identity: (0, 1, 1, 0)
-    var z = u256_from(0);
-    var o = u256_from(1);
-    u256_copy(p, z);
-    u256_copy(p + 32, o);
-    u256_copy(p + 64, o);
-    u256_copy(p + 96, z);
+    # Identity in extended coordinates: (X,Y,Z,T) = (0,1,1,0).
+    # Written limb-direct rather than via u256_from(0)/u256_from(1),
+    # which each `alloc(32)`: the stdlib bump allocator is NOT
+    # thread-safe (CLAUDE.md quirk #7), and ge_identity is on the
+    # parallel verify hot path (ge_scalarmult / _ge_table_select),
+    # so any alloc here would race once `_sigil_batch_mutex` is
+    # dropped. memset + two stores is also faster.
+    memset(p, 0, 128);
+    store64(p + 32, 1);   # Y = 1
+    store64(p + 64, 1);   # Z = 1
     return 0;
 }
 
@@ -60,41 +63,50 @@ fn ge_copy(dst, src): i64 {
 # ================================================================
 
 fn ge_add(r, p, q): i64 {
-    var t1[32]; var t2[32];
-    var A[32];  var B2[32];
-    var C[32];  var D[32];
-    var E[32];  var F[32];
-    var G[32];  var H2[32];
+    # Per-thread banked working scratch (3.6): every `var X[N]` is a
+    # static function-scope global (CLAUDE.md quirk #1). Each batch
+    # worker uses its own 32-byte lane (one `cbank()` read per call).
+    var bk = cbank();
+    var t1[256]; var t1b = &t1 + bk * 32;   # 32 * SIGIL_CRYPTO_BANKS
+    var t2[256]; var t2b = &t2 + bk * 32;
+    var A[256];  var Ab  = &A  + bk * 32;
+    var B2[256]; var B2b = &B2 + bk * 32;
+    var C[256];  var Cb  = &C  + bk * 32;
+    var D[256];  var Db  = &D  + bk * 32;
+    var E[256];  var Eb  = &E  + bk * 32;
+    var F[256];  var Fb  = &F  + bk * 32;
+    var G[256];  var Gb  = &G  + bk * 32;
+    var H2[256]; var H2b = &H2 + bk * 32;
 
     # A = (Y1-X1)*(Y2-X2)
-    fp_sub(&t1, ge_y(p), ge_x(p));
-    fp_sub(&t2, ge_y(q), ge_x(q));
-    fp_mul(&A, &t1, &t2);
+    fp_sub(t1b, ge_y(p), ge_x(p));
+    fp_sub(t2b, ge_y(q), ge_x(q));
+    fp_mul(Ab, t1b, t2b);
 
     # B = (Y1+X1)*(Y2+X2)
-    fp_add(&t1, ge_y(p), ge_x(p));
-    fp_add(&t2, ge_y(q), ge_x(q));
-    fp_mul(&B2, &t1, &t2);
+    fp_add(t1b, ge_y(p), ge_x(p));
+    fp_add(t2b, ge_y(q), ge_x(q));
+    fp_mul(B2b, t1b, t2b);
 
     # C = T1*2d*T2
-    fp_mul(&C, ge_t(p), ge_t(q));
-    fp_mul(&C, &C, _ed_2d);
+    fp_mul(Cb, ge_t(p), ge_t(q));
+    fp_mul(Cb, Cb, _ed_2d);
 
     # D = Z1*2*Z2
-    fp_mul(&D, ge_z(p), ge_z(q));
-    fp_add(&D, &D, &D);
+    fp_mul(Db, ge_z(p), ge_z(q));
+    fp_add(Db, Db, Db);
 
     # E=B-A, F=D-C, G=D+C, H=B+A
-    fp_sub(&E, &B2, &A);
-    fp_sub(&F, &D, &C);
-    fp_add(&G, &D, &C);
-    fp_add(&H2, &B2, &A);
+    fp_sub(Eb, B2b, Ab);
+    fp_sub(Fb, Db, Cb);
+    fp_add(Gb, Db, Cb);
+    fp_add(H2b, B2b, Ab);
 
     # X3=E*F, Y3=G*H, T3=E*H, Z3=F*G
-    fp_mul(ge_x(r), &E, &F);
-    fp_mul(ge_y(r), &G, &H2);
-    fp_mul(ge_t(r), &E, &H2);
-    fp_mul(ge_z(r), &F, &G);
+    fp_mul(ge_x(r), Eb, Fb);
+    fp_mul(ge_y(r), Gb, H2b);
+    fp_mul(ge_t(r), Eb, H2b);
+    fp_mul(ge_z(r), Fb, Gb);
     return 0;
 }
 
@@ -103,29 +115,37 @@ fn ge_add(r, p, q): i64 {
 # ================================================================
 
 fn ge_double(r, p): i64 {
-    var A[32]; var B[32]; var C[32]; var D[32];
-    var E[32]; var F[32]; var G[32]; var H[32];
-    var t[32];
+    # Per-thread banked working scratch (3.6) — see ge_add.
+    var bk = cbank();
+    var A[256]; var Ab = &A + bk * 32;     # 32 * SIGIL_CRYPTO_BANKS
+    var B[256]; var Bb = &B + bk * 32;
+    var C[256]; var Cb = &C + bk * 32;
+    var D[256]; var Db = &D + bk * 32;
+    var E[256]; var Eb = &E + bk * 32;
+    var F[256]; var Fb = &F + bk * 32;
+    var G[256]; var Gb = &G + bk * 32;
+    var H[256]; var Hb = &H + bk * 32;
+    var t[256]; var tb = &t + bk * 32;
 
-    fp_sq(&A, ge_x(p));
-    fp_sq(&B, ge_y(p));
-    fp_sq(&C, ge_z(p));
-    fp_add(&C, &C, &C);
-    fp_neg(&D, &A);  # a=-1 for ed25519
+    fp_sq(Ab, ge_x(p));
+    fp_sq(Bb, ge_y(p));
+    fp_sq(Cb, ge_z(p));
+    fp_add(Cb, Cb, Cb);
+    fp_neg(Db, Ab);  # a=-1 for ed25519
 
-    fp_add(&t, ge_x(p), ge_y(p));
-    fp_sq(&E, &t);
-    fp_sub(&E, &E, &A);
-    fp_sub(&E, &E, &B);
+    fp_add(tb, ge_x(p), ge_y(p));
+    fp_sq(Eb, tb);
+    fp_sub(Eb, Eb, Ab);
+    fp_sub(Eb, Eb, Bb);
 
-    fp_add(&G, &D, &B);
-    fp_sub(&F, &G, &C);
-    fp_sub(&H, &D, &B);
+    fp_add(Gb, Db, Bb);
+    fp_sub(Fb, Gb, Cb);
+    fp_sub(Hb, Db, Bb);
 
-    fp_mul(ge_x(r), &E, &F);
-    fp_mul(ge_y(r), &G, &H);
-    fp_mul(ge_t(r), &E, &H);
-    fp_mul(ge_z(r), &F, &G);
+    fp_mul(ge_x(r), Eb, Fb);
+    fp_mul(ge_y(r), Gb, Hb);
+    fp_mul(ge_t(r), Eb, Hb);
+    fp_mul(ge_z(r), Fb, Gb);
     return 0;
 }
 
@@ -155,10 +175,12 @@ fn ge_cmov(dst, src, bit): i64 {
 }
 
 fn ge_scalarmult(r, s, p): i64 {
-    var q[128];
-    var tmp[128];
+    # Per-thread banked working points (3.6) — see ge_add.
+    var bk = cbank();
+    var q[1024];   var qb = &q + bk * 128;     # 128 * SIGIL_CRYPTO_BANKS
+    var tmp[1024]; var tmpb = &tmp + bk * 128;
     ge_identity(r);
-    ge_copy(&q, p);
+    ge_copy(qb, p);
 
     var i = 0;
     while (i < 256) {
@@ -167,12 +189,12 @@ fn ge_scalarmult(r, s, p): i64 {
         var bit = (load8(s + byte_idx) >> bit_idx) & 1;
 
         # Unconditional add; unconditional select.
-        ge_add(&tmp, r, &q);
-        ge_cmov(r, &tmp, bit);
+        ge_add(tmpb, r, qb);
+        ge_cmov(r, tmpb, bit);
 
         # Unconditional double of q.
-        ge_double(&tmp, &q);
-        ge_copy(&q, &tmp);
+        ge_double(tmpb, qb);
+        ge_copy(qb, tmpb);
         i = i + 1;
     }
     return 0;
@@ -206,8 +228,10 @@ fn _ge_table_select(dst, row, digit): i64 {
 }
 
 fn ge_scalarmult_base(r, s): i64 {
-    var sel[128];
-    var tmp[128];
+    # Per-thread banked working points (3.6) — see ge_add.
+    var bk = cbank();
+    var sel[1024]; var selb = &sel + bk * 128;   # 128 * SIGIL_CRYPTO_BANKS
+    var tmp[1024]; var tmpb = &tmp + bk * 128;
     ge_identity(r);
 
     var i = 0;
@@ -219,12 +243,12 @@ fn ge_scalarmult_base(r, s): i64 {
         if ((i & 1) == 1) { digit = (b >> 4) & 0xF; }
 
         # Constant-time select into sel.
-        _ge_table_select(&sel, _ed_B_table + i * 16 * 128, digit);
+        _ge_table_select(selb, _ed_B_table + i * 16 * 128, digit);
 
         # r = r + sel  (ge_add handles r==identity and sel==identity correctly;
         # HWCD08 addition formula is complete on twisted Edwards curves).
-        ge_add(&tmp, r, &sel);
-        ge_copy(r, &tmp);
+        ge_add(tmpb, r, selb);
+        ge_copy(r, tmpb);
         i = i + 1;
     }
     return 0;
@@ -269,18 +293,20 @@ fn _build_ed_B_table(): i64 {
 # ================================================================
 
 fn ge_to_bytes(out, p): i64 {
-    var recip[32];
-    var x[32];
-    var y[32];
-    fp_inv(&recip, ge_z(p));
-    fp_mul(&x, ge_x(p), &recip);
-    fp_mul(&y, ge_y(p), &recip);
+    # Per-thread banked working scratch (3.6) — see ge_add.
+    var bk = cbank();
+    var recip[256]; var recipb = &recip + bk * 32;   # 32 * SIGIL_CRYPTO_BANKS
+    var x[256];     var xb = &x + bk * 32;
+    var y[256];     var yb = &y + bk * 32;
+    fp_inv(recipb, ge_z(p));
+    fp_mul(xb, ge_x(p), recipb);
+    fp_mul(yb, ge_y(p), recipb);
 
     # Encode y as 32 bytes little-endian
-    u256_store_le(out, &y);
+    u256_store_le(out, yb);
 
     # Set high bit to sign of x (low bit of x)
-    var x_sign = u256_limb(&x, 0) & 1;
+    var x_sign = u256_limb(xb, 0) & 1;
     store8(out + 31, (load8(out + 31) & 0xFF) | (x_sign << 7));
     return 0;
 }
@@ -298,62 +324,77 @@ var _ed_decomp_exp = 0;
 fn ge_from_bytes(p, s): i64 {
     ed25519_init();
 
-    var u[32]; var v[32]; var y2[32];
-    var v3[32]; var v7[32]; var uv3[32]; var uv7[32];
-    var pow[32]; var x[32]; var check[32]; var vx2[32];
-    var y[32]; var s_copy[32]; var one[32];
+    # Working scratch, banked per thread (3.6): each `var X[N]` is a
+    # static function-scope global (CLAUDE.md quirk #1); each batch
+    # worker decompresses into its own 32-byte lanes. One `cbank()`
+    # read per call.  (32 * SIGIL_CRYPTO_BANKS each.)
+    var bk = cbank();
+    var u[256];      var ub = &u + bk * 32;
+    var v[256];      var vb = &v + bk * 32;
+    var y2[256];     var y2b = &y2 + bk * 32;
+    var v3[256];     var v3b = &v3 + bk * 32;
+    var v7[256];     var v7b = &v7 + bk * 32;
+    var uv3[256];    var uv3b = &uv3 + bk * 32;
+    var uv7[256];    var uv7b = &uv7 + bk * 32;
+    var pow[256];    var powb = &pow + bk * 32;
+    var x[256];      var xb = &x + bk * 32;
+    var check[256];  var checkb = &check + bk * 32;
+    var vx2[256];    var vx2b = &vx2 + bk * 32;
+    var y[256];      var yb = &y + bk * 32;
+    var s_copy[256]; var s_copyb = &s_copy + bk * 32;
+    var one[256];    var oneb = &one + bk * 32;
 
-    memset(&one, 0, 32);
-    store64(&one, 1);
+    memset(oneb, 0, 32);
+    store64(oneb, 1);
 
     # Decode y from bytes, clear sign bit
     var x_sign = (load8(s + 31) >> 7) & 1;
-    memcpy(&s_copy, s, 32);
-    store8(&s_copy + 31, load8(&s_copy + 31) & 0x7F);
+    memcpy(s_copyb, s, 32);
+    store8(s_copyb + 31, load8(s_copyb + 31) & 0x7F);
 
     # Load y as u256 from little-endian bytes
-    u256_load_le(&y, &s_copy);
+    u256_load_le(yb, s_copyb);
 
     # u = y^2 - 1
-    fp_sq(&y2, &y);
-    fp_sub(&u, &y2, &one);
+    fp_sq(y2b, yb);
+    fp_sub(ub, y2b, oneb);
 
     # v = d*y^2 + 1
-    fp_mul(&v, _ed_d, &y2);
-    fp_add(&v, &v, &one);
+    fp_mul(vb, _ed_d, y2b);
+    fp_add(vb, vb, oneb);
 
     # candidate = u * v^3 * (u*v^7)^((p-5)/8)
-    fp_sq(&v3, &v);
-    fp_mul(&v3, &v3, &v);        # v^3
-    fp_sq(&v7, &v3);
-    fp_mul(&v7, &v7, &v);        # v^7
-    fp_mul(&uv7, &u, &v7);       # u*v^7
-    fp_mul(&uv3, &u, &v3);       # u*v^3
+    fp_sq(v3b, vb);
+    fp_mul(v3b, v3b, vb);        # v^3
+    fp_sq(v7b, v3b);
+    fp_mul(v7b, v7b, vb);        # v^7
+    fp_mul(uv7b, ub, v7b);       # u*v^7
+    fp_mul(uv3b, ub, v3b);       # u*v^3
 
-    fp_pow(&pow, &uv7, _ed_decomp_exp);
+    fp_pow(powb, uv7b, _ed_decomp_exp);
 
     # x = u*v^3 * pow
-    fp_mul(&x, &uv3, &pow);
+    fp_mul(xb, uv3b, powb);
 
     # Verify: v*x^2 == u?
-    fp_sq(&vx2, &x);
-    fp_mul(&check, &v, &vx2);
+    fp_sq(vx2b, xb);
+    fp_mul(checkb, vb, vx2b);
 
     # If check != u, try x * sqrt(-1)
-    if (u256_eq(&check, &u) == 0) {
-        fp_mul(&x, &x, _ed_sqrtm1);
+    if (u256_eq(checkb, ub) == 0) {
+        fp_mul(xb, xb, _ed_sqrtm1);
     }
 
     # Adjust sign
-    if ((u256_limb(&x, 0) & 1) != x_sign) {
-        fp_neg(&x, &x);
+    if ((u256_limb(xb, 0) & 1) != x_sign) {
+        fp_neg(xb, xb);
     }
 
     # Set point: X=x, Y=y, Z=1, T=x*y
-    u256_copy(ge_x(p), &x);
-    u256_copy(ge_y(p), &y);
-    u256_copy(ge_z(p), &one);
-    fp_mul(ge_t(p), &x, &y);
+    u256_copy(ge_x(p), xb);
+    u256_copy(ge_y(p), yb);
+    u256_copy(ge_z(p), oneb);
+    fp_mul(ge_t(p), xb, yb);
     return 0;
 }
 
@@ -426,39 +467,41 @@ fn sc_reduce(out, s64): i64 {
     # Reduce 512-bit value mod L using: val = hi*2^256 + lo ≡ hi*R + lo (mod L)
     # where R = 2^256 mod L. Iterate until hi == 0.
     #
-    # Scratch is stack-local — `lo`, `hi`, `prod` live only for
-    # the lifetime of the call (trivially per-thread by
-    # construction).
-    var lo[32];
-    var hi[32];
-    var prod[64];
+    # Working scratch, banked per thread (3.6): `var X[N]` is a
+    # static function-scope global (CLAUDE.md quirk #1), so each
+    # batch-verify worker reduces into its own lane. One `cbank()`
+    # read per call.
+    var bk = cbank();
+    var lo[256];   var lob = &lo + bk * 32;     # 32 * SIGIL_CRYPTO_BANKS
+    var hi[256];   var hib = &hi + bk * 32;
+    var prod[512]; var prodb = &prod + bk * 64; # 64 * SIGIL_CRYPTO_BANKS
 
     # Load 64-byte input as two u256 (little-endian).
-    u256_load_le(&lo, s64);
-    u256_load_le(&hi, s64 + 32);
+    u256_load_le(lob, s64);
+    u256_load_le(hib, s64 + 32);
 
     # Iteratively reduce: lo = lo + hi*R, split result, repeat until hi == 0
-    while (u256_is_zero(&hi) == 0) {
-        u256_mul_full(&prod, &hi, _scr_r256);
+    while (u256_is_zero(hib) == 0) {
+        u256_mul_full(prodb, hib, _scr_r256);
         # new_hi = product high 256 bits
-        store64(&hi, load64(&prod + 32));
-        store64(&hi + 8, load64(&prod + 40));
-        store64(&hi + 16, load64(&prod + 48));
-        store64(&hi + 24, load64(&prod + 56));
+        store64(hib, load64(prodb + 32));
+        store64(hib + 8, load64(prodb + 40));
+        store64(hib + 16, load64(prodb + 48));
+        store64(hib + 24, load64(prodb + 56));
         # new_lo = old_lo + product_lo (carry propagates to hi)
-        var carry = u256_add(&lo, &lo, &prod);
+        var carry = u256_add(lob, lob, prodb);
         if (carry > 0) {
             # Add carry to hi limb 0, propagate manually
-            var h0 = load64(&hi) + 1;
-            store64(&hi, h0);
+            var h0 = load64(hib) + 1;
+            store64(hib, h0);
             if (h0 == 0) {
-                var h1 = load64(&hi + 8) + 1;
-                store64(&hi + 8, h1);
+                var h1 = load64(hib + 8) + 1;
+                store64(hib + 8, h1);
                 if (h1 == 0) {
-                    var h2 = load64(&hi + 16) + 1;
-                    store64(&hi + 16, h2);
+                    var h2 = load64(hib + 16) + 1;
+                    store64(hib + 16, h2);
                     if (h2 == 0) {
-                        store64(&hi + 24, load64(&hi + 24) + 1);
+                        store64(hib + 24, load64(hib + 24) + 1);
                     }
                 }
             }
@@ -466,11 +509,11 @@ fn sc_reduce(out, s64): i64 {
     }
 
     # Final reduction mod L
-    while (u256_cmp(&lo, _ed_L) >= 0) {
-        u256_sub(&lo, &lo, _ed_L);
+    while (u256_cmp(lob, _ed_L) >= 0) {
+        u256_sub(lob, lob, _ed_L);
     }
 
-    u256_copy(out, &lo);
+    u256_copy(out, lob);
     return 0;
 }
 
@@ -584,58 +627,64 @@ fn ed25519_sign(sk, msg, msg_len, sig_out): i64 {
 # Ed25519 verify: pk (32b), msg, msg_len, sig (64b) -> 0/1
 # ================================================================
 
-# 3.3: alloc-free on the hot path. All per-call buffers (points
-# and scalars) live on the stack. No bump-allocator calls in the
-# verify body — concurrent workers in sv_verify_batch can run
-# this without serialising on the freelist or batch mutex.
+# 3.3: alloc-free on the hot path — no bump-allocator calls in the
+# verify body (the stdlib allocator is not thread-safe, quirk #7).
+# 3.6: every per-call buffer below is banked per thread. A `var X[N]`
+# is a static function-scope global (CLAUDE.md quirk #1), NOT a
+# stack-local, so concurrent sv_verify_batch workers MUST each use
+# their own lane — this is what lets the batch path drop
+# `_sigil_batch_mutex`. One `cbank()` read per verify; every banked
+# helper it calls (ge_*, fp_*, sc_reduce, sha*) banks its own
+# scratch the same way.
 fn ed25519_verify(pk, msg, msg_len, sig): i64 {
     ed25519_init();
-    var hram[64];
-    var h_scalar[32];
-    var S_scalar[32];
-    var R_bytes[32];
-    var A[128];
-    var SB[128];
-    var hA[128];
-    var R_check[128];
+    var bk = cbank();
+    var hram[512];     var hramb = &hram + bk * 64;       # 64 * SIGIL_CRYPTO_BANKS
+    var h_scalar[256]; var h_scalarb = &h_scalar + bk * 32;
+    var S_scalar[256]; var S_scalarb = &S_scalar + bk * 32;
+    var R_bytes[256];  var R_bytesb = &R_bytes + bk * 32;
+    var A[1024];       var Ab = &A + bk * 128;            # 128 * SIGIL_CRYPTO_BANKS
+    var SB[1024];      var SBb = &SB + bk * 128;
+    var hA[1024];      var hAb = &hA + bk * 128;
+    var R_check[1024]; var R_checkb = &R_check + bk * 128;
 
-    ge_from_bytes(&A, pk);
+    ge_from_bytes(Ab, pk);
 
-    # h = SHA-512(R || pk || msg) mod L. Stack-allocated SHA-512
-    # context — sha512_init() would fl_alloc, which is not thread-
-    # safe under concurrent batch-verify workers.
-    var hctx[208];
-    sha512_init_into(&hctx);
-    sha512_update(&hctx, sig, 32);
-    sha512_update(&hctx, pk, 32);
-    sha512_update(&hctx, msg, msg_len);
-    sha512_finalize(&hctx, &hram);
+    # h = SHA-512(R || pk || msg) mod L. Stack-allocated (banked)
+    # SHA-512 context — sha512_init() would fl_alloc, which is not
+    # thread-safe under concurrent batch-verify workers.
+    var hctx[1664];    var hctxb = &hctx + bk * 208;      # 208 * SIGIL_CRYPTO_BANKS
+    sha512_init_into(hctxb);
+    sha512_update(hctxb, sig, 32);
+    sha512_update(hctxb, pk, 32);
+    sha512_update(hctxb, msg, msg_len);
+    sha512_finalize(hctxb, hramb);
 
-    sc_reduce(&h_scalar, &hram);
+    sc_reduce(h_scalarb, hramb);
 
     # Load S from sig[32..64] as scalar
-    u256_load_le(&S_scalar, sig + 32);
+    u256_load_le(S_scalarb, sig + 32);
 
     # RFC 8032 §5.1.7 / §8.4: reject non-canonical S (S must be < L).
     # Prevents signature malleability — the same (pk, msg) must have
     # exactly one valid signature encoding.
-    if (u256_cmp(&S_scalar, _ed_L) >= 0) { return 0; }
+    if (u256_cmp(S_scalarb, _ed_L) >= 0) { return 0; }
 
     # [S]B  (fixed-base; S is public, but base table wins on speed anyway)
-    ge_scalarmult_base(&SB, &S_scalar);
+    ge_scalarmult_base(SBb, S_scalarb);
 
     # [h]A
-    ge_scalarmult(&hA, &h_scalar, &A);
+    ge_scalarmult(hAb, h_scalarb, Ab);
 
     # R_check = [S]B - [h]A (negate hA: negate X and T)
-    fp_neg(ge_x(&hA), ge_x(&hA));
-    fp_neg(ge_t(&hA), ge_t(&hA));
+    fp_neg(ge_x(hAb), ge_x(hAb));
+    fp_neg(ge_t(hAb), ge_t(hAb));
 
-    ge_add(&R_check, &SB, &hA);
+    ge_add(R_checkb, SBb, hAb);
 
-    ge_to_bytes(&R_bytes, &R_check);
+    ge_to_bytes(R_bytesb, R_checkb);
 
-    return ct_eq_bytes_lens(&R_bytes, 32, sig, 32);
+    return ct_eq_bytes_lens(R_bytesb, 32, sig, 32);
 }
 
 # ================================================================

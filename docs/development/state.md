@@ -12,11 +12,12 @@
 
 | Field | Value |
 |---|---|
-| Current version | **3.5.9** (`VERSION`) |
-| Cyrius toolchain pin | **6.0.14** (`cyrius.cyml [package].cyrius`) |
-| Last release date | 2026-05-28 |
-| Last release audit | [`2026-05-28-3.5.9-ecdsa-sign-audit.md`](../audit/2026-05-28-3.5.9-ecdsa-sign-audit.md) |
-| Phase | Released; **3.5 cycle CLOSED** (3.5.0–3.5.4). 3.5.5 doc-comment patch. 3.5.6 added HMAC-SHA384 + HKDF-SHA384 (first cyrius native-TLS forcing function). **3.5.7 (current) added AES-128-GCM** (`aes_128_key_expand` / `aes_128_gcm_encrypt` / `aes_128_gcm_decrypt` + 10-round AES-NI path) — RFC 8446 §9.1 mandatory `TLS_AES_128_GCM_SHA256` (0x1301); issue `2026-05-28-cyrius-tls-arc-full-audit.md` line item 1. **3.5.x line continues for the rest of the cyrius native-TLS arc**: **3.5.8** private-key parsers (PEM+DER) → **3.5.9** ECDSA P-256/P-384 sign → **3.5.10** RSA sign+verify (Large/splittable) → **3.5.11** TLS 1.2 PRF (optional) → **3.5.12** closeout (last 3.5.x tag; Closeout Pass over the whole 3.5.5–3.5.11 delta + the deferred 3.5.6 audit). Then 3.6 (parallel verify) / 3.7 (perf), both gated on forcing functions. |
+| Current version | **3.6.0** (`VERSION`) |
+| Cyrius toolchain pin | **6.0.52** (`cyrius.cyml [package].cyrius`) |
+| Dependencies | agnosys **1.3.2**, sakshi **2.2.6** |
+| Last release date | 2026-06-03 |
+| Last release audit | [`2026-06-03-3.6.0-parallel-verify-audit.md`](../audit/2026-06-03-3.6.0-parallel-verify-audit.md) |
+| Phase | Released. **3.6.0 opened the 3.6 line early** with the parallel-verify refactor — `sv_verify_batch` drops `_sigil_batch_mutex` (3.42× at 64 artifacts / 4 workers) on the back of cyrius 6.0.52 thread-local storage. The deferred 3.5.x cyrius-native-TLS items — **RSA sign+verify** (was 3.5.10), **TLS 1.2 PRF** (was 3.5.11), and the **cycle closeout** (was 3.5.12) — carry forward into the **3.6.x** line (see roadmap). 3.5 cycle history: 3.5.0–3.5.4 modern AEAD + X25519 (CLOSED); 3.5.5 doc-comment patch; 3.5.6 HMAC/HKDF-SHA384; 3.5.7 AES-128-GCM; 3.5.8 private-key parsers; 3.5.9 ECDSA P-256/P-384 sign. 3.7 (perf / Solinas) still gated on a forcing function. |
 
 ## Test surface
 
@@ -33,6 +34,7 @@
 
 Per-cycle assertion delta:
 
+- 3.6.0 ship: +0 (parallel-verify refactor — no new test assertions; correctness is covered by the full suite at bank 0 plus `batch_parallel.tcyr` (228 assertions) run **mutex-off as the race detector**: 35/35 consecutive clean runs. The first mutex-off run failed and surfaced the un-banked `fp_inv` / `hash_file_into` buffers.)
 - 3.5.9 ship: +20 (`ecdsa_sign.tcyr` 20 — exact RFC 6979 A.2.5/A.2.6 (r‖s) for P-256/P-384 "sample"/"test", determinism, sign→verify roundtrips raw + DER, DER structure)
 - 3.5.8 ship: +33 (`privkey.tcyr` 33 — Ed25519 PKCS#8 seed parse + derive + sign/verify, ECDSA P-256/P-384 SEC1 + PKCS#8 scalar parse, curve/OID/truncation rejection, and the `pem_decode_privkey` label+algo dispatch for all 5 EC/Ed25519 forms + RSA sentinel)
 - 3.5.7 ship: +15 (`aes128_gcm.tcyr` 15 — canonical GCM AES-128 Test Cases 1–4 (empty / single-block / 4-block / AAD+partial) + decrypt roundtrip + one-bit tag-flip rejection with pt_out-zeroed checks + empty roundtrip)
@@ -65,6 +67,7 @@ Consumers that link or rely on sigil for trust verification:
 
 | Version | Date | Headline |
 |---|---|---|
+| 3.6.0 | 2026-06-03 | **Parallel batch verify** — `sv_verify_batch` drops `_sigil_batch_mutex`; crypto runs concurrently across workers. **3.42×** at 64 artifacts / 4 workers (422.867 → 123.563 ms vs `v3.2.0-allocfree`). New `src/crypto_scratch.cyr` gives each worker a private *bank* (lane) of every racing crypto working array (sha256/512 schedules, SHA-NI block scratch, Ed25519 field/group/verify temporaries, `fp_*`/`u512_mod_p` incl. `fp_inv`, `hash_file_into` buffers) via cyrius 6.0.52 thread-local storage — no signature churn. `ge_identity` made alloc-free. Maintenance bump: cyrius 6.0.14→6.0.52, agnosys 1.2.7→1.3.2, sakshi 2.2.5→2.2.6. Race surface verified closed (`batch_parallel.tcyr` mutex-off 35/35). Audit: `docs/audit/2026-06-03-3.6.0-parallel-verify-audit.md`. |
 | 3.5.9 | 2026-05-28 | ECDSA P-256/P-384 deterministic signing (`src/ecdsa_sign.cyr`) — `ecdsa_p256_sign` / `ecdsa_p384_sign` (+`_der`), RFC 6979 §3.2 HMAC_DRBG nonce (HMAC-SHA256/384). Raw `r‖s` + DER (TLS 1.3 CertificateVerify). Consumes the 3.5.8 scalars; pairs with verify. Exact RFC 6979 A.2.5/A.2.6 vectors (+20 assertions). Benches: P-256 74 ms / P-384 179 ms. Pin unchanged (6.0.14). Audit: `docs/audit/2026-05-28-3.5.9-ecdsa-sign-audit.md`. |
 | 3.5.8 | 2026-05-28 | EC + Ed25519 private-key parsers (`src/privkey.cyr`) — `ed25519_privkey_from_der` (PKCS#8/RFC 8410), `ecdsa_p256_privkey_from_der` / `ecdsa_p384_privkey_from_der` (SEC1 + PKCS#8 → big-endian scalar), `pem_decode_privkey` (auto-detect label + algo, reuses the `pem.cyr` base64 decoder). RSA label recognized → `0 - SIG_PRIVKEY_RSA` sentinel (parser lands in 3.5.10). First half of issue line item 4. +33 assertions. Pin unchanged (6.0.14). Audit: `docs/audit/2026-05-28-3.5.8-privkey-parsers-audit.md`. |
 | 3.5.7 | 2026-05-28 | AES-128-GCM (`src/aes_gcm.cyr` + `src/aes_ni.cyr`) — `aes_128_key_expand` (16-byte key → 176-byte / 11-key schedule, Nk=4/Nr=10) + `aes_128_gcm_encrypt` / `aes_128_gcm_decrypt`, mirroring the AES-256 surface; 10-round `aes128_encrypt_block_ni` AES-NI path gated by a FIPS 197 §C.1 boot self-test. RFC 8446 §9.1 mandatory `TLS_AES_128_GCM_SHA256` (0x1301) + the four TLS 1.2 `*_WITH_AES_128_GCM_SHA256` suites. Block/CTR/GCM machinery parametrized on round count; AES-256 path unchanged. +15 assertions. Cyrius pin 6.0.12 → 6.0.14. First of the 5 line items in `docs/development/issues/2026-05-28-cyrius-tls-arc-full-audit.md`. Audit: `docs/audit/2026-05-28-3.5.7-aes128-gcm-audit.md`. |
@@ -93,10 +96,11 @@ back to v2.0.0.
 | 3.5.7 — AES-128-GCM | **Shipped** 2026-05-28 | `aes_128_key_expand` / `aes_128_gcm_encrypt` / `_decrypt` + 10-round AES-NI. RFC 8446 §9.1 mandatory `TLS_AES_128_GCM_SHA256` + 4 TLS 1.2 suites. Cyrius slot v6.0.14 unblocked. |
 | 3.5.8 — EC + Ed25519 privkey parsers | **Shipped** 2026-05-28 | `src/privkey.cyr`: PEM + DER for ECDSA P-256/P-384 (SEC1/PKCS#8) + Ed25519 (PKCS#8/RFC 8410) + `pem_decode_privkey`. RSA parser deferred to 3.5.10 (no RSA key type until the engine lands). Cyrius v6.0.15 / .23 unblocked (key-loading side). |
 | 3.5.9 — ECDSA sign | **Shipped** 2026-05-28 | `src/ecdsa_sign.cyr`: `ecdsa_p256_sign` / `ecdsa_p384_sign` (+`_der`), RFC 6979 deterministic-k. Cyrius v6.0.17 / .25 unblocked. |
-| 3.5.10 — RSA engine + parser + sign/verify | pending | Bignum modexp engine + RSA key type + `rsa_privkey_from_der` (moved from 3.5.8) + PKCS#1 v1.5 + PSS, SHA-256/384. **Large/splittable** (`bigint_ext` is Curve25519-only). Cyrius v6.0.17 / .25 / .29–.34. |
-| 3.5.11 — TLS 1.2 PRF | pending (optional) | `tls12_prf_sha256/384` — ship-or-decline; cyrius keeps inline if declined. Cyrius v6.0.29–.34. |
-| 3.5.12 — closeout | **last 3.5.x tag** | Closeout Pass over the 3.5.5–3.5.11 delta + deferred 3.5.6 audit doc. Ships before 3.6 opens. |
-| 3.6 / 3.7 | Gated | Parallel verify (3.6) and perf tuning / Solinas (3.7) remain gated on forcing functions per roadmap. |
+| 3.6.0 — parallel verify | **Shipped** 2026-06-03 | Dropped `_sigil_batch_mutex`; per-thread crypto banks (`src/crypto_scratch.cyr`) over cyrius 6.0.52 TLS. 3.42× at 64 artifacts / 4 workers. Forcing function: cyrius 6.0.52 shipping thread-local storage. Audit: `docs/audit/2026-06-03-3.6.0-parallel-verify-audit.md`. |
+| 3.6.x — RSA engine + parser + sign/verify | pending (was 3.5.10) | Bignum modexp engine + RSA key type + `rsa_privkey_from_der` + PKCS#1 v1.5 + PSS, SHA-256/384. **Large/splittable** (`bigint_ext` is Curve25519-only). Cyrius v6.0.17 / .25 / .29–.34. |
+| 3.6.x — TLS 1.2 PRF | pending, optional (was 3.5.11) | `tls12_prf_sha256/384` — ship-or-decline; cyrius keeps inline if declined. Cyrius v6.0.29–.34. |
+| 3.6.x — cyrius-native-TLS closeout | pending (was 3.5.12) | Closeout Pass over the 3.5.5–3.5.9 + 3.6.0 delta + the deferred 3.5.6 audit doc. |
+| 3.7 — perf / Solinas | Gated | Solinas word-level reduction for P-256/P-384 + unified `_into` API. Gated on a latency forcing function per roadmap. |
 
 When a cycle is opened, list each work-item bite here as it
 moves through `pending → in_progress → completed`. The release

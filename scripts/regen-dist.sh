@@ -28,6 +28,7 @@ cd "$(dirname "$0")/.."
 MODULES="
 src/types.cyr
 src/error.cyr
+src/crypto_scratch.cyr
 src/sha_ni.cyr
 src/sha256.cyr
 src/hex.cyr

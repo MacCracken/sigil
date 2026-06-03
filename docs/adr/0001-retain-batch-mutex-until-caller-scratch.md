@@ -1,8 +1,23 @@
 # 0001 — Retain `_sigil_batch_mutex` until caller-scratch lands
 
-**Status**: Accepted
+**Status**: Superseded by 3.6.0 (2026-06-03) — mutex dropped
 **Date**: 2026-05-22
 
+> **Amendment (2026-06-03) — RESOLVED in 3.6.0:** the mutex was
+> dropped. The forcing function was cyrius **6.0.52** shipping
+> thread-local storage (`lib/thread_local.cyr`). Rather than the
+> caller-provided-scratch design this ADR anticipated (thread a
+> scratch pointer through every crypto signature), 3.6 gave each
+> worker a private *bank* (lane) of every racing `var X[N]`, selected
+> by a thread-local bank index (`src/crypto_scratch.cyr`) — no
+> signature changes, no caller changes, collisions impossible by
+> construction. The core finding still holds (in-function `var X[N]`
+> is a static function-scope global under cycc 6.0.52, not a
+> stack-local); 3.6 *accommodates* it per-thread instead of fighting
+> it. Result: 3.42× at 64 artifacts / 4 workers; `batch_parallel.tcyr`
+> 228/228 mutex-off. See CHANGELOG 3.6.0 and
+> `docs/audit/2026-06-03-3.6.0-parallel-verify-audit.md`.
+>
 > **Amendment (2026-05-27):** the dedicated parallel-verify cycle
 > referenced below as "3.5" was renumbered to **3.6** when the 3.5
 > slot was reassigned to the modern-crypto arc (Poly1305 / ChaCha20

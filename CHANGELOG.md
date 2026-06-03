@@ -7,7 +7,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-(none — tip is 3.5.9.)
+(none — tip is 3.6.0.)
+
+## [3.6.0] — 2026-06-03
+
+Parallel batch verify — `sv_verify_batch` drops `_sigil_batch_mutex`
+and runs the crypto truly concurrently across worker threads.
+**3.42× speedup** at 64 artifacts / 4 workers (422.867 ms → 123.563 ms
+vs the `v3.2.0-allocfree` baseline). Also a maintenance bump:
+toolchain to cyrius 6.0.52, agnosys 1.3.2, sakshi 2.2.6.
+
+The batch path was parallel since 3.0 but serialised every artifact
+behind a mutex, because the crypto primitives' transient working
+arrays are static function-scope globals (CLAUDE.md quirk #1), not
+stack-locals, and so raced across workers. cyrius 6.0.52 shipped
+thread-local storage (`lib/thread_local.cyr`), which unblocks giving
+each worker its own private *bank* of every such array — dropping the
+mutex with no signature churn.
+
+### Added
+
+- **`src/crypto_scratch.cyr`** — per-thread crypto-scratch bank
+  selection over cyrius 6.0.52 TLS. `crypto_bank_set(bank)` assigns a
+  worker its lane; `cbank()` returns it (0 on the main/serial path,
+  self-installing the main TLS block as a backstop);
+  `crypto_tls_main_init()` pre-warms the main thread. `SIGIL_CRYPTO_BANKS
+  = 8` lanes (bank 0 = main, 1..workers = batch). Each racing
+  `var X[N]` is widened to `[N*8]` and sliced by `cbank()*N`, so
+  concurrent workers touch disjoint memory — no offset map, collisions
+  impossible by construction.
+
+### Changed
+
+- **Mutex dropped from `sv_verify_batch` / `_batch_worker`** (`src/verify.cyr`).
+  Workers are assigned banks 1..workers and the main thread pre-warms
+  crypto inits + its TLS block before fan-out (clamped so the bank
+  index can never exceed the scratch width).
+- **Per-thread banking** of every transient working array on the
+  verify call path: `sha256`/`sha512` message schedules, the SHA-NI
+  block scratch (`src/sha_ni.cyr`), the Ed25519 field/group/verify
+  temporaries (`src/ed25519.cyr`), the `fp_*` / `u512_mod_p` scratch
+  (`src/bigint_ext.cyr`, incl. `fp_inv`'s addition chain), and the
+  `hash_file_into` file-read buffer + digest (`src/trust.cyr`).
+- **`ge_identity` is now alloc-free** — it built `0`/`1` via
+  `u256_from` (each `alloc(32)`), which would race on the non-thread-
+  safe bump allocator once the mutex is gone. Rewritten as
+  `memset` + two stores (also faster).
+- **Toolchain pin** cyrius 6.0.14 → **6.0.52**; deps **agnosys 1.2.7 →
+  1.3.2**, **sakshi 2.2.5 → 2.2.6**. `lib/` snapshot re-synced.
+- **Dist regenerated** — `dist/sigil.cyr` rebuilt (now includes
+  `src/crypto_scratch.cyr`).
+
+### Performance
+
+- `sv_verify_batch_64`: **123.563 ms** (was 422.867 ms) — **3.42×** at
+  4 workers. `batch_4` 3.50×, `batch_16` 3.39×. `batch_1` (serial)
+  6.897 ms — no regression from the per-call `cbank()` read.
+  `benches/history.csv` row `v3.6-parallel-crypto`.
+
+### Security
+
+- Race surface enumerated exhaustively and closed; verified by
+  `tests/tcyr/batch_parallel.tcyr` mutex-off (35/35 clean runs — the
+  first run failed and surfaced the un-banked `fp_inv` /
+  `hash_file_into` buffers, both then banked). Constant-time and
+  zeroization posture unchanged (banking shifts only data-independent
+  base addresses; no secret-material buffer is banked). Audit:
+  `docs/audit/2026-06-03-3.6.0-parallel-verify-audit.md`. 0 CRITICAL /
+  HIGH / MEDIUM.
 
 ## [3.5.9] — 2026-05-28
 

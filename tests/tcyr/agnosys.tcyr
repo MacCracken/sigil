@@ -26,6 +26,8 @@ include "lib/tagged.cyr"
 include "lib/process.cyr"
 include "lib/agnosys.cyr"
 
+include "lib/thread_local.cyr"
+include "src/crypto_scratch.cyr"
 include "src/types.cyr"
 include "src/error.cyr"
 include "src/sha256.cyr"

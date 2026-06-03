@@ -139,3 +139,7 @@ timestamp,label,benchmark,estimate,unit
 2026-05-28T00:00:00Z,v3.5.7-aes128-gcm,aes_128_gcm_encrypt_1kb,728,µs
 2026-05-28T00:00:00Z,v3.5.9-ecdsa-sign,ecdsa_p256_sign,74.444,ms
 2026-05-28T00:00:00Z,v3.5.9-ecdsa-sign,ecdsa_p384_sign,179.169,ms
+2026-06-03T00:00:00Z,v3.6-parallel-crypto,sv_verify_batch_1,6.897,ms
+2026-06-03T00:00:00Z,v3.6-parallel-crypto,sv_verify_batch_4,8.199,ms
+2026-06-03T00:00:00Z,v3.6-parallel-crypto,sv_verify_batch_16,31.534,ms
+2026-06-03T00:00:00Z,v3.6-parallel-crypto,sv_verify_batch_64,123.563,ms

@@ -17,6 +17,8 @@ include "lib/json.cyr"
 include "lib/sakshi.cyr"
 include "lib/chrono.cyr"
 
+include "lib/thread_local.cyr"
+include "src/crypto_scratch.cyr"
 include "src/types.cyr"
 include "src/error.cyr"
 include "src/sha256.cyr"

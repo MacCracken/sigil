@@ -6,27 +6,29 @@ type: state
 
 # Documentation Health — sigil
 
-> **Last refresh**: 2026-05-27 (**3.5 arc closeout — 3.5.4**).
-> The 3.5 modern-crypto arc shipped four new primitives — Poly1305
-> (3.5.0), ChaCha20 (3.5.1), ChaCha20-Poly1305 AEAD (3.5.2), X25519
-> (3.5.3) — completing the pure-Cyrius TLS 1.3 `ChaCha20-Poly1305 +
-> X25519` suite; 3.5.4 then ran the Closeout Pass. This sweep:
-> consolidated the four per-bite audits into a single
-> `docs/audit/2026-05-27-3.5-arc-audit.md` (deleted the per-bite
-> files; repointed `state.md` / `roadmap.md`); added
-> `src/{poly1305,chacha20,chacha20poly1305,x25519}.cyr` + matching
-> `tests/tcyr/*.tcyr` + `tests/bcyr/sigil.bcyr` cases +
-> `benches/history.csv` row `v3.5.4-modern-crypto`; extended
-> `sources.md` (ChaCha20, AEAD, RFC 7748); cyrius pin 6.0.1 →
-> 6.0.3; filed an upstream cyrius issue (secret/defer block-cap
-> 8 → 32). Amended ADR 0001 (parallel-verify "3.5" → 3.6) and ADR
-> 0003 (bump-alloc / Solinas "3.6" → 3.7) for the cycle renumber.
-> Prior refresh: 2026-05-23 (v3.4.3); see git history for the
-> 3.4.x sweep detail.
+> **Last refresh**: 2026-06-03 (**3.6.0 — parallel verify**).
+> Dropped `_sigil_batch_mutex`; `sv_verify_batch` now runs the
+> crypto concurrently (3.42× at 64 artifacts / 4 workers) on the
+> back of cyrius 6.0.52 thread-local storage. This sweep: added
+> `src/crypto_scratch.cyr` (per-thread crypto banks) + the
+> `docs/audit/2026-06-03-3.6.0-parallel-verify-audit.md` audit +
+> `benches/history.csv` row `v3.6-parallel-crypto`; per-thread
+> banking landed across `sha_ni`/`sha256`/`sha512`/`bigint_ext`/
+> `ed25519`/`trust`; toolchain pin 6.0.14 → **6.0.52**, agnosys
+> 1.2.7 → 1.3.2, sakshi 2.2.5 → 2.2.6 (README + state.md + roadmap
+> repinned); **ADR 0001 marked Superseded** (mutex dropped via TLS
+> banks, not the caller-scratch design it anticipated). The three
+> unshipped cyrius-native-TLS items (RSA, TLS 1.2 PRF, closeout)
+> were renumbered 3.5.10–12 → **3.6.x** in `state.md` + `roadmap.md`.
+> No new RFC/FIPS surface (threading refactor) — `sources.md`
+> unchanged. Injected `lib/thread_local.cyr` + `src/crypto_scratch.cyr`
+> includes into the 36 standalone test/bench files that compile a
+> banked module. Prior refresh: 2026-05-27 (3.5.4 arc closeout); see
+> git history for the 3.5.x sweep detail.
 >
 > **Refresh cadence**: when docs are touched, update the
 > affected row inline. Full audit at minor closeout
-> (next: 3.5.x → 3.6.0 close).
+> (next: the 3.6.x cyrius-native-TLS items → close).
 >
 > **Scope**: this repo only (`sigil`) — the entire `docs/` tree
 > plus root-level files (README, CHANGELOG, CLAUDE.md, VERSION,

@@ -1,0 +1,88 @@
+# crypto_scratch.cyr — per-thread working-buffer bank selection for
+# the parallel batch-verify path (sigil 3.6).
+#
+# WHY THIS EXISTS
+# ---------------
+# A `var X[N]` declared inside a function in cyrius is a STATIC
+# function-scope global, not a per-call stack array (CLAUDE.md quirk
+# #1; tests/tcyr/var_array_semantics.tcyr — re-confirmed under cycc
+# 6.0.52 during the 3.6 open). The transient working arrays inside
+# the crypto primitives (SHA-256/512 message schedules, the Ed25519
+# field/group temporaries) are therefore shared across threads, which
+# is exactly why `sv_verify_batch` had to serialise every artifact
+# behind `_sigil_batch_mutex` (see the threading-safety contract in
+# src/verify.cyr).
+#
+# THE 3.6 MECHANISM — per-thread BANKS
+# ------------------------------------
+# Each racing `var X[N]` is widened to `var X[N * SIGIL_CRYPTO_BANKS]`
+# and the function operates on its own lane `&X + cbank()*N`. `cbank()`
+# returns the calling thread's bank index, read from a thread-local
+# slot (cyrius 6.0.52 `lib/thread_local.cyr`):
+#   - the main thread / serial path uses bank 0 (a fresh TLS slot
+#     reads 0);
+#   - batch workers are assigned distinct banks 1..workers at spawn
+#     (`crypto_bank_set`).
+# Distinct concurrent banks ⇒ disjoint memory ⇒ no data race — with
+# NO signature changes, NO caller changes, and NO cross-function
+# offset map. Each function still owns its own array; a worker simply
+# writes a different lane of it. Collisions are impossible by
+# construction (every lane is owned by exactly one live thread).
+#
+# This is deliberately cheaper and far lower-risk than threading a
+# caller-provided scratch pointer through every `fp_mul` / `ge_add` /
+# `sha256_transform` signature (the shape the v3.6 roadmap sketched
+# before cyrius shipped thread-local storage): no signature churn, and
+# the bank arithmetic is local and self-evidently collision-free.
+#
+# TLS LIFECYCLE
+# -------------
+# Worker threads spawned via `thread_create` get a zeroed 4 KB TLS
+# block installed automatically by CLONE_SETTLS (cyrius lib/thread.cyr),
+# so they need no init — their slot reads 0 until `crypto_bank_set`
+# overwrites it. The MAIN thread has no TLS block until one is
+# installed, so `cbank()` self-installs one on first use (and the
+# batch path pre-warms it on the main thread before fan-out). The
+# `& (SIGIL_CRYPTO_BANKS-1)` mask makes an out-of-range slot value
+# impossible to turn into an out-of-bounds lane — defence in depth.
+#
+# Requires: lib/thread_local.cyr (cyrius >= 6.0.52). Must be included
+# before any banked crypto module (src/sha_ni.cyr onward).
+
+# Number of concurrent crypto-scratch lanes. MUST be a power of two
+# (the `cbank()` mask relies on it) and MUST exceed _SIGIL_BATCH_WORKERS
+# (src/verify.cyr) since bank 0 is reserved for the main/serial path
+# and workers take banks 1..workers. 8 covers the default 4 workers
+# with headroom; widening only costs a few KB of static scratch.
+var SIGIL_CRYPTO_BANKS = 8;
+var _SIGIL_CBANK_MASK = 7;      # SIGIL_CRYPTO_BANKS - 1
+var _SIGIL_CBANK_SLOT = 0;      # thread-local slot holding the bank index
+var _crypto_tls_inited = 0;
+
+# Install a TLS block on the calling (main) thread so `cbank()` is
+# well-defined on the serial path. Idempotent. The batch path calls
+# this on the main thread before fan-out; `cbank()` also calls it
+# lazily as a backstop. Returns 0.
+fn crypto_tls_main_init(): i64 {
+    if (_crypto_tls_inited == 1) { return 0; }
+    thread_local_init();
+    _crypto_tls_inited = 1;
+    return 0;
+}
+
+# Assign the calling (worker) thread its bank index. Called once at
+# worker entry, before any banked primitive runs on that thread. Bank
+# must be in 1 .. SIGIL_CRYPTO_BANKS-1. Returns 0.
+fn crypto_bank_set(bank): i64 {
+    thread_local_set(_SIGIL_CBANK_SLOT, bank);
+    return 0;
+}
+
+# Bank index for the calling thread: 0 on the main/serial path,
+# 1..workers inside a batch worker. Self-installs the main-thread TLS
+# block on first use so direct (non-batch) crypto calls are safe. The
+# mask guarantees the result is always a valid lane index.
+fn cbank(): i64 {
+    if (_crypto_tls_inited == 0) { crypto_tls_main_init(); }
+    return thread_local_get(_SIGIL_CBANK_SLOT) & _SIGIL_CBANK_MASK;
+}

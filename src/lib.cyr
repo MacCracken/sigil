@@ -30,6 +30,10 @@ include "lib/slice.cyr"
 # new ceiling, so the previous `#ifdef SIGIL_BATCH_PARALLEL`
 # gate is no longer required.
 include "lib/thread.cyr"
+# Thread-local storage (cyrius 6.0.52) — backs the per-thread crypto
+# scratch banks in src/crypto_scratch.cyr that let the parallel batch
+# verify path drop `_sigil_batch_mutex` (sigil 3.6).
+include "lib/thread_local.cyr"
 
 # AGNOS kernel interfaces (agnosys 0.98.0, bundled)
 include "lib/agnosys.cyr"
@@ -37,6 +41,9 @@ include "lib/agnosys.cyr"
 # Sigil modules (dependency order)
 include "src/types.cyr"
 include "src/error.cyr"
+# Per-thread crypto scratch banks (3.6) — must precede every banked
+# crypto module (sha_ni onward) since they call `cbank()`.
+include "src/crypto_scratch.cyr"
 include "src/sha_ni.cyr"
 include "src/sha256.cyr"
 include "src/hex.cyr"

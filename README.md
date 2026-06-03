@@ -12,7 +12,7 @@ revocation management.
 Cyrius (ported from Rust v1.0.0; original Rust source removed in
 2.7.0). Zero external dependencies.
 
-**Cyrius pin:** `6.0.14` (synced across `cyrius.cyml` and CI).
+**Cyrius pin:** `6.0.52` (synced across `cyrius.cyml` and CI).
 
 ## Crypto stack
 
@@ -120,9 +120,11 @@ for the full module map and data flow.
 
 ## Tests
 
-1284 assertions across 47 test files, 0 failures (3.5.9). Crypto
+1284 assertions across 47 test files, 0 failures (3.6.0). Crypto
 suites use published known-answer vectors (RFC / FIPS / NIST); the
 TEE attestation arc ships synthesised end-to-end fixtures.
+`tests/tcyr/batch_parallel.tcyr` doubles as the parallel-verify race
+detector — run mutex-off since 3.6.
 
 ```sh
 cyrius build programs/smoke.cyr build/sigil   # full build

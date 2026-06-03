@@ -173,7 +173,12 @@ fn sha512_init_into(ctx): i64 {
 # remain read-only-after-init and shared across threads.
 
 fn sha512_transform(ctx): i64 {
-    var W[640];           # 80 message-schedule words × 8 bytes
+    # Message schedule, banked per thread (3.6): `var W[N]` is a
+    # static function-scope global (CLAUDE.md quirk #1); each batch
+    # worker uses its own 640-byte lane so concurrent compresses on
+    # the Ed25519 HRAM hash never race. `Wb` is this thread's lane.
+    var W[5120];          # 80 words × 8 bytes × SIGIL_CRYPTO_BANKS
+    var Wb = &W + cbank() * 640;
     var buf = ctx + 64;
 
     # Prepare message schedule W[0..15] from block (big-endian 64-bit words)
@@ -188,20 +193,20 @@ fn sha512_transform(ctx): i64 {
         | ((load8(buf + off + 5) & 0xFF) << 16)
         | ((load8(buf + off + 6) & 0xFF) << 8)
         | (load8(buf + off + 7) & 0xFF);
-        store64(&W + i * 8, w);
+        store64(Wb + i * 8, w);
         i = i + 1;
     }
 
     # Extend W[16..79]
     i = 16;
     while (i < 80) {
-        var w16 = load64(&W + (i - 16) * 8);
-        var w15 = load64(&W + (i - 15) * 8);
-        var w7 = load64(&W + (i - 7) * 8);
-        var w2 = load64(&W + (i - 2) * 8);
+        var w16 = load64(Wb + (i - 16) * 8);
+        var w15 = load64(Wb + (i - 15) * 8);
+        var w7 = load64(Wb + (i - 7) * 8);
+        var w2 = load64(Wb + (i - 2) * 8);
         var s0 = sha512_ssig0(w15);
         var s1 = sha512_ssig1(w2);
-        store64(&W + i * 8, w16 + s0 + w7 + s1);
+        store64(Wb + i * 8, w16 + s0 + w7 + s1);
         i = i + 1;
     }
 
@@ -219,7 +224,7 @@ fn sha512_transform(ctx): i64 {
     i = 0;
     while (i < 80) {
         var t1 = hv + sha512_bsig1(e) + sha512_ch(e, f, g);
-        t1 = t1 + load64(_sha512_K + i * 8) + load64(&W + i * 8);
+        t1 = t1 + load64(_sha512_K + i * 8) + load64(Wb + i * 8);
         var t2 = sha512_bsig0(a) + sha512_maj(a, b, c);
 
         hv = g;
