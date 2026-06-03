@@ -6,7 +6,16 @@ type: state
 
 # Documentation Health — sigil
 
-> **Last refresh**: 2026-06-03 (**3.6.0 — parallel verify**).
+> **Last refresh**: 2026-06-03 (**3.6.1 — TLS 1.2 PRF**).
+> Added `src/tls12_prf.cyr` (RFC 5246 §5 `tls12_prf_sha256/384`) +
+> `tests/tcyr/tls12_prf.tcyr` (+9, canonical IETF vectors) + audit
+> `docs/audit/2026-06-03-3.6.1-tls12-prf-audit.md` + `sources.md`
+> (RFC 5246 §5) + roadmap (PRF marked shipped, flagged to cyrius).
+> Toolchain pin 6.0.52 → **6.0.53** (README + state.md + roadmap).
+> Suite 47→48 files, 1284→1293 assertions. Same-day prior refresh
+> (3.6.0 — parallel verify) summarized below.
+>
+> **Earlier 2026-06-03 (3.6.0 — parallel verify).**
 > Dropped `_sigil_batch_mutex`; `sv_verify_batch` now runs the
 > crypto concurrently (3.42× at 64 artifacts / 4 workers) on the
 > back of cyrius 6.0.52 thread-local storage. This sweep: added

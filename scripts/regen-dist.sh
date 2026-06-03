@@ -43,6 +43,7 @@ src/sha512.cyr
 src/sha384.cyr
 src/hmac_sha384.cyr
 src/hkdf_sha384.cyr
+src/tls12_prf.cyr
 src/bigint_ext.cyr
 src/ed25519.cyr
 src/x25519.cyr

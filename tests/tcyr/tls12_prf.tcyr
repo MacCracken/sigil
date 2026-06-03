@@ -1,0 +1,116 @@
+# tls12_prf.tcyr — TLS 1.2 PRF (RFC 5246 5) known-answer vectors
+#
+# PRF(secret, label, seed) = P_hash(secret, label || seed).
+#
+# Vectors: the canonical TLS 1.2 PRF test vectors (originating from
+# the 2009 IETF TLS WG "Test vectors for TLS 1.2 PRF" message; the
+# same pair used by mbedTLS / wolfSSL test suites). The SHA-256
+# vector was reproduced exactly with a stdlib-only Python reference
+# (hmac/hashlib) before embedding; that reference was then used to
+# emit the full SHA-384 stream, and its SHA-256 output matched the
+# published vector byte-for-byte (the validation anchor).
+#
+#   SHA-256: secret 9bbe..db35, label "test label", seed a0ba..198c
+#            -> 100-byte P_SHA256 output
+#   SHA-384: secret b80b..67df, label "test label", seed cd66..7465
+#            -> 148-byte P_SHA384 output
+#
+# Also checks: arbitrary out_len truncation (a 12-byte request is the
+# 12-byte prefix of the 100-byte stream), the return value (= out_len),
+# and the over-cap guard (label_len + seed_len > 256 returns 0).
+
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/string.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fmt.cyr"
+include "lib/json.cyr"
+include "lib/sakshi.cyr"
+include "lib/chrono.cyr"
+include "lib/bigint.cyr"
+include "lib/ct.cyr"
+
+include "lib/thread_local.cyr"
+include "src/crypto_scratch.cyr"
+include "src/types.cyr"
+include "src/error.cyr"
+include "src/sha256.cyr"
+include "src/hex.cyr"
+include "src/hmac.cyr"
+include "src/sha512.cyr"
+include "src/sha384.cyr"
+include "src/hmac_sha384.cyr"
+include "src/tls12_prf.cyr"
+
+fn main() {
+    alloc_init();
+
+    # ============================================================
+    # TLS 1.2 PRF over SHA-256 — RFC 5246 5
+    # ============================================================
+    test_group("TLS 1.2 PRF P_SHA256");
+
+    var s256 = hex_decode("9bbe436ba940f017b17652849a71db35", 32);   # 16 bytes
+    var seed256 = hex_decode("a0ba9f936cda311827a6f796ffd5198c", 32); # 16 bytes
+
+    var out256[100];
+    var rc256 = tls12_prf_sha256(s256, 16, "test label", 10, seed256, 16, &out256, 100);
+    assert_eq(rc256, 100, "P_SHA256 rc == out_len");
+    assert_streq(hex_encode(&out256, 100),
+    "e3f229ba727be17b8d122620557cd453c2aab21d07c3d495329b52d4e61edb5a6b301791e90d35c9c9a46b4e14baf9af0fa022f7077def17abfd3797c0564bab4fbc91666e9def9b97fce34f796789baa48082d122ee42c5a72e5a5110fff70187347b66",
+    "P_SHA256 100-byte vector");
+
+    # Arbitrary out_len: a 12-byte request is the 12-byte prefix.
+    var out12[12];
+    var rc12 = tls12_prf_sha256(s256, 16, "test label", 10, seed256, 16, &out12, 12);
+    assert_eq(rc12, 12, "P_SHA256 short rc");
+    assert_streq(hex_encode(&out12, 12), "e3f229ba727be17b8d122620",
+    "P_SHA256 12-byte prefix");
+
+    # 48-byte master-secret-sized request (prefix of the stream).
+    var out48[48];
+    tls12_prf_sha256(s256, 16, "test label", 10, seed256, 16, &out48, 48);
+    assert_streq(hex_encode(&out48, 48),
+    "e3f229ba727be17b8d122620557cd453c2aab21d07c3d495329b52d4e61edb5a6b301791e90d35c9c9a46b4e14baf9af",
+    "P_SHA256 48-byte prefix");
+
+    # ============================================================
+    # TLS 1.2 PRF over SHA-384 — RFC 5246 5 (SHA-384 suites)
+    # ============================================================
+    test_group("TLS 1.2 PRF P_SHA384");
+
+    var s384 = hex_decode("b80b733d6ceefcdc71566ea48e5567df", 32);   # 16 bytes
+    var seed384 = hex_decode("cd665cf6a8447dd6ff8b27555edb7465", 32); # 16 bytes
+
+    var out384[148];
+    var rc384 = tls12_prf_sha384(s384, 16, "test label", 10, seed384, 16, &out384, 148);
+    assert_eq(rc384, 148, "P_SHA384 rc == out_len");
+    assert_streq(hex_encode(&out384, 148),
+    "7b0c18e9ced410ed1804f2cfa34a336a1c14dffb4900bb5fd7942107e81c83cde9ca0faa60be9fe34f82b1233c9146a0e534cb400fed2700884f9dc236f80edd8bfa961144c9e8d792eca722a7b32fc3d416d473ebc2c5fd4abfdad05d9184259b5bf8cd4d90fa0d31e2dec479e4f1a26066f2eea9a69236a3e52655c9e9aee691c8f3a26854308d5eaa3be85e0990703d73e56f",
+    "P_SHA384 148-byte vector");
+
+    # ============================================================
+    # Edge cases
+    # ============================================================
+    test_group("TLS 1.2 PRF edges");
+
+    # Over-cap (label_len + seed_len > 256) returns 0, writes nothing.
+    var outx[16];
+    var rcx = tls12_prf_sha256(s256, 16, "test label", 300, seed256, 0, &outx, 16);
+    assert_eq(rcx, 0, "over-cap guard returns 0");
+
+    # Determinism: same inputs -> same first 12 bytes again.
+    var out12b[12];
+    tls12_prf_sha256(s256, 16, "test label", 10, seed256, 16, &out12b, 12);
+    assert_eq(ct_eq_bytes(&out12, &out12b, 12), 1, "deterministic");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

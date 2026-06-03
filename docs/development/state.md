@@ -12,28 +12,33 @@
 
 | Field | Value |
 |---|---|
-| Current version | **3.6.0** (`VERSION`) |
-| Cyrius toolchain pin | **6.0.52** (`cyrius.cyml [package].cyrius`) |
+| Current version | **3.6.1** (`VERSION`) |
+| Cyrius toolchain pin | **6.0.53** (`cyrius.cyml [package].cyrius`) |
 | Dependencies | agnosys **1.3.2**, sakshi **2.2.6** |
 | Last release date | 2026-06-03 |
-| Last release audit | [`2026-06-03-3.6.0-parallel-verify-audit.md`](../audit/2026-06-03-3.6.0-parallel-verify-audit.md) |
-| Phase | Released. **3.6.0 opened the 3.6 line early** with the parallel-verify refactor — `sv_verify_batch` drops `_sigil_batch_mutex` (3.42× at 64 artifacts / 4 workers) on the back of cyrius 6.0.52 thread-local storage. The deferred 3.5.x cyrius-native-TLS items — **RSA sign+verify** (was 3.5.10), **TLS 1.2 PRF** (was 3.5.11), and the **cycle closeout** (was 3.5.12) — carry forward into the **3.6.x** line (see roadmap). 3.5 cycle history: 3.5.0–3.5.4 modern AEAD + X25519 (CLOSED); 3.5.5 doc-comment patch; 3.5.6 HMAC/HKDF-SHA384; 3.5.7 AES-128-GCM; 3.5.8 private-key parsers; 3.5.9 ECDSA P-256/P-384 sign. 3.7 (perf / Solinas) still gated on a forcing function. |
+| Last release audit | [`2026-06-03-3.6.1-tls12-prf-audit.md`](../audit/2026-06-03-3.6.1-tls12-prf-audit.md) |
+| Phase | Released. **3.6.1 added the TLS 1.2 PRF** (`src/tls12_prf.cyr`, RFC 5246 §5 P_SHA256/P_SHA384) — the "ship-or-decline" cyrius-native-TLS item, shipped; cyrius can drop its inline PRF. Also pin bump 6.0.52→6.0.53. **3.6.0** opened the 3.6 line with the parallel-verify refactor — `sv_verify_batch` drops `_sigil_batch_mutex` (3.42× at 64 artifacts / 4 workers) on cyrius 6.0.52 thread-local storage. **Still carried in the 3.6.x line:** **RSA sign+verify** (was 3.5.10) and the **cyrius-native-TLS closeout** (was 3.5.12). 3.5 cycle history: 3.5.0–3.5.4 modern AEAD + X25519 (CLOSED); 3.5.5 doc-comment patch; 3.5.6 HMAC/HKDF-SHA384; 3.5.7 AES-128-GCM; 3.5.8 private-key parsers; 3.5.9 ECDSA P-256/P-384 sign. 3.7 (perf / Solinas) still gated on a forcing function. |
 
 ## Test surface
 
 | Metric | Value |
 |---|---|
-| `.tcyr` test files | 47 |
-| Total assertions | **1284**, 0 failures |
+| `.tcyr` test files | 48 |
+| Total assertions | **1293**, 0 failures |
 | Benchmark suite | `benches/` — see `benches/history.csv` |
 
-> Counting note: 3 `*_verify_full.tcyr` tests print their
-> `N passed` line to stderr; capture with `2>&1` or the total
-> undercounts by 38 (sgx 11 + tdx 16 + snp 11). 1216 is the
-> stderr-inclusive total across all 44 files.
+> Counting note: the 3 `*_verify_full.tcyr` tests (sgx 11 + tdx 16 +
+> snp 11 = 38) emit their `N passed` summary in a tty-sensitive way
+> that is dropped under any pipe or file redirect, so a scripted
+> `grep`-sum of `cyrius test` output yields **1255** across the 48
+> files and silently omits those 38. Add them back for the true
+> total: **1293**. (Each verify_full still prints its summary on an
+> interactive run; it's only the redirected/scripted sum that loses
+> them.)
 
 Per-cycle assertion delta:
 
+- 3.6.1 ship: +9 (`tls12_prf.tcyr` 9 — canonical RFC 5246 §5 PRF vectors: P_SHA256 100-byte + P_SHA384 148-byte (Python `hmac`/`hashlib`-reproduced; SHA-256 matched the published vector), truncation prefixes (12 + 48 byte), determinism, over-cap guard)
 - 3.6.0 ship: +0 (parallel-verify refactor — no new test assertions; correctness is covered by the full suite at bank 0 plus `batch_parallel.tcyr` (228 assertions) run **mutex-off as the race detector**: 35/35 consecutive clean runs. The first mutex-off run failed and surfaced the un-banked `fp_inv` / `hash_file_into` buffers.)
 - 3.5.9 ship: +20 (`ecdsa_sign.tcyr` 20 — exact RFC 6979 A.2.5/A.2.6 (r‖s) for P-256/P-384 "sample"/"test", determinism, sign→verify roundtrips raw + DER, DER structure)
 - 3.5.8 ship: +33 (`privkey.tcyr` 33 — Ed25519 PKCS#8 seed parse + derive + sign/verify, ECDSA P-256/P-384 SEC1 + PKCS#8 scalar parse, curve/OID/truncation rejection, and the `pem_decode_privkey` label+algo dispatch for all 5 EC/Ed25519 forms + RSA sentinel)
@@ -67,6 +72,7 @@ Consumers that link or rely on sigil for trust verification:
 
 | Version | Date | Headline |
 |---|---|---|
+| 3.6.1 | 2026-06-03 | **TLS 1.2 PRF** (`src/tls12_prf.cyr`, RFC 5246 §5) — `tls12_prf_sha256` / `tls12_prf_sha384` (`PRF = P_hash(secret, label‖seed)`) on the existing HMAC primitives. Resolves the cyrius-native-TLS "ship-or-decline" PRF item on the **ship** side. +9 assertions (canonical IETF PRF vectors, Python-reproduced). Pin bump 6.0.52→6.0.53. Audit: `docs/audit/2026-06-03-3.6.1-tls12-prf-audit.md`. |
 | 3.6.0 | 2026-06-03 | **Parallel batch verify** — `sv_verify_batch` drops `_sigil_batch_mutex`; crypto runs concurrently across workers. **3.42×** at 64 artifacts / 4 workers (422.867 → 123.563 ms vs `v3.2.0-allocfree`). New `src/crypto_scratch.cyr` gives each worker a private *bank* (lane) of every racing crypto working array (sha256/512 schedules, SHA-NI block scratch, Ed25519 field/group/verify temporaries, `fp_*`/`u512_mod_p` incl. `fp_inv`, `hash_file_into` buffers) via cyrius 6.0.52 thread-local storage — no signature churn. `ge_identity` made alloc-free. Maintenance bump: cyrius 6.0.14→6.0.52, agnosys 1.2.7→1.3.2, sakshi 2.2.5→2.2.6. Race surface verified closed (`batch_parallel.tcyr` mutex-off 35/35). Audit: `docs/audit/2026-06-03-3.6.0-parallel-verify-audit.md`. |
 | 3.5.9 | 2026-05-28 | ECDSA P-256/P-384 deterministic signing (`src/ecdsa_sign.cyr`) — `ecdsa_p256_sign` / `ecdsa_p384_sign` (+`_der`), RFC 6979 §3.2 HMAC_DRBG nonce (HMAC-SHA256/384). Raw `r‖s` + DER (TLS 1.3 CertificateVerify). Consumes the 3.5.8 scalars; pairs with verify. Exact RFC 6979 A.2.5/A.2.6 vectors (+20 assertions). Benches: P-256 74 ms / P-384 179 ms. Pin unchanged (6.0.14). Audit: `docs/audit/2026-05-28-3.5.9-ecdsa-sign-audit.md`. |
 | 3.5.8 | 2026-05-28 | EC + Ed25519 private-key parsers (`src/privkey.cyr`) — `ed25519_privkey_from_der` (PKCS#8/RFC 8410), `ecdsa_p256_privkey_from_der` / `ecdsa_p384_privkey_from_der` (SEC1 + PKCS#8 → big-endian scalar), `pem_decode_privkey` (auto-detect label + algo, reuses the `pem.cyr` base64 decoder). RSA label recognized → `0 - SIG_PRIVKEY_RSA` sentinel (parser lands in 3.5.10). First half of issue line item 4. +33 assertions. Pin unchanged (6.0.14). Audit: `docs/audit/2026-05-28-3.5.8-privkey-parsers-audit.md`. |
@@ -98,7 +104,7 @@ back to v2.0.0.
 | 3.5.9 — ECDSA sign | **Shipped** 2026-05-28 | `src/ecdsa_sign.cyr`: `ecdsa_p256_sign` / `ecdsa_p384_sign` (+`_der`), RFC 6979 deterministic-k. Cyrius v6.0.17 / .25 unblocked. |
 | 3.6.0 — parallel verify | **Shipped** 2026-06-03 | Dropped `_sigil_batch_mutex`; per-thread crypto banks (`src/crypto_scratch.cyr`) over cyrius 6.0.52 TLS. 3.42× at 64 artifacts / 4 workers. Forcing function: cyrius 6.0.52 shipping thread-local storage. Audit: `docs/audit/2026-06-03-3.6.0-parallel-verify-audit.md`. |
 | 3.6.x — RSA engine + parser + sign/verify | pending (was 3.5.10) | Bignum modexp engine + RSA key type + `rsa_privkey_from_der` + PKCS#1 v1.5 + PSS, SHA-256/384. **Large/splittable** (`bigint_ext` is Curve25519-only). Cyrius v6.0.17 / .25 / .29–.34. |
-| 3.6.x — TLS 1.2 PRF | pending, optional (was 3.5.11) | `tls12_prf_sha256/384` — ship-or-decline; cyrius keeps inline if declined. Cyrius v6.0.29–.34. |
+| 3.6.1 — TLS 1.2 PRF | **Shipped** 2026-06-03 (was 3.5.11) | `tls12_prf_sha256/384` (`src/tls12_prf.cyr`). Decision: **ship** (not decline) — cyrius can drop its inline PRF and call sigil. **Flag to cyrius:** sigil now owns the TLS 1.2 PRF. |
 | 3.6.x — cyrius-native-TLS closeout | pending (was 3.5.12) | Closeout Pass over the 3.5.5–3.5.9 + 3.6.0 delta + the deferred 3.5.6 audit doc. |
 | 3.7 — perf / Solinas | Gated | Solinas word-level reduction for P-256/P-384 + unified `_into` API. Gated on a latency forcing function per roadmap. |
 

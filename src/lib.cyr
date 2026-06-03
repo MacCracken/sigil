@@ -67,6 +67,9 @@ include "src/sha384.cyr"
 # TLS_AES_256_GCM_SHA384 key schedule.
 include "src/hmac_sha384.cyr"
 include "src/hkdf_sha384.cyr"
+# TLS 1.2 PRF (RFC 5246 §5) — P_SHA256 / P_SHA384 key schedule for
+# the cyrius native-TLS arc. Depends on hmac_sha256 + hmac_sha384.
+include "src/tls12_prf.cyr"
 include "src/bigint_ext.cyr"
 include "src/ed25519.cyr"
 include "src/x25519.cyr"

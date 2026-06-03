@@ -7,7 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-(none — tip is 3.6.0.)
+(none — tip is 3.6.1.)
+
+## [3.6.1] — 2026-06-03
+
+TLS 1.2 PRF (RFC 5246 §5) for the cyrius native-TLS arc, plus a
+toolchain pin bump to cyrius 6.0.53.
+
+### Added
+
+- **`src/tls12_prf.cyr`** — `tls12_prf_sha256` / `tls12_prf_sha384`
+  (RFC 5246 §5): `PRF(secret, label, seed) = P_hash(secret, label ||
+  seed)` with `A(i) = HMAC(secret, A(i-1))`. Default `P_SHA256` plus
+  the `P_SHA384` variant for the SHA-384 suites. Built on the existing
+  `hmac_sha256` / `hmac_sha384`; no new hashing primitive. Arbitrary
+  output length; `label || seed` capped at 256 bytes (over-cap returns
+  0, no truncation). This resolves the "ship-or-decline" TLS 1.2 PRF
+  item (cyrius native-TLS arc line item 5) on the **ship** side —
+  cyrius can drop its inline PRF and call sigil's.
+- **Tests** (`tests/tcyr/tls12_prf.tcyr`, +9 assertions) — the
+  canonical IETF TLS 1.2 PRF vectors (P_SHA256 100-byte, P_SHA384
+  148-byte), reproduced with a stdlib-only Python `hmac`/`hashlib`
+  reference before embedding (SHA-256 matched the published vector
+  byte-for-byte); plus truncation prefixes, determinism, and the
+  over-cap guard. Suite now 48 files / 1293 assertions.
+
+### Changed
+
+- **Toolchain pin** cyrius 6.0.52 → **6.0.53**. `lib/` snapshot
+  re-synced. Deps unchanged (agnosys 1.3.2, sakshi 2.2.6 — both
+  already latest).
+- **Dist regenerated** — `dist/sigil.cyr` now includes
+  `src/tls12_prf.cyr`; `cyrius doc --check` 0 undocumented.
+
+### Security
+
+- Per-bite audit `docs/audit/2026-06-03-3.6.1-tls12-prf-audit.md`:
+  buffer bounds (the 256-byte `label||seed` guard precedes both
+  `memcpy`s — no OOB), `secret var` zeroization of the derived
+  key stream, no secret-dependent control flow. 0 CRITICAL / HIGH /
+  MEDIUM / LOW.
 
 ## [3.6.0] — 2026-06-03
 

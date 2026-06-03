@@ -76,6 +76,23 @@ their specs inline; this file is the cross-module overview.
   against Python `hmac`/`hashlib` and `openssl kdf`.
   - https://www.rfc-editor.org/rfc/rfc8448.txt#section-4
 
+### TLS 1.2 PRF — `src/tls12_prf.cyr`
+
+- **RFC 5246 §5** — The Transport Layer Security (TLS) Protocol
+  Version 1.2 (2008-08). Defines `PRF(secret, label, seed) =
+  P_<hash>(secret, label || seed)` and `P_hash`; TLS 1.2 uses the
+  cipher-suite's negotiated hash (default SHA-256; SHA-384 for the
+  `*_SHA384` suites).
+  - https://www.rfc-editor.org/rfc/rfc5246.txt#section-5
+- **RFC 5288 / RFC 5289** — the AES-GCM / SHA-384 cipher suites that
+  select `P_SHA384` for the TLS 1.2 key schedule.
+- **Test vectors** — the canonical 2009 IETF TLS WG "Test vectors for
+  TLS 1.2 PRF" pair (P_SHA256 + P_SHA384), also used by mbedTLS /
+  wolfSSL. Reproduced with a stdlib-only Python `hmac`/`hashlib`
+  reference before embedding; the SHA-256 output matched the
+  published vector byte-for-byte (the validation anchor for the
+  SHA-384 emission).
+
 ### AES-256-GCM — `src/aes_gcm.cyr`
 
 - **FIPS 197** — Advanced Encryption Standard (AES) (NIST,

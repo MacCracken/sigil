@@ -101,20 +101,21 @@ held as the last 3.5.x tag (3.5.12)**.
       v6.0.17 / v6.0.25 (verify + sign for CertificateVerify) and
       v6.0.29–.34 (1.2 RSA suites).
 
-### 3.5.11 — TLS 1.2 PRF (issue line item 5, optional)
+### 3.6.1 — TLS 1.2 PRF — **SHIPPED 2026-06-03** (was 3.5.11, issue line item 5)
 
-- [ ] **`tls12_prf_sha256` / `tls12_prf_sha384` — ship-or-decline
-      decision.** TLS 1.2's key schedule is `P_hash(secret, label ||
-      seed)` with `A(i+1) = HMAC_hash(secret, A(i))` — buildable from
-      the existing `hmac_sha256` / `hmac_sha384` in ~15-20 LoC.
-      **Not blocking:** cyrius keeps it inline in `tls_native.cyr` if
-      sigil declines. Decide ship-vs-decline (ship favours symmetry
-      with the HKDF surface; decline keeps the protocol-only/crypto
-      boundary clean — cf. [[feedback_tls_protocol_stays_in_cyrius]]);
-      **flag the choice to cyrius either way** so its wrapper knows
-      which path. If shipped: per-bite audit doc + RFC 5246 §5 / RFC
-      7627 vectors. **Cyrius forcing slots:** v6.0.29–.34 (1.2
-      backport).
+- [x] **`tls12_prf_sha256` / `tls12_prf_sha384` — decided: SHIP.**
+      `src/tls12_prf.cyr`: `PRF(secret, label, seed) = P_hash(secret,
+      label || seed)` with `A(i) = HMAC_hash(secret, A(i-1))`, built on
+      the existing `hmac_sha256` / `hmac_sha384`. Chosen to ship (over
+      decline) for symmetry with the HKDF surface and so cyrius's TLS
+      1.2 path has one crypto boundary; the construction is pure
+      HMAC, so it sits cleanly on the crypto side of
+      [[feedback_tls_protocol_stays_in_cyrius]] (no protocol/state
+      machine). **Flagged to cyrius: sigil now owns the TLS 1.2 PRF —
+      cyrius can drop its inline `tls_native.cyr` PRF and call
+      `tls12_prf_sha256/384`.** Per-bite audit
+      `docs/audit/2026-06-03-3.6.1-tls12-prf-audit.md`; canonical IETF
+      RFC 5246 §5 vectors (+9 assertions, `tests/tcyr/tls12_prf.tcyr`).
 
 ### 3.5.12 — Closeout (audit / security / hardening) — **last 3.5.x tag**
 
