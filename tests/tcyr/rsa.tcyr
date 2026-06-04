@@ -34,6 +34,10 @@ include "src/sha256.cyr"
 include "src/hex.cyr"
 include "src/sha512.cyr"
 include "src/sha384.cyr"
+include "src/bigint_ext.cyr"
+include "src/ed25519.cyr"
+include "src/ecdsa_p256.cyr"
+include "src/x509.cyr"
 include "src/bignum.cyr"
 include "src/rsa.cyr"
 
@@ -65,6 +69,35 @@ fn main() {
     # SHA-384 verify against a SHA-256 signature must fail (wrong DigestInfo).
     assert_eq(rsa_pkcs1v15_verify_sha384(n, 256, e, 3, msg, 33, sig256, 256), 0,
         "SHA-256 sig rejected by SHA-384 verify");
+
+    # ============================================================
+    # Public-key DER parsing (3.6.3a) -- parse then verify with the
+    # extracted (n, e). DER generated from the same key.
+    # ============================================================
+    test_group("RSA pubkey DER parse");
+
+    var np[512];
+    var ep[16];
+    var el[8];
+
+    # PKCS#1 RSAPublicKey: SEQUENCE { INTEGER n, INTEGER e }  (270 bytes)
+    var rsapub = hex_decode("3082010a0282010100bd61200b4b717e9153324c43ba3079b49275d4e3b3c1b88833a25d20c9e664d39c9185df74a506e5ab7c8f77cfad648a5a3c4652a483b79a28c02bb8108e8c2bc331baf18cdf9e8957cf79d031d42368439ccd2711cedf640f68d5a9aa77cc2c580973857ef867652c22f89400f0f5ed6f25bfca78c5728ef64eed549f321dddfe5bded13a0a0ed6d683361cacbfd1b1fe6647fb439d61ca1357b524d316b5c6a76c1666ea6aa6c0728d9469782af0aba3b3023106545b44dee0abbc9bafe37e0626af5277f78d21304a8fd60dc09b2e9ce0e68439db90ba430496e0f4987927e645e8004af2aa5fa93731eb3317f041023e92857f3d0801e9c7eeebd19e56490203010001", 540);
+    var nl1 = rsa_pubkey_from_der(rsapub, 270, &np, 512, &ep, 16, &el);
+    assert_eq(nl1, 256, "PKCS#1 pubkey: modulus length 256");
+    assert_eq(load64(&el), 3, "PKCS#1 pubkey: exponent length 3");
+    assert_eq(rsa_pkcs1v15_verify_sha256(&np, nl1, &ep, load64(&el), msg, 33, sig256, 256), 1,
+        "verify with parsed PKCS#1 public key");
+
+    # X.509 SubjectPublicKeyInfo (rsaEncryption)  (294 bytes)
+    var spki = hex_decode("30820122300d06092a864886f70d01010105000382010f003082010a0282010100bd61200b4b717e9153324c43ba3079b49275d4e3b3c1b88833a25d20c9e664d39c9185df74a506e5ab7c8f77cfad648a5a3c4652a483b79a28c02bb8108e8c2bc331baf18cdf9e8957cf79d031d42368439ccd2711cedf640f68d5a9aa77cc2c580973857ef867652c22f89400f0f5ed6f25bfca78c5728ef64eed549f321dddfe5bded13a0a0ed6d683361cacbfd1b1fe6647fb439d61ca1357b524d316b5c6a76c1666ea6aa6c0728d9469782af0aba3b3023106545b44dee0abbc9bafe37e0626af5277f78d21304a8fd60dc09b2e9ce0e68439db90ba430496e0f4987927e645e8004af2aa5fa93731eb3317f041023e92857f3d0801e9c7eeebd19e56490203010001", 588);
+    var nl2 = rsa_pubkey_from_der(spki, 294, &np, 512, &ep, 16, &el);
+    assert_eq(nl2, 256, "SPKI pubkey: modulus length 256");
+    assert_eq(rsa_pkcs1v15_verify_sha256(&np, nl2, &ep, load64(&el), msg, 33, sig256, 256), 1,
+        "verify with parsed SPKI public key");
+
+    # Malformed (truncated) DER is rejected.
+    assert_eq(rsa_pubkey_from_der(rsapub, 4, &np, 512, &ep, 16, &el), 0 - 1,
+        "truncated DER rejected");
 
     return assert_summary();
 }

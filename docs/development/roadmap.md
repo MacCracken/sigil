@@ -83,16 +83,21 @@ held as the last 3.5.x tag (3.5.12)**.
 > Bleichenbacher/BERserk forgery class). Audit
 > `docs/audit/2026-06-03-3.6.2-rsa-verify-audit.md`.
 >
-> **Remaining sub-bites (3.6.x):**
-> - `rsa_pubkey_from_der` (SPKI + PKCS#1 `RSAPublicKey`) so verify
->   works straight off an X.509 cert / TLS key, and an x509.cyr hook.
-> - **PKCS#1 v1.5 sign** — needs the RSA private-key type +
->   `rsa_privkey_from_der` (fills the `pem_decode_privkey` RSA stub) +
->   a **blinded, constant-time** modexp (the verify `bn_modexp` is
->   public-exponent only and MUST NOT be reused for the secret `d`).
-> - **PSS** (MGF1) verify + sign, SHA-256/384.
-> - **Perf:** Montgomery/Barrett for `bn_modexp` (schoolbook today;
->   pairs with the 3.7 EC Solinas work).
+> **Remaining sub-bites — agreed sequencing (2026-06-03):**
+> - **3.6.3** — `rsa_pubkey_from_der` (SPKI + PKCS#1 `RSAPublicKey`, so
+>   verify works straight off a cert/TLS key) **+** the RSA private-key
+>   type + `rsa_privkey_from_der` (fills the 3.5.8 `pem_decode_privkey`
+>   stub) **+ PKCS#1 v1.5 SIGN**. Signing uses the secret exponent `d`,
+>   so it gets a **blinded, constant-time Montgomery ladder** (the
+>   verify `bn_modexp` is public-exponent only and MUST NOT be reused),
+>   **CRT** (sign mod p,q then recombine; ~4x), and **verify-after-sign**
+>   (Bellcore/CRT-fault guard). The constant-time Montgomery modexp
+>   lands here because safe signing requires it — not deferred to perf.
+> - **3.6.4** — **PSS** (MGF1) verify + sign, SHA-256/384 **+** extend
+>   the Montgomery modexp to the (public) verify path + benchmark both.
+> - **3.6.5** — **cyrius-native-TLS closeout / hardening:** full
+>   CLAUDE.md Closeout Pass over the whole 3.6.x delta + the deferred
+>   3.5.6 HMAC/HKDF-SHA384 audit doc. Last 3.6.x tag before 3.7.
 
 - [ ] **RSA PKCS#1 v1.5 + PSS, sign + verify, SHA-256 + SHA-384.**
       `rsa_pkcs1_{sign,verify}_sha{256,384}` +

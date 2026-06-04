@@ -106,3 +106,101 @@ fn rsa_pkcs1v15_verify_sha384(n_be, n_len, e_be, e_len, msg, msg_len, sig, sig_l
     var pl = _rsa_di_sha384(&_rsa_di);
     return _rsa_pkcs1v15_check(n_be, n_len, e_be, e_len, &_rsa_di, pl, &_rsa_hash, 48, sig, sig_len);
 }
+
+# ================================================================
+# Public-key DER parsing (3.6.3a)
+# ================================================================
+# Reuses the audited ASN.1/DER walker from src/x509.cyr (`der_walk`,
+# `DER_TAG_*`, `_oid_eq`) rather than re-implementing a parser on
+# untrusted input. x509.cyr is included before rsa.cyr.
+
+# rsaEncryption OID content (1.2.840.113549.1.1.1), i.e. the 9 bytes
+# after the `06 09` tag/length.
+fn _rsa_oid_is_rsaencryption(buf, off, len): i64 {
+    var ref[9];
+    store8(&ref + 0, 0x2a); store8(&ref + 1, 0x86); store8(&ref + 2, 0x48);
+    store8(&ref + 3, 0x86); store8(&ref + 4, 0xf7); store8(&ref + 5, 0x0d);
+    store8(&ref + 6, 0x01); store8(&ref + 7, 0x01); store8(&ref + 8, 0x01);
+    return _oid_eq(buf, off, len, &ref, 9);
+}
+
+# Copy a DER INTEGER's magnitude (stripping the leading 0x00 sign byte,
+# if present) from buf[pos .. pos+len) into `out`, left-aligned. Returns
+# the magnitude length, or -1 if it exceeds `out_max`.
+fn _rsa_int_magnitude(buf, pos, len, out, out_max): i64 {
+    var p = pos;
+    var l = len;
+    var go = 1;
+    while (go == 1) {
+        if (l > 1) {
+            if ((load8(buf + p) & 0xFF) == 0) { p = p + 1; l = l - 1; }
+            else { go = 0; }
+        } else { go = 0; }
+    }
+    if (l > out_max) { return 0 - 1; }
+    memcpy(out, buf + p, l);
+    return l;
+}
+
+# Parse an RSA public key from DER. Accepts either a bare PKCS#1
+# `RSAPublicKey` (SEQUENCE { INTEGER n, INTEGER e }) or an X.509
+# SubjectPublicKeyInfo (SEQUENCE { SEQUENCE { rsaEncryption OID, NULL },
+# BIT STRING { RSAPublicKey } }). Writes the modulus magnitude to
+# `n_out` (big-endian, left-aligned) and the exponent to `e_out`;
+# returns the modulus length (> 0) and writes the exponent length to
+# `*e_len_out`. Returns -1 on any tag/length/OID mismatch (every
+# `der_walk` is bounds-checked).
+fn rsa_pubkey_from_der(der, der_len, n_out, n_max, e_out, e_max, e_len_out): i64 {
+    var seq_c = 0;
+    var seq_n = 0;
+    if (der_walk(der, der_len, 0, DER_TAG_SEQUENCE, &seq_c, &seq_n) < 0) { return 0 - 1; }
+
+    # `npos` = position of the INTEGER n (start of the RSAPublicKey body).
+    var npos = 0 - 1;
+
+    # Discriminate by the first inner element: INTEGER -> bare PKCS#1;
+    # SEQUENCE -> SPKI (AlgorithmIdentifier).
+    var ic = 0;
+    var icn = 0;
+    if (der_walk(der, der_len, seq_c, DER_TAG_INTEGER, &ic, &icn) >= 0) {
+        npos = seq_c;
+    } else {
+        var ac = 0;
+        var an = 0;
+        if (der_walk(der, der_len, seq_c, DER_TAG_SEQUENCE, &ac, &an) < 0) { return 0 - 1; }
+        var oc = 0;
+        var on = 0;
+        var oidlen = der_walk(der, der_len, ac, DER_TAG_OBJECT_ID, &oc, &on);
+        if (oidlen < 0) { return 0 - 1; }
+        if (_rsa_oid_is_rsaencryption(der, oc, oidlen) != 1) { return 0 - 1; }
+        # BIT STRING (subjectPublicKey) follows the AlgorithmIdentifier.
+        var bc = 0;
+        var bn = 0;
+        var bitlen = der_walk(der, der_len, an, DER_TAG_BIT_STRING, &bc, &bn);
+        if (bitlen < 1) { return 0 - 1; }
+        # First content byte is the unused-bits count; must be 0 for a
+        # byte-aligned key. The RSAPublicKey SEQUENCE follows it.
+        if ((load8(der + bc) & 0xFF) != 0) { return 0 - 1; }
+        var rc = 0;
+        var rn = 0;
+        if (der_walk(der, der_len, bc + 1, DER_TAG_SEQUENCE, &rc, &rn) < 0) { return 0 - 1; }
+        npos = rc;
+    }
+
+    # RSAPublicKey body: INTEGER n, INTEGER e.
+    var nc = 0;
+    var nn = 0;
+    var nlen = der_walk(der, der_len, npos, DER_TAG_INTEGER, &nc, &nn);
+    if (nlen < 0) { return 0 - 1; }
+    var ec2 = 0;
+    var en2 = 0;
+    var elen = der_walk(der, der_len, nn, DER_TAG_INTEGER, &ec2, &en2);
+    if (elen < 0) { return 0 - 1; }
+
+    var nmag = _rsa_int_magnitude(der, nc, nlen, n_out, n_max);
+    if (nmag < 0) { return 0 - 1; }
+    var emag = _rsa_int_magnitude(der, ec2, elen, e_out, e_max);
+    if (emag < 0) { return 0 - 1; }
+    store64(e_len_out, emag);
+    return nmag;
+}
