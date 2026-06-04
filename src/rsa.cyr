@@ -51,6 +51,24 @@ fn _rsa_di_sha384(buf): i64 {
     return 19;
 }
 
+# EMSA-PKCS1-v1.5 encode (RFC 8017 §9.2): write EM = 0x00 01 PS 00 T
+# into `out` (k bytes), where T = prefix || hash and PS is (k - 3 -
+# |T|) bytes of 0xFF (>= 8 required). Returns 0, or -1 if k is too
+# small. Used by both verify (rebuild-and-compare) and sign.
+fn _rsa_emsa_encode(out, k, prefix, prefix_len, hash, hash_len): i64 {
+    var tlen = prefix_len + hash_len;
+    if (k < tlen + 11) { return 0 - 1; }
+    var ps_len = k - 3 - tlen;
+    store8(out + 0, 0x00);
+    store8(out + 1, 0x01);
+    var i = 0;
+    while (i < ps_len) { store8(out + 2 + i, 0xFF); i = i + 1; }
+    store8(out + 2 + ps_len, 0x00);
+    memcpy(out + 3 + ps_len, prefix, prefix_len);
+    memcpy(out + 3 + ps_len + prefix_len, hash, hash_len);
+    return 0;
+}
+
 # Core PKCS#1 v1.5 verify. n_be/e_be: public key as big-endian bytes.
 # prefix/prefix_len: the DigestInfo prefix. hash/hash_len: the message
 # digest. sig/sig_len: the signature. Returns 1 iff valid, else 0.
@@ -71,24 +89,10 @@ fn _rsa_pkcs1v15_check(n_be, n_len, e_be, e_len, prefix, prefix_len, hash, hash_
     bn_modexp(&_rsa_m, &_rsa_s, e_be, e_len, &_rsa_n, limbs);
     bn_to_be(&_rsa_em, n_len, &_rsa_m, limbs);
 
-    # Reconstruct the expected EM = 0x00 01 PS 00 T, where T = prefix ||
-    # hash and PS is (k - 3 - |T|) bytes of 0xFF. RFC 8017 §9.2 requires
-    # at least 8 octets of 0xFF (=> k >= |T| + 11).
-    var tlen = prefix_len + hash_len;
-    if (n_len < tlen + 11) { return 0; }
-    var ps_len = n_len - 3 - tlen;
-
-    store8(&_rsa_expected + 0, 0x00);
-    store8(&_rsa_expected + 1, 0x01);
-    var i = 0;
-    while (i < ps_len) { store8(&_rsa_expected + 2 + i, 0xFF); i = i + 1; }
-    store8(&_rsa_expected + 2 + ps_len, 0x00);
-    memcpy(&_rsa_expected + 3 + ps_len, prefix, prefix_len);
-    memcpy(&_rsa_expected + 3 + ps_len + prefix_len, hash, hash_len);
-
-    # Compare the full encoded message. Operands are public, but reuse
-    # the OR-accumulating constant-time compare for a single audit
-    # surface (same as ed25519/ecdsa).
+    # Reconstruct the expected EM and compare all k octets (RFC 8017
+    # §9.2). Operands are public, but reuse the OR-accumulating
+    # constant-time compare for a single audit surface.
+    if (_rsa_emsa_encode(&_rsa_expected, n_len, prefix, prefix_len, hash, hash_len) < 0) { return 0; }
     return ct_eq_bytes(&_rsa_em, &_rsa_expected, n_len);
 }
 
@@ -203,4 +207,170 @@ fn rsa_pubkey_from_der(der, der_len, n_out, n_max, e_out, e_max, e_len_out): i64
     if (emag < 0) { return 0 - 1; }
     store64(e_len_out, emag);
     return nmag;
+}
+
+# ================================================================
+# Private-key DER parsing (3.6.3b)
+# ================================================================
+# RSA private key, parsed into a caller-provided `RSAK_SIZE`-byte
+# struct. Components are big-endian, left-aligned in fixed slots (sized
+# for RSA-4096), each with a length field. The struct holds SECRET
+# material (d, p, q, dp, dq, qinv) — the caller MUST zeroize it after
+# use (e.g. wrap in `secret var` or memset before free).
+var RSAK_N    = 0;       # 512 bytes (modulus)
+var RSAK_E    = 512;     # 16  (public exponent)
+var RSAK_D    = 528;     # 512 (private exponent)        [secret]
+var RSAK_P    = 1040;    # 256 (prime1)                  [secret]
+var RSAK_Q    = 1296;    # 256 (prime2)                  [secret]
+var RSAK_DP   = 1552;    # 256 (d mod p-1)               [secret]
+var RSAK_DQ   = 1808;    # 256 (d mod q-1)               [secret]
+var RSAK_QINV = 2064;    # 256 (q^-1 mod p)              [secret]
+var RSAK_NLEN = 2320;
+var RSAK_ELEN = 2328;
+var RSAK_DLEN = 2336;
+var RSAK_PLEN = 2344;
+var RSAK_QLEN = 2352;
+var RSAK_DPLEN = 2360;
+var RSAK_DQLEN = 2368;
+var RSAK_QINVLEN = 2376;
+var RSAK_SIZE = 2384;
+
+# Walk the next DER INTEGER at *pos_ptr, store its magnitude (leading
+# 0x00 stripped) into key+slot_off (cap slot_max), record the length at
+# key+len_off, and advance *pos_ptr past it. Returns 0 / -1.
+fn _rsa_take_int(der, der_len, pos_ptr, key, slot_off, slot_max, len_off): i64 {
+    var c = 0;
+    var nx = 0;
+    var L = der_walk(der, der_len, load64(pos_ptr), DER_TAG_INTEGER, &c, &nx);
+    if (L < 0) { return 0 - 1; }
+    var mag = _rsa_int_magnitude(der, c, L, key + slot_off, slot_max);
+    if (mag < 0) { return 0 - 1; }
+    store64(key + len_off, mag);
+    store64(pos_ptr, nx);
+    return 0;
+}
+
+# Parse an RSA private key from DER into `key` (RSAK_SIZE bytes).
+# Accepts a bare PKCS#1 `RSAPrivateKey` (RFC 8017 §A.1.2) or a PKCS#8
+# `PrivateKeyInfo` wrapper (rsaEncryption). Extracts the 8 CRT
+# components (n, e, d, p, q, dp, dq, qinv). Returns 0 on success, -1 on
+# any tag/length/OID mismatch. `key` holds secret material — caller
+# zeroizes.
+fn rsa_privkey_from_der(der, der_len, key): i64 {
+    var sc = 0;
+    var sn = 0;
+    if (der_walk(der, der_len, 0, DER_TAG_SEQUENCE, &sc, &sn) < 0) { return 0 - 1; }
+
+    # First element is the version INTEGER. The element AFTER it
+    # discriminates: INTEGER (modulus) => bare PKCS#1; SEQUENCE
+    # (AlgorithmIdentifier) => PKCS#8.
+    var vc = 0;
+    var vn = 0;
+    if (der_walk(der, der_len, sc, DER_TAG_INTEGER, &vc, &vn) < 0) { return 0 - 1; }
+
+    var body = 0 - 1;       # offset of the RSAPrivateKey's version INTEGER
+    var tc = 0;
+    var tn = 0;
+    if (der_walk(der, der_len, vn, DER_TAG_INTEGER, &tc, &tn) >= 0) {
+        body = sc;          # bare PKCS#1: RSAPrivateKey starts at the outer version
+    } else {
+        var ac = 0;
+        var an = 0;
+        if (der_walk(der, der_len, vn, DER_TAG_SEQUENCE, &ac, &an) < 0) { return 0 - 1; }
+        var oc = 0;
+        var on = 0;
+        var oidlen = der_walk(der, der_len, ac, DER_TAG_OBJECT_ID, &oc, &on);
+        if (oidlen < 0) { return 0 - 1; }
+        if (_rsa_oid_is_rsaencryption(der, oc, oidlen) != 1) { return 0 - 1; }
+        var kc = 0;
+        var kn = 0;
+        if (der_walk(der, der_len, an, DER_TAG_OCTET_STRING, &kc, &kn) < 0) { return 0 - 1; }
+        var ic = 0;
+        var inn = 0;
+        if (der_walk(der, der_len, kc, DER_TAG_SEQUENCE, &ic, &inn) < 0) { return 0 - 1; }
+        body = ic;
+    }
+
+    # Skip the RSAPrivateKey version, then take the 8 components in order.
+    var pos = body;
+    var c = 0;
+    var nx = 0;
+    if (der_walk(der, der_len, pos, DER_TAG_INTEGER, &c, &nx) < 0) { return 0 - 1; }
+    pos = nx;
+    if (_rsa_take_int(der, der_len, &pos, key, RSAK_N,    512, RSAK_NLEN)    < 0) { return 0 - 1; }
+    if (_rsa_take_int(der, der_len, &pos, key, RSAK_E,    16,  RSAK_ELEN)    < 0) { return 0 - 1; }
+    if (_rsa_take_int(der, der_len, &pos, key, RSAK_D,    512, RSAK_DLEN)    < 0) { return 0 - 1; }
+    if (_rsa_take_int(der, der_len, &pos, key, RSAK_P,    256, RSAK_PLEN)    < 0) { return 0 - 1; }
+    if (_rsa_take_int(der, der_len, &pos, key, RSAK_Q,    256, RSAK_QLEN)    < 0) { return 0 - 1; }
+    if (_rsa_take_int(der, der_len, &pos, key, RSAK_DP,   256, RSAK_DPLEN)   < 0) { return 0 - 1; }
+    if (_rsa_take_int(der, der_len, &pos, key, RSAK_DQ,   256, RSAK_DQLEN)   < 0) { return 0 - 1; }
+    if (_rsa_take_int(der, der_len, &pos, key, RSAK_QINV, 256, RSAK_QINVLEN) < 0) { return 0 - 1; }
+    return 0;
+}
+
+# ================================================================
+# PKCS#1 v1.5 signing (3.6.3d)
+# ================================================================
+# RSASSA-PKCS1-v1.5 (RFC 8017 §8.2.1), deterministic. The signature is
+# `s = m^d mod n` over the secret exponent `d`, computed with the
+# constant-time Montgomery ladder `bn_mont_modexp` (NOT the public
+# `bn_modexp`). A **verify-after-sign** step recomputes `s^e mod n`
+# (public exponent, fast) and refuses to release `s` unless it equals
+# `m` — the Bellcore fault-attack guard (a faulty modexp could
+# otherwise leak the key).
+#
+# This bite uses the full-width `d` (no CRT yet) for a correct,
+# constant-time, fault-checked signer; CRT (~4x) and base blinding
+# (DPA/timing decorrelation) are the next 3.6.3 sub-steps. `_rsa_sign_*`
+# hold message/signature-derived values (public); the secret is `d`
+# inside `key` (caller zeroizes).
+var _rsa_sign_em[512];
+var _rsa_sign_m[512];
+var _rsa_sign_s[512];
+var _rsa_sign_chk[512];
+var _rsa_sign_n[512];       # modulus as a bignum (little-endian limbs)
+
+# Core signer. `key` is an RSAK struct; prefix/hash form the DigestInfo.
+# Writes the k-byte signature to `sig_out`. Returns k (>0), or -1 on a
+# too-small modulus or a failed verify-after-sign.
+fn _rsa_pkcs1v15_sign(key, prefix, prefix_len, hash, hash_len, sig_out): i64 {
+    var nlen = load64(key + RSAK_NLEN);
+    if (nlen > 512) { return 0 - 1; }
+    var limbs = (nlen + 7) / 8;
+
+    # EM = EMSA-PKCS1-v1.5(hash), m = OS2IP(EM). Convert the modulus
+    # from its stored big-endian bytes to a little-endian limb bignum.
+    if (_rsa_emsa_encode(&_rsa_sign_em, nlen, prefix, prefix_len, hash, hash_len) < 0) { return 0 - 1; }
+    bn_from_be(&_rsa_sign_m, limbs, &_rsa_sign_em, nlen);
+    bn_from_be(&_rsa_sign_n, limbs, key + RSAK_N, nlen);
+
+    # s = m^d mod n  (constant-time; d is secret)
+    var dlen = load64(key + RSAK_DLEN);
+    bn_mont_modexp(&_rsa_sign_s, &_rsa_sign_m, key + RSAK_D, dlen, &_rsa_sign_n, limbs);
+
+    # Verify-after-sign (Bellcore guard): s^e mod n must equal m.
+    var elen = load64(key + RSAK_ELEN);
+    bn_modexp(&_rsa_sign_chk, &_rsa_sign_s, key + RSAK_E, elen, &_rsa_sign_n, limbs);
+    if (bn_cmp(&_rsa_sign_chk, &_rsa_sign_m, limbs) != 0) {
+        bn_zero(&_rsa_sign_s, limbs);   # discard a faulty signature
+        return 0 - 1;
+    }
+
+    bn_to_be(sig_out, nlen, &_rsa_sign_s, limbs);
+    return nlen;
+}
+
+# Sign SHA-256(msg) with RSASSA-PKCS1-v1.5. `key` is an RSAK struct
+# (from rsa_privkey_from_der). Writes k bytes to sig_out; returns k.
+fn rsa_pkcs1v15_sign_sha256(key, msg, msg_len, sig_out): i64 {
+    sha256(msg, msg_len, &_rsa_hash);
+    var pl = _rsa_di_sha256(&_rsa_di);
+    return _rsa_pkcs1v15_sign(key, &_rsa_di, pl, &_rsa_hash, 32, sig_out);
+}
+
+# Sign SHA-384(msg) with RSASSA-PKCS1-v1.5.
+fn rsa_pkcs1v15_sign_sha384(key, msg, msg_len, sig_out): i64 {
+    sha384(msg, msg_len, &_rsa_hash);
+    var pl = _rsa_di_sha384(&_rsa_di);
+    return _rsa_pkcs1v15_sign(key, &_rsa_di, pl, &_rsa_hash, 48, sig_out);
 }

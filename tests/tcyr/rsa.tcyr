@@ -99,6 +99,64 @@ fn main() {
     assert_eq(rsa_pubkey_from_der(rsapub, 4, &np, 512, &ep, 16, &el), 0 - 1,
         "truncated DER rejected");
 
+    # ============================================================
+    # Private-key DER parsing (3.6.3b). PKCS#1 RSAPrivateKey + PKCS#8,
+    # same key. Strong check: parsed p*q == parsed n (bignum multiply).
+    # ============================================================
+    test_group("RSA privkey DER parse");
+
+    var key[2384];   # RSAK_SIZE
+
+    var rpk = hex_decode("308204a40201000282010100bd61200b4b717e9153324c43ba3079b49275d4e3b3c1b88833a25d20c9e664d39c9185df74a506e5ab7c8f77cfad648a5a3c4652a483b79a28c02bb8108e8c2bc331baf18cdf9e8957cf79d031d42368439ccd2711cedf640f68d5a9aa77cc2c580973857ef867652c22f89400f0f5ed6f25bfca78c5728ef64eed549f321dddfe5bded13a0a0ed6d683361cacbfd1b1fe6647fb439d61ca1357b524d316b5c6a76c1666ea6aa6c0728d9469782af0aba3b3023106545b44dee0abbc9bafe37e0626af5277f78d21304a8fd60dc09b2e9ce0e68439db90ba430496e0f4987927e645e8004af2aa5fa93731eb3317f041023e92857f3d0801e9c7eeebd19e56490203010001028201005ee9275321cb4ea06caebf940de32f8bb4ff42e39f7a4e0e4cba69abfe23ee92335ca758573041e5a6ed3545d99a4fd21ae92c614cbc0aaf430f149a1a0a26ebe3d6af97517fdd077e2fa8201468fa19ce10eeac4efb7befbcdd507fc8c4635a320102997c09e85fc71ffbaec94dfa22b5da986553e3b8c7376055075d0593fb887588145f900d8a6039bdfdc5785b3fe78869f2a9e1cbf9b2e51d46e14593afdec2fd19cb26132bccbb367324ef4bceb92f236cf53da31412a829f07ef6e96119d83e58aa12d9f4511f2b6f26da9f7b926595d9d3fed9aeba0e85b54c6ebae34c95ed1108add77b838f6b4489d559aa7dae2a9ac035202956dc2dd405eda38502818100fa39ca409a5604a542347389be869b95fe79d01cac6b96d7a3fd7c564cf8a9358e1fe56efd0f8ce2af6c8a13b6cfad8b84b82c079ac38038ccf562f4e526e7ab4c88bf68d35ea71b8f6a63bc5c63d7f20be5aee392a8e9b26a38f39f9fccd1b7c9071d5e3215c6dcd2c6bd6bbffa66401014cf87745f8c66c9d002379d20615f02818100c1bfe28ee57539c6196e7114ed19a1aac67864bbf260056c44527b1ea4d2a9ff7ffcb3101a5051b66afe0907d3777ca9785f567c08893cfdbb130da9f4a0d0cc94dd5b612dd94d3935b1acf58889c57cd29172c2414a9944f88c09fbe4494739eee439cf4c2e443bf1009c1fb2839f98466fc051d0d8a1c93a311ceccaf021570281810095e0036a8a86b7259ceff9bc29684acc9eadab9f610ed83cb536e14077be00ebd902f5d372b3dbb8f345d9b6512b375177df305025bcaf9256012c926ea6cce0676908ecea9da90df2ead06e44107189c2e281cc414df71c2c4f8c6cb1b46670e471e47f4514921636115fe7a8077d3325eeb116faf7380b6119bc1a3f7ce395028180561529561000fb8056c04921e10e6853f6067bcb3daf07f9c88955069278beeb34345462ad2e4e7fdc1dae6979bd36f81cf14efda0d548f1faf24639e2e4a8a09ceb94b422a8cfb4c17485c239bdecaebee7bcb32e4b34b9fe2c4a2b4e8c7846f72b13bc54bea1b67827ab36321c6506451555bf84291c08ca001437e91ab3d502818100c6b60e9a61a5af18e043229f10bf2a00140da8d6d3d58ee64fbe38d64de58d72590f4df471efeeef6de2d868557bb2d5492db29a04b23121383ec3fe136a73d0229d4b958c32ac3aed7a62bd84b99b26efe3823d5e918f3418d342bfbcf213d4f397092f6112baa3c8163d6eac324160e74c02d42fb71e25522004c92a2a47ee", 2384);
+    assert_eq(rsa_privkey_from_der(rpk, 1192, &key), 0, "PKCS#1 privkey parse ok");
+    assert_eq(load64(&key + 2320), 256, "privkey n length 256");   # RSAK_NLEN
+    assert_eq(load64(&key + 2328), 3,   "privkey e length 3");     # RSAK_ELEN
+    assert_eq(load64(&key + 2336), 256, "privkey d length 256");   # RSAK_DLEN
+    assert_eq(load64(&key + 2344), 128, "privkey p length 128");   # RSAK_PLEN
+    assert_eq(load64(&key + 2352), 128, "privkey q length 128");   # RSAK_QLEN
+    assert_streq(hex_encode(&key + 0, 256), hex_encode(n, 256), "privkey n matches");
+
+    # Strong check: p * q == n (confirms p, q parsed correctly).
+    var pbn[128];
+    var qbn[128];
+    var pq[256];
+    bn_from_be(&pbn, 16, &key + 1040, 128);   # RSAK_P
+    bn_from_be(&qbn, 16, &key + 1296, 128);   # RSAK_Q
+    bn_mul(&pq, &pbn, &qbn, 16);
+    var pqbytes[256];
+    bn_to_be(&pqbytes, 256, &pq, 32);
+    assert_streq(hex_encode(&pqbytes, 256), hex_encode(n, 256), "parsed p * q == n");
+
+    # PKCS#8 wrapper -> same modulus.
+    var key8[2384];
+    var pkcs8 = hex_decode("308204be020100300d06092a864886f70d0101010500048204a8308204a40201000282010100bd61200b4b717e9153324c43ba3079b49275d4e3b3c1b88833a25d20c9e664d39c9185df74a506e5ab7c8f77cfad648a5a3c4652a483b79a28c02bb8108e8c2bc331baf18cdf9e8957cf79d031d42368439ccd2711cedf640f68d5a9aa77cc2c580973857ef867652c22f89400f0f5ed6f25bfca78c5728ef64eed549f321dddfe5bded13a0a0ed6d683361cacbfd1b1fe6647fb439d61ca1357b524d316b5c6a76c1666ea6aa6c0728d9469782af0aba3b3023106545b44dee0abbc9bafe37e0626af5277f78d21304a8fd60dc09b2e9ce0e68439db90ba430496e0f4987927e645e8004af2aa5fa93731eb3317f041023e92857f3d0801e9c7eeebd19e56490203010001028201005ee9275321cb4ea06caebf940de32f8bb4ff42e39f7a4e0e4cba69abfe23ee92335ca758573041e5a6ed3545d99a4fd21ae92c614cbc0aaf430f149a1a0a26ebe3d6af97517fdd077e2fa8201468fa19ce10eeac4efb7befbcdd507fc8c4635a320102997c09e85fc71ffbaec94dfa22b5da986553e3b8c7376055075d0593fb887588145f900d8a6039bdfdc5785b3fe78869f2a9e1cbf9b2e51d46e14593afdec2fd19cb26132bccbb367324ef4bceb92f236cf53da31412a829f07ef6e96119d83e58aa12d9f4511f2b6f26da9f7b926595d9d3fed9aeba0e85b54c6ebae34c95ed1108add77b838f6b4489d559aa7dae2a9ac035202956dc2dd405eda38502818100fa39ca409a5604a542347389be869b95fe79d01cac6b96d7a3fd7c564cf8a9358e1fe56efd0f8ce2af6c8a13b6cfad8b84b82c079ac38038ccf562f4e526e7ab4c88bf68d35ea71b8f6a63bc5c63d7f20be5aee392a8e9b26a38f39f9fccd1b7c9071d5e3215c6dcd2c6bd6bbffa66401014cf87745f8c66c9d002379d20615f02818100c1bfe28ee57539c6196e7114ed19a1aac67864bbf260056c44527b1ea4d2a9ff7ffcb3101a5051b66afe0907d3777ca9785f567c08893cfdbb130da9f4a0d0cc94dd5b612dd94d3935b1acf58889c57cd29172c2414a9944f88c09fbe4494739eee439cf4c2e443bf1009c1fb2839f98466fc051d0d8a1c93a311ceccaf021570281810095e0036a8a86b7259ceff9bc29684acc9eadab9f610ed83cb536e14077be00ebd902f5d372b3dbb8f345d9b6512b375177df305025bcaf9256012c926ea6cce0676908ecea9da90df2ead06e44107189c2e281cc414df71c2c4f8c6cb1b46670e471e47f4514921636115fe7a8077d3325eeb116faf7380b6119bc1a3f7ce395028180561529561000fb8056c04921e10e6853f6067bcb3daf07f9c88955069278beeb34345462ad2e4e7fdc1dae6979bd36f81cf14efda0d548f1faf24639e2e4a8a09ceb94b422a8cfb4c17485c239bdecaebee7bcb32e4b34b9fe2c4a2b4e8c7846f72b13bc54bea1b67827ab36321c6506451555bf84291c08ca001437e91ab3d502818100c6b60e9a61a5af18e043229f10bf2a00140da8d6d3d58ee64fbe38d64de58d72590f4df471efeeef6de2d868557bb2d5492db29a04b23121383ec3fe136a73d0229d4b958c32ac3aed7a62bd84b99b26efe3823d5e918f3418d342bfbcf213d4f397092f6112baa3c8163d6eac324160e74c02d42fb71e25522004c92a2a47ee", 2436);
+    assert_eq(rsa_privkey_from_der(pkcs8, 1218, &key8), 0, "PKCS#8 privkey parse ok");
+    assert_streq(hex_encode(&key8 + 0, 256), hex_encode(n, 256), "PKCS#8 n matches");
+
+    # ============================================================
+    # PKCS#1 v1.5 sign (3.6.3d). Deterministic, so the signature must
+    # match the Python KAT byte-for-byte; also sign->verify roundtrips.
+    # `key` was parsed from the PKCS#1 RSAPrivateKey above.
+    # ============================================================
+    test_group("RSA PKCS#1 v1.5 sign");
+
+    var mysig[256];
+    var sl = rsa_pkcs1v15_sign_sha256(&key, msg, 33, &mysig);
+    assert_eq(sl, 256, "sign returns k = 256");
+    assert_streq(hex_encode(&mysig, 256),
+        "1deecf28b83e745e556f3d3799d17707f5e4960bcc5dbeeb2cb2ac586bbc51dac76ea3d1579915fd1b1640d73f7a657059ef17325c4e0aa7c69acece7ce64b8ad74c8dc2b564b806f6b8ee3969d0ddbe7d41fbba2761f10f97e9d589bfe55720a0221ddfed24815be862ee6e6907395e88737c43b0c731ced78bf3512b4c5c421e00d1fa1389ae9983adf8e7115f19223f409885c79e7895ba7daffb89bcb5111c8045391d2c374ede6da84297d12b8dea99f79a0d502b80f806a5e0dce5b17b4dfef7971204d85ad040941ece7f77f46c6d4a8bd8df5211c1fd48e95f7eb6748ead5867c0bc8e0e2e521810c7dc788aec537362d3cfbfd79d37e5aa5159ce0a",
+        "SHA-256 signature matches Python KAT");
+    assert_eq(rsa_pkcs1v15_verify_sha256(n, 256, e, 3, msg, 33, &mysig, 256), 1,
+        "sign -> verify roundtrip (SHA-256)");
+
+    var mysig384[256];
+    rsa_pkcs1v15_sign_sha384(&key, msg, 33, &mysig384);
+    assert_streq(hex_encode(&mysig384, 256),
+        "00b98c67c2dc7b56d431b01fc7153a090c639f5333fd4e05dc775d61e64881a0846947aea2bd6f255b30cf22346e5ed9c0793b41667b53853482e16fbbba64ed93b6ddf942c6c0dc6ba9d2087c8733d5a0dd727f1dbd997b6ea21c64c9819c1420f789173af81e1e573c2babf2b163cc6e8ab0eaba82244b0bb3c60ad6327598f31fc7cad6cffd3c46a26636a8877db8c58b0b2c33a205a34e7115f21aebf9e57973b3114d0b6ec76a45d11a92a7578eec8c100586bb9a3ddded9fbfea3ac3b94c2db1dc179414631b35a3360df7a4914775be7e8708087f4fde8b81282d13f0f83194922fb17089203c6611ab10c92f8e421d01afe9b2eb7c2b57c8f5096172",
+        "SHA-384 signature matches Python KAT");
+    assert_eq(rsa_pkcs1v15_verify_sha384(n, 256, e, 3, msg, 33, &mysig384, 256), 1,
+        "sign -> verify roundtrip (SHA-384)");
+
     return assert_summary();
 }
 

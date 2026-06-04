@@ -97,6 +97,42 @@ fn main() {
         "2048-bit s^65537 mod n");
 
     # ============================================================
+    # Constant-time Montgomery modexp == schoolbook (odd modulus)
+    # ============================================================
+    test_group("bignum Montgomery modexp");
+
+    # 256-bit s^65537 must match the schoolbook KAT above.
+    var m256[64];
+    bn_mont_modexp(&m256, &b256bn, e3, 3, &n256bn, 4);
+    var m256b[32];
+    bn_to_be(&m256b, 32, &m256, 4);
+    assert_streq(hex_encode(&m256b, 32),
+        "9265279ef2e78bb2e7532b18a5f2a3bf4520c430fafb0fa99d92a426c4ea9712",
+        "mont 256-bit s^65537 == schoolbook");
+
+    # Large (256-bit) exponent: Montgomery must equal schoolbook.
+    var bigexp = hex_decode("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", 64);
+    var sch[64];
+    var mon[64];
+    bn_modexp(&sch, &b256bn, bigexp, 32, &n256bn, 4);
+    bn_mont_modexp(&mon, &b256bn, bigexp, 32, &n256bn, 4);
+    var schb[32];
+    var monb[32];
+    bn_to_be(&schb, 32, &sch, 4);
+    bn_to_be(&monb, 32, &mon, 4);
+    assert_streq(hex_encode(&monb, 32), hex_encode(&schb, 32),
+        "mont == schoolbook (256-bit base & exponent)");
+
+    # 2048-bit s^65537 must match the 2048-bit schoolbook KAT.
+    var m2[256];
+    bn_mont_modexp(&m2, &b2bn, e3, 3, &n2bn, 32);
+    var m2b[256];
+    bn_to_be(&m2b, 256, &m2, 32);
+    assert_streq(hex_encode(&m2b, 256),
+        "3d8306ccc59858067855f56b80ddd17caa76a0b5b854f8ff3bf5cbeabac5cd406ae0c78a6e2087efa183ba8dd193a493ab697775015c9429d48178edd7cf4c3d11880bac72265be8ffdc0004482c0b4791805f63d1c2ff1c7baa82ebe16c735b427490dd7269d1e54f2a844b8292d0b252f27bb350076e1a56d4b639d6a517cfc964ab58c25ae643038140ad08c5d2bd03469e7d2e578570cfe5b2977d86370bfb1581947b9d4181da965de467a64c8ab17260467465f672e58eafffce5012870d3fd11f1eda0c3c486cc08b1d0794725aa2652a2c33211f9e4497a7113b1b1f74f864478709434407868f8c26f8ac0e0fc5baf15e66886727fa8fe2a8415f1e",
+        "mont 2048-bit s^65537 == schoolbook");
+
+    # ============================================================
     # Edge cases
     # ============================================================
     test_group("bignum modexp edges");
