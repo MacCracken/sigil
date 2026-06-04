@@ -10,9 +10,9 @@ Detail for each is in its section below.
 
 **3.6.x — cyrius native-TLS tail**
 - [x] RSA-PSS (MGF1) verify + sign, SHA-256/384 — **shipped 3.6.5**
-- [ ] Montgomery on the verify path + RSA verify/sign benches
-- [ ] `pem_decode_privkey` → RSAK struct wiring
-- [ ] cyrius-native-TLS closeout (Closeout Pass; 3.5.6 HMAC/HKDF-SHA384 audit doc **done 3.6.5**)
+- [x] Montgomery on the verify path + RSA verify/sign benches — **shipped 3.6.6** (verify 3.43×)
+- [x] `pem_decode_privkey` → RSAK struct wiring — **shipped 3.6.6**
+- [ ] cyrius-native-TLS closeout — **3.6.8** (Closeout Pass; 3.5.6 audit doc done 3.6.5)
 
 **v3.7 — perf (gated on a latency complaint)**
 - [ ] Solinas reduction for P-256
@@ -80,18 +80,21 @@ PKCS#1 v1.5 surface, and (3.6.5) RSA-PSS + x509 RSA chain-link verify
       issuer routing in `_x509_verify_link` → `rsa_pkcs1v15_verify_*`.
       (Was a Backlog item; pulled forward with the PSS bite.)
 
-- [ ] **Montgomery on the verify path + RSA benches.** Switch the
-      verify-side / public-exponent modexp from the schoolbook
-      `bn_modexp` to `bn_mont_modexp` (no secret, so the residual
-      timing paths are irrelevant), and add `benches/history.csv` rows
-      for RSA verify and sign (CRT vs full-width). Optional general
-      Barrett/Montgomery for the public path.
+- [x] **Montgomery on the verify path + RSA benches.** **Shipped 3.6.6.**
+      Switched the three public-exponent modexp sites (`_rsa_recover_em`
+      RSAVP1 verify; `r^e` blinding; `s^e` verify-after-sign) from
+      schoolbook `bn_modexp` to `bn_mont_modexp` — verify **3.43×**
+      (11.68→3.40 ms). New `tests/bcyr/rsa.bcyr`; `history.csv` row
+      `v3.6.6-rsa-montgomery` (verify + sign + CRT-vs-full-width). A
+      review-found odd-modulus precondition was enforced at the verify
+      boundary. (General Barrett/Montgomery for arbitrary public moduli
+      remains a possible 3.7 perf item, not needed for RSA.)
 
-- [ ] **`pem_decode_privkey` → RSAK struct.** It currently returns the
-      `SIG_PRIVKEY_RSA` sentinel; wire it to base64-decode the body and
-      call `rsa_privkey_from_der`, emitting an RSAK struct. Needs a
-      small API-shape decision — its EC/Ed25519 contract decodes into a
-      single scalar buffer, whereas RSA needs the multi-field struct.
+- [x] **`pem_decode_privkey` → RSAK struct.** **Shipped 3.6.6.** The RSA
+      branches now emit the RSAK struct into `key_out` when `key_max >=
+      RSAK_SIZE` (one auto-detecting entry point; the `SIG_PRIVKEY_RSA`
+      sentinel is now only the buffer-too-small signal). EC/Ed25519
+      scalar contract unchanged.
 
 - [ ] **cyrius-native-TLS closeout (last 3.6.x tag).** Full CLAUDE.md
       Closeout Pass over the whole 3.6.x delta. The overdue **3.5.6

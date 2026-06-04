@@ -3,8 +3,9 @@
 # item 4 (docs/development/issues/2026-05-28-cyrius-tls-arc-full-audit.md);
 # the RSA private-key DER parser shipped in 3.6.3 as
 # `rsa_privkey_from_der` (src/rsa.cyr, into an RSAK struct);
-# `pem_decode_privkey` below still returns the SIG_PRIVKEY_RSA sentinel
-# (emitting an RSAK struct from here is a later follow-up).
+# `pem_decode_privkey` below (3.6.6) emits that RSAK struct directly when
+# the caller's buffer is large enough, falling back to a sentinel only
+# when key_max < RSAK_SIZE.
 #
 # Scope:
 #   - Ed25519 PKCS#8 / RFC 8410 → 32-byte seed.
@@ -274,8 +275,9 @@ fn ecdsa_p384_privkey_from_der(der, der_len, d_out): i64 {
 # malformed blob). The DER parse itself shipped in 3.6.3
 # (`rsa_privkey_from_der`, src/rsa.cyr) into an RSAK struct; a caller
 # that sees this sentinel base64-decodes the PEM body and calls it.
-# (Having `pem_decode_privkey` emit the RSAK struct directly is a later
-# follow-up — its EC/Ed25519 contract decodes into a single scalar.)
+# (3.6.6: when `key_max >= RSAK_SIZE`, `pem_decode_privkey` emits the
+# RSAK struct directly and returns RSAK_SIZE; the sentinel is now only
+# the buffer-too-small signal. EC/Ed25519 still decode into a scalar.)
 
 # rsaEncryption OID 1.2.840.113549.1.1.1 → content 2A 86 48 86 F7 0D 01 01 01.
 fn _privkey_oid_is_rsa(buf, off, len): i64 {
@@ -363,16 +365,21 @@ fn _privkey_pkcs8_algo(der, der_len): i64 {
 }
 
 # pem_decode_privkey — decode a PEM private key, auto-detecting the
-# label and algorithm. Writes the raw scalar/seed to `key_out`
-# (`key_max` must be ≥ 48 to hold the largest, P-384) and the
-# SIG_PRIVKEY_* tag to `*out_algo`.
+# label and algorithm. For EC / Ed25519 it writes the raw scalar/seed to
+# `key_out`; for RSA (3.6.6) it writes the full RSAK struct to `key_out`
+# (when `key_max >= RSAK_SIZE`). The SIG_PRIVKEY_* tag is written to
+# `*out_algo` so the caller knows how to interpret `key_out`.
+#
+# `key_max` must be ≥ 48 (the largest EC scalar, P-384); pass ≥ RSAK_SIZE
+# (2384) if RSA keys may appear and you want the parsed struct back.
 #
 # Returns:
-#   32 / 48        — number of key bytes written (success).
-#   0 - SIG_PRIVKEY_RSA  — RSA recognized; *out_algo = RSA. (The DER
-#                          parse itself is `rsa_privkey_from_der`,
-#                          src/rsa.cyr, 3.6.3 — base64-decode the body
-#                          and call it.)
+#   32 / 48        — EC/Ed25519: number of scalar/seed bytes written.
+#   RSAK_SIZE      — RSA: an RSAK struct was written to key_out;
+#                    *out_algo = SIG_PRIVKEY_RSA.
+#   0 - SIG_PRIVKEY_RSA  — RSA recognized but key_max < RSAK_SIZE;
+#                    *out_algo = RSA. Retry with a ≥ RSAK_SIZE buffer (or
+#                    base64-decode the body and call rsa_privkey_from_der).
 #   -1             — malformed / unknown / unsupported curve.
 #
 # The DER scratch is bump-allocated (sized to pem_len, a strict upper
@@ -430,9 +437,14 @@ fn pem_decode_privkey(pem, pem_len, key_out, key_max, out_algo): i64 {
     if (der_len < 0) { return 0 - 1; }
 
     if (kind == 2) {
-        # PKCS#1 RSA — recognized; DER parse is rsa_privkey_from_der (3.6.3).
+        # PKCS#1 RSA. 3.6.6: emit the RSAK struct directly when the
+        # caller's buffer can hold it (key_max >= RSAK_SIZE); otherwise
+        # fall back to the sentinel so a caller with a scalar-sized buffer
+        # learns it's RSA and can retry with a 2384-byte buffer.
         store64(out_algo, SIG_PRIVKEY_RSA);
-        return 0 - SIG_PRIVKEY_RSA;
+        if (key_max < RSAK_SIZE) { return 0 - SIG_PRIVKEY_RSA; }
+        if (rsa_privkey_from_der(pool, der_len, key_out) != 0) { return 0 - 1; }
+        return RSAK_SIZE;
     }
 
     if (kind == 1) {
@@ -469,8 +481,12 @@ fn pem_decode_privkey(pem, pem_len, key_out, key_max, out_algo): i64 {
         return 48;
     }
     if (algo == SIG_PRIVKEY_RSA) {
+        # PKCS#8 RSA. Same RSAK emit-or-sentinel contract as the PKCS#1
+        # branch above; rsa_privkey_from_der unwraps the PKCS#8 wrapper.
         store64(out_algo, SIG_PRIVKEY_RSA);
-        return 0 - SIG_PRIVKEY_RSA;
+        if (key_max < RSAK_SIZE) { return 0 - SIG_PRIVKEY_RSA; }
+        if (rsa_privkey_from_der(pool, der_len, key_out) != 0) { return 0 - 1; }
+        return RSAK_SIZE;
     }
     return 0 - 1;
 }

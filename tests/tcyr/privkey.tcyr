@@ -41,6 +41,8 @@ include "src/ed25519.cyr"
 include "src/ecdsa_p256.cyr"
 include "src/ecdsa_p384.cyr"
 include "src/x509.cyr"
+include "src/bignum.cyr"
+include "src/rsa.cyr"
 include "src/pem.cyr"
 include "src/privkey.cyr"
 
@@ -164,12 +166,27 @@ fn main() {
     assert_eq(algo, SIG_PRIVKEY_ECDSA_P384, "PEM p384 PKCS#8 algo");
     assert_streq(hex_encode(&kout, 48), p384_d, "PEM p384 PKCS#8 scalar");
 
-    # RSA PKCS#1 — label recognized, parser unsupported until 3.5.10.
-    # The body need only be valid base64; the RSA path returns the
-    # sentinel before parsing the DER content.
+    # RSA PKCS#1 — with a scalar-sized (48-byte) buffer, the RSA path
+    # returns the sentinel before parsing (key_max < RSAK_SIZE). The body
+    # need only be valid base64 here.
     var rsa_pem = "-----BEGIN RSA PRIVATE KEY-----\nAAAA\n-----END RSA PRIVATE KEY-----\n";
-    assert_eq(pem_decode_privkey(rsa_pem, strlen(rsa_pem), &kout, 48, &algo), 0 - SIG_PRIVKEY_RSA, "PEM RSA returns sentinel");
-    assert_eq(algo, SIG_PRIVKEY_RSA, "PEM RSA algo tag");
+    assert_eq(pem_decode_privkey(rsa_pem, strlen(rsa_pem), &kout, 48, &algo), 0 - SIG_PRIVKEY_RSA, "PEM RSA sentinel on small buffer");
+    assert_eq(algo, SIG_PRIVKEY_RSA, "PEM RSA algo tag (sentinel)");
+
+    # RSA PKCS#1 — with a full RSAK_SIZE buffer, 3.6.6 emits the RSAK
+    # struct directly. Real PKCS#1 key (same RSA-2048 key as rsa.tcyr);
+    # rc == RSAK_SIZE (2384) and the parsed modulus matches.
+    test_group("pem_decode_privkey RSA → RSAK struct");
+    var rsa_real_pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEAvWEgC0txfpFTMkxDujB5tJJ11OOzwbiIM6JdIMnmZNOckYXfdKUG5at8j3fPrWSKWjxGUqSDt5oowCu4EI6MK8MxuvGM356JV8950DHUI2hDnM0nEc7fZA9o1amqd8wsWAlzhX74Z2UsIviUAPD17W8lv8p4xXKO9k7tVJ8yHd3+W97ROgoO1taDNhysv9Gx/mZH+0OdYcoTV7Uk0xa1xqdsFmbqaqbAco2UaXgq8KujswIxBlRbRN7gq7ybr+N+BiavUnf3jSEwSo/WDcCbLpzg5oQ525C6QwSW4PSYeSfmRegASvKqX6k3MeszF/BBAj6ShX89CAHpx+7r0Z5WSQIDAQABAoIBAF7pJ1Mhy06gbK6/lA3jL4u0/0Ljn3pODky6aav+I+6SM1ynWFcwQeWm7TVF2ZpP0hrpLGFMvAqvQw8UmhoKJuvj1q+XUX/dB34vqCAUaPoZzhDurE77e++83VB/yMRjWjIBApl8Cehfxx/7rslN+iK12phlU+O4xzdgVQddBZP7iHWIFF+QDYpgOb39xXhbP+eIafKp4cv5suUdRuFFk6/ewv0ZyyYTK8y7NnMk70vOuS8jbPU9oxQSqCnwfvbpYRnYPliqEtn0UR8rbyban3uSZZXZ0/7ZrroOhbVMbrrjTJXtEQit13uDj2tEidVZqn2uKprANSApVtwt1AXto4UCgYEA+jnKQJpWBKVCNHOJvoablf550Bysa5bXo/18Vkz4qTWOH+Vu/Q+M4q9sihO2z62LhLgsB5rDgDjM9WL05Sbnq0yIv2jTXqcbj2pjvFxj1/IL5a7jkqjpsmo485+fzNG3yQcdXjIVxtzSxr1rv/pmQBAUz4d0X4xmydACN50gYV8CgYEAwb/ijuV1OcYZbnEU7RmhqsZ4ZLvyYAVsRFJ7HqTSqf9//LMQGlBRtmr+CQfTd3ypeF9WfAiJPP27Ew2p9KDQzJTdW2Et2U05NbGs9YiJxXzSkXLCQUqZRPiMCfvkSUc57uQ5z0wuRDvxAJwfsoOfmEZvwFHQ2KHJOjEc7MrwIVcCgYEAleADaoqGtyWc7/m8KWhKzJ6tq59hDtg8tTbhQHe+AOvZAvXTcrPbuPNF2bZRKzdRd98wUCW8r5JWASySbqbM4GdpCOzqnakN8urQbkQQcYnC4oHMQU33HCxPjGyxtGZw5HHkf0UUkhY2EV/nqAd9MyXusRb69zgLYRm8Gj9845UCgYBWFSlWEAD7gFbASSHhDmhT9gZ7yz2vB/nIiVUGkni+6zQ0VGKtLk5/3B2uaXm9Nvgc8U79oNVI8fryRjni5KignOuUtCKoz7TBdIXCOb3srr7nvLMuSzS5/ixKK06MeEb3KxO8VL6htngnqzYyHGUGRRVVv4QpHAjKABQ36Rqz1QKBgQDGtg6aYaWvGOBDIp8QvyoAFA2o1tPVjuZPvjjWTeWNclkPTfRx7+7vbeLYaFV7stVJLbKaBLIxITg+w/4TanPQIp1LlYwyrDrtemK9hLmbJu/jgj1ekY80GNNCv7zyE9TzlwkvYRK6o8gWPW6sMkFg50wC1C+3HiVSIATJKipH7g==\n-----END RSA PRIVATE KEY-----\n";
+    var rsak[2384];
+    var rsa_algo2 = 0;
+    assert_eq(pem_decode_privkey(rsa_real_pem, strlen(rsa_real_pem), &rsak, 2384, &rsa_algo2), 2384,
+        "PEM RSA emits RSAK struct (rc = RSAK_SIZE)");
+    assert_eq(rsa_algo2, SIG_PRIVKEY_RSA, "PEM RSA algo tag (struct)");
+    assert_eq(load64(&rsak + 2320), 256, "PEM RSA RSAK modulus length 256");   # RSAK_NLEN
+    assert_streq(hex_encode(&rsak + 0, 256),
+        "bd61200b4b717e9153324c43ba3079b49275d4e3b3c1b88833a25d20c9e664d39c9185df74a506e5ab7c8f77cfad648a5a3c4652a483b79a28c02bb8108e8c2bc331baf18cdf9e8957cf79d031d42368439ccd2711cedf640f68d5a9aa77cc2c580973857ef867652c22f89400f0f5ed6f25bfca78c5728ef64eed549f321dddfe5bded13a0a0ed6d683361cacbfd1b1fe6647fb439d61ca1357b524d316b5c6a76c1666ea6aa6c0728d9469782af0aba3b3023106545b44dee0abbc9bafe37e0626af5277f78d21304a8fd60dc09b2e9ce0e68439db90ba430496e0f4987927e645e8004af2aa5fa93731eb3317f041023e92857f3d0801e9c7eeebd19e5649",
+        "PEM RSA RSAK modulus matches");
 
     return assert_summary();
 }

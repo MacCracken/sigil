@@ -66,6 +66,11 @@ fn main() {
         "valid sig over wrong message rejected");
     assert_eq(rsa_pkcs1v15_verify_sha256(n, 256, e, 3, msg, 33, sig256, 255), 0,
         "wrong signature length rejected");
+    # Even modulus rejected (3.6.6 odd-modulus precondition for the
+    # Montgomery verify ladder). n with its LSB cleared is even/malformed.
+    var n_even = hex_decode("bd61200b4b717e9153324c43ba3079b49275d4e3b3c1b88833a25d20c9e664d39c9185df74a506e5ab7c8f77cfad648a5a3c4652a483b79a28c02bb8108e8c2bc331baf18cdf9e8957cf79d031d42368439ccd2711cedf640f68d5a9aa77cc2c580973857ef867652c22f89400f0f5ed6f25bfca78c5728ef64eed549f321dddfe5bded13a0a0ed6d683361cacbfd1b1fe6647fb439d61ca1357b524d316b5c6a76c1666ea6aa6c0728d9469782af0aba3b3023106545b44dee0abbc9bafe37e0626af5277f78d21304a8fd60dc09b2e9ce0e68439db90ba430496e0f4987927e645e8004af2aa5fa93731eb3317f041023e92857f3d0801e9c7eeebd19e5648", 512);
+    assert_eq(rsa_pkcs1v15_verify_sha256(n_even, 256, e, 3, msg, 33, sig256, 256), 0,
+        "even modulus rejected");
     # SHA-384 verify against a SHA-256 signature must fail (wrong DigestInfo).
     assert_eq(rsa_pkcs1v15_verify_sha384(n, 256, e, 3, msg, 33, sig256, 256), 0,
         "SHA-256 sig rejected by SHA-384 verify");

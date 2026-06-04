@@ -143,3 +143,8 @@ timestamp,label,benchmark,estimate,unit
 2026-06-03T00:00:00Z,v3.6-parallel-crypto,sv_verify_batch_4,8.199,ms
 2026-06-03T00:00:00Z,v3.6-parallel-crypto,sv_verify_batch_16,31.534,ms
 2026-06-03T00:00:00Z,v3.6-parallel-crypto,sv_verify_batch_64,123.563,ms
+2026-06-04T00:00:00Z,v3.6.6-rsa-montgomery,rsa2048_verify_sha256,3.385,ms
+2026-06-04T00:00:00Z,v3.6.6-rsa-montgomery,rsa2048_verify_schoolbook,11.680,ms
+2026-06-04T00:00:00Z,v3.6.6-rsa-montgomery,rsa2048_verify_montgomery,3.401,ms
+2026-06-04T00:00:00Z,v3.6.6-rsa-montgomery,rsa2048_sign_sha256_crt,74.820,ms
+2026-06-04T00:00:00Z,v3.6.6-rsa-montgomery,rsa2048_modexp_fullwidth,242.898,ms

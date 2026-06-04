@@ -7,7 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-(none — tip is 3.6.5.)
+(none — tip is 3.6.6.)
+
+## [3.6.6] — 2026-06-04
+
+Verify-path **Montgomery** exponentiation (the public modexp), RSA
+benchmarks, and `pem_decode_privkey` now emits the parsed **RSAK
+struct** directly. No new primitives — a perf + ergonomics bite on the
+RSA surface. Cut after a 24-agent adversarial review whose one confirmed
+finding (an unenforced odd-modulus precondition) was fixed in-cycle.
+
+### Added
+
+- **RSA benchmarks** (`tests/bcyr/rsa.bcyr`, new — kept separate from
+  `sigil.bcyr` to stay under the 1 MB preprocessor cap that mldsa
+  already pushes). `benches/history.csv` rows `v3.6.6-rsa-montgomery`:
+  verify 3.385 ms; sign (CRT) 74.82 ms; plus the schoolbook/Montgomery
+  and full-width/CRT comparison rows.
+- **Tests** — `rsa.tcyr` +1 (even-modulus reject), `privkey.tcyr` +4
+  (PEM RSA → RSAK struct, modulus matches). Suite **51 files / 1369
+  assertions**, 0 failures.
+
+### Changed
+
+- **Montgomery on the public-exponent modexp** (`src/rsa.cyr`) — the
+  three public-exponent sites switched `bn_modexp` → `bn_mont_modexp`:
+  `_rsa_recover_em` (RSAVP1 verify), and the `r^e` blinding + `s^e`
+  verify-after-sign in `_rsa_raw_sign`. **Verify modexp 11.680 ms →
+  3.401 ms (3.43×)**; operands are public, so this is a pure speed win
+  (no change to the constant-time posture). `bn_modexp` stays as a
+  tested general primitive. Signatures unchanged (still match the
+  external byte-for-byte KATs).
+- **`pem_decode_privkey` emits the RSAK struct** (`src/privkey.cyr`) —
+  for RSA, when `key_max >= RSAK_SIZE` (2384) it base64-decodes + calls
+  `rsa_privkey_from_der` into `key_out` and returns `RSAK_SIZE`; the
+  `0-SIG_PRIVKEY_RSA` sentinel is now only the buffer-too-small signal.
+  One auto-detecting entry point now loads any supported key type
+  (EC/Ed25519 → scalar, RSA → struct). EC/Ed25519 contract unchanged.
+
+### Security
+
+- 3.6.6 audit: `docs/audit/2026-06-04-3.6.6-montgomery-pem-rsak-audit.md`.
+  0 outstanding (CRITICAL/HIGH/MEDIUM/LOW). The adversarial review's one
+  confirmed LOW — `_rsa_recover_em` fed `bn_mont_modexp` (odd-modulus
+  precondition) an attacker-controlled modulus with no oddness check —
+  was **fixed in this release**: an even/zero modulus is now rejected at
+  the verify boundary before the Montgomery ladder (defense-in-depth; the
+  EM compare already rejected it, so not exploitable). Audit floor
+  unchanged at 8 LOW.
 
 ## [3.6.5] — 2026-06-04
 

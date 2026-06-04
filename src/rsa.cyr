@@ -82,13 +82,27 @@ fn _rsa_recover_em(n_be, n_len, e_be, e_len, sig, sig_len, em_out): i64 {
     var limbs = (n_len + 7) / 8;
 
     bn_from_be(&_rsa_n, limbs, n_be, n_len);
+
+    # bn_mont_modexp (3.6.6) requires an ODD modulus — a real RSA n always
+    # is (p·q of two odd primes). The modulus here is attacker-controlled
+    # (parsed from an SPKI / caller key), and the schoolbook path it
+    # replaced accepted any modulus, so enforce the precondition at this
+    # trust boundary: reject an even (or zero) n rather than feeding the
+    # Montgomery ladder an input outside its domain. (Even n is malformed;
+    # this is defense-in-depth — the EM compare would also reject.)
+    if ((load64(&_rsa_n) & 1) == 0) { return 0 - 1; }
+
     bn_from_be(&_rsa_s, limbs, sig, sig_len);
 
     # RFC 8017 §8.2.2 / §5.2.1: reject s >= n (out of range).
     if (bn_cmp(&_rsa_s, &_rsa_n, limbs) >= 0) { return 0 - 1; }
 
-    # m = s^e mod n  (RSAVP1), then I2OSP to k octets.
-    bn_modexp(&_rsa_m, &_rsa_s, e_be, e_len, &_rsa_n, limbs);
+    # m = s^e mod n  (RSAVP1), then I2OSP to k octets. The modulus is
+    # odd (RSA n), so the constant-time Montgomery ladder applies; it is
+    # ~Nx faster than the schoolbook `bn_modexp` here (3.6.6). The
+    # operands are public — Montgomery is used purely for speed, not for
+    # the side-channel posture (no secret to protect on the verify path).
+    bn_mont_modexp(&_rsa_m, &_rsa_s, e_be, e_len, &_rsa_n, limbs);
     bn_to_be(em_out, n_len, &_rsa_m, limbs);
     return 0;
 }
@@ -453,7 +467,9 @@ fn _rsa_raw_sign(key, em, sig_out): i64 {
     # public-exponent modexp). Decorrelates the secret modexp from the
     # key; the final s is unchanged.
     if (_rsa_gen_blind(&_rsa_blind_r, &_rsa_blind_rinv, &_rsa_sign_n, nlen, limbs) < 0) { return 0 - 1; }
-    bn_modexp(&_rsa_blind_re, &_rsa_blind_r, key + RSAK_E, elen, &_rsa_sign_n, limbs);
+    # r^e mod n: public exponent over the random (public) blinding base —
+    # Montgomery ladder for speed (modulus n is odd). 3.6.6.
+    bn_mont_modexp(&_rsa_blind_re, &_rsa_blind_r, key + RSAK_E, elen, &_rsa_sign_n, limbs);
     bn_mul(&_rsa_blind_prod, &_rsa_sign_m, &_rsa_blind_re, limbs);
     bn_mod(&_rsa_blind_mb, &_rsa_blind_prod, 2 * limbs, &_rsa_sign_n, limbs);
 
@@ -467,8 +483,10 @@ fn _rsa_raw_sign(key, em, sig_out): i64 {
     bn_mul(&_rsa_blind_prod, &_rsa_blind_sb, &_rsa_blind_rinv, limbs);
     bn_mod(&_rsa_sign_s, &_rsa_blind_prod, 2 * limbs, &_rsa_sign_n, limbs);
 
-    # Verify-after-sign (Bellcore guard): s^e mod n must equal m.
-    bn_modexp(&_rsa_sign_chk, &_rsa_sign_s, key + RSAK_E, elen, &_rsa_sign_n, limbs);
+    # Verify-after-sign (Bellcore guard): s^e mod n must equal m. Public
+    # exponent over the (public) signature — Montgomery ladder for speed
+    # (modulus n is odd). 3.6.6.
+    bn_mont_modexp(&_rsa_sign_chk, &_rsa_sign_s, key + RSAK_E, elen, &_rsa_sign_n, limbs);
     if (bn_cmp(&_rsa_sign_chk, &_rsa_sign_m, limbs) != 0) {
         bn_zero(&_rsa_sign_s, limbs);   # discard a faulty signature
         return 0 - 1;
