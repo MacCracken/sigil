@@ -14,11 +14,12 @@ Detail for each is in its section below.
 - [x] `pem_decode_privkey` → RSAK struct wiring — **shipped 3.6.6**
 - [x] cyrius-native-TLS closeout — **shipped 3.6.8** (Closeout Pass; 3.5.6 audit doc done 3.6.5)
 
-**v3.7 — perf (gated on a latency complaint)**
-- [ ] Solinas reduction for P-256
-- [ ] Solinas reduction for P-384
+**v3.7 — perf (OPEN; un-gated 2026-06-04)**
+- [x] Solinas reduction for P-256 — **shipped 3.7.0** (verify 147→26 ms, 5.65×)
+- [ ] Solinas reduction for P-384 — next (3.7.1)
 - [ ] Unified `_into`-shape API (closes the 8 open bump-allocator LOWs)
 - [ ] Re-run full crypto bench suite
+- [ ] **EC scalar-mult speedup** (fixed-base comb for G + wNAF for Q) — carries the **≤10 ms ecdsa_p256_verify** target that Solinas-reduction alone did not reach (26 ms); the scalar-mult, not the reduction, is now the dominant cost
 
 **Backlog — unscheduled**
 - [ ] Retire the per-thread bank-indexing workaround if cyrius gains native thread-local arrays
@@ -131,12 +132,32 @@ Barrett/Montgomery here — cross-reference the 3.6.5+ RSA bench item.)
 
 ### 3.7 work items
 
-- [ ] **Solinas reduction for P-256.** Word-level reduction
-      against `p256 = 2^256 − 2^224 + 2^192 + 2^96 − 1` per
-      FIPS 186-4 Appendix D / NIST SP 800-186. Replace
-      `_p256_long_div_reduce` with the new pipeline.
-      Re-bench against the `v3.2.1` baseline; target ≤ 10 ms
-      / verify. CSV row `v3.7-p256-solinas`.
+- [x] **Solinas reduction for P-256.** **Shipped 3.7.0.** Word-level
+      reduction against `p256 = 2^256 − 2^224 + 2^192 + 2^96 − 1` (FIPS
+      186-4 App. D / GECC Alg. 2.29): `_p256_solinas_reduce` replaces the
+      bit-by-bit `_p256_long_div_reduce` (kept as the differential-KAT
+      reference). `ecdsa_p256_verify` **147.5 → 26.1 ms (5.65×)** on
+      6.0.61 (CSV row `v3.7.0-p256-solinas`). **The ≤ 10 ms target was
+      NOT reached by reduction alone** — with the reduction fast, the
+      schoolbook `u256_mul_full` and especially the double-and-add
+      scalar multiplication now dominate. The ≤ 10 ms target carries to
+      the new **EC scalar-mult speedup** item below.
+
+- [ ] **EC scalar-mult speedup (carries the ≤ 10 ms target).** The
+      `ecdsa_p256_verify` cost is now dominated by the two double-and-add
+      scalar multiplications (`u1·G + u2·Q`, ~6000 field-muls). A
+      fixed-base comb for `G` (like ed25519 already uses) + a wNAF /
+      windowed ladder for the variable `Q`, and optionally a Karatsuba
+      `u256_mul_full`, are the path to ≤ 10 ms. Distinct from the Solinas
+      reduction (which is done). Cross-reference the "scatter-store for
+      the fixed-base comb" backlog item (cache-timing) if the comb is
+      adopted on a secret path.
+
+- [ ] **Solinas reduction for P-384.** Same shape against
+      `p384 = 2^384 − 2^128 − 2^96 + 2^32 − 1`. The P-384
+      Solinas decomposition is wider (more word-level
+      shuffles) but the structure is identical. CSV row
+      `v3.7-p384-solinas`. **Next up (3.7.1).**
 
 - [ ] **Solinas reduction for P-384.** Same shape against
       `p384 = 2^384 − 2^128 − 2^96 + 2^32 − 1`. The P-384
@@ -159,18 +180,18 @@ Barrett/Montgomery here — cross-reference the 3.6.5+ RSA bench item.)
       and 3.4.1 cycles.
 
 - [ ] **Re-run the full crypto bench suite.** Capture before /
-      after rows for every verify-path bench. The 3.7 ship
-      target: `ecdsa_p256_verify` and `ecdsa_p384_verify`
-      both ≤ 10 ms / verify on the dev host. SEV-SNP / TDX
-      verify rows benefit transitively from the P-256 /
-      P-384 speedup; cross-check the deltas are clean.
+      after rows for every verify-path bench. The ≤ 10 ms /
+      verify ship target for `ecdsa_p256_verify` /
+      `ecdsa_p384_verify` now depends on the **EC scalar-mult
+      speedup** item above (Solinas reduction alone reached
+      26 ms for P-256). SEV-SNP / TDX verify rows benefit
+      transitively; cross-check the deltas are clean.
 
-**Sequencing decision:** open 3.7 only if a downstream
-consumer surfaces a latency complaint (kavach's batch-
-attestation flow, ark's signature-heavy publisher workflow).
-Until then, the verify path is fast enough for one-shot
-checks. Cache the open audit follow-ups via this cycle's
-INFO docs.
+**Sequencing decision:** ~~open 3.7 only if a downstream consumer
+surfaces a latency complaint~~ — **3.7 was opened 2026-06-04** (Robert's
+call), starting with Solinas P-256 (3.7.0). The remaining items
+(Solinas P-384, the EC scalar-mult speedup that carries ≤ 10 ms, the
+unified `_into` API) sequence as 3.7.x tags.
 
 ## Backlog — unscheduled
 

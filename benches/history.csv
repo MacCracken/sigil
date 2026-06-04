@@ -148,3 +148,5 @@ timestamp,label,benchmark,estimate,unit
 2026-06-04T00:00:00Z,v3.6.6-rsa-montgomery,rsa2048_verify_montgomery,3.401,ms
 2026-06-04T00:00:00Z,v3.6.6-rsa-montgomery,rsa2048_sign_sha256_crt,74.820,ms
 2026-06-04T00:00:00Z,v3.6.6-rsa-montgomery,rsa2048_modexp_fullwidth,242.898,ms
+2026-06-04T00:00:00Z,v3.7.0-p256-solinas,ecdsa_p256_verify,26.139,ms
+2026-06-04T00:00:00Z,v3.7.0-p256-solinas,ecdsa_p256_verify_longdiv_baseline,147.488,ms

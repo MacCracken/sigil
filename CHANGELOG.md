@@ -7,7 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-(none — tip is 3.6.8.)
+(none — tip is 3.7.0.)
+
+## [3.7.0] — 2026-06-04
+
+Opens the **v3.7 performance cycle** (un-gated by maintainer decision).
+First item: **Solinas fast reduction for P-256**, replacing the
+bit-by-bit long division on the field-prime reduction. Toolchain pin
+6.0.58 → 6.0.61.
+
+### Added
+
+- **Solinas reduction mod p256** (`src/ecdsa_p256.cyr`,
+  `_p256_solinas_reduce`) — FIPS 186-4 App. D / GECC Alg. 2.29
+  word-level reduction (nine 32-bit-word terms combined as
+  `s1 + 2·s2 + 2·s3 + s4 + s5 − s6 − s7 − s8 − s9 mod p`) over the
+  audited `fp_p256_add`/`fp_p256_sub`. `p256_reduce` now uses it; the
+  long-division `_p256_reduce_longdiv` is retained as the differential
+  -KAT reference.
+- **Tests** — `ecdsa_p256.tcyr` +3: a differential KAT proving the
+  Solinas path equals the long-division reference byte-for-byte over 64
+  SHA-256-seeded random 512-bit inputs + edge cases (2^512−1, high-half
+  all-ones), on top of the existing reduce KATs + full RFC 6979 verify
+  suite. Suite **51 files / 1390 assertions**, 0 failures.
+
+### Performance
+
+- **`ecdsa_p256_verify` 147.5 ms → 26.1 ms (5.65×)** on the dev host
+  (cyrius 6.0.61), `benches/history.csv` row `v3.7.0-p256-solinas`. The
+  speedup transitively benefits every P-256 chain verification (x509,
+  SGX/TDX/SEV-SNP `*_verify_full`).
+- The roadmap's aspirational **≤ 10 ms** target is **not** met by the
+  reduction alone — with reduction fast, the schoolbook `u256_mul_full`
+  and the double-and-add scalar multiplication now dominate. That target
+  carries to a new v3.7 **EC scalar-mult speedup** item (fixed-base comb
+  + wNAF); see the roadmap. (Per the perf-claim rule, all numbers are
+  backed by `history.csv`.)
+
+### Changed
+
+- Cyrius toolchain pin **6.0.58 → 6.0.61** (`cyrius.cyml`).
+
+### Security
+
+- 3.7.0 audit: `docs/audit/2026-06-04-3.7.0-p256-solinas-audit.md`. The
+  Solinas reduction has data-dependent conditional subtracts, but so did
+  the long division it replaces — **CT posture is unchanged** (the
+  reduction was never constant-time; `ecdsa_p256_verify` is public-data;
+  the sign path's secret-scalar exposure is pre-existing and mitigated
+  by RFC 6979 determinism + AGNOS single-tenant deployment). Audit floor
+  unchanged at 8 LOW.
 
 ## [3.6.8] — 2026-06-04
 

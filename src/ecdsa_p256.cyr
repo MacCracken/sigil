@@ -175,8 +175,11 @@ fn _p256_long_div_reduce(R, lo): i64 {
     return 0;
 }
 
-# r = val mod p256 (val is 512-bit, r is 256-bit)
-fn p256_reduce(out, val): i64 {
+# r = val mod p256 (val is 512-bit, r is 256-bit) — textbook long
+# division. Retained as the correctness reference for the Solinas
+# differential KAT (tests/tcyr/ecdsa_p256.tcyr); `p256_reduce` itself
+# now uses the fast Solinas path below (3.7.0).
+fn _p256_reduce_longdiv(out, val): i64 {
     _p256_init();
     if (_p256_R == 0) { _p256_R = alloc(32); }
 
@@ -189,6 +192,108 @@ fn p256_reduce(out, val): i64 {
 
     _p256_long_div_reduce(_p256_R, val);
     u256_copy(out, _p256_R);
+    return 0;
+}
+
+# ================================================================
+# Solinas fast reduction mod p256 (3.7.0)
+#
+# p256 = 2^256 − 2^224 + 2^192 + 2^96 − 1 is a Solinas (generalized
+# Mersenne) prime, so a 512-bit product reduces via a fixed permutation
+# of its sixteen 32-bit words c0..c15 (c0 = least significant) into nine
+# 256-bit terms, combined as (FIPS 186-4 App. D.2 / GECC Alg. 2.29):
+#
+#   r = s1 + 2·s2 + 2·s3 + s4 + s5 − s6 − s7 − s8 − s9  (mod p256)
+#
+# Each term is < 2^256 (one conditional subtract reduces it into [0,p)),
+# then combined with the audited constant-time-free fp_p256_add /
+# fp_p256_sub (operands in [0,p), result stays in [0,p)). This replaces
+# the 256-iteration bit-by-bit long division — ~20-50× fewer limb ops.
+# Validated byte-for-byte against `_p256_reduce_longdiv` over random and
+# edge inputs in ecdsa_p256.tcyr.
+# ================================================================
+var _p256_sol_t = 0;        # single 256-bit term scratch
+
+# Read 32-bit word `idx` (0..15, little-endian) from a 64-byte product.
+fn _p256_wd(prod, idx): i64 {
+    var limb = load64(prod + (idx / 2) * 8);
+    if ((idx & 1) == 0) { return limb & 0xFFFFFFFF; }
+    return (limb >> 32) & 0xFFFFFFFF;
+}
+
+# Assemble a 256-bit value (32 bytes, little-endian) from eight 32-bit
+# words w0 (low) .. w7 (high).
+fn _p256_mk(out, w0, w1, w2, w3, w4, w5, w6, w7): i64 {
+    store64(out + 0,  (w0 & 0xFFFFFFFF) | (w1 << 32));
+    store64(out + 8,  (w2 & 0xFFFFFFFF) | (w3 << 32));
+    store64(out + 16, (w4 & 0xFFFFFFFF) | (w5 << 32));
+    store64(out + 24, (w6 & 0xFFFFFFFF) | (w7 << 32));
+    return 0;
+}
+
+# Reduce a single term in [0, 2^256) into [0, p256): one conditional
+# subtract (a term < 2^256 < 2·p256).
+fn _p256_sol_red1(t): i64 {
+    if (u256_cmp(t, _p256_p) >= 0) { u256_sub(t, t, _p256_p); }
+    return 0;
+}
+
+fn _p256_solinas_reduce(out, val): i64 {
+    _p256_init();
+    if (_p256_sol_t == 0) { _p256_sol_t = alloc(32); }
+    var T = _p256_sol_t;
+
+    var c0 = _p256_wd(val, 0);   var c1 = _p256_wd(val, 1);
+    var c2 = _p256_wd(val, 2);   var c3 = _p256_wd(val, 3);
+    var c4 = _p256_wd(val, 4);   var c5 = _p256_wd(val, 5);
+    var c6 = _p256_wd(val, 6);   var c7 = _p256_wd(val, 7);
+    var c8 = _p256_wd(val, 8);   var c9 = _p256_wd(val, 9);
+    var c10 = _p256_wd(val, 10); var c11 = _p256_wd(val, 11);
+    var c12 = _p256_wd(val, 12); var c13 = _p256_wd(val, 13);
+    var c14 = _p256_wd(val, 14); var c15 = _p256_wd(val, 15);
+
+    # s1 = (c7 c6 c5 c4 c3 c2 c1 c0)
+    _p256_mk(out, c0, c1, c2, c3, c4, c5, c6, c7);
+    _p256_sol_red1(out);
+
+    # + 2·s2 ; s2 = (c15 c14 c13 c12 c11 0 0 0)
+    _p256_mk(T, 0, 0, 0, c11, c12, c13, c14, c15); _p256_sol_red1(T);
+    fp_p256_add(out, out, T); fp_p256_add(out, out, T);
+
+    # + 2·s3 ; s3 = (0 c15 c14 c13 c12 0 0 0)
+    _p256_mk(T, 0, 0, 0, c12, c13, c14, c15, 0); _p256_sol_red1(T);
+    fp_p256_add(out, out, T); fp_p256_add(out, out, T);
+
+    # + s4 ; s4 = (c15 c14 0 0 0 c10 c9 c8)
+    _p256_mk(T, c8, c9, c10, 0, 0, 0, c14, c15); _p256_sol_red1(T);
+    fp_p256_add(out, out, T);
+
+    # + s5 ; s5 = (c8 c13 c15 c14 c13 c11 c10 c9)
+    _p256_mk(T, c9, c10, c11, c13, c14, c15, c13, c8); _p256_sol_red1(T);
+    fp_p256_add(out, out, T);
+
+    # − s6 ; s6 = (c10 c8 0 0 0 c13 c12 c11)
+    _p256_mk(T, c11, c12, c13, 0, 0, 0, c8, c10); _p256_sol_red1(T);
+    fp_p256_sub(out, out, T);
+
+    # − s7 ; s7 = (c11 c9 0 0 c15 c14 c13 c12)
+    _p256_mk(T, c12, c13, c14, c15, 0, 0, c9, c11); _p256_sol_red1(T);
+    fp_p256_sub(out, out, T);
+
+    # − s8 ; s8 = (c12 0 c10 c9 c8 c15 c14 c13)
+    _p256_mk(T, c13, c14, c15, c8, c9, c10, 0, c12); _p256_sol_red1(T);
+    fp_p256_sub(out, out, T);
+
+    # − s9 ; s9 = (c13 0 c11 c10 c9 0 c15 c14)
+    _p256_mk(T, c14, c15, 0, c9, c10, c11, 0, c13); _p256_sol_red1(T);
+    fp_p256_sub(out, out, T);
+
+    return 0;
+}
+
+# r = val mod p256 (val is 512-bit, r is 256-bit) — Solinas fast path.
+fn p256_reduce(out, val): i64 {
+    _p256_solinas_reduce(out, val);
     return 0;
 }
 

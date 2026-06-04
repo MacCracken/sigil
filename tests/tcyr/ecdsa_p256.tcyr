@@ -119,6 +119,42 @@ fn main() {
         "00000000fffffffeffffffffffffffffffffffff000000000000000000000001");
     assert_eq(u256_eq(reduced, expected_2_256_modp), 1, "reduce(2^256) == 2^256 - p");
 
+    # 2e: differential KAT (3.7.0) — the Solinas fast path (p256_reduce)
+    # must agree byte-for-byte with the long-division reference
+    # (_p256_reduce_longdiv) over 64 pseudo-random 512-bit inputs
+    # (SHA-256 of a counter fills each half) plus edge cases.
+    var ld = alloc(32);
+    var ctr = alloc(8);
+    var h = alloc(32);
+    var ki = 0;
+    var diffs = 0;
+    while (ki < 64) {
+        store64(ctr, ki);
+        sha256(ctr, 8, h);
+        memcpy(val512, h, 32);
+        store64(ctr, ki + 1000);
+        sha256(ctr, 8, h);
+        memcpy(val512 + 32, h, 32);
+        p256_reduce(reduced, val512);
+        _p256_reduce_longdiv(ld, val512);
+        if (u256_eq(reduced, ld) == 0) { diffs = diffs + 1; }
+        ki = ki + 1;
+    }
+    assert_eq(diffs, 0, "Solinas == long-div over 64 random 512-bit inputs");
+
+    # Edge: all-ones (2^512 - 1).
+    memset(val512, 0xFF, 64);
+    p256_reduce(reduced, val512);
+    _p256_reduce_longdiv(ld, val512);
+    assert_eq(u256_eq(reduced, ld), 1, "Solinas == long-div for 2^512-1");
+
+    # Edge: high half all-ones, low half zero.
+    memset(val512, 0, 64);
+    memset(val512 + 32, 0xFF, 32);
+    p256_reduce(reduced, val512);
+    _p256_reduce_longdiv(ld, val512);
+    assert_eq(u256_eq(reduced, ld), 1, "Solinas == long-div for high-half all-ones");
+
     # ============================================================
     # Group 3 — field arithmetic
     # ============================================================
