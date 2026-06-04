@@ -12,31 +12,32 @@
 
 | Field | Value |
 |---|---|
-| Current version | **3.6.6** (`VERSION`) |
+| Current version | **3.6.7** (`VERSION`) |
 | Cyrius toolchain pin | **6.0.58** (`cyrius.cyml [package].cyrius`) |
 | Dependencies | agnosys **1.3.2**, sakshi **2.2.6** |
 | Last release date | 2026-06-04 |
-| Last release audit | [`2026-06-04-3.6.6-montgomery-pem-rsak-audit.md`](../audit/2026-06-04-3.6.6-montgomery-pem-rsak-audit.md) |
-| Phase | Released. **3.6.6 switched the public-exponent modexp to Montgomery** (`bn_modexp`→`bn_mont_modexp` at `_rsa_recover_em` verify + `r^e` blinding + `s^e` verify-after-sign — verify **3.43×**: 11.68→3.40 ms; new `tests/bcyr/rsa.bcyr` + `benches/history.csv`) and made **`pem_decode_privkey` emit the RSAK struct** directly (single auto-detecting entry point; sentinel now only the buffer-too-small signal). Cut after a 24-agent adversarial review (1 confirmed LOW — unenforced odd-modulus precondition — fixed in-cycle). 3.6.x history: 3.6.5 RSA-PSS + x509 RSA chain-link; 3.6.4 RSA sign hardening; 3.6.3 RSA key parse + v1.5 sign; 3.6.2 RSA v1.5 verify + bignum engine; 3.6.1 TLS 1.2 PRF; 3.6.0 parallel verify. **Remaining 3.6.x:** 3.6.7 picks up backlog (x509 P-384 chain-link + AES-128 seal keys), then **3.6.8 = cyrius-native-TLS closeout**. 3.7 (EC Solinas + bignum Barrett/Montgomery perf) gated on a forcing function. |
+| Last release audit | [`2026-06-04-3.6.7-p384-chainlink-aes128-seal-audit.md`](../audit/2026-06-04-3.6.7-p384-chainlink-aes128-seal-audit.md) |
+| Phase | Released. **3.6.7 took two backlog items**: **x509 P-384 chain-link verify** (`ecdsa-with-SHA384` issuers → `ecdsa_p384_verify`; `X509_SIG_ECDSA_SHA384`; width-parameterized `_ecdsa_der_int_w`) and **AES-128 seal keys** (`sgx_derive_seal_key_n`/`sgx_seal_key_n`/`sgx_unseal_key_n` with a 16/32-byte width; the 7-arg fns stay 256-bit back-compat wrappers). Cut after a 29-agent adversarial review; its real finding — a latent (pre-3.6.7) DER-strictness bug on the shared ECDSA signature parse (`sb_np` clobber) — was fixed in-cycle, hardening both P-256 and P-384. 3.6.x history: 3.6.6 Montgomery-on-verify + pem→RSAK; 3.6.5 RSA-PSS + x509 RSA chain-link; 3.6.4 RSA sign hardening; 3.6.0–3.6.3 parallel verify / TLS 1.2 PRF / RSA v1.5. **Remaining 3.6.x:** **3.6.8 = cyrius-native-TLS closeout** (the last 3.6 tag). 3.7 (EC Solinas + bignum Barrett/Montgomery perf) gated on a forcing function. |
 
 ## Test surface
 
 | Metric | Value |
 |---|---|
 | `.tcyr` test files | 51 |
-| Total assertions | **1369**, 0 failures |
+| Total assertions | **1387**, 0 failures |
 | Benchmark suite | `benches/` — `history.csv`; RSA rows via `tests/bcyr/rsa.bcyr` |
 
 > Counting note: the 3 `*_verify_full.tcyr` tests (sgx 11 + tdx 16 +
 > snp 11 = 38) emit their `N passed` summary in a tty-sensitive way that
 > is dropped under any pipe or file redirect, so a scripted `grep`-sum of
-> `cyrius test` output yields **1331** across the other 48 files and
-> silently omits those 38. Add them back for the true total: **1369**.
+> `cyrius test` output yields **1349** across the other 48 files and
+> silently omits those 38. Add them back for the true total: **1387**.
 > (Each verify_full still prints its summary on an interactive run; it's
 > only the redirected/scripted sum that loses them.)
 
 Per-cycle assertion delta:
 
+- 3.6.7 ship: +18 (`x509_p384.tcyr` +9 — P-384 CA→leaf SHA-384 chain verify, tamper reject, SHA256-vs-P384-issuer regression; `seal.tcyr` +9 — AES-128 derive/seal/unseal, width validation, 256-bit back-compat)
 - 3.6.6 ship: +5 (`rsa.tcyr` +1 — even-modulus reject for the Montgomery verify precondition; `privkey.tcyr` +4 — PEM RSA → RSAK struct emit + modulus match)
 - 3.6.5 ship: +30 (`rsa.tcyr` +10 — RSA-PSS: external pure-Python PSS KAT verify SHA-256/384, sign→verify roundtrips, tamper/wrong-message/wrong-length/cross-hash/cross-scheme rejects. `x509_rsa.tcyr` +20, new — OpenSSL RSA-2048 CA signing SHA-256 + SHA-384 leaves, green chain + tamper/wrong-key/DN-mismatch rejects)
 - 3.6.4 ship: +5 (`bignum.tcyr` +5 — `bn_modinv` self-check `r·r^-1 ≡ 1 mod n` at 256/2048-bit + the non-coprime `-1` path; the blinded+CRT signer reuses the existing `rsa.tcyr` deterministic-KAT assertions)
@@ -76,6 +77,7 @@ Consumers that link or rely on sigil for trust verification:
 
 | Version | Date | Headline |
 |---|---|---|
+| 3.6.7 | 2026-06-04 | **x509 P-384 chain-link verify + AES-128 seal keys.** `_x509_verify_link` dispatches `ecdsa-with-SHA384` issuers (`X509_SIG_ECDSA_SHA384`, `X509_CURVE_P384`) to `ecdsa_p384_verify`; width-parameterized `_ecdsa_der_int_w` (32/48). `sgx_derive_seal_key_n`/`sgx_seal_key_n`/`sgx_unseal_key_n` add a 16-byte AES-128 option (`SGX_SEAL_KEY_SIZE_128`); the 7-arg fns stay byte-for-byte 256-bit wrappers. Cut after a 29-agent adversarial review; its real finding (a latent pre-3.6.7 DER-strictness `sb_np` clobber on the shared ECDSA parse) fixed in-cycle for both curves. +18 assertions. Audit: `docs/audit/2026-06-04-3.6.7-p384-chainlink-aes128-seal-audit.md`. |
 | 3.6.6 | 2026-06-04 | **Montgomery on the public-exponent modexp + pem→RSAK.** `bn_modexp`→`bn_mont_modexp` at the verify RSAVP1 + sign-path `r^e`/`s^e` (verify **3.43×**: 11.68→3.40 ms; new `tests/bcyr/rsa.bcyr`, `history.csv` row `v3.6.6-rsa-montgomery`). `pem_decode_privkey` now emits the RSAK struct into `key_out` when `key_max>=RSAK_SIZE` (sentinel = buffer-too-small). Cut after a 24-agent adversarial review; its 1 confirmed LOW (unenforced odd-modulus precondition on the verify ladder) fixed in-cycle (even/zero `n` rejected). +5 assertions. Audit: `docs/audit/2026-06-04-3.6.6-montgomery-pem-rsak-audit.md`. |
 | 3.6.5 | 2026-06-04 | **RSA-PSS + x509 RSA chain-link verify.** `rsa_pss_{verify,sign}_sha{256,384}` (RFC 8017 §8.1/§9.1 — MGF1, salt=hLen sign, salt-agnostic verify; shares `_rsa_recover_em`/`_rsa_raw_sign` with the v1.5 surface). `x509_parse` now handles rsaEncryption SPKI (`X509_CURVE_RSA`) + rsa-with-SHA256/384, and `_x509_verify_link` dispatches RSA issuers to `rsa_pkcs1v15_verify_*` (unblocks AMD ARK/ASK RSA-4096+SHA-384). Debt pass: wrote the overdue **3.5.6 audit doc**; surfaced 3 deferrals prior cycles buried in source comments into the roadmap. +30 assertions (rsa +10, new `x509_rsa.tcyr` +20). Pin 6.0.53→6.0.58. Audit: `docs/audit/2026-06-04-3.6.5-pss-x509-rsa-audit.md` (+ retrospective `2026-06-04-3.5.6-hmac-hkdf-sha384-audit.md`). |
 | 3.6.4 | 2026-06-03 | **RSA sign hardening + security audit pass.** Base **blinding** (`s=(m·rᵉ)ᵈ·r⁻¹ mod n`, fresh `/dev/urandom` `r`; `bn_modinv` via binary inversion) + **CRT** (Garner, ~4×) on top of the CT Montgomery ladder + verify-after-sign. Signatures unchanged (still match the external Python ref byte-for-byte). Consolidated audit over verify+keys+sign; resolves 3.6.3 LOW-1; caught+fixed a `bn_modinv` non-coprime infinite loop. +5 assertions. Audit: `docs/audit/2026-06-03-3.6.4-rsa-hardening-audit.md`. |
@@ -111,8 +113,7 @@ list).
 
 | Slot | State | Notes |
 |---|---|---|
-| 3.6.7 — backlog bite | in progress | x509 **P-384** chain-link verify (ecdsa-with-SHA384 issuer dispatch) + **AES-128 seal keys** (parameterise `SGX_SEAL_KEY_SIZE`). |
-| 3.6.8 — cyrius-native-TLS closeout | pending | Full CLAUDE.md Closeout Pass over the 3.6.x delta: dead-code audit, stale-comment sweep (incl. the `_into`-in-3.6 comment fix + the stale `benches/sigil.bcyr` path in CLAUDE.md), security re-scan, downstream-consumer note, clean build, version verify, bench baseline. |
+| 3.6.8 — cyrius-native-TLS closeout | pending | Full CLAUDE.md Closeout Pass over the 3.6.x delta: dead-code audit, stale-comment sweep (incl. the `_into`-in-3.6 comment fix + the stale `benches/sigil.bcyr` path in CLAUDE.md), security re-scan, downstream-consumer note, clean build, version verify, bench baseline. *(x509 P-384 chain-link + AES-128 seal shipped 3.6.7.)* |
 | 3.7 — perf / Solinas | Gated | Solinas word-level reduction for P-256/P-384 + unified `_into` API (closes the 8 audit-floor LOWs). Gated on a latency forcing function per roadmap. *(Montgomery-on-verify shipped 3.6.6; RSA-PSS + x509 RSA chain-link shipped 3.6.5.)* |
 
 When a cycle is opened, list each work-item bite here as it

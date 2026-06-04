@@ -68,6 +68,7 @@ var DER_TAG_CONTEXT_3_EXP    = 0xA3;   # [3] EXPLICIT — extensions
 var X509_SIG_ECDSA_SHA256    = 1;
 var X509_SIG_RSA_SHA256      = 2;
 var X509_SIG_RSA_SHA384      = 3;
+var X509_SIG_ECDSA_SHA384    = 4;   # P-384 chain-link issuers (3.6.7)
 
 # Public-key type enum stored in X509Cert.curve (the slot doubles as a
 # key-type discriminant). P-256 / P-384 are EC affine points held in the
@@ -172,6 +173,7 @@ var _oid_ec_pub_key       = 0;
 var _oid_prime256v1       = 0;
 var _oid_secp384r1         = 0;
 var _oid_ecdsa_with_sha256 = 0;
+var _oid_ecdsa_with_sha384 = 0;
 var _oid_basic_constraints = 0;
 var _oid_key_usage         = 0;
 var _oid_rsa_encryption    = 0;
@@ -194,6 +196,8 @@ fn _x509_oids_init(): i64 {
     _oid_secp384r1         = _build_oid("2b81040022", 10);
     # 8-byte content for ecdsa-with-SHA256: 2A 86 48 CE 3D 04 03 02
     _oid_ecdsa_with_sha256 = _build_oid("2a8648ce3d040302", 16);
+    # 8-byte content for ecdsa-with-SHA384: 2A 86 48 CE 3D 04 03 03
+    _oid_ecdsa_with_sha384 = _build_oid("2a8648ce3d040303", 16);
     # 3-byte content for basicConstraints: 55 1D 13
     _oid_basic_constraints = _build_oid("551d13", 6);
     # 3-byte content for keyUsage:       55 1D 0F
@@ -523,6 +527,8 @@ fn _xp_parse_sig_algid(buf, buf_len, pos, out_algo): i64 {
     var rsa_null_required = 0;
     if (_oid_eq(buf, oid_cp, oid_len, _oid_ecdsa_with_sha256, 8) == 1) {
         algo = X509_SIG_ECDSA_SHA256;
+    } else { if (_oid_eq(buf, oid_cp, oid_len, _oid_ecdsa_with_sha384, 8) == 1) {
+        algo = X509_SIG_ECDSA_SHA384;
     } else { if (_oid_eq(buf, oid_cp, oid_len, _oid_sha256_with_rsa, 9) == 1) {
         algo = X509_SIG_RSA_SHA256;
         rsa_null_required = 1;
@@ -531,7 +537,7 @@ fn _xp_parse_sig_algid(buf, buf_len, pos, out_algo): i64 {
         rsa_null_required = 1;
     } else {
         return 0 - 1;
-    } } }
+    } } } }
 
     # Parameters: if present, must be NULL (zero-length). ECDSA omits it
     # (RFC 5758 §3.2); RSA PKCS#1 requires the explicit NULL be present.
@@ -877,24 +883,39 @@ fn x509_parse(der, der_len, out_cert): i64 {
     var inner_sig_off = sb_cp + 1;
     var inner_sig_len = sb_len - 1;
 
-    if (outer_algo == X509_SIG_ECDSA_SHA256) {
+    # ECDSA field width by algorithm: P-256/SHA-256 = 32, P-384/SHA-384 = 48.
+    var ec_fw = 0;
+    if (outer_algo == X509_SIG_ECDSA_SHA256) { ec_fw = 32; }
+    if (outer_algo == X509_SIG_ECDSA_SHA384) { ec_fw = 48; }
+
+    if (ec_fw > 0) {
         # ECDSA: the BIT STRING wraps a DER SEQUENCE of two INTEGERs.
-        # Unwrap r || s into a fixed 64-byte heap buffer (reuse
-        # _ecdsa_der_int from src/ecdsa_p256.cyr).
-        var raw_sig = alloc(64);
-        memset(raw_sig, 0, 64);
+        # Unwrap r || s into a fixed 2*fw-byte heap buffer (fw = 32 for
+        # P-256, 48 for P-384) via _ecdsa_der_int_w (src/ecdsa_p256.cyr).
+        var ec_sz = 2 * ec_fw;
+        var raw_sig = alloc(ec_sz);
+        memset(raw_sig, 0, ec_sz);
         var pos_after_seq_tag = 0;
+        # NB: walk the inner r/s SEQUENCE into a DISTINCT out-param so the
+        # BIT STRING end (`sb_np`, from the walk above) is preserved for
+        # the final cert-length gate below. Reusing sb_np here would let a
+        # BIT STRING over-declare its length and smuggle trailing bytes
+        # inside the cert (DER-strictness bug, fixed 3.6.7).
+        var inner_seq_np = 0;
         var inner_seq_len = der_walk(der, der_len, inner_sig_off, DER_TAG_SEQUENCE,
-                                       &pos_after_seq_tag, &sb_np);
+                                       &pos_after_seq_tag, &inner_seq_np);
         if (inner_seq_len < 0) { return 0; }
         var inner_seq_end = pos_after_seq_tag + inner_seq_len;
-        var r_next = _ecdsa_der_int(der, pos_after_seq_tag, inner_seq_end, raw_sig);
+        # The inner SEQUENCE must consume the entire BIT STRING content
+        # (the 1 unused-bits byte + this SEQUENCE) — no slack.
+        if (inner_seq_end != sb_np) { return 0; }
+        var r_next = _ecdsa_der_int_w(der, pos_after_seq_tag, inner_seq_end, raw_sig, ec_fw);
         if (r_next < 0) { return 0; }
-        var s_next2 = _ecdsa_der_int(der, r_next, inner_seq_end, raw_sig + 32);
+        var s_next2 = _ecdsa_der_int_w(der, r_next, inner_seq_end, raw_sig + ec_fw, ec_fw);
         if (s_next2 < 0) { return 0; }
         if (s_next2 != inner_seq_end) { return 0; }
-        # sig_off/sig_len for ECDSA = (absolute heap addr of raw r||s, 64).
-        _x509_set_sig(out_cert, raw_sig, 64);
+        # sig_off/sig_len for ECDSA = (absolute heap addr of raw r||s, 2*fw).
+        _x509_set_sig(out_cert, raw_sig, ec_sz);
     } else {
         # RSA PKCS#1: the signature value IS the BIT STRING content —
         # `inner_sig_len` raw big-endian octets (the k-byte signature).
@@ -966,6 +987,17 @@ fn _x509_verify_link(child, issuer_cert): i64 {
         if (x509_cert_curve(issuer_cert) != X509_CURVE_P256) { return 0; }
         var pk = x509_cert_pubkey(issuer_cert);
         return ecdsa_p256_verify(pk, der_ptr + tbs_off, tbs_len, sig_addr);
+    }
+
+    if (algo == X509_SIG_ECDSA_SHA384) {
+        # P-384 chain-link (3.6.7): issuer must be P-384; the 96-byte
+        # (Qx||Qy) pubkey slot feeds ecdsa_p384_verify, which SHA-384
+        # -hashes the raw TBS internally. Real AMD ARK/ASK are RSA, but
+        # P-384 EC CAs (and SEV-SNP P-384 issuer chains) need this path.
+        if (sig_len != 96) { return 0; }
+        if (x509_cert_curve(issuer_cert) != X509_CURVE_P384) { return 0; }
+        var pk384 = x509_cert_pubkey(issuer_cert);
+        return ecdsa_p384_verify(pk384, der_ptr + tbs_off, tbs_len, sig_addr);
     }
 
     if (algo == X509_SIG_RSA_SHA256) {

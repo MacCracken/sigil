@@ -112,22 +112,46 @@ fn main() {
               "now_unix=0 disables time check (still verifies)");
 
     # ============================================================
-    # Group 4 — Mixed-curve guard: P-384 issuer rejected
+    # Group 4 — Algorithm/curve consistency guard
     # ============================================================
-    test_group("x509_verify_chain — P-384 issuer rejection (out of 3.4.1 scope)");
+    # 3.6.7 added P-384 chain-link verify, but a P-384 ISSUER is only
+    # valid for an ECDSA-with-SHA384 link. Here the child's sig_algo is
+    # ECDSA-SHA256 (vcek was signed by a P-256 root), so verifying it
+    # against a P-384 issuer must still be REJECTED — the SHA-256 path
+    # requires a P-256 issuer. (The real P-384 green path is Group 5.)
+    test_group("x509_verify_chain — SHA256 sig + P-384 issuer rejected");
 
-    # Synthetically force the chain walker to treat the P-384 cert
-    # as an issuer. We can't actually sign anything with our P-384
-    # leaf (no private key here) — instead, point a child cert's
-    # struct at the leaf as its parent and watch the link reject.
     var leaf_clone = x509_cert_alloc();
     memcpy(leaf_clone, vcek, 256);
-
-    # Use the leaf itself as both child and root — the chain
-    # would attempt to verify leaf-signed-by-leaf, which exercises
-    # _x509_verify_link with a P-384 issuer.
     assert_eq(x509_verify_chain(leaf_clone, inters, 0, vcek, NOW_IN_WINDOW), 0,
-              "P-384 issuer rejected by chain link (mixed-curve unsupported)");
+              "SHA-256-signed child rejected against a P-384 issuer");
+
+    # ============================================================
+    # Group 5 — P-384 chain-link green path (3.6.7)
+    # ============================================================
+    # Real P-384 CA (secp384r1, self-signed ecdsa-with-SHA384) signing a
+    # P-384 leaf with ecdsa-with-SHA384. Generated 2026-06-04 via OpenSSL
+    # 3.6.2; `openssl verify -CAfile ca.crt leaf.crt` -> OK.
+    test_group("x509_verify_chain — P-384 CA signs P-384 leaf (SHA-384)");
+
+    var P384CA_HEX = "308201ea3082016fa003020102021417ee35f250c82bbec682a8ffbd8aa30faa80ed1b300a06082a8648ce3d04030330223120301e06035504030c17536967696c2050333834205465737420526f6f74204341301e170d3236303630343139303533375a170d3336303630313139303533375a30223120301e06035504030c17536967696c2050333834205465737420526f6f742043413076301006072a8648ce3d020106052b81040022036200042416473a014113093400b498a8edcc95652e0eb95a942424b036a89e2aa60e68040538f532b2964799a2c54c95167acf7d6e1f1bcc32253b7bf08a70b99360a0523f5646c327bb8a7cc0a5fbc7e99afc8e8ad1768bc46ab987a896987f6ef3fca3663064301d0603551d0e04160414d0f4bbf4b22ab82bf16774d78ed404bf1b8677e9301f0603551d23041830168014d0f4bbf4b22ab82bf16774d78ed404bf1b8677e930120603551d130101ff040830060101ff020101300e0603551d0f0101ff040403020106300a06082a8648ce3d0403030369003066023100c8f711376d5f3638373beb00fc791a996e58c65ee1daafe71ccfadaed8d270222f0fedd249d3a9d7146d4ff01be895e40231008a4b64acc617b56f1cdef4b6ef5948aec1a539e10b961f86e5286b2a57682bfdb0b50e3626f609aebd215fe501edd12d";
+    var P384LEAF_HEX = "308201c230820148a003020102021456337429790e1d4ded5e8d5b7094c6c82e8e1099300a06082a8648ce3d04030330223120301e06035504030c17536967696c2050333834205465737420526f6f74204341301e170d3236303630343139303533375a170d3237303630343139303533375a301f311d301b06035504030c14536967696c20503338342054657374204c6561663076301006072a8648ce3d020106052b8104002203620004aee2a49377abc2e59dfaa0abddffe90275dd7df607ed3aa0c68e8597ad0f19d3e30669dd78d0301cd608132db5d88e350b8f573e3ba182ecf50579c22c859238cd9beb431cc7268a9f86b6c7641c7fb14d5b28c4b4dbe4023fc42bf30090e444a3423040301d0603551d0e04160414d572dca5e15b6c59ed1f40789ce173b72c1425fa301f0603551d23041830168014d0f4bbf4b22ab82bf16774d78ed404bf1b8677e9300a06082a8648ce3d0403030368003065023100b685e14cc416526d6f4f04d3d6258ecd5212a935252a589ace54a842275fc223db83fd3eab8fc7d6d758e4458008724c023008f899436fb287ebde2e409072fa48a825645f568de9958b1e764d0f46c9aa67188d393b3e92b1004049d4d78057d202";
+    var p384ca = x509_cert_alloc();
+    var p384leaf = x509_cert_alloc();
+    assert_eq(x509_parse(hex_decode(P384CA_HEX, 988), 494, p384ca), 1, "P-384 CA parses");
+    assert_eq(x509_cert_curve(p384ca), X509_CURVE_P384, "P-384 CA curve = P-384");
+    assert_eq(x509_cert_is_ca(p384ca), 1, "P-384 CA basicConstraints CA:TRUE");
+    assert_eq(x509_parse(hex_decode(P384LEAF_HEX, 908), 454, p384leaf), 1, "P-384 leaf parses");
+    assert_eq(x509_cert_sig_algo(p384leaf), X509_SIG_ECDSA_SHA384, "leaf sig algo = ECDSA-SHA384");
+    assert_eq(x509_verify_chain(p384leaf, inters, 0, p384ca, 1782864000), 1,
+              "P-384 CA → P-384 leaf (SHA-384) chain verifies");
+    assert_eq(_x509_verify_link(p384leaf, p384ca), 1, "direct P-384 link verify");
+    # Tamper the leaf's last signature byte → reject.
+    var p384leaf_bad = x509_cert_alloc();
+    var bad_der = hex_decode(P384LEAF_HEX, 908);
+    store8(bad_der + 453, (load8(bad_der + 453) ^ 0x01) & 0xFF);
+    assert_eq(x509_parse(bad_der, 454, p384leaf_bad), 1, "tampered P-384 leaf parses");
+    assert_eq(_x509_verify_link(p384leaf_bad, p384ca), 0, "tampered P-384 signature rejected");
 
     return assert_summary();
 }

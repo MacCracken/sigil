@@ -22,10 +22,10 @@ Detail for each is in its section below.
 
 **Backlog — unscheduled**
 - [ ] Retire the per-thread bank-indexing workaround if cyrius gains native thread-local arrays
-- [ ] x509 P-384 chain-link verify (non-P256 issuers)
+- [x] x509 P-384 chain-link verify (non-P256 issuers) — **shipped 3.6.7** (`ecdsa-with-SHA384` issuers → `ecdsa_p384_verify`)
 - [x] x509 RSA chain-link verify — **shipped 3.6.5** (RSA-SHA256/384 issuers)
 - [ ] AES-GCM arbitrary-length IVs (non-96-bit, via GHASH) — *un-buried 3.6.5; was hidden in `src/aes_gcm.cyr` as "deferred to a follow-up"*
-- [ ] AES-128 seal keys (parameterise `SGX_SEAL_KEY_SIZE`) — *un-buried 3.6.5; was hidden in `src/seal.cyr` as "a future bite can parameterise"*
+- [x] AES-128 seal keys (parameterise `SGX_SEAL_KEY_SIZE`) — **shipped 3.6.7** (`sgx_derive_seal_key_n`, 16/32-byte width)
 - [ ] Reconcile the stale "`_into` lands in 3.6" comments in `src/sgx.cyr` / `src/tdx.cyr` with reality (the work is v3.7) — *un-buried 3.6.5; comment correction folds into the 3.7 `_into` cycle*
 - [ ] Scatter-store for the fixed-base comb (cache-timing)
 - [ ] CLMUL-assisted GHASH (gated on cyrius asm pseudo)
@@ -185,25 +185,16 @@ in-place when an adjacent edit touches the relevant module.
       need the `secret var` paths banked too — unsafe under the current
       scope-exit-zeroizes-all-lanes shape).
 
-- [ ] **x509 chain-link verify for non-ECDSA-P256 issuers.**
-      3.4.1 lets the leaf cert be P-384 but every issuer in a
-      verified chain must remain P-256 (chain-link signatures
-      are ECDSA-SHA256 only). Two follow-ups, both gated on a
-      downstream consumer ask:
-      - **P-384 chain-link verify**: extend
-        `_x509_verify_link` to dispatch on issuer curve. A
-        P-384 issuer would route to a P-384 sig algorithm
-        (likely a new `X509_SIG_ECDSA_SHA384` enum value);
-        the cert parser would accept ecdsa-with-SHA384 OID
-        (1.2.840.10045.4.3.3 → DER `06 08 2A 86 48 CE 3D 04
-        03 03`) and tag certs accordingly.
-      - **RSA chain-link verify**: now *unblocked* — sigil has
-        RSA PKCS#1 v1.5 verify (3.6.2). Wire `_x509_verify_link`
-        to dispatch RSA-with-SHA256/384 issuers (real AMD ARK/ASK
-        links are RSA-4096 + SHA-384) to `rsa_pkcs1v15_verify_*`
-        once the cert parser tags RSA SPKIs + sig algorithms.
-        Surfaces when a consumer integrates real AMD KDS chains
-        end-to-end via sigil.
+- [x] **x509 chain-link verify for non-ECDSA-P256 issuers.** Both
+      follow-ups are now shipped:
+      - **P-384 chain-link verify** — **shipped 3.6.7.**
+        `_x509_verify_link` dispatches `ecdsa-with-SHA384`
+        (`X509_SIG_ECDSA_SHA384`, OID `06 08 2A 86 48 CE 3D 04 03 03`)
+        to `ecdsa_p384_verify`; the sig-value parse selects field width
+        32/48 via `_ecdsa_der_int_w`.
+      - **RSA chain-link verify** — **shipped 3.6.5.**
+        `_x509_verify_link` dispatches RSA-with-SHA256/384 issuers to
+        `rsa_pkcs1v15_verify_*` (real AMD ARK/ASK are RSA-4096+SHA-384).
 
 - [ ] **AES-GCM arbitrary-length IVs.** `src/aes_gcm.cyr` implements
       only the 12-byte (96-bit) IV fast path; NIST SP 800-38D also
@@ -216,12 +207,11 @@ in-place when an adjacent edit touches the relevant module.
       GHASH-based J0 derivation in the `iv_len != 12` branch + KATs from
       SP 800-38D Appendix B.
 
-- [ ] **AES-128 seal keys.** `seal.cyr`'s `SGX_SEAL_KEY_SIZE` is
-      hardcoded to 32 (AES-256-GCM). *Surfaced 2026-06-04 (un-buried from
-      a `src/seal.cyr` comment: "A future bite that supports 16-byte
-      AES-128 keys can parameterise"; never roadmapped).* Parameterise
-      the key width so a consumer can seal an AES-128 key. Low priority —
-      sigil's own AEAD is AES-256; gate on a consumer ask.
+- [x] **AES-128 seal keys.** **Shipped 3.6.7.** `sgx_derive_seal_key_n`
+      / `sgx_seal_key_n` / `sgx_unseal_key_n` take a 16- or 32-byte width
+      (`SGX_SEAL_KEY_SIZE_128` / `_256`); the original 7-arg fns stay
+      byte-for-byte 256-bit wrappers. (Un-buried 3.6.5 from a `src/seal.cyr`
+      comment that read "a future bite can parameterise".)
 
 - [ ] **Reconcile the stale "`_into` lands in 3.6" comments.**
       `src/sgx.cyr` and `src/tdx.cyr` both carry "closes when the unified

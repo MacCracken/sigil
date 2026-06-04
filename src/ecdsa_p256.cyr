@@ -959,37 +959,43 @@ fn ecdsa_p256_verify(pk, msg, msg_len, sig): i64 {
 # on the left to 32 bytes for raw verify.
 # ================================================================
 
-# Decode one DER INTEGER starting at off into a 32-byte big-endian
-# destination buffer. Returns the next offset on success, or -1 on
-# any malformed input. `dst` must be 32 bytes; on success, contents
-# are big-endian r/s value zero-padded on the left.
-fn _ecdsa_der_int(src, off, src_len, dst): i64 {
+# Decode one DER INTEGER starting at off into a big-endian destination
+# of field width `fw` bytes (32 for P-256, 48 for P-384). Returns the
+# next offset on success, or -1 on any malformed input. `dst` must be
+# `fw` bytes; on success, contents are the big-endian r/s value
+# zero-padded on the left.
+fn _ecdsa_der_int_w(src, off, src_len, dst, fw): i64 {
     if (off + 2 > src_len) { return 0 - 1; }
     if ((load8(src + off) & 0xFF) != 0x02) { return 0 - 1; }
     var raw_len = load8(src + off + 1) & 0xFF;
-    if (raw_len > 33) { return 0 - 1; }      # too long for P-256
+    if (raw_len > fw + 1) { return 0 - 1; }      # too long for this field
     if (off + 2 + raw_len > src_len) { return 0 - 1; }
 
     var int_off = off + 2;
     var int_len = raw_len;
     # Strip a single leading 0x00 sign byte, if any. (DER requires it
     # when the next byte's high bit is set; we tolerate either.)
-    if (raw_len == 33) {
+    if (raw_len == fw + 1) {
         if ((load8(src + int_off) & 0xFF) != 0x00) { return 0 - 1; }
         int_off = int_off + 1;
         int_len = int_len - 1;
     }
-    if (int_len > 32) { return 0 - 1; }
+    if (int_len > fw) { return 0 - 1; }
 
-    # Left-pad with zeros into the 32-byte big-endian destination.
-    memset(dst, 0, 32);
-    var pad = 32 - int_len;
+    # Left-pad with zeros into the `fw`-byte big-endian destination.
+    memset(dst, 0, fw);
+    var pad = fw - int_len;
     var i = 0;
     while (i < int_len) {
         store8(dst + pad + i, load8(src + int_off + i) & 0xFF);
         i = i + 1;
     }
     return off + 2 + raw_len;   # consume the original encoded length
+}
+
+# P-256 (32-byte field) wrapper — preserves the original contract.
+fn _ecdsa_der_int(src, off, src_len, dst): i64 {
+    return _ecdsa_der_int_w(src, off, src_len, dst, 32);
 }
 
 fn ecdsa_p256_verify_der(pk, msg, msg_len, sig_der, sig_der_len): i64 {

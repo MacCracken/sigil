@@ -7,7 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-(none — tip is 3.6.6.)
+(none — tip is 3.6.7.)
+
+## [3.6.7] — 2026-06-04
+
+Two backlog items: **x509 P-384 chain-link verification** (P-384 EC
+issuers, `ecdsa-with-SHA384`) and **AES-128 seal keys** (a 16-byte
+option on the SGX seal KDF). Cut after a 29-agent adversarial review
+whose one real finding — a latent DER-strictness bug on the shared
+ECDSA signature-parse path (predating this release) — was fixed
+in-cycle, hardening both the P-256 and P-384 paths.
+
+### Added
+
+- **x509 P-384 chain-link verify** (`src/x509.cyr`) — `x509_parse` now
+  recognises the `ecdsa-with-SHA384` signature algorithm
+  (`X509_SIG_ECDSA_SHA384`), and `_x509_verify_link` dispatches a P-384
+  issuer to `ecdsa_p384_verify` (SHA-384 over the TBS, 96-byte raw
+  `r‖s`). The ECDSA signature-value parse now selects field width 32/48
+  by algorithm. ECDSA-P256 and RSA chain-link paths unchanged.
+- **AES-128 seal keys** (`src/seal.cyr`) — `sgx_derive_seal_key_n(...,
+  out_key_len)` and `sgx_seal_key_n`/`sgx_unseal_key_n` accept a 16- or
+  32-byte key width (`SGX_SEAL_KEY_SIZE_128` / `_256`). The original
+  7-arg `sgx_derive_seal_key`/`sgx_seal_key`/`sgx_unseal_key` are
+  unchanged 256-bit wrappers (byte-for-byte back-compatible).
+- **`_ecdsa_der_int_w`** (`src/ecdsa_p256.cyr`) — width-parameterized
+  DER-INTEGER decoder (32 = P-256, 48 = P-384); `_ecdsa_der_int` is now
+  a fw=32 wrapper.
+- **Tests** — `x509_p384.tcyr` +9 (real P-384 CA→leaf SHA-384 chain,
+  tamper reject, algo/curve-confusion regression); `seal.tcyr` +9
+  (AES-128 derive/seal/unseal, width validation, back-compat). Suite
+  **51 files / 1387 assertions**, 0 failures.
+
+### Fixed
+
+- **ECDSA cert DER strictness** (`src/x509.cyr`) — the ECDSA
+  signature-value parse reused the BIT STRING's next-position out-param
+  when walking the inner `SEQUENCE { r, s }`, so the trailing-data gate
+  validated the inner SEQUENCE end rather than the BIT STRING end. A
+  crafted cert could over-declare the signatureValue length and admit
+  stray bytes inside the accepted buffer (not a forgery — `r`/`s` are
+  still parsed from the genuine SEQUENCE and the signature verified). Now
+  the inner SEQUENCE is walked into a distinct out-param and asserted to
+  consume the whole BIT STRING content. Latent since the P-256 path
+  (pre-3.6.7); the fix closes both curves.
+
+### Security
+
+- 3.6.7 audit:
+  `docs/audit/2026-06-04-3.6.7-p384-chainlink-aes128-seal-audit.md`. 0
+  outstanding. The AES-128 seal note: a 16- and 32-byte key from the
+  same KDF context are HKDF-prefix-related (the length is not bound into
+  the frozen info layout); use a distinct `key_id` per (purpose, width)
+  if both are needed. Audit floor unchanged at 8 LOW.
 
 ## [3.6.6] — 2026-06-04
 

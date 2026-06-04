@@ -235,12 +235,67 @@ fn run_validation_tests(): i64 {
     return 0;
 }
 
+# AES-128 (16-byte) seal keys (3.6.7).
+fn run_aes128_tests(): i64 {
+    test_group("sgx_derive_seal_key_n — AES-128 (16-byte) keys");
+
+    var sealing_root = alloc(32);
+    var measurement  = alloc(32);
+    var i = 0;
+    while (i < 32) {
+        store8(sealing_root + i, 0x33 ^ i);
+        store8(measurement + i,  0x44 ^ i);
+        i = i + 1;
+    }
+
+    # Constants.
+    assert_eq(SGX_SEAL_KEY_SIZE_128, 16, "SGX_SEAL_KEY_SIZE_128 == 16");
+    assert_eq(SGX_SEAL_KEY_SIZE_256, 32, "SGX_SEAL_KEY_SIZE_256 == 32");
+
+    # 16-byte derive succeeds.
+    var k16 = alloc(16);
+    assert_eq(sgx_derive_seal_key_n(sealing_root, SGX_SEAL_POLICY_MRSIGNER,
+                measurement, 7, "kid", 3, k16, SGX_SEAL_KEY_SIZE_128), 1,
+        "AES-128 derive → 1");
+
+    # HKDF prefix property: the 16-byte key equals the first 16 bytes of
+    # the 32-byte key from identical inputs (documented in seal.cyr).
+    var k32 = alloc(32);
+    sgx_derive_seal_key_n(sealing_root, SGX_SEAL_POLICY_MRSIGNER,
+                measurement, 7, "kid", 3, k32, SGX_SEAL_KEY_SIZE_256);
+    assert_eq(keys_equal(k16, k32, 16), 1, "AES-128 key == first 16 bytes of AES-256 key");
+
+    # seal_key_n ↔ unseal_key_n symmetric at 128-bit.
+    var s16 = alloc(16);
+    var u16 = alloc(16);
+    sgx_seal_key_n(sealing_root, SGX_SEAL_POLICY_MRENCLAVE, measurement,
+                3, "tag", 3, s16, 16);
+    sgx_unseal_key_n(sealing_root, SGX_SEAL_POLICY_MRENCLAVE, measurement,
+                3, "tag", 3, u16, 16);
+    assert_eq(keys_equal(s16, u16, 16), 1, "AES-128 seal == unseal");
+
+    # Invalid key widths rejected (only 16 / 32 allowed).
+    var bad = alloc(32);
+    assert_eq(sgx_derive_seal_key_n(sealing_root, SGX_SEAL_POLICY_MRSIGNER,
+                measurement, 0, "x", 1, bad, 24), 0, "out_key_len=24 rejected");
+    assert_eq(sgx_derive_seal_key_n(sealing_root, SGX_SEAL_POLICY_MRSIGNER,
+                measurement, 0, "x", 1, bad, 0), 0, "out_key_len=0 rejected");
+
+    # The back-compat 7-arg wrapper still produces the 256-bit key.
+    var k32b = alloc(32);
+    assert_eq(sgx_derive_seal_key(sealing_root, SGX_SEAL_POLICY_MRSIGNER,
+                measurement, 7, "kid", 3, k32b), 1, "7-arg wrapper still works");
+    assert_eq(keys_equal(k32b, k32, 32), 1, "7-arg wrapper == _n(...,32)");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     run_reference_test();
     run_symmetry_test();
     run_divergence_tests();
     run_validation_tests();
+    run_aes128_tests();
     return assert_summary();
 }
 
