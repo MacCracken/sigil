@@ -8,11 +8,11 @@ see [CHANGELOG.md](../../CHANGELOG.md).
 Every open item, in one place, so nothing hides in a lower section.
 Detail for each is in its section below.
 
-**3.6.x — cyrius native-TLS tail**
+**3.6.x — cyrius native-TLS tail — CLOSED (3.6.8)**
 - [x] RSA-PSS (MGF1) verify + sign, SHA-256/384 — **shipped 3.6.5**
 - [x] Montgomery on the verify path + RSA verify/sign benches — **shipped 3.6.6** (verify 3.43×)
 - [x] `pem_decode_privkey` → RSAK struct wiring — **shipped 3.6.6**
-- [ ] cyrius-native-TLS closeout — **3.6.8** (Closeout Pass; 3.5.6 audit doc done 3.6.5)
+- [x] cyrius-native-TLS closeout — **shipped 3.6.8** (Closeout Pass; 3.5.6 audit doc done 3.6.5)
 
 **v3.7 — perf (gated on a latency complaint)**
 - [ ] Solinas reduction for P-256
@@ -26,7 +26,7 @@ Detail for each is in its section below.
 - [x] x509 RSA chain-link verify — **shipped 3.6.5** (RSA-SHA256/384 issuers)
 - [ ] AES-GCM arbitrary-length IVs (non-96-bit, via GHASH) — *un-buried 3.6.5; was hidden in `src/aes_gcm.cyr` as "deferred to a follow-up"*
 - [x] AES-128 seal keys (parameterise `SGX_SEAL_KEY_SIZE`) — **shipped 3.6.7** (`sgx_derive_seal_key_n`, 16/32-byte width)
-- [ ] Reconcile the stale "`_into` lands in 3.6" comments in `src/sgx.cyr` / `src/tdx.cyr` with reality (the work is v3.7) — *un-buried 3.6.5; comment correction folds into the 3.7 `_into` cycle*
+- [x] Reconcile the stale "`_into` lands in 3.6" comments in `src/sgx.cyr` / `src/tdx.cyr` — **fixed 3.6.8** (point at the gated v3.7 `_into` cycle); the stale `benches/sigil.bcyr` path in CLAUDE.md fixed too
 - [ ] Scatter-store for the fixed-base comb (cache-timing)
 - [ ] CLMUL-assisted GHASH (gated on cyrius asm pseudo)
 - [ ] NI dispatch structural fix (gated on cyrius asm pseudo)
@@ -50,21 +50,26 @@ by the v3.7 `_into` work. Zero CRITICAL / HIGH / MEDIUM outstanding.
   crypto: Poly1305 / ChaCha20 / ChaCha20-Poly1305 / X25519,
   HMAC-/HKDF-SHA384, AES-128-GCM, EC + Ed25519 private-key parsers,
   ECDSA P-256/P-384 deterministic signing.
-- **3.6.0–3.6.4** — parallel batch verify (dropped `_sigil_batch_mutex`
-  via per-thread crypto banks, 3.42×); TLS 1.2 PRF; the full RSA
-  PKCS#1 v1.5 surface (verify + DER/PEM key parsing + sign) on a new
-  general bignum/modexp engine, hardened with a constant-time
-  Montgomery ladder, base blinding, CRT, and verify-after-sign.
+- **3.6 — cyrius-native-TLS arc (CLOSED at 3.6.8)** — parallel batch
+  verify (dropped `_sigil_batch_mutex` via per-thread crypto banks,
+  3.42×); TLS 1.2 PRF; the full RSA PKCS#1 v1.5 surface (verify +
+  DER/PEM key parsing + sign) on a new general bignum/modexp engine,
+  hardened with a constant-time Montgomery ladder, base blinding, CRT,
+  and verify-after-sign; RSA-PSS; x509 RSA + P-384 chain-link verify;
+  Montgomery-on-verify (3.43×); `pem_decode_privkey`→RSAK; AES-128 seal
+  keys. Closed out at 3.6.8 (Closeout Pass + the overdue 3.5.6 audit
+  doc + un-burying three hidden deferrals).
 
 **Cyrius pin:** `6.0.58` (synced across `cyrius.cyml` and CI).
 
-## v3.6.x — cyrius native-TLS arc (in progress)
+## v3.6.x — cyrius native-TLS arc (CLOSED at 3.6.8)
 
-The cyrius native-TLS arc needs sigil-side crypto one slot at a time
+The cyrius native-TLS arc delivered sigil-side crypto one slot at a time
 ([`issues/2026-05-28-cyrius-tls-arc-full-audit.md`](issues/2026-05-28-cyrius-tls-arc-full-audit.md)).
-Shipped so far: parallel verify, the TLS 1.2 PRF, the complete RSA
-PKCS#1 v1.5 surface, and (3.6.5) RSA-PSS + x509 RSA chain-link verify
-(see CHANGELOG / `state.md`). Remaining items carry as **3.6.6+** tags.
+**All items shipped (3.6.0–3.6.8)**: parallel verify, TLS 1.2 PRF, the
+complete RSA PKCS#1 v1.5 + PSS surface, RSA + P-384 x509 chain-link,
+Montgomery-on-verify, `pem_decode_privkey`→RSAK, AES-128 seal. The
+per-item detail below is retained for history.
 
 ### 3.6.5+ — remaining items
 
@@ -213,8 +218,12 @@ in-place when an adjacent edit touches the relevant module.
       byte-for-byte 256-bit wrappers. (Un-buried 3.6.5 from a `src/seal.cyr`
       comment that read "a future bite can parameterise".)
 
-- [ ] **Reconcile the stale "`_into` lands in 3.6" comments.**
-      `src/sgx.cyr` and `src/tdx.cyr` both carry "closes when the unified
+- [x] **Reconcile the stale "`_into` lands in 3.6" comments.** **Fixed
+      3.6.8.** `src/sgx.cyr` and `src/tdx.cyr` now point at the gated v3.7
+      `_into` cycle (not "3.6"); the stale `benches/sigil.bcyr` path in
+      CLAUDE.md was corrected to `tests/bcyr/sigil.bcyr` in the same
+      closeout sweep. *(Original note retained below for history.)*
+      `src/sgx.cyr` and `src/tdx.cyr` both carried "closes when the unified
       `_into` API lands in 3.6" — but that work was moved to **v3.7**
       (see the perf cycle below). *Surfaced 2026-06-04; the comments were
       promising a version that shipped without the work.* Fix the comment

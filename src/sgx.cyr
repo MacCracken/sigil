@@ -413,8 +413,9 @@ fn sgx_quote_verify_with_pck(quote, pck_pk): i64 {
 # proportional to qe_cert_data_len, parses up to N certs (each
 # x509_cert_alloc + raw_sig alloc) and the root. For long-running
 # consumers (kavach attestation loop), per-call drift is ~5–8 KB.
-# Defer-to-3.6 carries the unified `_into` API that eliminates the
-# drift (matches the four 3.2.x LOW findings). Tracked in
+# The gated v3.7 `_into` API will eliminate the drift (matches the
+# 3.2.x/3.4 LOW findings; tracked in state.md "Audit floor", gated on
+# a latency forcing function per roadmap.md). Audit reference:
 # `docs/audit/2026-05-22-audit.md`.
 # ================================================================
 

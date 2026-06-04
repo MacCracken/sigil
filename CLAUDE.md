@@ -46,7 +46,7 @@ Sigil was scaffolded as a port from Rust v1.0.0 (original Rust source removed in
 ```bash
 cyrius build programs/smoke.cyr build/sigil          # full build (smoke probe)
 for t in tests/tcyr/*.tcyr; do cyrius test "$t"; done # full test suite
-cyrius bench benches/sigil.bcyr                       # benchmarks (where applicable)
+cyrius bench tests/bcyr/sigil.bcyr                    # benchmarks (where applicable)
 CYRIUS_DCE=1 cyrius build ...                         # DCE release build
 ```
 

@@ -396,8 +396,9 @@ fn tdx_quote_verify_with_pck(quote, pck_pk): i64 {
 # and TDX 1.5+ deployments traverse the same entry point.
 #
 # Same alloc-drift LOW as sgx_quote_verify_full carries here —
-# tracked in the same 2026-05-22 audit follow-up; closes when the
-# unified `_into` API lands in 3.6.
+# tracked in the same 2026-05-22 audit follow-up; closes with the
+# gated v3.7 unified `_into` API (gated on a latency forcing function
+# per roadmap.md).
 # ================================================================
 
 var TDX_VERIFY_FULL_MAX_CERTS = 4;

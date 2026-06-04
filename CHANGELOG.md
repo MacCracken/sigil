@@ -7,7 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-(none — tip is 3.6.7.)
+(none — tip is 3.6.8.)
+
+## [3.6.8] — 2026-06-04
+
+**cyrius-native-TLS arc closeout** — the last 3.6.x tag. A CLAUDE.md
+Closeout Pass over the whole 3.6.0–3.6.7 delta: full suite green,
+benchmark baseline re-captured (no regressions), dead-code audit (clean
+— `bn_modexp` is still a tested primitive after the Montgomery swap),
+security re-scan (clean), and a stale-comment/doc sweep. No functional
+code changes — comment/doc honesty fixes only.
+
+### Fixed
+
+- **Stale `_into`-API comments** (`src/sgx.cyr`, `src/tdx.cyr`) — both
+  claimed the unified `_into` API would land "in 3.6"; 3.6 is now
+  closing without it (it's the gated v3.7 cycle). Corrected to point at
+  v3.7 (gated on a latency forcing function), matching the roadmap +
+  state.md audit floor. Resolves the un-buried deferral surfaced in
+  3.6.5.
+- **Stale benchmark path in CLAUDE.md** — the Quick Start showed
+  `cyrius bench benches/sigil.bcyr`, but the harness lives at
+  `tests/bcyr/sigil.bcyr` (`benches/` holds only `history.csv`).
+  Corrected so the documented command runs.
+
+### Notes
+
+- **API-additive across 3.6.x**: every pre-3.6 public signature is
+  preserved — `pem_decode_privkey` / `sgx_derive_seal_key` /
+  `sgx_seal_key` / `sgx_unseal_key` kept their original arity (new `_n`
+  variants added alongside), and `rsa_pkcs1v15_verify/sign`,
+  `x509_verify_chain`, etc. are unchanged. The Montgomery-on-verify
+  switch is internal. Consumers adopt 3.6.x by bumping their sigil pin
+  with no source migration. (One nuance: `pem_decode_privkey` now
+  returns `RSAK_SIZE` for RSA when `key_max >= RSAK_SIZE`; callers using
+  the historical ≤48-byte scalar buffer still receive the sentinel.)
+- **Downstream check**: of the eight consumers, `ark` deps the local
+  sigil dist (`path=../sigil`) but does not build on this host (it pins
+  cyrius 5.1.10; its vendored `lib/agnosys` is incompatible with the
+  host cycc — a pre-existing ark-side toolchain-drift issue independent
+  of sigil); `kavach`/`phylax` pin older released tags (3.5.9 / 3.1.1);
+  the rest don't currently dep on sigil. The dist bundle self-compiles
+  clean (the regen-dist compile-check), and sigil's own 51-file suite is
+  green — the substantive guarantee given the API-additivity above.
+- 3.6.8 audit: `docs/audit/2026-06-04-3.6.8-closeout-audit.md`.
 
 ## [3.6.7] — 2026-06-04
 
