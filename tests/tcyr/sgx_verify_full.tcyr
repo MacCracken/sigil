@@ -152,6 +152,47 @@ fn main() {
     store8(quote_t + mre_off, (load8(quote_t + mre_off) & 0xFF) ^ 0x01);
     var q_t = sgx_quote_alloc();
     assert_eq(sgx_quote_parse(quote_t, QUOTE_LEN, q_t), 1, "tampered quote still parses");
+    # ============================================================
+    # Group N — _into (caller-scratch arena) no-drift path (3.7.3)
+    # ============================================================
+    test_group("sgx_quote_verify_full_into — arena, no drift");
+
+    var arena = arena_new(16384);
+    # First verify into the arena: same result as the bump path (1).
+    assert_eq(sgx_quote_verify_full_into(q, root_der, ROOT_DER_LEN, NOW_IN_WINDOW, arena), 1,
+              "_into verify matches bump path (valid)");
+    var used_after_one = arena_used(arena);
+    assert_eq(used_after_one > 0, 1, "_into consumed arena scratch");
+
+    # Loop with arena_reset between calls. Two independent drift
+    # witnesses: (a) arena_used returns to exactly the same value each
+    # iteration (arena reuse), and (b) the GLOBAL heap (alloc_used) does
+    # not grow across the whole loop — the decisive check, since
+    # arena_used alone cannot see a residual global-bump alloc. g0 is
+    # captured AFTER the first _into call so all init-once tables (OID /
+    # PEM / mdays) are already warm. The pre-3.7.3 path grew the global
+    # heap on every call.
+    var g0 = alloc_used();
+    var li = 0;
+    var drift = 0;
+    while (li < 50) {
+        arena_reset(arena);
+        if (sgx_quote_verify_full_into(q, root_der, ROOT_DER_LEN, NOW_IN_WINDOW, arena) != 1) { drift = drift + 1; }
+        if (arena_used(arena) != used_after_one) { drift = drift + 1; }
+        li = li + 1;
+    }
+    assert_eq(drift, 0, "50 reset+verify iterations: stable, bounded arena use");
+    assert_eq(alloc_used() - g0, 0, "no GLOBAL-heap drift across 50 _into iterations");
+
+    # A too-small arena fails closed (returns 0), no crash.
+    var tiny = arena_new(64);
+    assert_eq(sgx_quote_verify_full_into(q, root_der, ROOT_DER_LEN, NOW_IN_WINDOW, tiny), 0,
+              "exhausted arena fails closed");
+
+    # The bump wrapper still works (delegates to _into with arena=0).
+    assert_eq(sgx_quote_verify_full(q, root_der, ROOT_DER_LEN, NOW_IN_WINDOW), 1,
+              "bump wrapper still verifies");
+
     assert_eq(sgx_quote_verify_full(q_t, root_der, ROOT_DER_LEN, NOW_IN_WINDOW), 0,
               "tampered mr_enclave fails verify_full");
 

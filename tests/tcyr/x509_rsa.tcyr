@@ -127,6 +127,29 @@ fn main() {
     assert_eq(x509_verify_chain(l256, inters, 0, l256, NOW), 0,
         "issuer DN mismatch rejected (leaf as its own root)");
 
+    # ============================================================
+    test_group("x509_parse_into — RSA cert arena no-drift (3.7.3)");
+    # Parsing an RSA cert allocates the 544-byte RSA SPKI side block;
+    # via _into it must come from the arena, leaving the GLOBAL heap
+    # unchanged across a reset+parse loop. Warm-up parse first so the
+    # init-once OID/mdays tables are already allocated before g0.
+    var arena = arena_new(8192);
+    var wc = x509_cert_alloc_into(arena);
+    assert_eq(x509_parse_into(leaf256, 787, wc, arena), 1, "RSA leaf parses via _into");
+    assert_eq(x509_cert_curve(wc), X509_CURVE_RSA, "_into RSA leaf key type = RSA");
+    var g0 = alloc_used();
+    var li = 0;
+    var bad = 0;
+    while (li < 50) {
+        arena_reset(arena);
+        var c2 = x509_cert_alloc_into(arena);
+        if (c2 == 0) { bad = bad + 1; }
+        if (x509_parse_into(leaf256, 787, c2, arena) != 1) { bad = bad + 1; }
+        li = li + 1;
+    }
+    assert_eq(bad, 0, "50 RSA x509_parse_into iterations all succeed");
+    assert_eq(alloc_used() - g0, 0, "no GLOBAL-heap drift: RSA 544-byte block is arena-routed");
+
     return assert_summary();
 }
 

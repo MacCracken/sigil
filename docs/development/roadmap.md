@@ -17,9 +17,9 @@ Detail for each is in its section below.
 **v3.7 — perf (OPEN; un-gated 2026-06-04)**
 - [x] Solinas reduction for P-256 — **shipped 3.7.0** (verify 147→26 ms, 5.65×)
 - [x] Solinas reduction for P-384 — **shipped 3.7.1** (verify 339→55 ms, 6.21×)
-- [ ] Unified `_into`-shape API (closes the 8 open bump-allocator LOWs)
+- [x] Unified `_into`-shape API — **shipped 3.7.3** (caller-scratch arena; **audit floor 8 LOW → 0**: 4 drift findings resolved, 4 reclassified as correct init-once)
 - [ ] Re-run full crypto bench suite
-- [ ] **EC scalar-mult speedup** (fixed-base comb for G + wNAF for Q) — carries the **≤10 ms ecdsa_p256_verify** target that Solinas-reduction alone did not reach (26 ms); the scalar-mult, not the reduction, is now the dominant cost
+- [ ] **EC scalar-mult speedup** (fixed-base comb for G + wNAF for Q) — **next (3.7.4)**; carries the **≤10 ms ecdsa_p256_verify** target that Solinas-reduction alone did not reach (26 ms); the scalar-mult, not the reduction, is now the dominant cost
 
 **Backlog — unscheduled**
 - [ ] Retire the per-thread bank-indexing workaround if cyrius gains native thread-local arrays
@@ -36,9 +36,10 @@ Detail for each is in its section below.
 - [ ] ML-KEM-768 (PQC KEM)
 - [ ] PQC-default builds (drop `-D SIGIL_PQC` when the preprocessor cap lifts)
 
-**Open audit findings** — 8 LOW (bump-allocator lifetime; +1 from the
-3.6.5 RSA SPKI side block), tracked in `state.md` "Audit floor," cleared
-by the v3.7 `_into` work. Zero CRITICAL / HIGH / MEDIUM outstanding.
+**Open audit findings** — **NONE.** The audit floor was **cleared at
+3.7.3**: 4 genuine per-call-drift LOWs resolved via the `_into`
+caller-scratch API, 4 reclassified as correct init-once singletons. Zero
+findings of any severity outstanding (see `state.md` "Audit floor").
 
 ## Closed cycles
 
@@ -125,9 +126,8 @@ The 3.2.x verify paths are correct but slow:
   `_p384_long_div_reduce`. Solinas word-level reduction
   drops the cost 20–50×.
 
-3.7 closes the bump-allocator-lifetime LOW findings (now eight
-across the 3.2.x, 3.4, and 3.6.5 cycles) and lands Solinas reduction for
-both curves. (The general bignum modexp from 3.6 could also gain
+3.7 **closed** the bump-allocator-lifetime LOW findings (3.7.3, audit
+floor 8 → 0) and landed Solinas reduction for both curves (3.7.0/3.7.1). (The general bignum modexp from 3.6 could also gain
 Barrett/Montgomery here — cross-reference the 3.6.5+ RSA bench item.)
 
 ### 3.7 work items
@@ -167,19 +167,19 @@ Barrett/Montgomery here — cross-reference the 3.6.5+ RSA bench item.)
       shuffles) but the structure is identical. CSV row
       `v3.7-p384-solinas`.
 
-- [ ] **Unified `_into`-shape API.** Eliminate per-call
-      `alloc` in `x509_parse`, `_snp_v_init`, `_sgxv_init`,
-      `_tdxv_init`, `_pem_init`, and the
-      `sgx_quote_verify_full` / `tdx_quote_verify_full`
-      orchestrators. Two patterns to choose between:
-      caller-provides-scratch (matches 3.2.0's
-      `sv_verify_artifact_into` and 3.4's
-      `pem_decode_certs_into`) or library-owns-pool. The
-      former is cleaner for long-running consumers (kavach);
-      the latter is simpler for one-shot use. Audit doc
-      to pick the shape with input from kavach's actual call
-      patterns. Closes seven LOWs across the 3.2.2, 3.2.4, 3.4.0,
-      and 3.4.1 cycles.
+- [x] **Unified `_into`-shape API.** **Shipped 3.7.3** —
+      caller-provides-scratch (the chosen shape, matching the
+      `sv_verify_artifact_into` / `pem_decode_certs_into` precedent).
+      Added `x509_parse_into` / `x509_cert_alloc_into` +
+      `sgx`/`tdx`/`snp` `*_verify_full_into`, drawing per-call scratch
+      from a stdlib arena (`arena_new` / `arena_reset`). The original
+      entries are byte-for-byte `arena==0` wrappers.
+      **Investigation finding:** only 4 of the 8 floor LOWs were genuine
+      per-call drift (`x509_parse` raw_sig + RSA block; the SGX/TDX/SNP
+      orchestrator drift) — resolved here. The other 4 (`_snp_v_init`,
+      `_sgxv_init`, `_tdxv_init`, `_pem_init` tables) are correct
+      init-once singletons (CLAUDE.md quirk #2), reclassified, not
+      churned. **Audit floor: 8 → 0.**
 
 - [ ] **Re-run the full crypto bench suite.** Capture before /
       after rows for every verify-path bench. The ≤ 10 ms /

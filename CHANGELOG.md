@@ -7,7 +7,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-(none — tip is 3.7.2.)
+(none — tip is 3.7.3.)
+
+## [3.7.3] — 2026-06-04
+
+The v3.7 audit-floor closer: a **caller-scratch `_into` API** for the
+TEE attestation + x509 verify paths, plus an honest reclassification of
+the eight outstanding LOW findings. **Audit floor: 8 → 0.**
+
+### Added
+
+- **`_into` (caller-provided arena) variants** so a long-running
+  consumer (e.g. kavach's attestation loop) reuses one scratch buffer
+  across verifications instead of drifting the global bump heap:
+  - `x509_parse_into` / `x509_cert_alloc_into` (`src/x509.cyr`) — the
+    per-call cert struct, ECDSA `raw_sig`, and RSA SPKI side block draw
+    from the caller's arena.
+  - `sgx_quote_verify_full_into` (`src/sgx.cyr`),
+    `tdx_quote_verify_full_into` (`src/tdx.cyr`),
+    `snp_report_verify_full_into` (`src/sev_snp.cyr`) — thread the arena
+    through `pem_decode_certs_into` + the x509 `_into` parsers.
+  - Arenas use the stdlib allocator (`lib/alloc.cyr`:
+    `arena_new` / `arena_alloc` / `arena_reset`); the `_x509_scratch`
+    shim falls back to the global bump heap when `arena == 0`.
+  - The original entries (`x509_parse`, `x509_cert_alloc`,
+    `sgx`/`tdx`/`snp` `*_verify_full`) are unchanged `arena == 0`
+    wrappers — **byte-for-byte behavior preserved, API-additive**.
+- **Tests (+14)** — arena no-drift tests with a **global-heap witness**
+  (`alloc_used()` delta == 0 across 50 `arena_reset`+verify/parse
+  iterations, the decisive check `arena_used` alone can't make):
+  `sgx_verify_full.tcyr` +6 (orchestrator `*_into` path),
+  `x509_rsa.tcyr` +4 (RSA 544-byte block arena-routing), and
+  `x509_p384.tcyr` +4 (P-384 raw_sig arena-routing) — empirically
+  proving no residual global-bump alloc on the `_into` path. Plus
+  exhausted-arena-fails-closed and bump-wrapper checks. Suite **52
+  files / 1431 assertions**, 0 failures.
+
+### Fixed
+
+- **Audit floor cleared (8 LOW → 0):**
+  - **4 genuine per-call-drift findings resolved** — the x509 `raw_sig`
+    (3.2.2), the RSA SPKI block (3.6.5), and the SGX/TDX/SEV-SNP
+    orchestrator drift (3.4.0, 3.4.1) now have a drift-free `_into`
+    path. The one-shot bump wrappers remain (documented as suitable for
+    one-shot use).
+  - **4 reclassified as correct, not drift** — `_sgxv_init` (3.2.3),
+    `_tdxv_init` (3.2.5), `_snp_v_init` (3.2.4), and `_pem_init`'s
+    tables (3.4.0 LOW-2) are **init-once-guarded singletons**, exactly
+    the "alloc() for init-once tables" pattern CLAUDE.md endorses — they
+    were over-conservatively flagged and never actually drifted.
+
+### Security
+
+- 3.7.3 audit: `docs/audit/2026-06-04-3.7.3-into-api-audit.md`. The
+  `_into` path is verified to contain **no residual global-bump
+  `alloc()`** (every per-call allocation is arena-routed); the `arena ==
+  0` wrappers are byte-for-byte identical to the prior behavior. **Zero
+  outstanding findings of any severity** — the audit floor is empty for
+  the first time since the 3.2.x TEE arc.
 
 ## [3.7.2] — 2026-06-04
 

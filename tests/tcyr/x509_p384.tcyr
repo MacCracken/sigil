@@ -153,6 +153,30 @@ fn main() {
     assert_eq(x509_parse(bad_der, 454, p384leaf_bad), 1, "tampered P-384 leaf parses");
     assert_eq(_x509_verify_link(p384leaf_bad, p384ca), 0, "tampered P-384 signature rejected");
 
+    # ============================================================
+    # Group 6 — x509_parse_into P-384 arena no-drift (3.7.3)
+    # ============================================================
+    # An ECDSA-SHA384 cert allocates a 96-byte raw_sig (r||s); via _into
+    # it must come from the arena, leaving the GLOBAL heap unchanged
+    # across a reset+parse loop. Warm-up parse first (init-once tables).
+    var p384_der = hex_decode(P384LEAF_HEX, 908);
+    var arena = arena_new(8192);
+    var wc = x509_cert_alloc_into(arena);
+    assert_eq(x509_parse_into(p384_der, 454, wc, arena), 1, "P-384 leaf parses via _into");
+    assert_eq(x509_cert_sig_algo(wc), X509_SIG_ECDSA_SHA384, "_into P-384 leaf sig algo");
+    var g0 = alloc_used();
+    var li = 0;
+    var bad = 0;
+    while (li < 50) {
+        arena_reset(arena);
+        var c2 = x509_cert_alloc_into(arena);
+        if (c2 == 0) { bad = bad + 1; }
+        if (x509_parse_into(p384_der, 454, c2, arena) != 1) { bad = bad + 1; }
+        li = li + 1;
+    }
+    assert_eq(bad, 0, "50 P-384 x509_parse_into iterations all succeed");
+    assert_eq(alloc_used() - g0, 0, "no GLOBAL-heap drift: P-384 raw_sig is arena-routed");
+
     return assert_summary();
 }
 

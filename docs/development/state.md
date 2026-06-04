@@ -12,31 +12,32 @@
 
 | Field | Value |
 |---|---|
-| Current version | **3.7.2** (`VERSION`) |
+| Current version | **3.7.3** (`VERSION`) |
 | Cyrius toolchain pin | **6.0.62** (`cyrius.cyml [package].cyrius`) |
 | Dependencies | agnosys **1.3.2**, sakshi **2.2.6** |
 | Last release date | 2026-06-04 |
-| Last release audit | [`2026-06-04-3.7.2-gcm-arbitrary-iv-audit.md`](../audit/2026-06-04-3.7.2-gcm-arbitrary-iv-audit.md) |
-| Phase | Released. **3.7.2 added AES-GCM arbitrary-length IVs** (NIST SP 800-38D §7.1 GHASH-based J0; new `aes_gcm_encrypt_iv`/`_decrypt_iv` + AES-128 variants taking `iv_len`; the 8-arg entries stay byte-for-byte 12-byte wrappers) — a backlog-cleanup item folded into the v3.7 arc (un-buried 3.6.5). Interop-verified vs OpenSSL at 60/8/1-byte IVs (the 60-byte cases = McGrew-Viega TC6/TC18). Pin 6.0.61 → 6.0.62. **Remaining v3.7:** EC scalar-mult speedup (carries ≤ 10 ms), unified `_into` API (clears the 8-LOW audit floor), full bench re-run. The other backlog items (bank-retire / CLMUL-GHASH / NI-dispatch) stay blocked on cyrius features absent in 6.0.62. |
+| Last release audit | [`2026-06-04-3.7.3-into-api-audit.md`](../audit/2026-06-04-3.7.3-into-api-audit.md) |
+| Phase | Released. **3.7.3 added the caller-scratch `_into` API and cleared the audit floor (8 LOW → 0).** New `x509_parse_into` / `x509_cert_alloc_into` + `sgx`/`tdx`/`snp` `*_verify_full_into` draw all per-call scratch from a caller arena (stdlib `arena_new`; `arena_reset` between verifications) — drift-free for a looping consumer; the original entries stay byte-for-byte `arena==0` wrappers. Of the 8 audit-floor LOWs: 4 genuine per-call-drift findings (x509 raw_sig, RSA block, SGX/TDX/SNP orchestrator drift) are **resolved** via the `_into` path; 4 (`_sgxv_init`/`_tdxv_init`/`_snp_v_init`/`_pem_init` tables) are **reclassified as correct** init-once singletons (never drifted). **Remaining v3.7:** EC scalar-mult speedup (carries ≤ 10 ms) + full bench re-run. |
 
 ## Test surface
 
 | Metric | Value |
 |---|---|
 | `.tcyr` test files | 52 |
-| Total assertions | **1417**, 0 failures |
+| Total assertions | **1431**, 0 failures |
 | Benchmark suite | `benches/` — `history.csv`; RSA via `tests/bcyr/rsa.bcyr`, P-256/P-384 verify via `tests/bcyr/ecdsa_p256.bcyr` / `ecdsa_p384.bcyr` |
 
-> Counting note: the 3 `*_verify_full.tcyr` tests (sgx 11 + tdx 16 +
-> snp 11 = 38) emit their `N passed` summary in a tty-sensitive way that
+> Counting note: the 3 `*_verify_full.tcyr` tests (sgx 17 + tdx 16 +
+> snp 11 = 44) emit their `N passed` summary in a tty-sensitive way that
 > is dropped under any pipe or file redirect, so a scripted `grep`-sum of
-> `cyrius test` output yields **1379** across the other 49 files and
-> silently omits those 38. Add them back for the true total: **1417**.
+> `cyrius test` output yields **1387** across the other 49 files and
+> silently omits those 44. Add them back for the true total: **1431**.
 > (Each verify_full still prints its summary on an interactive run; it's
 > only the redirected/scripted sum that loses them.)
 
 Per-cycle assertion delta:
 
+- 3.7.3 ship: +14 (`_into` arena no-drift tests with a **global-heap witness** (`alloc_used()` delta == 0 across 50 reset+parse iterations): `sgx_verify_full.tcyr` +6 (orchestrator path), `x509_rsa.tcyr` +4 (RSA 544-byte block arena-routing), `x509_p384.tcyr` +4 (P-384 raw_sig arena-routing); proves no residual global-bump alloc)
 - 3.7.2 ship: +24 (`aes_gcm_iv.tcyr` +24, new — AES-256/128 GCM arbitrary-IV KATs vs OpenSSL at 60/8/1-byte IVs (60-byte = McGrew-Viega TC6/TC18), decrypt roundtrips, tamper reject, 12-byte consistency, iv_len validation)
 - 3.7.1 ship: +3 (`ecdsa_p384.tcyr` +3 — Solinas-vs-long-div differential KAT over 64 SHA-384-seeded random 768-bit inputs + 2^768−1 / high-half-all-ones edges)
 - 3.7.0 ship: +3 (`ecdsa_p256.tcyr` +3 — Solinas-vs-long-div differential KAT over 64 SHA-256-seeded random 512-bit inputs + 2^512−1 / high-half-all-ones edges)
@@ -81,6 +82,7 @@ Consumers that link or rely on sigil for trust verification:
 
 | Version | Date | Headline |
 |---|---|---|
+| 3.7.3 | 2026-06-04 | **Caller-scratch `_into` API — audit floor cleared (8 LOW → 0).** `x509_parse_into`/`x509_cert_alloc_into` + `sgx`/`tdx`/`snp` `*_verify_full_into` draw per-call scratch from a caller arena (stdlib `arena_new`; `arena_reset` between calls) — drift-free for a looping consumer; the original entries are byte-for-byte `arena==0` wrappers. 4 genuine-drift LOWs resolved via `_into`; 4 init-once LOWs reclassified as correct. +14 assertions (50× no-drift loops with `alloc_used()` global-heap witness across the orchestrator + RSA + P-384 paths). Audit: `docs/audit/2026-06-04-3.7.3-into-api-audit.md`. |
 | 3.7.2 | 2026-06-04 | **AES-GCM arbitrary-length IVs** (backlog cleanup in the v3.7 arc). `_gcm_compute_j0` adds the NIST SP 800-38D §7.1 GHASH-based J0 for non-96-bit IVs; new `aes_gcm_encrypt_iv`/`_decrypt_iv` + AES-128 variants take `iv_len`; the 8-arg entries stay byte-for-byte 12-byte wrappers. Interop-verified vs OpenSSL (AES-256/128 at 60/8/1-byte IVs; 60-byte = McGrew-Viega TC6/TC18). +24 assertions (new `aes_gcm_iv.tcyr`). Pin 6.0.61→6.0.62. Audit: `docs/audit/2026-06-04-3.7.2-gcm-arbitrary-iv-audit.md`. |
 | 3.7.1 | 2026-06-04 | **Solinas reduction for P-384.** `_p384_solinas_reduce` (FIPS 186-4 App. D, `p384 = 2^384−2^128−2^96+2^32−1`), the mirror of the 3.7.0 P-256 work; the 11-term layout was derived from the prime's folding relation + verified 5000/5000 vs `x mod p`. **`ecdsa_p384_verify` 339.2 → 54.6 ms (6.21×)** (`history.csv` row `v3.7.1-p384-solinas`, new `tests/bcyr/ecdsa_p384.bcyr`), transitively speeding the SEV-SNP P-384 chain. +3 assertions (differential KAT). Audit: `docs/audit/2026-06-04-3.7.1-p384-solinas-audit.md`. |
 | 3.7.0 | 2026-06-04 | **Opens v3.7 perf — Solinas reduction for P-256.** `_p256_solinas_reduce` (FIPS 186-4 App. D) replaces the bit-by-bit long division on the field reduction (`_p256_reduce_longdiv` retained as the differential-KAT reference). **`ecdsa_p256_verify` 147.5 → 26.1 ms (5.65×)** on 6.0.61 (`history.csv` row `v3.7.0-p256-solinas`), transitively speeding all P-256 chain verifies. The ≤ 10 ms target needs the (carried-forward) EC scalar-mult speedup — reduction alone reached 26 ms. Pin 6.0.58→6.0.61. +3 assertions. Audit: `docs/audit/2026-06-04-3.7.0-p256-solinas-audit.md`. |
@@ -121,17 +123,16 @@ list).
 
 | Slot | State | Notes |
 |---|---|---|
-| 3.7.x — EC scalar-mult speedup | pending | Fixed-base comb for `G` + wNAF for `Q`; **carries the ≤ 10 ms `ecdsa_p256_verify` target** (Solinas reduction alone reached 26 ms P-256 / 55 ms P-384). |
-| 3.7.x — unified `_into` API | pending | Eliminate per-call bump `alloc` in `x509_parse` / `_snp_v_init` / `_sgxv_init` / `_tdxv_init` / `_pem_init` / `sgx`+`tdx_quote_verify_full` (+ the 3.6.5 RSA SPKI block). Closes all 8 audit-floor LOWs. Needs the caller-scratch-vs-pool API-shape decision. |
+| 3.7.4 — EC scalar-mult speedup | pending (next) | Fixed-base comb for `G` + wNAF for `Q`; **carries the ≤ 10 ms `ecdsa_p256_verify` target** (Solinas reduction alone reached 26 ms P-256 / 55 ms P-384). |
 | 3.7.x — full crypto bench re-run | pending | Capture before/after rows for every verify-path bench at the cycle close. |
 
 The 3.6.x cyrius-native-TLS arc is **closed** (3.6.0–3.6.8). The **v3.7
-perf cycle is OPEN**: Solinas P-256 (3.7.0) + Solinas P-384 (3.7.1)
-shipped; remaining items above sequence as 3.7.x tags. The user also
-asked to fold ungated backlog items into 3.7.x — **AES-GCM
-arbitrary-length IVs** is the one ready candidate (the bank-retire /
-CLMUL-GHASH / NI-dispatch items remain blocked on cyrius features absent
-in 6.0.61); decision pending at the 3.7.1 handoff.
+perf cycle is OPEN**: Solinas P-256 (3.7.0), Solinas P-384 (3.7.1),
+AES-GCM arbitrary IVs (3.7.2), and the caller-scratch `_into` API +
+audit-floor clear (3.7.3) shipped. **Next: 3.7.4 = EC scalar-mult
+speedup.** Backlog: the one ungated item (AES-GCM IVs) is done; the
+bank-retire / CLMUL-GHASH / NI-dispatch items remain blocked on cyrius
+features absent in 6.0.62.
 
 When a cycle is opened, list each work-item bite here as it
 moves through `pending → in_progress → completed`. The release
@@ -146,20 +147,28 @@ CI fleet, list the hosts here.
 
 ## Audit floor
 
-Eight open LOW findings of the same shape (bump-allocator
-lifetime across per-call init paths) carry forward to the v3.7
-unified `_into` API cycle:
+**EMPTY — cleared at 3.7.3.** Zero findings of any severity outstanding
+(first time since the 3.2.x TEE arc). The eight prior LOWs (all
+bump-allocator-lifetime shape) were resolved as follows:
 
-- 3.2.2 LOW-1: `x509_parse` raw_sig alloc (+ 3.6.5: the RSA SPKI 544-byte
-  side block joins this path — same per-parse bump-`alloc` shape)
-- 3.2.4 LOW-1: `_snp_v_init` alloc
-- 3.4.0 LOW-1: `sgx_quote_verify_full` / `tdx_quote_verify_full` drift
-- 3.4.0 LOW-2: `_pem_init` lookup-table alloc
-- 3.4.1 LOW-1: `snp_report_verify_full` drift
-- 3.6.5 LOW-1: `x509_parse` RSA pubkey side block alloc
-- (and the two from `_sgxv_init` / `_tdxv_init` audited at 3.2.3 / 3.2.5)
+**Resolved via the `_into` caller-scratch API (3.7.3)** — genuine
+per-call drift, now with a drift-free path (the one-shot bump wrappers
+remain, documented as one-shot-suitable):
 
-Zero CRITICAL / HIGH / MEDIUM findings outstanding.
+- 3.2.2 LOW-1: `x509_parse` raw_sig alloc → `x509_parse_into`
+- 3.6.5 LOW-1: `x509_parse` RSA pubkey side block → `x509_parse_into`
+- 3.4.0 LOW-1: `sgx`/`tdx_quote_verify_full` drift → `*_verify_full_into`
+- 3.4.1 LOW-1: `snp_report_verify_full` drift → `snp_report_verify_full_into`
+
+**Reclassified as correct (3.7.3)** — init-once-guarded singletons, the
+`alloc()`-for-init-once-tables pattern CLAUDE.md endorses (quirk #2);
+they were over-conservatively flagged and never drifted:
+
+- 3.2.4 LOW-1: `_snp_v_init` (init-once, guarded)
+- 3.4.0 LOW-2: `_pem_init` lookup tables (init-once, guarded)
+- 3.2.3 / 3.2.5: `_sgxv_init` / `_tdxv_init` (init-once, guarded)
+
+Zero CRITICAL / HIGH / MEDIUM / LOW findings outstanding.
 
 ## Open architectural blockers
 

@@ -279,8 +279,19 @@ fn _snp_cert_is_self_issued(c): i64 {
     return _x509_dn_eq(buf, iss_off, iss_len, buf, sub_off, sub_len);
 }
 
+# snp_report_verify_full — one-shot wrapper (global bump scratch).
 fn snp_report_verify_full(report, vcek_chain_pem, vcek_chain_pem_len,
                             ark_root_der, ark_root_der_len, now_unix): i64 {
+    return snp_report_verify_full_into(report, vcek_chain_pem, vcek_chain_pem_len,
+                            ark_root_der, ark_root_der_len, now_unix, 0);
+}
+
+# snp_report_verify_full_into — drift-free variant: all per-call scratch
+# (VCEK chain DER pool + parsed cert structs + their P-384 sig blocks)
+# is drawn from the caller's `arena` (stdlib handle; `arena == 0` ⇒
+# global bump). Returns 1 on full success, 0 otherwise. 3.7.3.
+fn snp_report_verify_full_into(report, vcek_chain_pem, vcek_chain_pem_len,
+                            ark_root_der, ark_root_der_len, now_unix, arena): i64 {
     # Cert chain must be non-empty.
     if (vcek_chain_pem_len <= 0) { return 0; }
     if (ark_root_der_len <= 0) { return 0; }
@@ -295,23 +306,27 @@ fn snp_report_verify_full(report, vcek_chain_pem, vcek_chain_pem_len,
 
     var chain[64];
     memset(&chain, 0, 64);
-    var n = pem_decode_certs(vcek_chain_pem, vcek_chain_pem_len,
-                              &chain, SNP_VERIFY_FULL_MAX_CERTS);
+    var der_pool = _x509_scratch(arena, vcek_chain_pem_len);
+    if (der_pool == 0) { return 0; }
+    var n = pem_decode_certs_into(vcek_chain_pem, vcek_chain_pem_len,
+                              &chain, SNP_VERIFY_FULL_MAX_CERTS, der_pool, vcek_chain_pem_len);
     if (n < 1) { return 0; }
 
     var parsed[4];
     var i = 0;
     while (i < n) {
-        var c = x509_cert_alloc();
+        var c = x509_cert_alloc_into(arena);
+        if (c == 0) { return 0; }
         var ptr = load64(&chain + i * 16);
         var len = load64(&chain + i * 16 + 8);
-        if (x509_parse(ptr, len, c) != 1) { return 0; }
+        if (x509_parse_into(ptr, len, c, arena) != 1) { return 0; }
         store64(&parsed + i * 8, c);
         i = i + 1;
     }
 
-    var root = x509_cert_alloc();
-    if (x509_parse(ark_root_der, ark_root_der_len, root) != 1) { return 0; }
+    var root = x509_cert_alloc_into(arena);
+    if (root == 0) { return 0; }
+    if (x509_parse_into(ark_root_der, ark_root_der_len, root, arena) != 1) { return 0; }
 
     # Leaf at chain[0]; drop self-issued top (embedded ARK copy).
     var leaf = load64(&parsed + 0);
