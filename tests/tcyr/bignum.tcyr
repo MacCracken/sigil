@@ -1,0 +1,125 @@
+# bignum.tcyr -- general big-integer modexp engine (src/bignum.cyr).
+#
+# modexp known-answer vectors, all cross-checked against Python
+# `pow(base, exp, mod)`:
+#   * textbook 4^13 mod 497 = 445 (1-limb)
+#   * a 256-bit modexp with e = 65537 (4-limb)
+#   * a 2048-bit modexp with e = 65537 (32-limb) -- real RSA-2048 size
+# Plus serialization round-trip (bn_from_be -> bn_to_be) and the
+# base^0 = 1 / 0^e = 0 edge cases.
+
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/string.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fmt.cyr"
+include "lib/json.cyr"
+include "lib/sakshi.cyr"
+include "lib/chrono.cyr"
+include "lib/bigint.cyr"
+include "lib/ct.cyr"
+
+include "src/types.cyr"
+include "src/error.cyr"
+include "src/hex.cyr"
+include "src/bignum.cyr"
+
+fn main() {
+    alloc_init();
+
+    # ============================================================
+    # Serialization round-trip
+    # ============================================================
+    test_group("bignum serialize");
+
+    var rt_in = hex_decode("0123456789abcdef00ff00ff00ff00ff", 32);  # 16 bytes
+    var rt_bn[64];
+    bn_from_be(&rt_bn, 4, rt_in, 16);
+    var rt_out[16];
+    bn_to_be(&rt_out, 16, &rt_bn, 4);
+    assert_streq(hex_encode(&rt_out, 16), "0123456789abcdef00ff00ff00ff00ff",
+        "from_be/to_be round-trip");
+
+    # ============================================================
+    # modexp: textbook 4^13 mod 497 = 445   (1 limb)
+    # ============================================================
+    test_group("bignum modexp small");
+
+    var sm_base = hex_decode("04", 2);       # 4
+    var sm_mod  = hex_decode("01f1", 4);     # 497
+    var sm_exp  = hex_decode("0d", 2);       # 13
+    var sm_b[8]; var sm_m[8]; var sm_o[8];
+    bn_from_be(&sm_b, 1, sm_base, 1);
+    bn_from_be(&sm_m, 1, sm_mod, 2);
+    bn_modexp(&sm_o, &sm_b, sm_exp, 1, &sm_m, 1);
+    var sm_out[2];
+    bn_to_be(&sm_out, 2, &sm_o, 1);
+    assert_streq(hex_encode(&sm_out, 2), "01bd", "4^13 mod 497 == 445");
+
+    # ============================================================
+    # modexp: 256-bit, e = 65537   (4 limbs)
+    # ============================================================
+    test_group("bignum modexp 256-bit");
+
+    var e3 = hex_decode("010001", 6);        # 65537
+    var n256 = hex_decode("c0ffee1234567890abcdef00112233445566778899aabbccddeeff0102030405", 64);
+    var b256 = hex_decode("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", 64);
+    var n256bn[64]; var b256bn[64]; var o256bn[64];
+    bn_from_be(&n256bn, 4, n256, 32);
+    bn_from_be(&b256bn, 4, b256, 32);
+    bn_modexp(&o256bn, &b256bn, e3, 3, &n256bn, 4);
+    var o256[32];
+    bn_to_be(&o256, 32, &o256bn, 4);
+    assert_streq(hex_encode(&o256, 32),
+        "9265279ef2e78bb2e7532b18a5f2a3bf4520c430fafb0fa99d92a426c4ea9712",
+        "256-bit s^65537 mod n");
+
+    # ============================================================
+    # modexp: 2048-bit, e = 65537   (32 limbs) -- RSA-2048 size
+    # ============================================================
+    test_group("bignum modexp 2048-bit");
+
+    var n2048 = hex_decode("cfe4c44b680d7e805ac46a6a87b6e00abe9c5de0196f7d0e08fbbe62f214d8fb30227e5dab4136589928aa8e6984a475ae9510e91551b5ea39b0075ab3a1c6d6cfe4c44b680d7e805ac46a6a87b6e00abe9c5de0196f7d0e08fbbe62f214d8fb30227e5dab4136589928aa8e6984a475ae9510e91551b5ea39b0075ab3a1c6d6cfe4c44b680d7e805ac46a6a87b6e00abe9c5de0196f7d0e08fbbe62f214d8fb30227e5dab4136589928aa8e6984a475ae9510e91551b5ea39b0075ab3a1c6d6cfe4c44b680d7e805ac46a6a87b6e00abe9c5de0196f7d0e08fbbe62f214d8fb30227e5dab4136589928aa8e6984a475ae9510e91551b5ea39b0075ab3a1c6d7", 512);
+    var b2048 = hex_decode("7f2acef0705a67a6a77d7270f8d66a771c67d8af19dd8a7c0fb28c7813fc09345a6ac6122caf5174537d87afc34ce103f79565dc251ed3a48e2b188d697928247f2acef0705a67a6a77d7270f8d66a771c67d8af19dd8a7c0fb28c7813fc09345a6ac6122caf5174537d87afc34ce103f79565dc251ed3a48e2b188d697928247f2acef0705a67a6a77d7270f8d66a771c67d8af19dd8a7c0fb28c7813fc09345a6ac6122caf5174537d87afc34ce103f79565dc251ed3a48e2b188d697928247f2acef0705a67a6a77d7270f8d66a771c67d8af19dd8a7c0fb28c7813fc09345a6ac6122caf5174537d87afc34ce103f79565dc251ed3a48e2b188d69792824", 512);
+    var n2bn[256]; var b2bn[256]; var o2bn[256];
+    bn_from_be(&n2bn, 32, n2048, 256);
+    bn_from_be(&b2bn, 32, b2048, 256);
+    bn_modexp(&o2bn, &b2bn, e3, 3, &n2bn, 32);
+    var o2[256];
+    bn_to_be(&o2, 256, &o2bn, 32);
+    assert_streq(hex_encode(&o2, 256),
+        "3d8306ccc59858067855f56b80ddd17caa76a0b5b854f8ff3bf5cbeabac5cd406ae0c78a6e2087efa183ba8dd193a493ab697775015c9429d48178edd7cf4c3d11880bac72265be8ffdc0004482c0b4791805f63d1c2ff1c7baa82ebe16c735b427490dd7269d1e54f2a844b8292d0b252f27bb350076e1a56d4b639d6a517cfc964ab58c25ae643038140ad08c5d2bd03469e7d2e578570cfe5b2977d86370bfb1581947b9d4181da965de467a64c8ab17260467465f672e58eafffce5012870d3fd11f1eda0c3c486cc08b1d0794725aa2652a2c33211f9e4497a7113b1b1f74f864478709434407868f8c26f8ac0e0fc5baf15e66886727fa8fe2a8415f1e",
+        "2048-bit s^65537 mod n");
+
+    # ============================================================
+    # Edge cases
+    # ============================================================
+    test_group("bignum modexp edges");
+
+    # base^0 == 1
+    var z_exp = hex_decode("00", 2);
+    bn_modexp(&o256bn, &b256bn, z_exp, 1, &n256bn, 4);
+    bn_to_be(&o256, 32, &o256bn, 4);
+    assert_streq(hex_encode(&o256, 32),
+        "0000000000000000000000000000000000000000000000000000000000000001",
+        "base^0 == 1");
+
+    # 0^65537 mod n == 0
+    var zero_bn[64];
+    bn_zero(&zero_bn, 4);
+    bn_modexp(&o256bn, &zero_bn, e3, 3, &n256bn, 4);
+    bn_to_be(&o256, 32, &o256bn, 4);
+    assert_streq(hex_encode(&o256, 32),
+        "0000000000000000000000000000000000000000000000000000000000000000",
+        "0^e == 0");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

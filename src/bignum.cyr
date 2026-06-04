@@ -1,0 +1,298 @@
+# bignum.cyr -- general variable-width big-integer arithmetic.
+#
+# WHY A THIRD BIGINT MODULE
+# -------------------------
+# `lib/bigint.cyr` is fixed 256-bit (u256) and `src/bigint_ext.cyr` is
+# Curve25519 field arithmetic (mod 2^255-19 only). RSA needs arbitrary
+# modular exponentiation over 2048/3072/4096-bit operands, so this
+# module provides general big integers: little-endian arrays of 64-bit
+# limbs, backed by caller-provided byte buffers (limb i lives at byte
+# offset i*8; `var X[N]` is N BYTES, CLAUDE.md quirk #3). Schoolbook
+# multiply (reusing stdlib `_mul64`) + binary long-division reduction +
+# left-to-right square-and-multiply modexp.
+#
+# SCOPE / THREADING / TIMING
+# --------------------------
+# This is the engine for RSA. RSA *verification* (the first consumer)
+# operates entirely on PUBLIC data -- signature, public modulus n,
+# public exponent e -- so:
+#   * no constant-time requirement (data-dependent branches in the
+#     reduction loop are fine; there is no secret to leak). RSA *sign*
+#     (a later bite) must use blinding + a constant-time ladder; do NOT
+#     reuse `bn_modexp` for secret exponents without that work.
+#   * not on the parallel batch-verify path (that is Ed25519); like
+#     sigil's HMAC/HKDF/PRF surface the working buffers are plain
+#     static function-scope scratch, single-threaded by construction.
+#     If RSA ever joins a parallel path, these need the 3.6 bank
+#     treatment (see src/crypto_scratch.cyr).
+#
+# Correctness is the bar; speed is not (schoolbook + bit-by-bit
+# reduction). A Montgomery/Barrett pass is a later perf bite, mirroring
+# the EC Solinas follow-up.
+
+# Max width: 64 limbs = 4096 bits (RSA-4096). Products are 2x = 128
+# limbs. The reduction's running remainder needs 1 extra limb.
+var BN_MAX_LIMBS = 64;
+
+# Static scratch (single-threaded; see header). Sizes are BYTES.
+var _bn_modrem[520];        # (BN_MAX_LIMBS+1) limbs -- bn_mod remainder
+var _bn_modn1[520];         # (BN_MAX_LIMBS+1) limbs -- zero-extended modulus
+var _bn_exp_result[512];    # BN_MAX_LIMBS limbs -- modexp accumulator
+var _bn_exp_prod[1024];     # 2*BN_MAX_LIMBS limbs -- modexp product
+var _bn_exp_base[512];      # BN_MAX_LIMBS limbs -- modexp base copy
+
+# ----------------------------------------------------------------
+# Basic limb ops (all take a `limbs` count; buffers are byte ptrs)
+# ----------------------------------------------------------------
+
+fn bn_zero(a, limbs): i64 {
+    var i = 0;
+    while (i < limbs) { store64(a + i * 8, 0); i = i + 1; }
+    return 0;
+}
+
+fn bn_copy(dst, src, limbs): i64 {
+    memcpy(dst, src, limbs * 8);
+    return 0;
+}
+
+fn bn_is_zero(a, limbs): i64 {
+    var acc = 0;
+    var i = 0;
+    while (i < limbs) { acc = acc | load64(a + i * 8); i = i + 1; }
+    if (acc == 0) { return 1; }
+    return 0;
+}
+
+# Unsigned compare of two `limbs`-limb numbers: 1 if a>b, -1 if a<b,
+# 0 if equal. (i64 `<` is signed, so flip the sign bit for unsigned.)
+fn bn_cmp(a, b, limbs): i64 {
+    var sbit = 1 << 63;
+    var i = limbs - 1;
+    while (i >= 0) {
+        var av = load64(a + i * 8);
+        var bv = load64(b + i * 8);
+        if (av != bv) {
+            if ((av ^ sbit) < (bv ^ sbit)) { return 0 - 1; }
+            return 1;
+        }
+        i = i - 1;
+    }
+    return 0;
+}
+
+# a -= b (both `limbs` limbs); caller guarantees a >= b. Returns the
+# out-borrow (0 on a valid subtraction).
+fn bn_sub_assign(a, b, limbs): i64 {
+    var sbit = 1 << 63;
+    var borrow = 0;
+    var i = 0;
+    while (i < limbs) {
+        var av = load64(a + i * 8);
+        var bv = load64(b + i * 8);
+        if (borrow == 0) {
+            store64(a + i * 8, av - bv);
+            # borrow out iff av < bv (unsigned)
+            if ((av ^ sbit) < (bv ^ sbit)) { borrow = 1; } else { borrow = 0; }
+        } else {
+            store64(a + i * 8, av - bv - 1);
+            # borrow out iff av <= bv (unsigned), i.e. NOT (bv < av)
+            if ((bv ^ sbit) < (av ^ sbit)) { borrow = 0; } else { borrow = 1; }
+        }
+        i = i + 1;
+    }
+    return borrow;
+}
+
+# a <<= 1 over `limbs` limbs; returns the bit shifted out of the top.
+fn bn_shl1(a, limbs): i64 {
+    var carry = 0;
+    var i = 0;
+    while (i < limbs) {
+        var v = load64(a + i * 8);
+        var top = (v >> 63) & 1;
+        store64(a + i * 8, (v << 1) | carry);
+        carry = top;
+        i = i + 1;
+    }
+    return carry;
+}
+
+# Index of the highest set bit + 1 (0 for a zero value).
+fn bn_bitlen(a, limbs): i64 {
+    var i = limbs - 1;
+    while (i >= 0) {
+        var v = load64(a + i * 8);
+        if (v != 0) {
+            var b = 63;
+            while (b >= 0) {
+                if (((v >> b) & 1) == 1) { return i * 64 + b + 1; }
+                b = b - 1;
+            }
+        }
+        i = i - 1;
+    }
+    return 0;
+}
+
+# Bit `idx` (0 = LSB) of an arbitrarily-wide little-endian number.
+fn bn_test_bit(a, idx): i64 {
+    var limb = idx / 64;
+    var bit = idx % 64;
+    return (load64(a + limb * 8) >> bit) & 1;
+}
+
+# ----------------------------------------------------------------
+# Serialization (big-endian bytes <-> little-endian limbs)
+# ----------------------------------------------------------------
+
+# Parse `blen` big-endian bytes into `limbs` little-endian limbs.
+# `out` is zeroed first; bytes beyond the buffer width are dropped.
+fn bn_from_be(out, limbs, bytes, blen): i64 {
+    bn_zero(out, limbs);
+    var i = 0;                          # byte index counting from the LSB
+    while (i < blen) {
+        var b = load8(bytes + (blen - 1 - i)) & 0xFF;
+        var limb = i / 8;
+        var shift = (i % 8) * 8;
+        if (limb < limbs) {
+            store64(out + limb * 8, load64(out + limb * 8) | (b << shift));
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Serialize `limbs` little-endian limbs to `blen` big-endian bytes,
+# left-zero-padded (or truncated to the low `blen` bytes).
+fn bn_to_be(bytes, blen, a, limbs): i64 {
+    var i = 0;
+    while (i < blen) {
+        var b = 0;
+        if (i < limbs * 8) {
+            var limb = i / 8;
+            var shift = (i % 8) * 8;
+            b = (load64(a + limb * 8) >> shift) & 0xFF;
+        }
+        store8(bytes + (blen - 1 - i), b);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ----------------------------------------------------------------
+# Multiply and reduce
+# ----------------------------------------------------------------
+
+# out (2*limbs) = a * b (each `limbs` limbs). Schoolbook; out is zeroed.
+fn bn_mul(out, a, b, limbs): i64 {
+    bn_zero(out, 2 * limbs);
+    var sbit = 1 << 63;
+    var i = 0;
+    while (i < limbs) {
+        var av = load64(a + i * 8);
+        var carry = 0;
+        var j = 0;
+        while (j < limbs) {
+            var bv = load64(b + j * 8);
+            var lo[8];
+            var hi[8];
+            _mul64(av, bv, &lo, &hi);
+            var lov = load64(&lo);
+            var hiv = load64(&hi);
+            var prev = load64(out + (i + j) * 8);
+            # s1 = prev + lov
+            var s1 = prev + lov;
+            var c1 = 0;
+            if ((s1 ^ sbit) < (prev ^ sbit)) { c1 = 1; }
+            # s2 = s1 + carry
+            var s2 = s1 + carry;
+            var c2 = 0;
+            if ((s2 ^ sbit) < (s1 ^ sbit)) { c2 = 1; }
+            store64(out + (i + j) * 8, s2);
+            carry = hiv + c1 + c2;
+            j = j + 1;
+        }
+        # propagate the final column carry upward
+        var k = i + limbs;
+        while (carry != 0) {
+            var prev = load64(out + k * 8);
+            var s = prev + carry;
+            var cc = 0;
+            if ((s ^ sbit) < (prev ^ sbit)) { cc = 1; }
+            store64(out + k * 8, s);
+            carry = cc;
+            k = k + 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# rem (m_limbs) = x (x_limbs) mod modulus (m_limbs), via binary long
+# division. NOT constant-time -- intended for public operands (RSA
+# verify). Running remainder uses m_limbs+1 limbs internally so the
+# pre-subtract shift can't overflow.
+fn bn_mod(rem, x, x_limbs, modulus, m_limbs): i64 {
+    var rl = m_limbs + 1;
+    bn_zero(&_bn_modrem, rl);
+    # zero-extended modulus (top limb 0) so cmp/sub run over rl limbs
+    bn_copy(&_bn_modn1, modulus, m_limbs);
+    store64(&_bn_modn1 + m_limbs * 8, 0);
+
+    var i = bn_bitlen(x, x_limbs) - 1;
+    while (i >= 0) {
+        bn_shl1(&_bn_modrem, rl);
+        # bring down bit i of x into the LSB
+        store64(&_bn_modrem, load64(&_bn_modrem) | bn_test_bit(x, i));
+        if (bn_cmp(&_bn_modrem, &_bn_modn1, rl) >= 0) {
+            bn_sub_assign(&_bn_modrem, &_bn_modn1, rl);
+        }
+        i = i - 1;
+    }
+    bn_copy(rem, &_bn_modrem, m_limbs);
+    return 0;
+}
+
+# Bit `idx` of a big-endian byte string `exp` (blen bytes), 0 = LSB.
+fn _bn_exp_bit(exp, blen, idx): i64 {
+    var byte_from_end = idx / 8;
+    var bit = idx % 8;
+    return (load8(exp + (blen - 1 - byte_from_end)) >> bit) & 1;
+}
+
+# out (limbs) = base^exp mod modulus, where `exp` is `exp_blen`
+# big-endian bytes. Left-to-right square-and-multiply. PUBLIC exponent
+# only (see header) -- NOT for secret-exponent (sign) use.
+fn bn_modexp(out, base, exp, exp_blen, modulus, limbs): i64 {
+    bn_zero(&_bn_exp_result, limbs);
+    store64(&_bn_exp_result, 1);            # result = 1
+    bn_copy(&_bn_exp_base, base, limbs);
+
+    # Locate the highest set bit of exp (hb = -1 when exp == 0, leaving
+    # result = 1 = base^0). cyrius has no break/continue, so guard the
+    # scan with hb < 0.
+    var hb = 0 - 1;
+    var i = exp_blen * 8 - 1;
+    while (i >= 0) {
+        if (hb < 0) {
+            if (_bn_exp_bit(exp, exp_blen, i) == 1) { hb = i; }
+        }
+        i = i - 1;
+    }
+
+    i = hb;
+    while (i >= 0) {
+        # result = result^2 mod modulus
+        bn_mul(&_bn_exp_prod, &_bn_exp_result, &_bn_exp_result, limbs);
+        bn_mod(&_bn_exp_result, &_bn_exp_prod, 2 * limbs, modulus, limbs);
+        # if bit i set: result = result * base mod modulus
+        if (_bn_exp_bit(exp, exp_blen, i) == 1) {
+            bn_mul(&_bn_exp_prod, &_bn_exp_result, &_bn_exp_base, limbs);
+            bn_mod(&_bn_exp_result, &_bn_exp_prod, 2 * limbs, modulus, limbs);
+        }
+        i = i - 1;
+    }
+    bn_copy(out, &_bn_exp_result, limbs);
+    return 0;
+}

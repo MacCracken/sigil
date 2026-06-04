@@ -71,6 +71,9 @@ include "src/hkdf_sha384.cyr"
 # the cyrius native-TLS arc. Depends on hmac_sha256 + hmac_sha384.
 include "src/tls12_prf.cyr"
 include "src/bigint_ext.cyr"
+# General variable-width big integers + modexp (RSA engine). Depends
+# only on stdlib `_mul64` (lib/bigint.cyr). RSA verify builds on this.
+include "src/bignum.cyr"
 include "src/ed25519.cyr"
 include "src/x25519.cyr"
 include "src/ecdsa_p256.cyr"
@@ -79,6 +82,10 @@ include "src/ecdsa_sign.cyr"
 include "src/x509.cyr"
 include "src/pem.cyr"
 include "src/privkey.cyr"
+# RSA PKCS#1 v1.5 signature verification (RFC 8017). Builds on
+# src/bignum.cyr (modexp) + sha256/sha384. Verify-only (public data);
+# sign + PSS are later 3.6.x bites.
+include "src/rsa.cyr"
 include "src/sgx.cyr"
 include "src/sev_snp.cyr"
 include "src/tdx.cyr"

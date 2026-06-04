@@ -12,19 +12,19 @@
 
 | Field | Value |
 |---|---|
-| Current version | **3.6.1** (`VERSION`) |
+| Current version | **3.6.2** (`VERSION`) |
 | Cyrius toolchain pin | **6.0.53** (`cyrius.cyml [package].cyrius`) |
 | Dependencies | agnosys **1.3.2**, sakshi **2.2.6** |
 | Last release date | 2026-06-03 |
-| Last release audit | [`2026-06-03-3.6.1-tls12-prf-audit.md`](../audit/2026-06-03-3.6.1-tls12-prf-audit.md) |
-| Phase | Released. **3.6.1 added the TLS 1.2 PRF** (`src/tls12_prf.cyr`, RFC 5246 §5 P_SHA256/P_SHA384) — the "ship-or-decline" cyrius-native-TLS item, shipped; cyrius can drop its inline PRF. Also pin bump 6.0.52→6.0.53. **3.6.0** opened the 3.6 line with the parallel-verify refactor — `sv_verify_batch` drops `_sigil_batch_mutex` (3.42× at 64 artifacts / 4 workers) on cyrius 6.0.52 thread-local storage. **Still carried in the 3.6.x line:** **RSA sign+verify** (was 3.5.10) and the **cyrius-native-TLS closeout** (was 3.5.12). 3.5 cycle history: 3.5.0–3.5.4 modern AEAD + X25519 (CLOSED); 3.5.5 doc-comment patch; 3.5.6 HMAC/HKDF-SHA384; 3.5.7 AES-128-GCM; 3.5.8 private-key parsers; 3.5.9 ECDSA P-256/P-384 sign. 3.7 (perf / Solinas) still gated on a forcing function. |
+| Last release audit | [`2026-06-03-3.6.2-rsa-verify-audit.md`](../audit/2026-06-03-3.6.2-rsa-verify-audit.md) |
+| Phase | Released. **3.6.2 landed RSA PKCS#1 v1.5 verify** (`src/rsa.cyr`, RFC 8017) + the general big-integer / modexp engine it needed (`src/bignum.cyr`) — the load-bearing RSA interop path. **Verify only**; RSA key DER parse, PSS, and signing are the next 3.6.x bites. 3.6.1 added the TLS 1.2 PRF (`src/tls12_prf.cyr`). 3.6.0 opened the 3.6 line with the parallel-verify refactor (`sv_verify_batch` drops `_sigil_batch_mutex`, 3.42× at 64 artifacts / 4 workers, on cyrius 6.0.52 TLS). **Still carried in the 3.6.x line:** **RSA pubkey-DER parser + PSS + signing** (remainder of was-3.5.10) and the **cyrius-native-TLS closeout** (was 3.5.12). 3.5 cycle: 3.5.0–3.5.4 modern AEAD + X25519 (CLOSED); 3.5.6 HMAC/HKDF-SHA384; 3.5.7 AES-128-GCM; 3.5.8 private-key parsers; 3.5.9 ECDSA sign. 3.7 (perf / Solinas + bignum Montgomery) gated on a forcing function. |
 
 ## Test surface
 
 | Metric | Value |
 |---|---|
-| `.tcyr` test files | 48 |
-| Total assertions | **1293**, 0 failures |
+| `.tcyr` test files | 50 |
+| Total assertions | **1305**, 0 failures |
 | Benchmark suite | `benches/` — see `benches/history.csv` |
 
 > Counting note: the 3 `*_verify_full.tcyr` tests (sgx 11 + tdx 16 +
@@ -38,6 +38,7 @@
 
 Per-cycle assertion delta:
 
+- 3.6.2 ship: +12 (`bignum.tcyr` 6 — modexp KATs incl. full RSA-2048-size `s^65537 mod n`, all vs Python `pow`; serialize round-trip; `base^0`/`0^e` edges. `rsa.tcyr` 6 — real RSA-2048 PKCS#1 v1.5 SHA-256/384 verify accept + tamper/wrong-message/wrong-length/hash-mismatch reject)
 - 3.6.1 ship: +9 (`tls12_prf.tcyr` 9 — canonical RFC 5246 §5 PRF vectors: P_SHA256 100-byte + P_SHA384 148-byte (Python `hmac`/`hashlib`-reproduced; SHA-256 matched the published vector), truncation prefixes (12 + 48 byte), determinism, over-cap guard)
 - 3.6.0 ship: +0 (parallel-verify refactor — no new test assertions; correctness is covered by the full suite at bank 0 plus `batch_parallel.tcyr` (228 assertions) run **mutex-off as the race detector**: 35/35 consecutive clean runs. The first mutex-off run failed and surfaced the un-banked `fp_inv` / `hash_file_into` buffers.)
 - 3.5.9 ship: +20 (`ecdsa_sign.tcyr` 20 — exact RFC 6979 A.2.5/A.2.6 (r‖s) for P-256/P-384 "sample"/"test", determinism, sign→verify roundtrips raw + DER, DER structure)
@@ -72,6 +73,7 @@ Consumers that link or rely on sigil for trust verification:
 
 | Version | Date | Headline |
 |---|---|---|
+| 3.6.2 | 2026-06-03 | **RSA PKCS#1 v1.5 verify** (`src/rsa.cyr`, RFC 8017) + general big-integer/modexp engine (`src/bignum.cyr`). `rsa_pkcs1v15_verify_sha256/384`: `m=s^e mod n` via square-and-multiply modexp, then full-EM reconstruction + compare (defeats the Bleichenbacher/BERserk forgery class). Verify-only, public-data (no CT/zeroization need); not on the batch path so unbanked. modexp KAT-validated to RSA-2048 size vs Python `pow`; verify validated vs a real RSA-2048 key (SHA-256/384) + negative cases. +12 assertions. Audit: `docs/audit/2026-06-03-3.6.2-rsa-verify-audit.md`. |
 | 3.6.1 | 2026-06-03 | **TLS 1.2 PRF** (`src/tls12_prf.cyr`, RFC 5246 §5) — `tls12_prf_sha256` / `tls12_prf_sha384` (`PRF = P_hash(secret, label‖seed)`) on the existing HMAC primitives. Resolves the cyrius-native-TLS "ship-or-decline" PRF item on the **ship** side. +9 assertions (canonical IETF PRF vectors, Python-reproduced). Pin bump 6.0.52→6.0.53. Audit: `docs/audit/2026-06-03-3.6.1-tls12-prf-audit.md`. |
 | 3.6.0 | 2026-06-03 | **Parallel batch verify** — `sv_verify_batch` drops `_sigil_batch_mutex`; crypto runs concurrently across workers. **3.42×** at 64 artifacts / 4 workers (422.867 → 123.563 ms vs `v3.2.0-allocfree`). New `src/crypto_scratch.cyr` gives each worker a private *bank* (lane) of every racing crypto working array (sha256/512 schedules, SHA-NI block scratch, Ed25519 field/group/verify temporaries, `fp_*`/`u512_mod_p` incl. `fp_inv`, `hash_file_into` buffers) via cyrius 6.0.52 thread-local storage — no signature churn. `ge_identity` made alloc-free. Maintenance bump: cyrius 6.0.14→6.0.52, agnosys 1.2.7→1.3.2, sakshi 2.2.5→2.2.6. Race surface verified closed (`batch_parallel.tcyr` mutex-off 35/35). Audit: `docs/audit/2026-06-03-3.6.0-parallel-verify-audit.md`. |
 | 3.5.9 | 2026-05-28 | ECDSA P-256/P-384 deterministic signing (`src/ecdsa_sign.cyr`) — `ecdsa_p256_sign` / `ecdsa_p384_sign` (+`_der`), RFC 6979 §3.2 HMAC_DRBG nonce (HMAC-SHA256/384). Raw `r‖s` + DER (TLS 1.3 CertificateVerify). Consumes the 3.5.8 scalars; pairs with verify. Exact RFC 6979 A.2.5/A.2.6 vectors (+20 assertions). Benches: P-256 74 ms / P-384 179 ms. Pin unchanged (6.0.14). Audit: `docs/audit/2026-05-28-3.5.9-ecdsa-sign-audit.md`. |
@@ -103,7 +105,8 @@ back to v2.0.0.
 | 3.5.8 — EC + Ed25519 privkey parsers | **Shipped** 2026-05-28 | `src/privkey.cyr`: PEM + DER for ECDSA P-256/P-384 (SEC1/PKCS#8) + Ed25519 (PKCS#8/RFC 8410) + `pem_decode_privkey`. RSA parser deferred to 3.5.10 (no RSA key type until the engine lands). Cyrius v6.0.15 / .23 unblocked (key-loading side). |
 | 3.5.9 — ECDSA sign | **Shipped** 2026-05-28 | `src/ecdsa_sign.cyr`: `ecdsa_p256_sign` / `ecdsa_p384_sign` (+`_der`), RFC 6979 deterministic-k. Cyrius v6.0.17 / .25 unblocked. |
 | 3.6.0 — parallel verify | **Shipped** 2026-06-03 | Dropped `_sigil_batch_mutex`; per-thread crypto banks (`src/crypto_scratch.cyr`) over cyrius 6.0.52 TLS. 3.42× at 64 artifacts / 4 workers. Forcing function: cyrius 6.0.52 shipping thread-local storage. Audit: `docs/audit/2026-06-03-3.6.0-parallel-verify-audit.md`. |
-| 3.6.x — RSA engine + parser + sign/verify | pending (was 3.5.10) | Bignum modexp engine + RSA key type + `rsa_privkey_from_der` + PKCS#1 v1.5 + PSS, SHA-256/384. **Large/splittable** (`bigint_ext` is Curve25519-only). Cyrius v6.0.17 / .25 / .29–.34. |
+| 3.6.2 — RSA bignum engine + PKCS#1 v1.5 verify | **Shipped** 2026-06-03 (was part of 3.5.10) | `src/bignum.cyr` (general modexp) + `src/rsa.cyr` (`rsa_pkcs1v15_verify_sha256/384`). The load-bearing verify path. |
+| 3.6.x — RSA pubkey DER parse + PKCS#1 v1.5 sign + PSS | pending (rest of was-3.5.10) | `rsa_pubkey_from_der` (SPKI + PKCS#1) so verify works straight off a cert; wire the `pem_decode_privkey` RSA stub; PKCS#1 v1.5 **sign** (needs blinding + CT ladder — do NOT reuse the verify `bn_modexp` for secret `d`); PSS (MGF1) verify+sign, SHA-256/384. Split into sub-bites. |
 | 3.6.1 — TLS 1.2 PRF | **Shipped** 2026-06-03 (was 3.5.11) | `tls12_prf_sha256/384` (`src/tls12_prf.cyr`). Decision: **ship** (not decline) — cyrius can drop its inline PRF and call sigil. **Flag to cyrius:** sigil now owns the TLS 1.2 PRF. |
 | 3.6.x — cyrius-native-TLS closeout | pending (was 3.5.12) | Closeout Pass over the 3.5.5–3.5.9 + 3.6.0 delta + the deferred 3.5.6 audit doc. |
 | 3.7 — perf / Solinas | Gated | Solinas word-level reduction for P-256/P-384 + unified `_into` API. Gated on a latency forcing function per roadmap. |

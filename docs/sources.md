@@ -93,6 +93,22 @@ their specs inline; this file is the cross-module overview.
   published vector byte-for-byte (the validation anchor for the
   SHA-384 emission).
 
+### RSA PKCS#1 v1.5 verify — `src/rsa.cyr`, `src/bignum.cyr`
+
+- **RFC 8017** — PKCS #1: RSA Cryptography Specifications Version 2.2
+  (2016-11). §8.2.2 RSASSA-PKCS1-v1_5 verification, §9.2 EMSA-PKCS1-v1_5
+  encoding (incl. the DigestInfo prefixes), §5.2.1 RSAVP1.
+  - https://www.rfc-editor.org/rfc/rfc8017.txt
+- **Verify hygiene** — sigil reconstructs the full expected `EM` and
+  compares all octets (rather than parsing/skipping), the recommended
+  defense against the PKCS#1 v1.5 forgery class (Bleichenbacher 2006 /
+  "BERserk": low-exponent forgeries exploiting lax verifiers).
+- **Test vectors** — a real RSA-2048 key + SHA-256/SHA-384 PKCS#1 v1.5
+  signatures, generated with a pure-Python RSA (seeded keygen + manual
+  EMSA-PKCS1-v1_5 encode), each self-checked `pow(s,e,n) == EM`; the
+  `bn_modexp` engine is cross-checked against Python `pow(b,e,m)` up to
+  RSA-2048 width. (No external crypto lib used.)
+
 ### AES-256-GCM — `src/aes_gcm.cyr`
 
 - **FIPS 197** — Advanced Encryption Standard (AES) (NIST,

@@ -7,7 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-(none — tip is 3.6.1.)
+(none — tip is 3.6.2.)
+
+## [3.6.2] — 2026-06-03
+
+RSA PKCS#1 v1.5 signature **verification** (RFC 8017) — the
+load-bearing interop path of the cyrius native-TLS arc's RSA item —
+plus the general big-integer / modexp engine it required. Verify only;
+RSA key DER parsing, PSS, and signing are subsequent 3.6.x bites.
+
+### Added
+
+- **`src/bignum.cyr`** — general variable-width big integers
+  (little-endian i64 limbs, byte-buffer backed): `bn_from_be`/`bn_to_be`,
+  `bn_cmp`/`bn_sub_assign`/`bn_shl1`/`bn_bitlen`, schoolbook `bn_mul`
+  (reusing stdlib `_mul64`), binary long-division `bn_mod`, and
+  left-to-right square-and-multiply `bn_modexp`. sigil's first
+  arbitrary-width modular arithmetic (`lib/bigint.cyr` is fixed u256;
+  `bigint_ext` is Curve25519-only). **Public-exponent / verify use
+  only** — not constant-time, must not be reused for secret exponents
+  (sign) without blinding + a CT ladder. Single-threaded (not on the
+  batch path), so unbanked.
+- **`src/rsa.cyr`** — `rsa_pkcs1v15_verify_sha256` /
+  `rsa_pkcs1v15_verify_sha384` (RFC 8017 §8.2.2 / §9.2). Recovers
+  `m = s^e mod n` via `bn_modexp`, then **reconstructs the full
+  expected** `EM = 00 01 PS 00 DigestInfo H` and compares all `k`
+  octets — the robust shape that rejects the PKCS#1 v1.5 forgery class
+  (Bleichenbacher'06 / BERserk: garbage-after-hash, short `PS`,
+  algorithm substitution). Range-checks `s < n`, exact signature
+  length, and the 8-octet minimum `PS`.
+- **Tests** — `tests/tcyr/bignum.tcyr` (+6: modexp KATs incl. a full
+  RSA-2048-size `s^65537 mod n`, all cross-checked vs Python `pow`;
+  serialize round-trip; `base^0`/`0^e` edges) and `tests/tcyr/rsa.tcyr`
+  (+6: a real RSA-2048 key with valid SHA-256 / SHA-384 signatures
+  accepted, and tamper / wrong-message / wrong-length / hash-mismatch
+  all rejected). Suite now 50 files / 1305 assertions.
+
+### Security
+
+- Per-bite audit `docs/audit/2026-06-03-3.6.2-rsa-verify-audit.md`:
+  verify operates only on public data (no CT/zeroization obligation);
+  full-EM reconstruction defeats the RSA-verify forgery family;
+  buffer bounds for RSA ≤ 4096. 0 CRITICAL / HIGH / MEDIUM / LOW.
+
+### Changed
+
+- **Dist regenerated** — `dist/sigil.cyr` now includes
+  `src/bignum.cyr` + `src/rsa.cyr`; `cyrius doc --check` 0 undocumented.
 
 ## [3.6.1] — 2026-06-03
 

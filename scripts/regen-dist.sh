@@ -45,6 +45,7 @@ src/hmac_sha384.cyr
 src/hkdf_sha384.cyr
 src/tls12_prf.cyr
 src/bigint_ext.cyr
+src/bignum.cyr
 src/ed25519.cyr
 src/x25519.cyr
 src/ecdsa_p256.cyr
@@ -53,6 +54,7 @@ src/ecdsa_sign.cyr
 src/x509.cyr
 src/pem.cyr
 src/privkey.cyr
+src/rsa.cyr
 src/sgx.cyr
 src/sev_snp.cyr
 src/tdx.cyr

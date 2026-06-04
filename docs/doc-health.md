@@ -6,7 +6,18 @@ type: state
 
 # Documentation Health — sigil
 
-> **Last refresh**: 2026-06-03 (**3.6.1 — TLS 1.2 PRF**).
+> **Last refresh**: 2026-06-03 (**3.6.2 — RSA PKCS#1 v1.5 verify**).
+> Added `src/bignum.cyr` (general big-int + modexp engine) +
+> `src/rsa.cyr` (`rsa_pkcs1v15_verify_sha256/384`, RFC 8017) +
+> `tests/tcyr/{bignum,rsa}.tcyr` (+12, KAT-validated to RSA-2048) +
+> audit `docs/audit/2026-06-03-3.6.2-rsa-verify-audit.md` +
+> `sources.md` (RFC 8017) + roadmap (RSA verify shipped; DER-parse /
+> sign / PSS remain) + README/state.md. Suite 48→50 files,
+> 1293→1305 assertions. Verify-only, public-data path (no CT/zeroize
+> obligation; engine is single-threaded/unbanked, flagged not-for-sign).
+> Same-day prior refreshes (3.6.1 PRF, 3.6.0 parallel verify) below.
+>
+> **Earlier 2026-06-03 (3.6.1 — TLS 1.2 PRF).**
 > Added `src/tls12_prf.cyr` (RFC 5246 §5 `tls12_prf_sha256/384`) +
 > `tests/tcyr/tls12_prf.tcyr` (+9, canonical IETF vectors) + audit
 > `docs/audit/2026-06-03-3.6.1-tls12-prf-audit.md` + `sources.md`

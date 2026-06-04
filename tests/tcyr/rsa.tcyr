@@ -1,0 +1,73 @@
+# rsa.tcyr -- RSA PKCS#1 v1.5 signature verification (RFC 8017).
+#
+# Real RSA-2048 key + signatures, generated with a pure-Python RSA
+# (seeded keygen + manual PKCS#1 v1.5 encode; each signature self-
+# checked `pow(s, e, n) == EM` at generation). e = 65537.
+#   msg     = "sigil RSA PKCS#1 v1.5 KAT message"
+#   verify SHA-256 signature -> 1
+#   verify SHA-384 signature -> 1
+#   tampered signature (last byte ^1) -> 0
+#   correct sig over a different message -> 0
+#   wrong signature length -> 0
+
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/string.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fmt.cyr"
+include "lib/json.cyr"
+include "lib/sakshi.cyr"
+include "lib/chrono.cyr"
+include "lib/bigint.cyr"
+include "lib/ct.cyr"
+
+include "lib/thread_local.cyr"
+include "src/crypto_scratch.cyr"
+include "src/types.cyr"
+include "src/error.cyr"
+include "src/sha256.cyr"
+include "src/hex.cyr"
+include "src/sha512.cyr"
+include "src/sha384.cyr"
+include "src/bignum.cyr"
+include "src/rsa.cyr"
+
+fn main() {
+    alloc_init();
+
+    var n = hex_decode("bd61200b4b717e9153324c43ba3079b49275d4e3b3c1b88833a25d20c9e664d39c9185df74a506e5ab7c8f77cfad648a5a3c4652a483b79a28c02bb8108e8c2bc331baf18cdf9e8957cf79d031d42368439ccd2711cedf640f68d5a9aa77cc2c580973857ef867652c22f89400f0f5ed6f25bfca78c5728ef64eed549f321dddfe5bded13a0a0ed6d683361cacbfd1b1fe6647fb439d61ca1357b524d316b5c6a76c1666ea6aa6c0728d9469782af0aba3b3023106545b44dee0abbc9bafe37e0626af5277f78d21304a8fd60dc09b2e9ce0e68439db90ba430496e0f4987927e645e8004af2aa5fa93731eb3317f041023e92857f3d0801e9c7eeebd19e5649", 512);
+    var e = hex_decode("010001", 6);
+    var msg = hex_decode("736967696c2052534120504b435323312076312e35204b4154206d657373616765", 66);  # 33 bytes
+    var sig256 = hex_decode("1deecf28b83e745e556f3d3799d17707f5e4960bcc5dbeeb2cb2ac586bbc51dac76ea3d1579915fd1b1640d73f7a657059ef17325c4e0aa7c69acece7ce64b8ad74c8dc2b564b806f6b8ee3969d0ddbe7d41fbba2761f10f97e9d589bfe55720a0221ddfed24815be862ee6e6907395e88737c43b0c731ced78bf3512b4c5c421e00d1fa1389ae9983adf8e7115f19223f409885c79e7895ba7daffb89bcb5111c8045391d2c374ede6da84297d12b8dea99f79a0d502b80f806a5e0dce5b17b4dfef7971204d85ad040941ece7f77f46c6d4a8bd8df5211c1fd48e95f7eb6748ead5867c0bc8e0e2e521810c7dc788aec537362d3cfbfd79d37e5aa5159ce0a", 512);
+    var sig384 = hex_decode("00b98c67c2dc7b56d431b01fc7153a090c639f5333fd4e05dc775d61e64881a0846947aea2bd6f255b30cf22346e5ed9c0793b41667b53853482e16fbbba64ed93b6ddf942c6c0dc6ba9d2087c8733d5a0dd727f1dbd997b6ea21c64c9819c1420f789173af81e1e573c2babf2b163cc6e8ab0eaba82244b0bb3c60ad6327598f31fc7cad6cffd3c46a26636a8877db8c58b0b2c33a205a34e7115f21aebf9e57973b3114d0b6ec76a45d11a92a7578eec8c100586bb9a3ddded9fbfea3ac3b94c2db1dc179414631b35a3360df7a4914775be7e8708087f4fde8b81282d13f0f83194922fb17089203c6611ab10c92f8e421d01afe9b2eb7c2b57c8f5096172", 512);
+    var sigbad = hex_decode("1deecf28b83e745e556f3d3799d17707f5e4960bcc5dbeeb2cb2ac586bbc51dac76ea3d1579915fd1b1640d73f7a657059ef17325c4e0aa7c69acece7ce64b8ad74c8dc2b564b806f6b8ee3969d0ddbe7d41fbba2761f10f97e9d589bfe55720a0221ddfed24815be862ee6e6907395e88737c43b0c731ced78bf3512b4c5c421e00d1fa1389ae9983adf8e7115f19223f409885c79e7895ba7daffb89bcb5111c8045391d2c374ede6da84297d12b8dea99f79a0d502b80f806a5e0dce5b17b4dfef7971204d85ad040941ece7f77f46c6d4a8bd8df5211c1fd48e95f7eb6748ead5867c0bc8e0e2e521810c7dc788aec537362d3cfbfd79d37e5aa5159ce0b", 512);
+
+    test_group("RSA PKCS#1 v1.5 verify");
+
+    assert_eq(rsa_pkcs1v15_verify_sha256(n, 256, e, 3, msg, 33, sig256, 256), 1,
+        "valid SHA-256 signature accepted");
+    assert_eq(rsa_pkcs1v15_verify_sha384(n, 256, e, 3, msg, 33, sig384, 256), 1,
+        "valid SHA-384 signature accepted");
+
+    test_group("RSA PKCS#1 v1.5 rejects");
+
+    assert_eq(rsa_pkcs1v15_verify_sha256(n, 256, e, 3, msg, 33, sigbad, 256), 0,
+        "tampered signature rejected");
+    assert_eq(rsa_pkcs1v15_verify_sha256(n, 256, e, 3, "different message", 17, sig256, 256), 0,
+        "valid sig over wrong message rejected");
+    assert_eq(rsa_pkcs1v15_verify_sha256(n, 256, e, 3, msg, 33, sig256, 255), 0,
+        "wrong signature length rejected");
+    # SHA-384 verify against a SHA-256 signature must fail (wrong DigestInfo).
+    assert_eq(rsa_pkcs1v15_verify_sha384(n, 256, e, 3, msg, 33, sig256, 256), 0,
+        "SHA-256 sig rejected by SHA-384 verify");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

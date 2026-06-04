@@ -73,7 +73,26 @@ held as the last 3.5.x tag (3.5.12)**.
 > left as `3.5.x` for blame continuity; track them as 3.6.x in
 > `state.md`.
 
-### 3.5.10 — RSA signature surface (issue line item 2) — **Large**
+### 3.6.2+ — RSA signature surface (was 3.5.10, issue line item 2) — **Large, multi-bite**
+
+> **3.6.2 SHIPPED (2026-06-03):** the general big-integer/modexp engine
+> (`src/bignum.cyr`) + **PKCS#1 v1.5 verify** (`src/rsa.cyr`:
+> `rsa_pkcs1v15_verify_sha256/384`) — the load-bearing interop path.
+> modexp KAT-validated to RSA-2048 size; verify validated against a
+> real RSA-2048 key (full-EM reconstruction defeats the
+> Bleichenbacher/BERserk forgery class). Audit
+> `docs/audit/2026-06-03-3.6.2-rsa-verify-audit.md`.
+>
+> **Remaining sub-bites (3.6.x):**
+> - `rsa_pubkey_from_der` (SPKI + PKCS#1 `RSAPublicKey`) so verify
+>   works straight off an X.509 cert / TLS key, and an x509.cyr hook.
+> - **PKCS#1 v1.5 sign** — needs the RSA private-key type +
+>   `rsa_privkey_from_der` (fills the `pem_decode_privkey` RSA stub) +
+>   a **blinded, constant-time** modexp (the verify `bn_modexp` is
+>   public-exponent only and MUST NOT be reused for the secret `d`).
+> - **PSS** (MGF1) verify + sign, SHA-256/384.
+> - **Perf:** Montgomery/Barrett for `bn_modexp` (schoolbook today;
+>   pairs with the 3.7 EC Solinas work).
 
 - [ ] **RSA PKCS#1 v1.5 + PSS, sign + verify, SHA-256 + SHA-384.**
       `rsa_pkcs1_{sign,verify}_sha{256,384}` +

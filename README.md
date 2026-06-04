@@ -26,6 +26,8 @@ All cryptography implemented in Cyrius — no external dependencies:
 - **HMAC-SHA256 / HMAC-SHA384** (RFC 2104 / FIPS 198-1) — keyed hashing
 - **HKDF-SHA256 / HKDF-SHA384** (RFC 5869) — key derivation
 - **TLS 1.2 PRF** (RFC 5246 §5) — P_SHA256 / P_SHA384 key schedule
+- **RSA PKCS#1 v1.5** (RFC 8017) — signature verification, SHA-256/384
+  (on a general big-integer / modexp engine)
 - **AES-256-GCM / AES-128-GCM** (FIPS 197 + NIST SP 800-38D) — AEAD
   with runtime-detected AES-NI dispatch
 - **ChaCha20-Poly1305** (RFC 8439) — AEAD (ChaCha20 cipher +
@@ -47,6 +49,8 @@ All cryptography implemented in Cyrius — no external dependencies:
 - **`hmac.cyr`**, **`hkdf.cyr`** — HMAC/HKDF-SHA256
 - **`hmac_sha384.cyr`**, **`hkdf_sha384.cyr`** — HMAC/HKDF-SHA384
 - **`tls12_prf.cyr`** — TLS 1.2 PRF (RFC 5246 §5), P_SHA256/P_SHA384
+- **`bignum.cyr`** — general variable-width big integers + modexp
+- **`rsa.cyr`** — RSA PKCS#1 v1.5 signature verification (RFC 8017)
 - **`bigint_ext.cyr`** — 256-bit field arithmetic for Ed25519/X25519
 - **`ed25519.cyr`** — Ed25519 signatures
 - **`x25519.cyr`** — X25519 ECDH key agreement
@@ -159,7 +163,7 @@ Requires **cyrius ≥ 6.0.52** (the release that shipped `lib/thread_local.cyr`)
 
 ## Tests
 
-1293 assertions across 48 test files, 0 failures (3.6.1). Crypto
+1305 assertions across 50 test files, 0 failures (3.6.2). Crypto
 suites use published known-answer vectors (RFC / FIPS / NIST); the
 TEE attestation arc ships synthesised end-to-end fixtures.
 `tests/tcyr/batch_parallel.tcyr` doubles as the parallel-verify race
@@ -175,9 +179,10 @@ for t in tests/tcyr/*.tcyr; do cyrius test "$t"; done
 - **v3.5.x — cyrius native-TLS arc support** (in progress). Shipped:
   modern AEAD + key agreement (Poly1305/ChaCha20/AEAD/X25519,
   HMAC/HKDF-SHA384), AES-128-GCM, EC + Ed25519 private-key parsers,
-  ECDSA P-256/P-384 deterministic signing, TLS 1.2 PRF (3.6.1).
-  Remaining (carried into the 3.6.x line): RSA (PKCS#1 v1.5 + PSS,
-  with the bignum engine), cycle closeout.
+  ECDSA P-256/P-384 deterministic signing, TLS 1.2 PRF (3.6.1), RSA
+  PKCS#1 v1.5 **verify** + bignum/modexp engine (3.6.2). Remaining
+  (3.6.x): RSA pubkey-DER parse + PKCS#1 v1.5 sign + PSS, cycle
+  closeout.
 - **v3.6** — parallel verify (**shipped 3.6.0**): dropped
   `_sigil_batch_mutex` via per-thread crypto-scratch banks over
   cyrius 6.0.52 thread-local storage (3.42× at 64 artifacts / 4
