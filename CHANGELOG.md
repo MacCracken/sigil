@@ -7,7 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-(none — tip is 3.7.1.)
+(none — tip is 3.7.2.)
+
+## [3.7.2] — 2026-06-04
+
+A backlog-cleanup bite folded into the v3.7 arc: **AES-GCM
+arbitrary-length IVs** (NIST SP 800-38D §7.1), closing a completeness
+gap that had been buried in an `aes_gcm.cyr` comment (un-buried 3.6.5).
+Toolchain pin 6.0.61 → 6.0.62.
+
+### Added
+
+- **Arbitrary-length GCM IVs** (`src/aes_gcm.cyr`) — new
+  `_gcm_compute_j0` derives the pre-counter block J0 per SP 800-38D
+  §7.1: the 96-bit fast path (`IV ‖ 0³¹ ‖ 1`) unchanged, and for any
+  other length `J0 = GHASH_H(IV ‖ 0-pad ‖ (0⁶⁴ ‖ [len(IV)]₆₄))`. New
+  public entries `aes_gcm_encrypt_iv` / `aes_gcm_decrypt_iv` /
+  `aes_128_gcm_encrypt_iv` / `aes_128_gcm_decrypt_iv` take an `iv_len`
+  (bytes, > 0). The 8-arg `aes_gcm_encrypt` / `_decrypt` /
+  `aes_128_gcm_*` entries are unchanged 12-byte wrappers (API-additive).
+- **Tests** — new `tests/tcyr/aes_gcm_iv.tcyr` (+24): OpenSSL-generated
+  KATs for AES-256 and AES-128 at 60-/8-/1-byte IVs (the 60-byte cases
+  also match the canonical McGrew-Viega GCM Test Cases 6 & 18), decrypt
+  roundtrips, tamper-reject, the `encrypt_iv(…,12) == encrypt(…)`
+  byte-for-byte consistency invariant, and `iv_len ≤ 0` rejection. Suite
+  **52 files / 1417 assertions**, 0 failures.
+
+### Changed
+
+- Cyrius toolchain pin **6.0.61 → 6.0.62** (`cyrius.cyml`).
+
+### Security
+
+- 3.7.2 audit: `docs/audit/2026-06-04-3.7.2-gcm-arbitrary-iv-audit.md`.
+  The 12-byte path is byte-for-byte unchanged (existing GCM KATs +
+  consistency test); the arbitrary-IV J0 is interop-verified against
+  OpenSSL. `_gcm_compute_j0`'s GHASH accumulator is `secret var`
+  (subkey-derived, zeroized on exit). Audit floor unchanged at 8 LOW.
 
 ## [3.7.1] — 2026-06-04
 

@@ -12,31 +12,32 @@
 
 | Field | Value |
 |---|---|
-| Current version | **3.7.1** (`VERSION`) |
-| Cyrius toolchain pin | **6.0.61** (`cyrius.cyml [package].cyrius`) |
+| Current version | **3.7.2** (`VERSION`) |
+| Cyrius toolchain pin | **6.0.62** (`cyrius.cyml [package].cyrius`) |
 | Dependencies | agnosys **1.3.2**, sakshi **2.2.6** |
 | Last release date | 2026-06-04 |
-| Last release audit | [`2026-06-04-3.7.1-p384-solinas-audit.md`](../audit/2026-06-04-3.7.1-p384-solinas-audit.md) |
-| Phase | Released. **3.7.1 added Solinas fast reduction for P-384** (`_p384_solinas_reduce`, the mirror of the 3.7.0 P-256 work; eleven-term layout derived from the prime's folding relation + verified 5000/5000 vs `x mod p`): **`ecdsa_p384_verify` 339.2 → 54.6 ms (6.21×)**, transitively speeding the SEV-SNP P-384 chain. `_p384_reduce_longdiv` retained as the differential-KAT reference. The ≤ 10 ms target remains gated on the EC scalar-mult speedup (the scalar mult dominates, not the reduction). **Remaining v3.7:** EC scalar-mult speedup (carries ≤ 10 ms), unified `_into` API (clears the 8-LOW audit floor), full bench re-run. |
+| Last release audit | [`2026-06-04-3.7.2-gcm-arbitrary-iv-audit.md`](../audit/2026-06-04-3.7.2-gcm-arbitrary-iv-audit.md) |
+| Phase | Released. **3.7.2 added AES-GCM arbitrary-length IVs** (NIST SP 800-38D §7.1 GHASH-based J0; new `aes_gcm_encrypt_iv`/`_decrypt_iv` + AES-128 variants taking `iv_len`; the 8-arg entries stay byte-for-byte 12-byte wrappers) — a backlog-cleanup item folded into the v3.7 arc (un-buried 3.6.5). Interop-verified vs OpenSSL at 60/8/1-byte IVs (the 60-byte cases = McGrew-Viega TC6/TC18). Pin 6.0.61 → 6.0.62. **Remaining v3.7:** EC scalar-mult speedup (carries ≤ 10 ms), unified `_into` API (clears the 8-LOW audit floor), full bench re-run. The other backlog items (bank-retire / CLMUL-GHASH / NI-dispatch) stay blocked on cyrius features absent in 6.0.62. |
 
 ## Test surface
 
 | Metric | Value |
 |---|---|
-| `.tcyr` test files | 51 |
-| Total assertions | **1393**, 0 failures |
+| `.tcyr` test files | 52 |
+| Total assertions | **1417**, 0 failures |
 | Benchmark suite | `benches/` — `history.csv`; RSA via `tests/bcyr/rsa.bcyr`, P-256/P-384 verify via `tests/bcyr/ecdsa_p256.bcyr` / `ecdsa_p384.bcyr` |
 
 > Counting note: the 3 `*_verify_full.tcyr` tests (sgx 11 + tdx 16 +
 > snp 11 = 38) emit their `N passed` summary in a tty-sensitive way that
 > is dropped under any pipe or file redirect, so a scripted `grep`-sum of
-> `cyrius test` output yields **1355** across the other 48 files and
-> silently omits those 38. Add them back for the true total: **1393**.
+> `cyrius test` output yields **1379** across the other 49 files and
+> silently omits those 38. Add them back for the true total: **1417**.
 > (Each verify_full still prints its summary on an interactive run; it's
 > only the redirected/scripted sum that loses them.)
 
 Per-cycle assertion delta:
 
+- 3.7.2 ship: +24 (`aes_gcm_iv.tcyr` +24, new — AES-256/128 GCM arbitrary-IV KATs vs OpenSSL at 60/8/1-byte IVs (60-byte = McGrew-Viega TC6/TC18), decrypt roundtrips, tamper reject, 12-byte consistency, iv_len validation)
 - 3.7.1 ship: +3 (`ecdsa_p384.tcyr` +3 — Solinas-vs-long-div differential KAT over 64 SHA-384-seeded random 768-bit inputs + 2^768−1 / high-half-all-ones edges)
 - 3.7.0 ship: +3 (`ecdsa_p256.tcyr` +3 — Solinas-vs-long-div differential KAT over 64 SHA-256-seeded random 512-bit inputs + 2^512−1 / high-half-all-ones edges)
 - 3.6.8 ship: +0 (closeout — stale-comment/doc fixes only; no source-logic or test change)
@@ -80,6 +81,7 @@ Consumers that link or rely on sigil for trust verification:
 
 | Version | Date | Headline |
 |---|---|---|
+| 3.7.2 | 2026-06-04 | **AES-GCM arbitrary-length IVs** (backlog cleanup in the v3.7 arc). `_gcm_compute_j0` adds the NIST SP 800-38D §7.1 GHASH-based J0 for non-96-bit IVs; new `aes_gcm_encrypt_iv`/`_decrypt_iv` + AES-128 variants take `iv_len`; the 8-arg entries stay byte-for-byte 12-byte wrappers. Interop-verified vs OpenSSL (AES-256/128 at 60/8/1-byte IVs; 60-byte = McGrew-Viega TC6/TC18). +24 assertions (new `aes_gcm_iv.tcyr`). Pin 6.0.61→6.0.62. Audit: `docs/audit/2026-06-04-3.7.2-gcm-arbitrary-iv-audit.md`. |
 | 3.7.1 | 2026-06-04 | **Solinas reduction for P-384.** `_p384_solinas_reduce` (FIPS 186-4 App. D, `p384 = 2^384−2^128−2^96+2^32−1`), the mirror of the 3.7.0 P-256 work; the 11-term layout was derived from the prime's folding relation + verified 5000/5000 vs `x mod p`. **`ecdsa_p384_verify` 339.2 → 54.6 ms (6.21×)** (`history.csv` row `v3.7.1-p384-solinas`, new `tests/bcyr/ecdsa_p384.bcyr`), transitively speeding the SEV-SNP P-384 chain. +3 assertions (differential KAT). Audit: `docs/audit/2026-06-04-3.7.1-p384-solinas-audit.md`. |
 | 3.7.0 | 2026-06-04 | **Opens v3.7 perf — Solinas reduction for P-256.** `_p256_solinas_reduce` (FIPS 186-4 App. D) replaces the bit-by-bit long division on the field reduction (`_p256_reduce_longdiv` retained as the differential-KAT reference). **`ecdsa_p256_verify` 147.5 → 26.1 ms (5.65×)** on 6.0.61 (`history.csv` row `v3.7.0-p256-solinas`), transitively speeding all P-256 chain verifies. The ≤ 10 ms target needs the (carried-forward) EC scalar-mult speedup — reduction alone reached 26 ms. Pin 6.0.58→6.0.61. +3 assertions. Audit: `docs/audit/2026-06-04-3.7.0-p256-solinas-audit.md`. |
 | 3.6.8 | 2026-06-04 | **cyrius-native-TLS arc closeout** (last 3.6.x tag). CLAUDE.md Closeout Pass over 3.6.0–3.6.7: full suite green, bench baseline re-captured (no regressions), dead-code + security re-scan clean, stale-comment/doc sweep. Fixed the `_into`-in-3.6 comments (`sgx.cyr`/`tdx.cyr` → gated v3.7) and the stale `benches/sigil.bcyr` path in CLAUDE.md. No functional change; 3.6.x verified API-additive. +0 assertions. Audit: `docs/audit/2026-06-04-3.6.8-closeout-audit.md`. |

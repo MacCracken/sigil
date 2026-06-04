@@ -1,0 +1,111 @@
+# aes_gcm_iv.tcyr — AES-GCM with arbitrary-length IVs (3.7.2,
+# NIST SP 800-38D §7.1 GHASH-based J0). KATs generated with OpenSSL
+# 3.6.2 (EVP, EVP_CTRL_GCM_SET_IVLEN); the two 60-byte-IV cases also
+# match the canonical McGrew-Viega GCM Test Cases 6 (AES-128) and 18
+# (AES-256). Covers AES-256 + AES-128, 60-/8-/1-byte IVs, encrypt KAT,
+# decrypt roundtrip, tamper reject, the 12-byte consistency invariant,
+# and iv_len validation.
+
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fmt.cyr"
+include "lib/json.cyr"
+include "lib/sakshi.cyr"
+include "lib/chrono.cyr"
+
+include "lib/thread_local.cyr"
+include "src/crypto_scratch.cyr"
+include "src/types.cyr"
+include "src/error.cyr"
+include "src/sha256.cyr"
+include "src/hex.cyr"
+include "lib/ct.cyr"
+include "src/hmac.cyr"
+include "src/aes_gcm.cyr"
+
+fn main() {
+    alloc_init();
+
+    var key256 = hex_decode("feffe9928665731c6d6a8f9467308308feffe9928665731c6d6a8f9467308308", 64);
+    var key128 = hex_decode("feffe9928665731c6d6a8f9467308308", 32);
+    var iv60 = hex_decode("9313225df88406e555909c5aff5269aa6a7a9538534f7da1e4c303d2a318a728c3c0c95156809539fcf0e2429a6b525416aedbf5a0de6a57a637b39b", 120);
+    var aad = hex_decode("feedfacedeadbeeffeedfacedeadbeefabaddad2", 40);
+    var pt60 = hex_decode("d9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a318a721c3c0c95956809532fcf0e2449a6b525b16aedf5aa0de657ba637b39", 120);
+
+    var ct = alloc(60);
+    var tag = alloc(16);
+    var ptout = alloc(60);
+
+    # ============================================================
+    test_group("AES-256-GCM, 60-byte IV (McGrew-Viega TC18)");
+    assert_eq(aes_gcm_encrypt_iv(key256, iv60, 60, aad, 20, pt60, 60, ct, tag), 0, "encrypt_iv ok");
+    assert_streq(hex_encode(ct, 60),
+        "5a8def2f0c9e53f1f75d7853659e2a20eeb2b22aafde6419a058ab4f6f746bf40fc0c3b780f244452da3ebf1c5d82cdea2418997200ef82e44ae7e3f",
+        "ciphertext matches OpenSSL/TC18");
+    assert_streq(hex_encode(tag, 16), "a44a8266ee1c8eb0c8b5d4cf5ae9f19a", "tag matches OpenSSL/TC18");
+    assert_eq(aes_gcm_decrypt_iv(key256, iv60, 60, aad, 20, ct, 60, tag, ptout), ERR_NONE, "decrypt_iv ok");
+    assert_streq(hex_encode(ptout, 60), hex_encode(pt60, 60), "decrypt recovers plaintext");
+
+    # Tamper the tag → reject.
+    store8(tag, (load8(tag) ^ 0x01) & 0xFF);
+    assert_eq(aes_gcm_decrypt_iv(key256, iv60, 60, aad, 20, ct, 60, tag, ptout), ERR_INTEGRITY_MISMATCH,
+        "tampered tag rejected");
+    store8(tag, (load8(tag) ^ 0x01) & 0xFF);   # restore
+
+    # ============================================================
+    test_group("AES-128-GCM, 60-byte IV (McGrew-Viega TC6)");
+    assert_eq(aes_128_gcm_encrypt_iv(key128, iv60, 60, aad, 20, pt60, 60, ct, tag), 0, "encrypt_iv ok");
+    assert_streq(hex_encode(ct, 60),
+        "8ce24998625615b603a033aca13fb894be9112a5c3a211a8ba262a3cca7e2ca701e4a9a4fba43c90ccdcb281d48c7c6fd62875d2aca417034c34aee5",
+        "ciphertext matches OpenSSL/TC6");
+    assert_streq(hex_encode(tag, 16), "619cc5aefffe0bfa462af43c1699d050", "tag matches OpenSSL/TC6");
+    assert_eq(aes_128_gcm_decrypt_iv(key128, iv60, 60, aad, 20, ct, 60, tag, ptout), ERR_NONE, "decrypt_iv ok");
+    assert_streq(hex_encode(ptout, 60), hex_encode(pt60, 60), "decrypt recovers plaintext");
+
+    # ============================================================
+    test_group("AES-256-GCM, 8-byte IV (no AAD)");
+    var iv8 = hex_decode("cafebabefacedbad", 16);
+    var pt16 = hex_decode("d9313225f88406e5a55909c5aff5269a", 32);
+    assert_eq(aes_gcm_encrypt_iv(key256, iv8, 8, 0, 0, pt16, 16, ct, tag), 0, "encrypt_iv ok");
+    assert_streq(hex_encode(ct, 16), "c3762df1ca787d32ae47c13bf19844cb", "8-byte-IV ciphertext matches OpenSSL");
+    assert_streq(hex_encode(tag, 16), "fdb3d60032bf73fb62385867c3ab953f", "8-byte-IV tag matches OpenSSL");
+    assert_eq(aes_gcm_decrypt_iv(key256, iv8, 8, 0, 0, ct, 16, tag, ptout), ERR_NONE, "8-byte-IV decrypt ok");
+    assert_streq(hex_encode(ptout, 16), hex_encode(pt16, 16), "8-byte-IV plaintext recovered");
+
+    # ============================================================
+    test_group("AES-256-GCM, 1-byte IV (edge)");
+    var iv1 = hex_decode("2a", 2);
+    var pt16b = hex_decode("00112233445566778899aabbccddeeff", 32);
+    assert_eq(aes_gcm_encrypt_iv(key256, iv1, 1, 0, 0, pt16b, 16, ct, tag), 0, "encrypt_iv ok");
+    assert_streq(hex_encode(ct, 16), "dc472360766f6a9aeb05a1e3fd2b2b88", "1-byte-IV ciphertext matches OpenSSL");
+    assert_streq(hex_encode(tag, 16), "b0f8d097b5c8baf4e6c30d8d05096023", "1-byte-IV tag matches OpenSSL");
+    assert_eq(aes_gcm_decrypt_iv(key256, iv1, 1, 0, 0, ct, 16, tag, ptout), ERR_NONE, "1-byte-IV decrypt ok");
+
+    # ============================================================
+    test_group("12-byte IV consistency + validation");
+    # aes_gcm_encrypt_iv(..., 12) must equal aes_gcm_encrypt(...) (the
+    # 96-bit fast path) byte-for-byte — same J0, same output.
+    var iv12 = hex_decode("cafebabefacedbaddecaf888", 24);
+    var ct_a = alloc(16); var tag_a = alloc(16);
+    var ct_b = alloc(16); var tag_b = alloc(16);
+    aes_gcm_encrypt(key256, iv12, 0, 0, pt16, 16, ct_a, tag_a);
+    aes_gcm_encrypt_iv(key256, iv12, 12, 0, 0, pt16, 16, ct_b, tag_b);
+    assert_streq(hex_encode(ct_a, 16), hex_encode(ct_b, 16), "encrypt_iv(12) ct == encrypt(12) ct");
+    assert_streq(hex_encode(tag_a, 16), hex_encode(tag_b, 16), "encrypt_iv(12) tag == encrypt(12) tag");
+
+    # iv_len <= 0 rejected.
+    assert_eq(aes_gcm_encrypt_iv(key256, iv8, 0, 0, 0, pt16, 16, ct, tag), 0 - 1, "iv_len=0 rejected (encrypt)");
+    assert_eq(aes_gcm_decrypt_iv(key256, iv8, 0 - 1, 0, 0, ct, 16, tag, ptout), ERR_INVALID_INPUT,
+        "iv_len<0 rejected (decrypt)");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

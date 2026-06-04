@@ -25,7 +25,7 @@ Detail for each is in its section below.
 - [ ] Retire the per-thread bank-indexing workaround if cyrius gains native thread-local arrays
 - [x] x509 P-384 chain-link verify (non-P256 issuers) — **shipped 3.6.7** (`ecdsa-with-SHA384` issuers → `ecdsa_p384_verify`)
 - [x] x509 RSA chain-link verify — **shipped 3.6.5** (RSA-SHA256/384 issuers)
-- [ ] AES-GCM arbitrary-length IVs (non-96-bit, via GHASH) — *un-buried 3.6.5; was hidden in `src/aes_gcm.cyr` as "deferred to a follow-up"*
+- [x] AES-GCM arbitrary-length IVs (non-96-bit, via GHASH) — **shipped 3.7.2** (`*_iv` entries, SP 800-38D §7.1; OpenSSL/McGrew-Viega-verified). *Un-buried 3.6.5, folded into the v3.7 arc.*
 - [x] AES-128 seal keys (parameterise `SGX_SEAL_KEY_SIZE`) — **shipped 3.6.7** (`sgx_derive_seal_key_n`, 16/32-byte width)
 - [x] Reconcile the stale "`_into` lands in 3.6" comments in `src/sgx.cyr` / `src/tdx.cyr` — **fixed 3.6.8** (point at the gated v3.7 `_into` cycle); the stale `benches/sigil.bcyr` path in CLAUDE.md fixed too
 - [ ] Scatter-store for the fixed-base comb (cache-timing)
@@ -224,16 +224,15 @@ in-place when an adjacent edit touches the relevant module.
         `_x509_verify_link` dispatches RSA-with-SHA256/384 issuers to
         `rsa_pkcs1v15_verify_*` (real AMD ARK/ASK are RSA-4096+SHA-384).
 
-- [ ] **AES-GCM arbitrary-length IVs.** `src/aes_gcm.cyr` implements
-      only the 12-byte (96-bit) IV fast path; NIST SP 800-38D also
-      defines GCM for IVs of any length (the IV is run through GHASH to
-      form J0 when `len != 96`). *Surfaced 2026-06-04 (un-buried from a
-      `src/aes_gcm.cyr` comment that read "Arbitrary-length IVs deferred
-      to a follow-up" — it was never in this roadmap).* Not blocking the
-      cyrius-TLS arc (TLS uses 96-bit IVs exclusively), so unscheduled;
-      land it if a consumer needs non-TLS GCM. Self-contained: add the
-      GHASH-based J0 derivation in the `iv_len != 12` branch + KATs from
-      SP 800-38D Appendix B.
+- [x] **AES-GCM arbitrary-length IVs.** **Shipped 3.7.2.**
+      `_gcm_compute_j0` (`src/aes_gcm.cyr`) adds the SP 800-38D §7.1
+      GHASH-based J0 for the `iv_len != 12` branch; new
+      `aes_gcm_encrypt_iv` / `_decrypt_iv` + AES-128 variants take an
+      `iv_len`. Interop-verified vs OpenSSL (AES-256/128 at 60/8/1-byte
+      IVs; the 60-byte cases match McGrew-Viega TC6/TC18). The 8-arg
+      96-bit entries stay byte-for-byte 12-byte wrappers (API-additive).
+      *(Un-buried 3.6.5 from a stale `aes_gcm.cyr` comment; folded into
+      the v3.7 arc.)*
 
 - [x] **AES-128 seal keys.** **Shipped 3.6.7.** `sgx_derive_seal_key_n`
       / `sgx_seal_key_n` / `sgx_unseal_key_n` take a 16- or 32-byte width
