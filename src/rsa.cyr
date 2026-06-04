@@ -69,25 +69,35 @@ fn _rsa_emsa_encode(out, k, prefix, prefix_len, hash, hash_len): i64 {
     return 0;
 }
 
-# Core PKCS#1 v1.5 verify. n_be/e_be: public key as big-endian bytes.
-# prefix/prefix_len: the DigestInfo prefix. hash/hash_len: the message
-# digest. sig/sig_len: the signature. Returns 1 iff valid, else 0.
-fn _rsa_pkcs1v15_check(n_be, n_len, e_be, e_len, prefix, prefix_len, hash, hash_len, sig, sig_len): i64 {
+# RSAVP1 + I2OSP: recover the k-byte encoded message EM = (s^e mod n)
+# from a signature using the public key (n_be, e_be). Writes n_len bytes
+# to `em_out`. Returns 0 on success, -1 if lengths are out of range or
+# s >= n. Operands are entirely public (no CT requirement). Shared by
+# the PKCS#1 v1.5 check and the PSS verify.
+fn _rsa_recover_em(n_be, n_len, e_be, e_len, sig, sig_len, em_out): i64 {
     # Length sanity (RFC 8017 §8.2.2 step 1): signature is exactly k
     # octets, and k must fit our buffers.
-    if (sig_len != n_len) { return 0; }
-    if (n_len > 512) { return 0; }
+    if (sig_len != n_len) { return 0 - 1; }
+    if (n_len > 512) { return 0 - 1; }
     var limbs = (n_len + 7) / 8;
 
     bn_from_be(&_rsa_n, limbs, n_be, n_len);
     bn_from_be(&_rsa_s, limbs, sig, sig_len);
 
     # RFC 8017 §8.2.2 / §5.2.1: reject s >= n (out of range).
-    if (bn_cmp(&_rsa_s, &_rsa_n, limbs) >= 0) { return 0; }
+    if (bn_cmp(&_rsa_s, &_rsa_n, limbs) >= 0) { return 0 - 1; }
 
     # m = s^e mod n  (RSAVP1), then I2OSP to k octets.
     bn_modexp(&_rsa_m, &_rsa_s, e_be, e_len, &_rsa_n, limbs);
-    bn_to_be(&_rsa_em, n_len, &_rsa_m, limbs);
+    bn_to_be(em_out, n_len, &_rsa_m, limbs);
+    return 0;
+}
+
+# Core PKCS#1 v1.5 verify. n_be/e_be: public key as big-endian bytes.
+# prefix/prefix_len: the DigestInfo prefix. hash/hash_len: the message
+# digest. sig/sig_len: the signature. Returns 1 iff valid, else 0.
+fn _rsa_pkcs1v15_check(n_be, n_len, e_be, e_len, prefix, prefix_len, hash, hash_len, sig, sig_len): i64 {
+    if (_rsa_recover_em(n_be, n_len, e_be, e_len, sig, sig_len, &_rsa_em) < 0) { return 0; }
 
     # Reconstruct the expected EM and compare all k octets (RFC 8017
     # §9.2). Operands are public, but reuse the OR-accumulating
@@ -420,10 +430,14 @@ fn _rsa_crt_modexp(key, mb, sb_out, limbs): i64 {
     return 0;
 }
 
-# Core signer. `key` is an RSAK struct; prefix/hash form the DigestInfo.
-# Writes the k-byte signature to `sig_out`. Returns k (>0), or -1 on a
-# too-small modulus or a failed verify-after-sign.
-fn _rsa_pkcs1v15_sign(key, prefix, prefix_len, hash, hash_len, sig_out): i64 {
+# RSASP1 core: sign a fully-encoded k-byte message `em` (OS2IP'd to m)
+# under the secret key. Computes s = m^d mod n with base blinding + CRT
+# (or the full-width Montgomery ladder) + verify-after-sign, then writes
+# the k-byte signature to `sig_out`. Returns k (>0), or -1 on a too-small
+# modulus or a failed verify-after-sign. Shared by the PKCS#1 v1.5 and
+# PSS signers (both differ only in how `em` is built). `em` is `nlen`
+# bytes; caller guarantees m = OS2IP(em) < n.
+fn _rsa_raw_sign(key, em, sig_out): i64 {
     var nlen = load64(key + RSAK_NLEN);
     if (nlen > 512) { return 0 - 1; }
     var limbs = (nlen + 7) / 8;
@@ -431,9 +445,8 @@ fn _rsa_pkcs1v15_sign(key, prefix, prefix_len, hash, hash_len, sig_out): i64 {
     var dlen = load64(key + RSAK_DLEN);
     var elen = load64(key + RSAK_ELEN);
 
-    # EM = EMSA-PKCS1-v1.5(hash); m = OS2IP(EM); n as a bignum.
-    if (_rsa_emsa_encode(&_rsa_sign_em, nlen, prefix, prefix_len, hash, hash_len) < 0) { return 0 - 1; }
-    bn_from_be(&_rsa_sign_m, limbs, &_rsa_sign_em, nlen);
+    # m = OS2IP(EM); n as a bignum.
+    bn_from_be(&_rsa_sign_m, limbs, em, nlen);
     bn_from_be(&_rsa_sign_n, limbs, key + RSAK_N, nlen);
 
     # Base blinding: fresh random r, mb = m * r^e mod n  (r^e via the
@@ -465,6 +478,18 @@ fn _rsa_pkcs1v15_sign(key, prefix, prefix_len, hash, hash_len, sig_out): i64 {
     return nlen;
 }
 
+# Core signer. `key` is an RSAK struct; prefix/hash form the DigestInfo.
+# Writes the k-byte signature to `sig_out`. Returns k (>0), or -1 on a
+# too-small modulus or a failed verify-after-sign.
+fn _rsa_pkcs1v15_sign(key, prefix, prefix_len, hash, hash_len, sig_out): i64 {
+    var nlen = load64(key + RSAK_NLEN);
+    if (nlen > 512) { return 0 - 1; }
+
+    # EM = EMSA-PKCS1-v1.5(hash); sign via the shared RSASP1 core.
+    if (_rsa_emsa_encode(&_rsa_sign_em, nlen, prefix, prefix_len, hash, hash_len) < 0) { return 0 - 1; }
+    return _rsa_raw_sign(key, &_rsa_sign_em, sig_out);
+}
+
 # Sign SHA-256(msg) with RSASSA-PKCS1-v1.5. `key` is an RSAK struct
 # (from rsa_privkey_from_der). Writes k bytes to sig_out; returns k.
 fn rsa_pkcs1v15_sign_sha256(key, msg, msg_len, sig_out): i64 {
@@ -478,4 +503,261 @@ fn rsa_pkcs1v15_sign_sha384(key, msg, msg_len, sig_out): i64 {
     sha384(msg, msg_len, &_rsa_hash);
     var pl = _rsa_di_sha384(&_rsa_di);
     return _rsa_pkcs1v15_sign(key, &_rsa_di, pl, &_rsa_hash, 48, sig_out);
+}
+
+# ================================================================
+# RSASSA-PSS (RFC 8017 §8.1 / §9.1), SHA-256 and SHA-384 (3.6.5)
+# ================================================================
+# The modern TLS 1.3 RSA signature scheme (`rsa_pss_rsae_sha256` /
+# `_sha384`, RFC 8446 §4.2.3). MGF1 uses the SAME hash as the message
+# digest. Sign uses a fresh random salt of length hLen (the TLS 1.3
+# convention; equals the digest length). Verify is salt-length-agnostic
+# (EMSA-PSS-VERIFY recovers the salt from the 0x01 separator in DB), so
+# it accepts any conformant salt length — matching OpenSSL's
+# RSA_PSS_SALTLEN_AUTO.
+#
+# SCOPE / TIMING: PSS verify is entirely public (signature, public key).
+# PSS sign reuses `_rsa_raw_sign` (blinding + CRT + verify-after-sign);
+# the EMSA-PSS encode/MGF1 operate on the message digest + a random salt,
+# never on `d` — no secret-dependent branch is introduced here. The salt
+# is per-signature random, not key material, so no zeroization beyond the
+# raw signer's existing handling is required.
+
+# hLen for a hash id: 0 = SHA-256 (32), 1 = SHA-384 (48).
+fn _rsa_pss_hlen(hid): i64 {
+    if (hid == 1) { return 48; }
+    return 32;
+}
+
+# Dispatch hash by id into `out` (hLen bytes).
+fn _rsa_pss_hash(hid, msg, msg_len, out): i64 {
+    if (hid == 1) { sha384(msg, msg_len, out); return 48; }
+    sha256(msg, msg_len, out);
+    return 32;
+}
+
+# PSS scratch (single-threaded; verify is public, sign reuses the raw
+# signer's banks). emLen <= 512 (RSA-4096); dbLen = emLen-hLen-1 <= 512.
+# _pss_mprime holds M' = (8 zero octets) || mHash || salt: for verify the
+# recovered salt can be as large as dbLen, so size for the worst case
+# (8 + 48 + ~479).
+var _pss_mhash[64];         # Hash(M)
+var _pss_db[512];           # DB / maskedDB
+var _pss_dbmask[512];       # MGF1 output
+var _pss_h[64];             # H = Hash(M') on verify (read from EM on sign)
+var _pss_em[512];           # encoded message (right-aligned in nlen bytes)
+var _pss_salt[64];          # random salt (sign only; len = hLen <= 48)
+var _pss_mprime[600];       # M' = 8 || mHash || salt
+var _mgf_seedc[72];         # MGF1 input: seed (hLen) || C (4)
+var _mgf_block[64];         # one MGF1 hash block
+
+# MGF1 (RFC 8017 §B.2.1) with the id-`hid` hash. Writes `mask_len` bytes
+# of mask to `mask_out`. seed is `seed_len` bytes.
+fn _rsa_mgf1(hid, seed, seed_len, mask_out, mask_len): i64 {
+    var hlen = _rsa_pss_hlen(hid);
+    memcpy(&_mgf_seedc, seed, seed_len);
+    var counter = 0;
+    var off = 0;
+    while (off < mask_len) {
+        # C = I2OSP(counter, 4), big-endian.
+        store8(&_mgf_seedc + seed_len + 0, (counter >> 24) & 0xFF);
+        store8(&_mgf_seedc + seed_len + 1, (counter >> 16) & 0xFF);
+        store8(&_mgf_seedc + seed_len + 2, (counter >> 8) & 0xFF);
+        store8(&_mgf_seedc + seed_len + 3, counter & 0xFF);
+        _rsa_pss_hash(hid, &_mgf_seedc, seed_len + 4, &_mgf_block);
+        var n = hlen;
+        if (off + n > mask_len) { n = mask_len - off; }
+        memcpy(mask_out + off, &_mgf_block, n);
+        off = off + n;
+        counter = counter + 1;
+    }
+    return 0;
+}
+
+# Highest-set-bit index + 1 of a big-endian byte string (0 if all zero).
+fn _rsa_bitlen_be(buf, len): i64 {
+    var i = 0;
+    while (i < len) {
+        var b = load8(buf + i) & 0xFF;
+        if (b != 0) {
+            var bit = 7;
+            while (bit >= 0) {
+                if (((b >> bit) & 1) == 1) { return (len - 1 - i) * 8 + bit + 1; }
+                bit = bit - 1;
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Mask of the top `nbits` bits of a single octet (e.g. 1 -> 0x80,
+# 2 -> 0xC0). nbits is 0..8.
+fn _rsa_top_mask(nbits): i64 {
+    var m = 0;
+    var k = 0;
+    while (k < nbits) { m = m | ((0x80 >> k) & 0xFF); k = k + 1; }
+    return m;
+}
+
+# Read `n` random bytes from /dev/urandom into `out`. Returns 0 / -1.
+fn _rsa_pss_rand(out, n): i64 {
+    if (n == 0) { return 0; }
+    var fd = file_open("/dev/urandom", 0, 0);
+    if (fd < 0) { return 0 - 1; }
+    var got = 0;
+    while (got < n) {
+        var r = file_read(fd, out + got, n - got);
+        if (r <= 0) { file_close(fd); return 0 - 1; }
+        got = got + r;
+    }
+    file_close(fd);
+    return 0;
+}
+
+# EMSA-PSS-VERIFY (RFC 8017 §9.1.2) on the `emlen`-byte encoded message
+# at `em` (embits = modBits-1). `mhash` is the hLen-byte message digest.
+# Salt-length-agnostic. Returns 1 if consistent, else 0.
+fn _rsa_emsa_pss_verify(hid, em, emlen, embits, mhash, hlen): i64 {
+    # Step 4: rightmost octet must be 0xbc.
+    if ((load8(em + emlen - 1) & 0xFF) != 0xbc) { return 0; }
+
+    var dblen = emlen - hlen - 1;
+    if (dblen < 1) { return 0; }
+    var hptr = em + dblen;                  # H = next hLen octets
+
+    # Step 6: the top (8*emlen - embits) bits of maskedDB[0] must be 0.
+    var topbits = 8 * emlen - embits;
+    var tmask = _rsa_top_mask(topbits);
+    if (((load8(em) & 0xFF) & tmask) != 0) { return 0; }
+
+    # Step 7-8: DB = maskedDB XOR MGF1(H, dbLen); clear the same top bits.
+    _rsa_mgf1(hid, hptr, hlen, &_pss_dbmask, dblen);
+    var i = 0;
+    while (i < dblen) {
+        store8(&_pss_db + i, (load8(em + i) & 0xFF) ^ (load8(&_pss_dbmask + i) & 0xFF));
+        i = i + 1;
+    }
+    store8(&_pss_db, (load8(&_pss_db) & 0xFF) & (tmask ^ 0xFF));
+
+    # Step 10 (salt-agnostic): DB = (zero octets) || 0x01 || salt. Scan
+    # left; every octet before the first 0x01 must be zero.
+    var sep = 0 - 1;
+    i = 0;
+    while (i < dblen) {
+        if (sep < 0) {
+            var v = load8(&_pss_db + i) & 0xFF;
+            if (v == 0x01) { sep = i; }
+            else { if (v != 0x00) { return 0; } }
+        }
+        i = i + 1;
+    }
+    if (sep < 0) { return 0; }              # no 0x01 separator
+    var slen = dblen - 1 - sep;             # recovered salt length
+    if (slen < 0) { return 0; }
+
+    # Step 12-14: M' = (0x)00*8 || mHash || salt ; H' = Hash(M').
+    var j = 0;
+    while (j < 8) { store8(&_pss_mprime + j, 0); j = j + 1; }
+    memcpy(&_pss_mprime + 8, mhash, hlen);
+    memcpy(&_pss_mprime + 8 + hlen, &_pss_db + sep + 1, slen);
+    _rsa_pss_hash(hid, &_pss_mprime, 8 + hlen + slen, &_pss_h);
+
+    # Constant-time compare H' against the embedded H.
+    return ct_eq_bytes(hptr, &_pss_h, hlen);
+}
+
+# Verify an RSASSA-PSS signature (RFC 8017 §8.1.2) over the `hid` digest
+# of msg, public key (n_be, e_be). Returns 1 iff valid, else 0.
+fn _rsa_pss_verify(hid, n_be, n_len, e_be, e_len, msg, msg_len, sig, sig_len): i64 {
+    var hlen = _rsa_pss_hlen(hid);
+    if (_rsa_recover_em(n_be, n_len, e_be, e_len, sig, sig_len, &_rsa_em) < 0) { return 0; }
+
+    var modbits = _rsa_bitlen_be(n_be, n_len);
+    var embits = modbits - 1;
+    var emlen = (embits + 7) / 8;
+    if (emlen < hlen + 2) { return 0; }     # cannot hold H || 0xbc + minimum DB
+    if (emlen > n_len) { return 0; }        # (cannot happen for valid n)
+
+    # EM is the low `emlen` octets of the k-byte RSAVP1 output (the top
+    # n_len-emlen octets are zero by I2OSP). _rsa_recover_em wrote k bytes.
+    var em = (&_rsa_em) + (n_len - emlen);
+
+    _rsa_pss_hash(hid, msg, msg_len, &_pss_mhash);
+    return _rsa_emsa_pss_verify(hid, em, emlen, embits, &_pss_mhash, hlen);
+}
+
+# Sign msg with RSASSA-PSS (RFC 8017 §8.1.1). `key` is an RSAK struct;
+# salt length = hLen (fresh /dev/urandom). Writes k bytes to sig_out;
+# returns k (>0), or -1 on failure (entropy, too-small modulus, or a
+# failed verify-after-sign).
+fn _rsa_pss_sign(hid, key, msg, msg_len, sig_out): i64 {
+    var hlen = _rsa_pss_hlen(hid);
+    var nlen = load64(key + RSAK_NLEN);
+    if (nlen > 512) { return 0 - 1; }
+
+    var modbits = _rsa_bitlen_be(key + RSAK_N, nlen);
+    var embits = modbits - 1;
+    var emlen = (embits + 7) / 8;
+    var slen = hlen;                        # salt length = digest length
+    if (emlen < hlen + slen + 2) { return 0 - 1; }
+    var dblen = emlen - hlen - 1;
+
+    # mHash = Hash(M); salt <- random hLen bytes.
+    _rsa_pss_hash(hid, msg, msg_len, &_pss_mhash);
+    if (_rsa_pss_rand(&_pss_salt, slen) < 0) { return 0 - 1; }
+
+    # EM is built right-aligned in an nlen-byte buffer (leading zero pad
+    # when emlen < nlen). emstart points at EM[0].
+    memset(&_pss_em, 0, nlen);
+    var emstart = (&_pss_em) + (nlen - emlen);
+    var hptr = emstart + dblen;             # H lands here in EM
+
+    # M' = (0x)00*8 || mHash || salt ; H = Hash(M') written directly to EM.
+    var j = 0;
+    while (j < 8) { store8(&_pss_mprime + j, 0); j = j + 1; }
+    memcpy(&_pss_mprime + 8, &_pss_mhash, hlen);
+    memcpy(&_pss_mprime + 8 + hlen, &_pss_salt, slen);
+    _rsa_pss_hash(hid, &_pss_mprime, 8 + hlen + slen, hptr);
+
+    # DB = (0x)00*(dbLen-slen-1) || 0x01 || salt.
+    var i = 0;
+    while (i < dblen) { store8(&_pss_db + i, 0); i = i + 1; }
+    store8(&_pss_db + (dblen - slen - 1), 0x01);
+    memcpy(&_pss_db + (dblen - slen), &_pss_salt, slen);
+
+    # maskedDB = DB XOR MGF1(H, dbLen) -> written into EM[0..dbLen).
+    _rsa_mgf1(hid, hptr, hlen, &_pss_dbmask, dblen);
+    i = 0;
+    while (i < dblen) {
+        store8(emstart + i, (load8(&_pss_db + i) & 0xFF) ^ (load8(&_pss_dbmask + i) & 0xFF));
+        i = i + 1;
+    }
+    # Clear the top (8*emlen - embits) bits of maskedDB[0]; set trailer.
+    var tmask = _rsa_top_mask(8 * emlen - embits);
+    store8(emstart, (load8(emstart) & 0xFF) & (tmask ^ 0xFF));
+    store8(emstart + emlen - 1, 0xbc);
+
+    # m = OS2IP(EM); s = m^d mod n via the shared blinded/CRT RSASP1.
+    return _rsa_raw_sign(key, &_pss_em, sig_out);
+}
+
+# Verify an RSASSA-PSS signature over SHA-256(msg). Returns 1 iff valid.
+fn rsa_pss_verify_sha256(n_be, n_len, e_be, e_len, msg, msg_len, sig, sig_len): i64 {
+    return _rsa_pss_verify(0, n_be, n_len, e_be, e_len, msg, msg_len, sig, sig_len);
+}
+
+# Verify an RSASSA-PSS signature over SHA-384(msg). Returns 1 iff valid.
+fn rsa_pss_verify_sha384(n_be, n_len, e_be, e_len, msg, msg_len, sig, sig_len): i64 {
+    return _rsa_pss_verify(1, n_be, n_len, e_be, e_len, msg, msg_len, sig, sig_len);
+}
+
+# Sign SHA-256(msg) with RSASSA-PSS (salt = 32 bytes). Returns k.
+fn rsa_pss_sign_sha256(key, msg, msg_len, sig_out): i64 {
+    return _rsa_pss_sign(0, key, msg, msg_len, sig_out);
+}
+
+# Sign SHA-384(msg) with RSASSA-PSS (salt = 48 bytes). Returns k.
+fn rsa_pss_sign_sha384(key, msg, msg_len, sig_out): i64 {
+    return _rsa_pss_sign(1, key, msg, msg_len, sig_out);
 }

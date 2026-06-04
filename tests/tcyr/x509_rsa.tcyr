@@ -1,0 +1,134 @@
+# x509_rsa.tcyr -- X.509 chain-link verification with an RSA issuer
+# (sigil 3.6.5). Exercises the RSA SPKI parse + rsa-with-SHA256/384
+# signature-algorithm dispatch added to src/x509.cyr, feeding the
+# issuer's parsed (n, e) to rsa_pkcs1v15_verify_*.
+#
+# Test chain (generated 2026-06-04 with OpenSSL 3.6.2):
+#   openssl genrsa -out ca.key 2048
+#   openssl req -new -x509 -key ca.key -sha256 -days 3650
+#     -subj "/CN=Sigil RSA Test Root CA"
+#     -addext basicConstraints=critical,CA:TRUE,pathlen:1
+#     -addext keyUsage=critical,keyCertSign,cRLSign           (ca.crt)
+#   openssl genrsa -out leaf.key 2048
+#   openssl req -new -key leaf.key -subj "/CN=Sigil RSA Test Leaf"
+#   openssl x509 -req -CA ca.crt -CAkey ca.key -sha256 ...     (leaf256.crt)
+#   openssl x509 -req -CA ca.crt -CAkey ca.key -sha384 ...     (leaf384.crt)
+# `openssl verify -CAfile ca.crt leaf256.crt` -> OK (both).
+# DER via `openssl x509 -outform DER | xxd -p -c100000`.
+#
+# CA / leaf validity: 2026-06-04 18:15:15 UTC .. (CA 2036 / leaf 2027).
+
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/string.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fmt.cyr"
+include "lib/json.cyr"
+include "lib/sakshi.cyr"
+include "lib/chrono.cyr"
+include "lib/bigint.cyr"
+include "lib/ct.cyr"
+
+include "lib/thread_local.cyr"
+include "src/crypto_scratch.cyr"
+include "src/types.cyr"
+include "src/error.cyr"
+include "src/sha256.cyr"
+include "src/hex.cyr"
+include "src/sha512.cyr"
+include "src/sha384.cyr"
+include "src/bigint_ext.cyr"
+include "src/ed25519.cyr"
+include "src/ecdsa_p256.cyr"
+include "src/x509.cyr"
+include "src/bignum.cyr"
+include "src/rsa.cyr"
+
+var CA_HEX = "308203363082021ea00302010202146811642f987e02ffabef98cf7b4db90a4e5e97e3300d06092a864886f70d01010b05003021311f301d06035504030c16536967696c20525341205465737420526f6f74204341301e170d3236303630343138313531355a170d3336303630313138313531355a3021311f301d06035504030c16536967696c20525341205465737420526f6f7420434130820122300d06092a864886f70d01010105000382010f003082010a0282010100c5c5256c03d571730c413284a9dd11fdba3ac86aa4af0ebbd64aeeca67b581abfed623e7bc4c6c662312cc7cd09818f1defbead132b3e661f9f0a739225c9a0257eaad50bd29d1e28635acd1c141996f8ff6abe67b7432023e9539bcc93cd80736b572941c1ab8ae3514d86f351973a990f24842256fd569cb8cd34666ba760ab8daa8a944de866e7a65158d53a9e4e553879825f9a1ef8a203aa8f1fa2e39a268fcefbf1d3cfe2bcad4cd8613480d26fb509e9a59038338e7b746b8cc96507fdcfc8611c98b5bd8c071a22af3bc253c91956dd742e882626b39f2286f064d0e86e3ec2cafc7ee1fa18881513c17b7b2ec5804632485b5274fc7466ba807614f0203010001a3663064301d0603551d0e041604141f153fa720ece91a51ef4d2b621614435dcea782301f0603551d230418301680141f153fa720ece91a51ef4d2b621614435dcea78230120603551d130101ff040830060101ff020101300e0603551d0f0101ff040403020106300d06092a864886f70d01010b050003820101009bdcb31bd49ee07a41acb9bbf5e34a50d7abafc277c0522efd01075bd62989927b73e87b5f0d701b3802c18aed1bd5de2b7ed3f208b76433f1e79999073e8b7265aa9b75ae4c4fb5c241a2971c8a5cc735c323e822069170c4c63ce8e8dc83158a7d3e03485f31519254f7dbddcec4435074f86b66c836282c90c4c9f8de066bc0c5673bb83ccd9210bcf3a3b7daaa9213c8809474a8e3efb02263ff34d47204cd4d8663b75322d9cc4e1287d7030e0e91c81808f7f72b884f1b3a7226455f2dde9136455b0e07f2ebb9296bc9e273864e29c517ff707940888ab611dea3caadb5008503fc343cb9daaee7eee8ed25c1ae8f0de245e8ff711db9898611bd85ad";
+
+var LEAF256_HEX = "3082030f308201f7a00302010202146cf92d189fe010b0b74223f6903535a16a6a7262300d06092a864886f70d01010b05003021311f301d06035504030c16536967696c20525341205465737420526f6f74204341301e170d3236303630343138313531355a170d3237303630343138313531355a301e311c301a06035504030c13536967696c205253412054657374204c65616630820122300d06092a864886f70d01010105000382010f003082010a0282010100952051daa5ccb1129f3a312a1f726f2a117f38fc16c6cb47e032b899d4dbea541b995ef8dbb60a8b3c528e9c2ffcb9d90c8bf6c9ea6ef054caf1dd9cb60dca5f3b4979dc17a2f466040fd5372e6ab0fc29ee7f871a3611a228a1c1d5ed7c83fa8a301fc2286dbce083d0f01fce56ecbf91074f31de2080fcb7a6d180ed5ad62caa27a51acefb3004d6830735c2bc712f1ae1ddd02f330496d6322ece3363522c9a470b543e560654979dbe7a522804a778254158c8e40d6e210dd96b1c442470e4880b1ed455022dcd7739be69690704ca5e681378ef3cca6c4f177bf1cfc6f4d5df5a0b2664bc11480cd00e4f4d4eaa7362d36c532a4817507bfcb3159792450203010001a3423040301d0603551d0e04160414519decafc387133b1b98c6f69071ee4a02816a78301f0603551d230418301680141f153fa720ece91a51ef4d2b621614435dcea782300d06092a864886f70d01010b0500038201010047f7439a252c734d3cf4a6de0afc7828c0c942f71e54c6dd6ec2db1d0965233764cd9f16658a865152690ba318b3320bbaf4a5f53aadddfcf2ef98fb0ca93f2c19a299aafb2c25d803b18b494a032ac92f8adfccc09b57d4cd8a2ee6ceccabe0225e02307a0c7cbe69975050401171e5b7ef1352d0761f28f976bfa506b8617c9016c4256488b6f034aa6c2cd8dbb69c37437aa0c7da6619490095fe0d93cd1e0490581d7b2c71a86813ef5a33c6a61142f93e4a92285dddf21d1b938b6de867b30028828b0be3510a6b1a242272b15c3674acfc82f98a797c5f40c2b2aa1cfd5ae2588db7c90d0813413adf7f596eba17da102b9795b721f117b7adc5d27501";
+
+var LEAF384_HEX = "3082030f308201f7a00302010202146cf92d189fe010b0b74223f6903535a16a6a7263300d06092a864886f70d01010c05003021311f301d06035504030c16536967696c20525341205465737420526f6f74204341301e170d3236303630343138313531355a170d3237303630343138313531355a301e311c301a06035504030c13536967696c205253412054657374204c65616630820122300d06092a864886f70d01010105000382010f003082010a0282010100952051daa5ccb1129f3a312a1f726f2a117f38fc16c6cb47e032b899d4dbea541b995ef8dbb60a8b3c528e9c2ffcb9d90c8bf6c9ea6ef054caf1dd9cb60dca5f3b4979dc17a2f466040fd5372e6ab0fc29ee7f871a3611a228a1c1d5ed7c83fa8a301fc2286dbce083d0f01fce56ecbf91074f31de2080fcb7a6d180ed5ad62caa27a51acefb3004d6830735c2bc712f1ae1ddd02f330496d6322ece3363522c9a470b543e560654979dbe7a522804a778254158c8e40d6e210dd96b1c442470e4880b1ed455022dcd7739be69690704ca5e681378ef3cca6c4f177bf1cfc6f4d5df5a0b2664bc11480cd00e4f4d4eaa7362d36c532a4817507bfcb3159792450203010001a3423040301d0603551d0e04160414519decafc387133b1b98c6f69071ee4a02816a78301f0603551d230418301680141f153fa720ece91a51ef4d2b621614435dcea782300d06092a864886f70d01010c050003820101003f6b626431a4a1979250c1044a14b75dd2717e822a605d1450fb7e36b9f5d27bbeba2844127543625f9b652297c8d28b4688ac8f1beb4d9577858fc7e4c3b47d4a76bf5e375b8ae91b5d1e5cabf1f73a4241d346ae124efb7524256753329011fba4cbbce32b4b5a154975951872756fc1201bdd44ca1e584400dccdc8b58a87fad711f141b6c1a4e9175ea8d362949143e2ff83bbd3a34a45fdda77dc3191bdead185c395ce570a66cfc56971a60af3e13bb7131af303e9c7184e795d868ac89e959c11b7715b011bab494d165bd49bf821a56b23d67622f64848e95387d72f0d9774cede5fc575af4a30eadc48708f843e15f5acb549da85ae5794dfb27c81";
+
+# Tampered SHA-256 leaf: final signature octet 0x01 -> 0x02. Parses
+# fine (signature bytes aren't validated at parse), verify must fail.
+var LEAF256_BAD_HEX = "3082030f308201f7a00302010202146cf92d189fe010b0b74223f6903535a16a6a7262300d06092a864886f70d01010b05003021311f301d06035504030c16536967696c20525341205465737420526f6f74204341301e170d3236303630343138313531355a170d3237303630343138313531355a301e311c301a06035504030c13536967696c205253412054657374204c65616630820122300d06092a864886f70d01010105000382010f003082010a0282010100952051daa5ccb1129f3a312a1f726f2a117f38fc16c6cb47e032b899d4dbea541b995ef8dbb60a8b3c528e9c2ffcb9d90c8bf6c9ea6ef054caf1dd9cb60dca5f3b4979dc17a2f466040fd5372e6ab0fc29ee7f871a3611a228a1c1d5ed7c83fa8a301fc2286dbce083d0f01fce56ecbf91074f31de2080fcb7a6d180ed5ad62caa27a51acefb3004d6830735c2bc712f1ae1ddd02f330496d6322ece3363522c9a470b543e560654979dbe7a522804a778254158c8e40d6e210dd96b1c442470e4880b1ed455022dcd7739be69690704ca5e681378ef3cca6c4f177bf1cfc6f4d5df5a0b2664bc11480cd00e4f4d4eaa7362d36c532a4817507bfcb3159792450203010001a3423040301d0603551d0e04160414519decafc387133b1b98c6f69071ee4a02816a78301f0603551d230418301680141f153fa720ece91a51ef4d2b621614435dcea782300d06092a864886f70d01010b0500038201010047f7439a252c734d3cf4a6de0afc7828c0c942f71e54c6dd6ec2db1d0965233764cd9f16658a865152690ba318b3320bbaf4a5f53aadddfcf2ef98fb0ca93f2c19a299aafb2c25d803b18b494a032ac92f8adfccc09b57d4cd8a2ee6ceccabe0225e02307a0c7cbe69975050401171e5b7ef1352d0761f28f976bfa506b8617c9016c4256488b6f034aa6c2cd8dbb69c37437aa0c7da6619490095fe0d93cd1e0490581d7b2c71a86813ef5a33c6a61142f93e4a92285dddf21d1b938b6de867b30028828b0be3510a6b1a242272b15c3674acfc82f98a797c5f40c2b2aa1cfd5ae2588db7c90d0813413adf7f596eba17da102b9795b721f117b7adc5d27502";
+
+# 2026-07-01 00:00:00 UTC (inside both validity windows).
+var NOW = 1782864000;
+
+fn main() {
+    alloc_init();
+    _p256_init();
+
+    var ca = hex_decode(CA_HEX, 1652);            # 826 bytes
+    var leaf256 = hex_decode(LEAF256_HEX, 1574);  # 787 bytes
+    var leaf384 = hex_decode(LEAF384_HEX, 1574);
+    var leafbad = hex_decode(LEAF256_BAD_HEX, 1574);
+
+    var cacert = x509_cert_alloc();
+    var l256 = x509_cert_alloc();
+    var l384 = x509_cert_alloc();
+    var lbad = x509_cert_alloc();
+
+    # ============================================================
+    test_group("x509_parse — RSA CA + leaves");
+
+    assert_eq(x509_parse(ca, 826, cacert), 1, "RSA CA parses");
+    assert_eq(x509_cert_curve(cacert), X509_CURVE_RSA, "CA key type = RSA");
+    var rblk = x509_cert_rsa_pubkey(cacert);
+    assert_eq(load64(rblk + 528), 256, "CA modulus length = 256 (RSA-2048)");
+    assert_eq(load64(rblk + 536), 3, "CA exponent length = 3");
+    assert_eq(x509_cert_is_ca(cacert), 1, "CA basicConstraints CA:TRUE");
+
+    assert_eq(x509_parse(leaf256, 787, l256), 1, "SHA-256 leaf parses");
+    assert_eq(x509_cert_sig_algo(l256), X509_SIG_RSA_SHA256, "leaf256 sig algo = RSA-SHA256");
+    assert_eq(x509_cert_curve(l256), X509_CURVE_RSA, "leaf256 key type = RSA");
+
+    assert_eq(x509_parse(leaf384, 787, l384), 1, "SHA-384 leaf parses");
+    assert_eq(x509_cert_sig_algo(l384), X509_SIG_RSA_SHA384, "leaf384 sig algo = RSA-SHA384");
+
+    # ============================================================
+    test_group("x509_verify_chain — RSA issuer (green path)");
+
+    var inters = alloc(8);   # zero intermediates
+    assert_eq(x509_verify_chain(l256, inters, 0, cacert, NOW), 1,
+        "RSA CA signs SHA-256 leaf (in window)");
+    assert_eq(x509_verify_chain(l384, inters, 0, cacert, NOW), 1,
+        "RSA CA signs SHA-384 leaf (in window)");
+    assert_eq(x509_verify_chain(l256, inters, 0, cacert, 0), 1,
+        "verify with time check disabled (now_unix = 0)");
+
+    # Direct link verify (bypasses DN/window checks).
+    assert_eq(_x509_verify_link(l256, cacert), 1, "direct link verify (RSA-SHA256)");
+    assert_eq(_x509_verify_link(l384, cacert), 1, "direct link verify (RSA-SHA384)");
+
+    # ============================================================
+    test_group("x509_verify_chain — RSA rejects");
+
+    assert_eq(x509_parse(leafbad, 787, lbad), 1, "tampered leaf still parses");
+    assert_eq(x509_verify_chain(lbad, inters, 0, cacert, NOW), 0,
+        "tampered RSA signature rejected");
+    assert_eq(_x509_verify_link(lbad, cacert), 0,
+        "tampered RSA signature rejected (direct link)");
+
+    # Wrong issuer key: verify the leaf's link against the LEAF as issuer.
+    # The signature was made by the CA key, not the leaf key -> reject.
+    assert_eq(_x509_verify_link(l256, l256), 0,
+        "leaf signature does not verify under the leaf's own key");
+
+    # DN mismatch: leaf.issuer ("Root CA") != leaf.subject ("Leaf"), so a
+    # self-issued chain is rejected before the signature is even checked.
+    assert_eq(x509_verify_chain(l256, inters, 0, l256, NOW), 0,
+        "issuer DN mismatch rejected (leaf as its own root)");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

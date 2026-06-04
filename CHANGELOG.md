@@ -7,7 +7,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-(none — tip is 3.6.4.)
+(none — tip is 3.6.5.)
+
+## [3.6.5] — 2026-06-04
+
+RSASSA-**PSS** (the modern TLS 1.3 RSA signature scheme) and **x509 RSA
+chain-link verification**, both on the existing bignum/RSA engine. Plus
+a debt-clearing pass: the overdue **3.5.6 audit doc** is written, and
+several deferrals that prior cycles had buried in source comments are
+**surfaced into the roadmap** (none were tracked anywhere a planning doc
+would catch them). Toolchain pin 6.0.53 → 6.0.58.
+
+### Added
+
+- **RSA-PSS** (`src/rsa.cyr`, RFC 8017 §8.1/§9.1) —
+  `rsa_pss_verify_sha256` / `_sha384` and `rsa_pss_sign_sha256` /
+  `_sha384`. MGF1 with the matching hash; sign uses a fresh
+  `/dev/urandom` salt of length hLen (the TLS 1.3 `rsa_pss_rsae_*`
+  convention); verify is salt-length-agnostic (EMSA-PSS-Verify recovers
+  the salt, like OpenSSL `SALTLEN_AUTO`). Two cores were extracted so
+  PSS reuses the audited v1.5 logic: `_rsa_recover_em` (RSAVP1) and
+  `_rsa_raw_sign` (RSASP1 with base blinding + CRT + verify-after-sign).
+- **x509 RSA chain-link verify** (`src/x509.cyr`) — `x509_parse` now
+  recognises rsaEncryption SubjectPublicKeyInfo (new key-type
+  `X509_CURVE_RSA`; the (n, e) live in a 544-byte side block referenced
+  from the cert) and the `sha256WithRSAEncryption` /
+  `sha384WithRSAEncryption` signature algorithms (`X509_SIG_RSA_SHA256`
+  / `_SHA384`). `_x509_verify_link` dispatches RSA issuers to
+  `rsa_pkcs1v15_verify_sha256/384`; inner/outer signature algorithms
+  must match (RFC 5280 §4.1.1.2). Unblocks real AMD ARK/ASK chains
+  (RSA-4096 + SHA-384). ECDSA-P256 chain-link path unchanged.
+- **Tests** — `rsa.tcyr` +10 (external pure-Python PSS KAT verify for
+  SHA-256/384, sign→verify roundtrips, and tamper / wrong-message /
+  wrong-length / cross-hash / cross-scheme rejects). `x509_rsa.tcyr`
+  +20 (new; OpenSSL-generated RSA-2048 CA signing SHA-256 and SHA-384
+  leaves, green path + tamper / wrong-issuer-key / DN-mismatch rejects).
+  Suite **51 files / 1364 assertions**, 0 failures.
+
+### Fixed
+
+- **Overdue 3.5.6 audit doc written** —
+  `docs/audit/2026-06-04-3.5.6-hmac-hkdf-sha384-audit.md`. 3.5.6
+  (HMAC-/HKDF-SHA384) had shipped with KAT tests but no per-bite
+  security audit (the only 3.5.x/3.6.x bite missing one — a CLAUDE.md §
+  Security violation that had been parked inside the roadmap's
+  "closeout" line). Retrospective audit: 0 findings.
+- **Buried deferrals surfaced** — three scope cuts that prior cycles
+  hid in source comments are now tracked in the roadmap backlog:
+  AES-GCM arbitrary-length IVs (`aes_gcm.cyr`), AES-128 seal keys
+  (`seal.cyr`), and the stale "`_into` API lands in 3.6" promise in
+  `sgx.cyr`/`tdx.cyr` (the work is v3.7). No behaviour change; honesty
+  fix.
+
+### Security
+
+- 3.6.5 audit: `docs/audit/2026-06-04-3.6.5-pss-x509-rsa-audit.md`. 0
+  CRITICAL/HIGH/MEDIUM; 1 LOW (the RSA SPKI side block is a per-parse
+  bump `alloc`, same shape as the existing 3.2.2 LOW-1 — folds into the
+  v3.7 `_into` cleanup, bringing the audit floor to 8 LOW). PSS verify
+  is fully public (no CT requirement); PSS sign inherits the
+  constant-time ladder + blinding + Bellcore guard from `_rsa_raw_sign`.
+
+### Changed
+
+- Cyrius toolchain pin **6.0.53 → 6.0.58** (`cyrius.cyml`).
 
 ## [3.6.4] — 2026-06-03
 

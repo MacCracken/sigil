@@ -12,32 +12,34 @@
 
 | Field | Value |
 |---|---|
-| Current version | **3.6.4** (`VERSION`) |
-| Cyrius toolchain pin | **6.0.53** (`cyrius.cyml [package].cyrius`) |
+| Current version | **3.6.5** (`VERSION`) |
+| Cyrius toolchain pin | **6.0.58** (`cyrius.cyml [package].cyrius`) |
 | Dependencies | agnosys **1.3.2**, sakshi **2.2.6** |
-| Last release date | 2026-06-03 |
-| Last release audit | [`2026-06-03-3.6.4-rsa-hardening-audit.md`](../audit/2026-06-03-3.6.4-rsa-hardening-audit.md) |
-| Phase | Released. **3.6.4 hardened the RSA signer** — **base blinding** (`bn_modinv` + `/dev/urandom`) + **CRT** (~4×) on top of the CT Montgomery ladder + verify-after-sign — plus a consolidated **security audit pass** over the whole RSA surface (resolves the 3.6.3 blinding LOW). The RSA PKCS#1 v1.5 surface (verify + keys + sign) is now complete. 3.6.x history: 3.6.3 RSA key parse + v1.5 sign; 3.6.2 RSA v1.5 verify + bignum engine; 3.6.1 TLS 1.2 PRF; 3.6.0 parallel verify (mutex drop, 3.42×). **Remaining 3.6.x (3.6.5+):** **PSS** (verify+sign), Montgomery-on-verify + bench, `pem_decode_privkey` RSAK wiring, and the **cyrius-native-TLS closeout** (was 3.5.12). 3.7 (EC Solinas + bignum Barrett/Montgomery perf) gated on a forcing function. |
+| Last release date | 2026-06-04 |
+| Last release audit | [`2026-06-04-3.6.5-pss-x509-rsa-audit.md`](../audit/2026-06-04-3.6.5-pss-x509-rsa-audit.md) |
+| Phase | Released. **3.6.5 added RSA-PSS** (`rsa_pss_{verify,sign}_sha{256,384}`, RFC 8017 §8.1/§9.1 — MGF1, salt=hLen sign, salt-agnostic verify; shares `_rsa_recover_em`/`_rsa_raw_sign` with the v1.5 surface) **and x509 RSA chain-link verify** (rsaEncryption SPKI → `X509_CURVE_RSA`; rsa-with-SHA256/384 issuers dispatched to `rsa_pkcs1v15_verify_*`; unblocks AMD ARK/ASK RSA-4096+SHA-384 chains). Debt pass: the overdue **3.5.6 audit doc** is written, and three deferrals prior cycles had buried in source comments (AES-GCM arbitrary IVs, AES-128 seal, the `_into`-in-3.6 promise) are surfaced into the roadmap. The RSA signature surface (PKCS#1 v1.5 **and** PSS, sign + verify, SHA-256/384) is now complete. 3.6.x history: 3.6.4 RSA sign hardening; 3.6.3 RSA key parse + v1.5 sign; 3.6.2 RSA v1.5 verify + bignum engine; 3.6.1 TLS 1.2 PRF; 3.6.0 parallel verify (mutex drop, 3.42×). **Remaining 3.6.x (3.6.6+):** Montgomery-on-verify + bench, `pem_decode_privkey` RSAK wiring, and the **cyrius-native-TLS closeout**. 3.7 (EC Solinas + bignum Barrett/Montgomery perf) gated on a forcing function. |
 
 ## Test surface
 
 | Metric | Value |
 |---|---|
-| `.tcyr` test files | 50 |
-| Total assertions | **1334**, 0 failures |
+| `.tcyr` test files | 51 |
+| Total assertions | **1364**, 0 failures |
 | Benchmark suite | `benches/` — see `benches/history.csv` |
 
-> Counting note: the 3 `*_verify_full.tcyr` tests (sgx 11 + tdx 16 +
-> snp 11 = 38) emit their `N passed` summary in a tty-sensitive way
-> that is dropped under any pipe or file redirect, so a scripted
-> `grep`-sum of `cyrius test` output yields **1255** across the 48
-> files and silently omits those 38. Add them back for the true
-> total: **1293**. (Each verify_full still prints its summary on an
+> Counting note (corrected 3.6.5): the 3 `*_verify_full.tcyr` tests
+> (sgx 11 + tdx 16 + snp 11 = 38) emit their `N passed` summary in a
+> tty-sensitive way that is dropped under any pipe or file redirect, so
+> a scripted `grep`-sum of `cyrius test` output yields **1326** across
+> the other 48 files and silently omits those 38. Add them back for the
+> true total: **1364**. (Each verify_full still prints its summary on an
 > interactive run; it's only the redirected/scripted sum that loses
-> them.)
+> them.) The pre-3.6.5 figures in this note (1255 / 1293) were stale —
+> the table's prior **1334** was the correct true total at 3.6.4.
 
 Per-cycle assertion delta:
 
+- 3.6.5 ship: +30 (`rsa.tcyr` +10 — RSA-PSS: external pure-Python PSS KAT verify SHA-256/384, sign→verify roundtrips, tamper/wrong-message/wrong-length/cross-hash/cross-scheme rejects. `x509_rsa.tcyr` +20, new — OpenSSL RSA-2048 CA signing SHA-256 + SHA-384 leaves, green chain + tamper/wrong-key/DN-mismatch rejects)
 - 3.6.4 ship: +5 (`bignum.tcyr` +5 — `bn_modinv` self-check `r·r^-1 ≡ 1 mod n` at 256/2048-bit + the non-coprime `-1` path; the blinded+CRT signer reuses the existing `rsa.tcyr` deterministic-KAT assertions)
 - 3.6.3 ship: +24 (`rsa.tcyr` +21 — pubkey/privkey DER parse incl. p·q==n, deterministic PKCS#1 v1.5 sign matching an external Python RSA byte-for-byte SHA-256/384, sign→verify roundtrips; `bignum.tcyr` +3 — CT Montgomery modexp == schoolbook at 256/2048-bit)
 - 3.6.2 ship: +12 (`bignum.tcyr` 6 — modexp KATs incl. full RSA-2048-size `s^65537 mod n`, all vs Python `pow`; serialize round-trip; `base^0`/`0^e` edges. `rsa.tcyr` 6 — real RSA-2048 PKCS#1 v1.5 SHA-256/384 verify accept + tamper/wrong-message/wrong-length/hash-mismatch reject)
@@ -75,6 +77,7 @@ Consumers that link or rely on sigil for trust verification:
 
 | Version | Date | Headline |
 |---|---|---|
+| 3.6.5 | 2026-06-04 | **RSA-PSS + x509 RSA chain-link verify.** `rsa_pss_{verify,sign}_sha{256,384}` (RFC 8017 §8.1/§9.1 — MGF1, salt=hLen sign, salt-agnostic verify; shares `_rsa_recover_em`/`_rsa_raw_sign` with the v1.5 surface). `x509_parse` now handles rsaEncryption SPKI (`X509_CURVE_RSA`) + rsa-with-SHA256/384, and `_x509_verify_link` dispatches RSA issuers to `rsa_pkcs1v15_verify_*` (unblocks AMD ARK/ASK RSA-4096+SHA-384). Debt pass: wrote the overdue **3.5.6 audit doc**; surfaced 3 deferrals prior cycles buried in source comments into the roadmap. +30 assertions (rsa +10, new `x509_rsa.tcyr` +20). Pin 6.0.53→6.0.58. Audit: `docs/audit/2026-06-04-3.6.5-pss-x509-rsa-audit.md` (+ retrospective `2026-06-04-3.5.6-hmac-hkdf-sha384-audit.md`). |
 | 3.6.4 | 2026-06-03 | **RSA sign hardening + security audit pass.** Base **blinding** (`s=(m·rᵉ)ᵈ·r⁻¹ mod n`, fresh `/dev/urandom` `r`; `bn_modinv` via binary inversion) + **CRT** (Garner, ~4×) on top of the CT Montgomery ladder + verify-after-sign. Signatures unchanged (still match the external Python ref byte-for-byte). Consolidated audit over verify+keys+sign; resolves 3.6.3 LOW-1; caught+fixed a `bn_modinv` non-coprime infinite loop. +5 assertions. Audit: `docs/audit/2026-06-03-3.6.4-rsa-hardening-audit.md`. |
 | 3.6.3 | 2026-06-03 | **RSA key parsing + PKCS#1 v1.5 sign** (`src/rsa.cyr`, `src/bignum.cyr`). `rsa_pubkey_from_der` (PKCS#1 + SPKI) + `rsa_privkey_from_der` (PKCS#1 + PKCS#8, reusing x509's audited `der_walk`); `bn_mont_modexp` (constant-time Montgomery/CIOS, == schoolbook KAT); `rsa_pkcs1v15_sign_sha256/384` (CT ladder for secret `d` + verify-after-sign/Bellcore; matches an external Python RSA byte-for-byte). +24 assertions. **CRT + base blinding + security audit pass → 3.6.4.** Audit: `docs/audit/2026-06-03-3.6.3-rsa-keys-sign-audit.md`. |
 | 3.6.2 | 2026-06-03 | **RSA PKCS#1 v1.5 verify** (`src/rsa.cyr`, RFC 8017) + general big-integer/modexp engine (`src/bignum.cyr`). `rsa_pkcs1v15_verify_sha256/384`: `m=s^e mod n` via square-and-multiply modexp, then full-EM reconstruction + compare (defeats the Bleichenbacher/BERserk forgery class). Verify-only, public-data (no CT/zeroization need); not on the batch path so unbanked. modexp KAT-validated to RSA-2048 size vs Python `pow`; verify validated vs a real RSA-2048 key (SHA-256/384) + negative cases. +12 assertions. Audit: `docs/audit/2026-06-03-3.6.2-rsa-verify-audit.md`. |
@@ -101,15 +104,15 @@ back to v2.0.0.
 
 ## In-flight slots
 
-Open slots only. Shipped 3.5.x / 3.6.0–3.6.4 bites are trimmed here on
+Open slots only. Shipped 3.5.x / 3.6.0–3.6.5 bites are trimmed here on
 completion — see "Recently shipped" above, CHANGELOG, and the roadmap's
 "Outstanding work — full inventory" block (the authoritative remaining
 list).
 
 | Slot | State | Notes |
 |---|---|---|
-| 3.6.5+ — cyrius-native-TLS tail | pending | RSA-**PSS** (MGF1) verify+sign SHA-256/384; **Montgomery on the verify path** + RSA verify/sign benches; wire `pem_decode_privkey` → RSAK struct; **cyrius-native-TLS closeout** (full Closeout Pass + the deferred 3.5.6 HMAC/HKDF-SHA384 audit doc). |
-| 3.7 — perf / Solinas | Gated | Solinas word-level reduction for P-256/P-384 + unified `_into` API (closes the 7 audit-floor LOWs). Gated on a latency forcing function per roadmap. |
+| 3.6.6+ — cyrius-native-TLS tail | pending | **Montgomery on the verify path** + RSA verify/sign benches; wire `pem_decode_privkey` → RSAK struct; **cyrius-native-TLS closeout** (full Closeout Pass; the 3.5.6 audit doc is now **done**, 3.6.5). *(RSA-PSS and x509 RSA chain-link shipped 3.6.5.)* |
+| 3.7 — perf / Solinas | Gated | Solinas word-level reduction for P-256/P-384 + unified `_into` API (closes the 8 audit-floor LOWs). Gated on a latency forcing function per roadmap. |
 
 When a cycle is opened, list each work-item bite here as it
 moves through `pending → in_progress → completed`. The release
@@ -124,15 +127,17 @@ CI fleet, list the hosts here.
 
 ## Audit floor
 
-Seven open LOW findings of the same shape (bump-allocator
+Eight open LOW findings of the same shape (bump-allocator
 lifetime across per-call init paths) carry forward to the v3.7
 unified `_into` API cycle:
 
-- 3.2.2 LOW-1: `x509_parse` raw_sig alloc
+- 3.2.2 LOW-1: `x509_parse` raw_sig alloc (+ 3.6.5: the RSA SPKI 544-byte
+  side block joins this path — same per-parse bump-`alloc` shape)
 - 3.2.4 LOW-1: `_snp_v_init` alloc
 - 3.4.0 LOW-1: `sgx_quote_verify_full` / `tdx_quote_verify_full` drift
 - 3.4.0 LOW-2: `_pem_init` lookup-table alloc
 - 3.4.1 LOW-1: `snp_report_verify_full` drift
+- 3.6.5 LOW-1: `x509_parse` RSA pubkey side block alloc
 - (and the two from `_sgxv_init` / `_tdxv_init` audited at 3.2.3 / 3.2.5)
 
 Zero CRITICAL / HIGH / MEDIUM findings outstanding.

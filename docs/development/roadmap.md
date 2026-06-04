@@ -9,21 +9,24 @@ Every open item, in one place, so nothing hides in a lower section.
 Detail for each is in its section below.
 
 **3.6.x — cyrius native-TLS tail**
-- [ ] RSA-PSS (MGF1) verify + sign, SHA-256/384
+- [x] RSA-PSS (MGF1) verify + sign, SHA-256/384 — **shipped 3.6.5**
 - [ ] Montgomery on the verify path + RSA verify/sign benches
 - [ ] `pem_decode_privkey` → RSAK struct wiring
-- [ ] cyrius-native-TLS closeout (Closeout Pass + deferred 3.5.6 HMAC/HKDF-SHA384 audit doc)
+- [ ] cyrius-native-TLS closeout (Closeout Pass; 3.5.6 HMAC/HKDF-SHA384 audit doc **done 3.6.5**)
 
 **v3.7 — perf (gated on a latency complaint)**
 - [ ] Solinas reduction for P-256
 - [ ] Solinas reduction for P-384
-- [ ] Unified `_into`-shape API (closes the 7 open bump-allocator LOWs)
+- [ ] Unified `_into`-shape API (closes the 8 open bump-allocator LOWs)
 - [ ] Re-run full crypto bench suite
 
 **Backlog — unscheduled**
 - [ ] Retire the per-thread bank-indexing workaround if cyrius gains native thread-local arrays
 - [ ] x509 P-384 chain-link verify (non-P256 issuers)
-- [ ] x509 RSA chain-link verify (now unblocked — sigil has RSA verify)
+- [x] x509 RSA chain-link verify — **shipped 3.6.5** (RSA-SHA256/384 issuers)
+- [ ] AES-GCM arbitrary-length IVs (non-96-bit, via GHASH) — *un-buried 3.6.5; was hidden in `src/aes_gcm.cyr` as "deferred to a follow-up"*
+- [ ] AES-128 seal keys (parameterise `SGX_SEAL_KEY_SIZE`) — *un-buried 3.6.5; was hidden in `src/seal.cyr` as "a future bite can parameterise"*
+- [ ] Reconcile the stale "`_into` lands in 3.6" comments in `src/sgx.cyr` / `src/tdx.cyr` with reality (the work is v3.7) — *un-buried 3.6.5; comment correction folds into the 3.7 `_into` cycle*
 - [ ] Scatter-store for the fixed-base comb (cache-timing)
 - [ ] CLMUL-assisted GHASH (gated on cyrius asm pseudo)
 - [ ] NI dispatch structural fix (gated on cyrius asm pseudo)
@@ -32,9 +35,9 @@ Detail for each is in its section below.
 - [ ] ML-KEM-768 (PQC KEM)
 - [ ] PQC-default builds (drop `-D SIGIL_PQC` when the preprocessor cap lifts)
 
-**Open audit findings** — 7 LOW (bump-allocator lifetime), tracked in
-`state.md` "Audit floor," cleared by the v3.7 `_into` work. Zero
-CRITICAL / HIGH / MEDIUM outstanding.
+**Open audit findings** — 8 LOW (bump-allocator lifetime; +1 from the
+3.6.5 RSA SPKI side block), tracked in `state.md` "Audit floor," cleared
+by the v3.7 `_into` work. Zero CRITICAL / HIGH / MEDIUM outstanding.
 
 ## Closed cycles
 
@@ -53,24 +56,29 @@ CRITICAL / HIGH / MEDIUM outstanding.
   general bignum/modexp engine, hardened with a constant-time
   Montgomery ladder, base blinding, CRT, and verify-after-sign.
 
-**Cyrius pin:** `6.0.53` (synced across `cyrius.cyml` and CI).
+**Cyrius pin:** `6.0.58` (synced across `cyrius.cyml` and CI).
 
 ## v3.6.x — cyrius native-TLS arc (in progress)
 
 The cyrius native-TLS arc needs sigil-side crypto one slot at a time
 ([`issues/2026-05-28-cyrius-tls-arc-full-audit.md`](issues/2026-05-28-cyrius-tls-arc-full-audit.md)).
-Shipped so far: parallel verify, the TLS 1.2 PRF, and the complete RSA
-PKCS#1 v1.5 surface (see CHANGELOG / `state.md`). Remaining items
-carry as **3.6.5+** tags.
+Shipped so far: parallel verify, the TLS 1.2 PRF, the complete RSA
+PKCS#1 v1.5 surface, and (3.6.5) RSA-PSS + x509 RSA chain-link verify
+(see CHANGELOG / `state.md`). Remaining items carry as **3.6.6+** tags.
 
 ### 3.6.5+ — remaining items
 
-- [ ] **RSA-PSS** (MGF1) verify + sign, SHA-256/384 —
-      `rsa_pss_{sign,verify}_sha{256,384}`. The modern TLS 1.3 RSA
-      signature scheme (`rsa_pss_rsae_*`); builds on the shipped
-      bignum engine + the PKCS#1 v1.5 surface. Per-bite audit covering
-      MGF1, salt handling, and EMSA-PSS-Verify consistency. SHA-512-RSA
-      stays backlog (rare in 1.3).
+- [x] **RSA-PSS** (MGF1) verify + sign, SHA-256/384 —
+      `rsa_pss_{sign,verify}_sha{256,384}`. **Shipped 3.6.5.** The modern
+      TLS 1.3 RSA signature scheme (`rsa_pss_rsae_*`); built on the
+      bignum engine + the PKCS#1 v1.5 surface (shared `_rsa_recover_em`
+      / `_rsa_raw_sign` cores). Per-bite audit:
+      `docs/audit/2026-06-04-3.6.5-pss-x509-rsa-audit.md`.
+
+- [x] **x509 RSA chain-link verify.** **Shipped 3.6.5.** RSA SPKI parse
+      (`X509_CURVE_RSA`), rsa-with-SHA256/384 sig-algo dispatch, RSA
+      issuer routing in `_x509_verify_link` → `rsa_pkcs1v15_verify_*`.
+      (Was a Backlog item; pulled forward with the PSS bite.)
 
 - [ ] **Montgomery on the verify path + RSA benches.** Switch the
       verify-side / public-exponent modexp from the schoolbook
@@ -86,13 +94,12 @@ carry as **3.6.5+** tags.
       single scalar buffer, whereas RSA needs the multi-field struct.
 
 - [ ] **cyrius-native-TLS closeout (last 3.6.x tag).** Full CLAUDE.md
-      Closeout Pass over the whole 3.6.x delta + the deferred
-      **3.5.6 HMAC/HKDF-SHA384 audit doc**
-      (`docs/audit/<date>-3.5.6-hmac-hkdf-sha384-audit.md`: constant-time
-      review, buffer sizes, `secret var`/`memset` zeroization, the
-      255×48 OKM cap). Includes the downstream-consumer check, dead-code
-      + stale-comment sweep, security re-scan, clean-from-scratch build,
-      and version verify.
+      Closeout Pass over the whole 3.6.x delta. The overdue **3.5.6
+      HMAC/HKDF-SHA384 audit doc** is **done** (3.6.5:
+      `docs/audit/2026-06-04-3.5.6-hmac-hkdf-sha384-audit.md`). Closeout
+      still owes the downstream-consumer check, dead-code + stale-comment
+      sweep (incl. the `_into`-in-3.6 comment fix), security re-scan,
+      clean-from-scratch build, and version verify.
 
 ## Road to v3.7 — perf tuning: field arithmetic + alloc-free
 
@@ -109,8 +116,8 @@ The 3.2.x verify paths are correct but slow:
   `_p384_long_div_reduce`. Solinas word-level reduction
   drops the cost 20–50×.
 
-3.7 closes the bump-allocator-lifetime LOW findings (now seven
-across the 3.2.x + 3.4 cycles) and lands Solinas reduction for
+3.7 closes the bump-allocator-lifetime LOW findings (now eight
+across the 3.2.x, 3.4, and 3.6.5 cycles) and lands Solinas reduction for
 both curves. (The general bignum modexp from 3.6 could also gain
 Barrett/Montgomery here — cross-reference the 3.6.5+ RSA bench item.)
 
@@ -194,6 +201,32 @@ in-place when an adjacent edit touches the relevant module.
         once the cert parser tags RSA SPKIs + sig algorithms.
         Surfaces when a consumer integrates real AMD KDS chains
         end-to-end via sigil.
+
+- [ ] **AES-GCM arbitrary-length IVs.** `src/aes_gcm.cyr` implements
+      only the 12-byte (96-bit) IV fast path; NIST SP 800-38D also
+      defines GCM for IVs of any length (the IV is run through GHASH to
+      form J0 when `len != 96`). *Surfaced 2026-06-04 (un-buried from a
+      `src/aes_gcm.cyr` comment that read "Arbitrary-length IVs deferred
+      to a follow-up" — it was never in this roadmap).* Not blocking the
+      cyrius-TLS arc (TLS uses 96-bit IVs exclusively), so unscheduled;
+      land it if a consumer needs non-TLS GCM. Self-contained: add the
+      GHASH-based J0 derivation in the `iv_len != 12` branch + KATs from
+      SP 800-38D Appendix B.
+
+- [ ] **AES-128 seal keys.** `seal.cyr`'s `SGX_SEAL_KEY_SIZE` is
+      hardcoded to 32 (AES-256-GCM). *Surfaced 2026-06-04 (un-buried from
+      a `src/seal.cyr` comment: "A future bite that supports 16-byte
+      AES-128 keys can parameterise"; never roadmapped).* Parameterise
+      the key width so a consumer can seal an AES-128 key. Low priority —
+      sigil's own AEAD is AES-256; gate on a consumer ask.
+
+- [ ] **Reconcile the stale "`_into` lands in 3.6" comments.**
+      `src/sgx.cyr` and `src/tdx.cyr` both carry "closes when the unified
+      `_into` API lands in 3.6" — but that work was moved to **v3.7**
+      (see the perf cycle below). *Surfaced 2026-06-04; the comments were
+      promising a version that shipped without the work.* Fix the comment
+      text (or land the work) as part of the 3.7 `_into` cycle so the
+      source stops claiming a closed-out 3.6 delivery.
 
 - [ ] **Scatter-store for the fixed-base comb.** Distribute
       the 128-byte point entries across cache lines so a
