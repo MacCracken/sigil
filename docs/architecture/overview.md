@@ -11,6 +11,7 @@ lib.cyr (entry point)
   │
   ├── types.cyr         Enums, structs, constructors, accessors
   ├── error.cyr         SigilError codes, Result pattern
+  ├── crypto_scratch.cyr Per-thread crypto-scratch banks (3.6 parallel verify)
   │
   ├── sha_ni.cyr        SHA-256-NI hardware dispatch (runtime probe)
   ├── sha256.cyr        FIPS 180-4 SHA-256
@@ -19,23 +20,30 @@ lib.cyr (entry point)
   ├── hmac.cyr          HMAC-SHA256 (RFC 2104)
   ├── hkdf.cyr          HKDF-SHA256 (RFC 5869)
   ├── aes_ni.cyr        AES-NI hardware dispatch (runtime probe)
-  ├── aes_gcm.cyr       AES-256-GCM AEAD (FIPS 197 + NIST SP 800-38D)
+  ├── aes_gcm.cyr       AES-256/128-GCM AEAD (FIPS 197 + NIST SP 800-38D)
   ├── poly1305.cyr      Poly1305 one-time MAC (RFC 8439 §2.5)
   ├── chacha20.cyr      ChaCha20 stream cipher (RFC 8439 §2.3/§2.4)
   ├── chacha20poly1305.cyr  ChaCha20-Poly1305 AEAD (RFC 8439 §2.8)
   │
   ├── sha512.cyr        FIPS 180-4 SHA-512 (Ed25519 key expansion)
   ├── sha384.cyr        FIPS 180-4 SHA-384 (P-384 ECDSA, TDX P-384)
+  ├── hmac_sha384.cyr   HMAC-SHA384 (RFC 4231 / FIPS 198-1)
+  ├── hkdf_sha384.cyr   HKDF-SHA384 (RFC 5869)
+  ├── tls12_prf.cyr     TLS 1.2 PRF P_SHA256/P_SHA384 (RFC 5246 §5)
   ├── bigint_ext.cyr    256-bit field arithmetic (mod p = 2^255-19)
+  ├── bignum.cyr        General variable-width big-int + modexp (RSA engine)
   ├── ed25519.cyr       Ed25519 sign/verify (RFC 8032)
   ├── x25519.cyr        X25519 ECDH key agreement (RFC 7748)
   ├── ecdsa_p256.cyr    ECDSA verify on secp256r1 (FIPS 186-4)
   ├── ecdsa_p384.cyr    ECDSA verify on secp384r1 (FIPS 186-4)
+  ├── ecdsa_sign.cyr    ECDSA P-256/P-384 RFC 6979 deterministic sign
   │
   ├── x509.cyr          Minimal X.509 parser + chain walker
   │                       — P-256 and P-384 SPKIs
   │                       — ECDSA-SHA256 chain-link signatures only
   ├── pem.cyr           RFC 4648 base64 + PEM block decoder
+  ├── privkey.cyr       EC + Ed25519 private-key parsers (PEM + DER)
+  ├── rsa.cyr           RSA PKCS#1 v1.5 verify + sign + keys (RFC 8017)
   ├── sgx.cyr           Intel SGX DCAP v3 quote parse + verify
   │                       — sgx_quote_verify_with_pck (per-piece)
   │                       — sgx_quote_verify_full (end-to-end)
@@ -120,9 +128,13 @@ tdx_quote_parse                      │
 `verify.cyr:sv_verify_batch` fans the artifact list out across
 worker threads. Each worker calls into `sv_verify_artifact_into`
 with a pre-allocated artifact scratch buffer (no bump-allocator
-calls from worker bodies — see CLAUDE.md quirk #7). A
-`_sigil_batch_mutex` serialises calls into the crypto-module
-inner globals; dropping it is the v3.5 roadmap target.
+calls from worker bodies — see CLAUDE.md quirk #7). Since **3.6.0**
+the path is **mutex-free**: each worker is assigned a private *bank*
+of every crypto primitive's transient working state via thread-local
+storage (`crypto_scratch.cyr`), so concurrent workers never share the
+static `var X[N]` scratch the old `_sigil_batch_mutex` used to
+serialise. Result: ~3.4× at 64 artifacts / 4 workers. See
+`docs/audit/2026-06-03-3.6.0-parallel-verify-audit.md`.
 
 ## Consumers
 

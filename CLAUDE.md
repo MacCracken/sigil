@@ -64,6 +64,7 @@ CYRIUS_DCE=1 cyrius build ...                         # DCE release build
 
 ## Rules (Hard Constraints)
 
+- **NO UNILATERAL DECISIONS — every decision is the user's (Robert), and must be approved BEFORE acting (added 2026-06-03).** The assistant has no standing authority to decide scope, what ships, what is "good enough," or what is left out. **No deferral, descope, split, reorder, cut, or "defer to a later version" of ANY work item without first requesting approval and receiving an explicit go-ahead.** Surface every option and the full set of affected/remaining items, then wait. Never bury a deferred or backlog item — name it explicitly and get sign-off. When in doubt, ask; do not assume.
 - **Read the genesis repo's CLAUDE.md first** — [agnosticos/CLAUDE.md](https://github.com/MacCracken/agnosticos/blob/main/CLAUDE.md).
 - **Do not commit or push** — the user handles all git operations.
 - **NEVER use `gh` CLI** — use `curl` against the GitHub API if needed.

@@ -369,8 +369,10 @@ fn _privkey_pkcs8_algo(der, der_len): i64 {
 #
 # Returns:
 #   32 / 48        — number of key bytes written (success).
-#   0 - SIG_PRIVKEY_RSA  — RSA recognized but not yet supported
-#                          (parser lands in 3.5.10); *out_algo = RSA.
+#   0 - SIG_PRIVKEY_RSA  — RSA recognized; *out_algo = RSA. (The DER
+#                          parse itself is `rsa_privkey_from_der`,
+#                          src/rsa.cyr, 3.6.3 — base64-decode the body
+#                          and call it.)
 #   -1             — malformed / unknown / unsupported curve.
 #
 # The DER scratch is bump-allocated (sized to pem_len, a strict upper
@@ -428,7 +430,7 @@ fn pem_decode_privkey(pem, pem_len, key_out, key_max, out_algo): i64 {
     if (der_len < 0) { return 0 - 1; }
 
     if (kind == 2) {
-        # PKCS#1 RSA — recognized, parser arrives in 3.5.10.
+        # PKCS#1 RSA — recognized; DER parse is rsa_privkey_from_der (3.6.3).
         store64(out_algo, SIG_PRIVKEY_RSA);
         return 0 - SIG_PRIVKEY_RSA;
     }

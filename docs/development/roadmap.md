@@ -1,228 +1,98 @@
 # Sigil Roadmap
 
-Forward-looking work only. For shipped items and version history
-see [CHANGELOG.md](../../CHANGELOG.md). Closed cycles:
+Forward-looking work only. For shipped items and per-version detail
+see [CHANGELOG.md](../../CHANGELOG.md).
 
-- [`3.2-tee-arc.md`](3.2-tee-arc.md) — 3.2.x TEE attestation
-  sub-arc, complete 2026-05-21 → 2026-05-26 (6 bites: ECDSA →
-  X.509 → SGX → SEV-SNP → TDX → SGX seal).
-- [`3.2-scope.md`](3.2-scope.md) — 3.2.0 cycle history.
+## Outstanding work — full inventory
+
+Every open item, in one place, so nothing hides in a lower section.
+Detail for each is in its section below.
+
+**3.6.x — cyrius native-TLS tail**
+- [ ] RSA-PSS (MGF1) verify + sign, SHA-256/384
+- [ ] Montgomery on the verify path + RSA verify/sign benches
+- [ ] `pem_decode_privkey` → RSAK struct wiring
+- [ ] cyrius-native-TLS closeout (Closeout Pass + deferred 3.5.6 HMAC/HKDF-SHA384 audit doc)
+
+**v3.7 — perf (gated on a latency complaint)**
+- [ ] Solinas reduction for P-256
+- [ ] Solinas reduction for P-384
+- [ ] Unified `_into`-shape API (closes the 7 open bump-allocator LOWs)
+- [ ] Re-run full crypto bench suite
+
+**Backlog — unscheduled**
+- [ ] Retire the per-thread bank-indexing workaround if cyrius gains native thread-local arrays
+- [ ] x509 P-384 chain-link verify (non-P256 issuers)
+- [ ] x509 RSA chain-link verify (now unblocked — sigil has RSA verify)
+- [ ] Scatter-store for the fixed-base comb (cache-timing)
+- [ ] CLMUL-assisted GHASH (gated on cyrius asm pseudo)
+- [ ] NI dispatch structural fix (gated on cyrius asm pseudo)
+
+**Possible future surfaces (consumer-demand-gated)**
+- [ ] ML-KEM-768 (PQC KEM)
+- [ ] PQC-default builds (drop `-D SIGIL_PQC` when the preprocessor cap lifts)
+
+**Open audit findings** — 7 LOW (bump-allocator lifetime), tracked in
+`state.md` "Audit floor," cleared by the v3.7 `_into` work. Zero
+CRITICAL / HIGH / MEDIUM outstanding.
+
+## Closed cycles
+
 - [`3.0-scope.md`](3.0-scope.md) — 3.0 cycle history.
-- **3.4 — TEE attestation completion** (shipped 2026-05-22).
-  - **3.4.0**: PEM decoder + `sgx_quote_verify_full` +
-    `tdx_quote_verify_full` + TDX `att_key_type=3` (P-384/SHA-384)
-    dispatch. Audit: `docs/audit/2026-05-22-3.4.0-audit.md`.
-  - **3.4.1**: x509 P-384 SPKI extraction + `snp_report_verify_full`
-    + `X509_CURVE_*` constants + struct layout shift. Closes the
-    SEV-SNP gap deferred from 3.4.0. Audit:
-    `docs/audit/2026-05-22-3.4.1-audit.md`.
-  - **3.4.2**: Packaging fix — `dist/sigil.cyr` regenerated
-    from current source (had drifted ten module additions
-    behind since the upstream `cyrius distlib` subcommand
-    retired); `scripts/regen-dist.sh` shipped as the
-    replacement. 2026-05-22 doc-tree restructure rides along.
-    Audit: `docs/audit/2026-05-22-3.4.2-audit.md`.
-- **3.5.0–3.5.6 — modern AEAD + key agreement** (shipped
-  2026-05-27/28): Poly1305 → ChaCha20 → ChaCha20-Poly1305 AEAD →
-  X25519, then a post-closeout HMAC-SHA384 + HKDF-SHA384 patch.
-  Completes the TLS 1.3 ChaCha20-Poly1305-SHA256 +
-  AES-256-GCM-SHA384 suites with X25519 key share. Audit:
-  `docs/audit/2026-05-27-3.5-arc-audit.md`. Per-version detail in
-  [CHANGELOG.md](../../CHANGELOG.md).
+- [`3.2-scope.md`](3.2-scope.md) / [`3.2-tee-arc.md`](3.2-tee-arc.md)
+  — 3.2.0 cycle + the 3.2.x TEE attestation sub-arc.
+- **3.4** — TEE attestation completion (PEM decoder, SGX/TDX/SEV-SNP
+  `*_verify_full`, x509 P-384 SPKI).
+- **3.5** — modern AEAD + key agreement and the first cyrius-native-TLS
+  crypto: Poly1305 / ChaCha20 / ChaCha20-Poly1305 / X25519,
+  HMAC-/HKDF-SHA384, AES-128-GCM, EC + Ed25519 private-key parsers,
+  ECDSA P-256/P-384 deterministic signing.
+- **3.6.0–3.6.4** — parallel batch verify (dropped `_sigil_batch_mutex`
+  via per-thread crypto banks, 3.42×); TLS 1.2 PRF; the full RSA
+  PKCS#1 v1.5 surface (verify + DER/PEM key parsing + sign) on a new
+  general bignum/modexp engine, hardened with a constant-time
+  Montgomery ladder, base blinding, CRT, and verify-after-sign.
 
-**Cyrius pin:** `6.0.52` (synced across `cyrius.cyml` and CI).
+**Cyrius pin:** `6.0.53` (synced across `cyrius.cyml` and CI).
 
-## v3.5.x — cyrius native-TLS arc support (in progress)
+## v3.6.x — cyrius native-TLS arc (in progress)
 
 The cyrius native-TLS arc needs sigil-side crypto one slot at a time
-across cyrius v6.0.14 → .34
-([`issues/2026-05-28-cyrius-tls-arc-full-audit.md`](issues/2026-05-28-cyrius-tls-arc-full-audit.md),
-five line items). Sigil ships them as ordered 3.5.x bites; cyrius
-bumps its pin and resumes the held slot at each tag. Each crypto bite
-carries its own per-bite audit doc; the cycle-wide **Closeout Pass is
-held as the last 3.5.x tag (3.5.12)**.
+([`issues/2026-05-28-cyrius-tls-arc-full-audit.md`](issues/2026-05-28-cyrius-tls-arc-full-audit.md)).
+Shipped so far: parallel verify, the TLS 1.2 PRF, and the complete RSA
+PKCS#1 v1.5 surface (see CHANGELOG / `state.md`). Remaining items
+carry as **3.6.5+** tags.
 
-> **Catch-all slot:** fold any small additive/repair need against the
-> modern-crypto surface into the nearest unshipped bite or a new 3.5.x
-> slot **ahead of** the closeout — never after it.
+### 3.6.5+ — remaining items
 
-### Shipped (per-version detail in [CHANGELOG.md](../../CHANGELOG.md))
+- [ ] **RSA-PSS** (MGF1) verify + sign, SHA-256/384 —
+      `rsa_pss_{sign,verify}_sha{256,384}`. The modern TLS 1.3 RSA
+      signature scheme (`rsa_pss_rsae_*`); builds on the shipped
+      bignum engine + the PKCS#1 v1.5 surface. Per-bite audit covering
+      MGF1, salt handling, and EMSA-PSS-Verify consistency. SHA-512-RSA
+      stays backlog (rare in 1.3).
 
-- **3.5.7 — AES-128-GCM** (`src/aes_gcm.cyr` + 10-round AES-NI path).
-  RFC 8446 §9.1 mandatory `TLS_AES_128_GCM_SHA256`. Unblocked cyrius
-  v6.0.14. Audit: `docs/audit/2026-05-28-3.5.7-aes128-gcm-audit.md`.
-- **3.5.8 — EC + Ed25519 private-key parsers** (`src/privkey.cyr`):
-  `ecdsa_p256/p384_privkey_from_der` (SEC1 / PKCS#8),
-  `ed25519_privkey_from_der` (PKCS#8), `pem_decode_privkey`. RSA label
-  recognized → parser deferred to 3.5.10. Unblocked cyrius v6.0.15/.23
-  key loading. Audit:
-  `docs/audit/2026-05-28-3.5.8-privkey-parsers-audit.md`.
-- **3.5.9 — ECDSA P-256/P-384 sign** (`src/ecdsa_sign.cyr`): RFC 6979
-  deterministic-k, raw `r||s` + DER. Unblocked cyrius v6.0.17/.25
-  CertificateVerify. Audit:
-  `docs/audit/2026-05-28-3.5.9-ecdsa-sign-audit.md`.
+- [ ] **Montgomery on the verify path + RSA benches.** Switch the
+      verify-side / public-exponent modexp from the schoolbook
+      `bn_modexp` to `bn_mont_modexp` (no secret, so the residual
+      timing paths are irrelevant), and add `benches/history.csv` rows
+      for RSA verify and sign (CRT vs full-width). Optional general
+      Barrett/Montgomery for the public path.
 
-### Remaining
+- [ ] **`pem_decode_privkey` → RSAK struct.** It currently returns the
+      `SIG_PRIVKEY_RSA` sentinel; wire it to base64-decode the body and
+      call `rsa_privkey_from_der`, emitting an RSAK struct. Needs a
+      small API-shape decision — its EC/Ed25519 contract decodes into a
+      single scalar buffer, whereas RSA needs the multi-field struct.
 
-> **Renumbered into the 3.6.x line (2026-06-03).** 3.6.0 opened the
-> 3.6 line early to land parallel verify (cyrius 6.0.52 shipped the
-> thread-local storage that unblocked it — see "Road to v3.6" below,
-> now **shipped**). The three unshipped cyrius-native-TLS items below
-> therefore carry forward as **3.6.x** tags (RSA → TLS 1.2 PRF →
-> closeout), keeping their ordering and forcing slots. Section titles
-> left as `3.5.x` for blame continuity; track them as 3.6.x in
-> `state.md`.
-
-### 3.6.2+ — RSA signature surface (was 3.5.10, issue line item 2) — **Large, multi-bite**
-
-> **3.6.2 SHIPPED (2026-06-03):** the general big-integer/modexp engine
-> (`src/bignum.cyr`) + **PKCS#1 v1.5 verify** (`src/rsa.cyr`:
-> `rsa_pkcs1v15_verify_sha256/384`) — the load-bearing interop path.
-> modexp KAT-validated to RSA-2048 size; verify validated against a
-> real RSA-2048 key (full-EM reconstruction defeats the
-> Bleichenbacher/BERserk forgery class). Audit
-> `docs/audit/2026-06-03-3.6.2-rsa-verify-audit.md`.
->
-> **Sub-bite sequencing (revised 2026-06-03):**
-> - **3.6.3 SHIPPED** — `rsa_pubkey_from_der` (PKCS#1 + SPKI) +
->   `rsa_privkey_from_der` (PKCS#1 + PKCS#8) + `bn_mont_modexp`
->   (constant-time Montgomery, == schoolbook KAT) + `rsa_pkcs1v15_sign_
->   sha256/384` (CT ladder for secret `d` + verify-after-sign/Bellcore;
->   matches an external Python RSA byte-for-byte). Cut deliberately
->   WITHOUT CRT/blinding — a correct, CT-in-exponent, fault-checked
->   signer. Audit `docs/audit/2026-06-03-3.6.3-rsa-keys-sign-audit.md`.
-> - **3.6.4 SHIPPED** — RSA sign hardening + security audit pass:
->   **base blinding** (`s = (m·r^e)^d·r^-1 mod n`; new `bn_modinv` via
->   binary inversion + `/dev/urandom`) + **CRT** (Garner, ~4×) on the
->   CT Montgomery ladder + verify-after-sign; consolidated security
->   audit over verify+keys+sign (resolves 3.6.3 LOW-1; caught+fixed a
->   `bn_modinv` non-coprime infinite loop). RSA PKCS#1 v1.5 surface
->   complete. Audit `docs/audit/2026-06-03-3.6.4-rsa-hardening-audit.md`.
-> - **3.6.5+** — **PSS** (MGF1) verify + sign, SHA-256/384; switch the
->   verify path to the Montgomery modexp + benchmark; wire
->   `pem_decode_privkey` to emit an RSAK struct; and the
->   **cyrius-native-TLS closeout** (full CLAUDE.md Closeout Pass over
->   the 3.6.x delta + the deferred 3.5.6 HMAC/HKDF-SHA384 audit doc).
-
-- [ ] **RSA PKCS#1 v1.5 + PSS, sign + verify, SHA-256 + SHA-384.**
-      `rsa_pkcs1_{sign,verify}_sha{256,384}` +
-      `rsa_pss_{sign,verify}_sha{256,384}` (8 fns, or 2 dispatched).
-      TLS 1.3 server certs are overwhelmingly RSA in the wild
-      (Let's Encrypt default; enterprise CAs) — without it cyrius's
-      1.3 client cannot verify most RSA-signed CertificateVerify and
-      its server cannot present an RSA cert; also blocks all 1.2 RSA
-      ciphersuites. SHA-512-RSA stays backlog (rare in 1.3).
-      **Sizing — Large / likely multi-bite:** unlike the other four
-      items this is *not* existing-shape — sigil has no general
-      bignum modexp engine (`bigint_ext` is Curve25519-only). Expect
-      to split into sub-tags if it does not fit one patch, e.g.
-      `3.5.10` general big-integer modexp engine + the RSA key type +
-      `rsa_privkey_from_der` (PKCS#1 / PKCS#8) + `rsa_pubkey_from_*` +
-      PKCS#1 v1.5 verify (the most interop-load-bearing path), then
-      `3.5.10a/.11`-shaped follow-ons for PSS (MGF1) + the sign paths.
-      Each sub-bite gets its own audit doc (Montgomery/modexp
-      constant-time, padding-oracle hygiene on verify, blinding on
-      sign). **Owns the RSA private-key parser** (moved here from
-      3.5.8 — it needs the bignum key type defined in this bite to
-      parse into and a sign/verify path to test against; the 3.5.8
-      `pem_decode_privkey` already routes the `RSA PRIVATE KEY` header
-      to a stub that this bite fills in). **Cyrius forcing slots:**
-      v6.0.17 / v6.0.25 (verify + sign for CertificateVerify) and
-      v6.0.29–.34 (1.2 RSA suites).
-
-### 3.6.1 — TLS 1.2 PRF — **SHIPPED 2026-06-03** (was 3.5.11, issue line item 5)
-
-- [x] **`tls12_prf_sha256` / `tls12_prf_sha384` — decided: SHIP.**
-      `src/tls12_prf.cyr`: `PRF(secret, label, seed) = P_hash(secret,
-      label || seed)` with `A(i) = HMAC_hash(secret, A(i-1))`, built on
-      the existing `hmac_sha256` / `hmac_sha384`. Chosen to ship (over
-      decline) for symmetry with the HKDF surface and so cyrius's TLS
-      1.2 path has one crypto boundary; the construction is pure
-      HMAC, so it sits cleanly on the crypto side of
-      [[feedback_tls_protocol_stays_in_cyrius]] (no protocol/state
-      machine). **Flagged to cyrius: sigil now owns the TLS 1.2 PRF —
-      cyrius can drop its inline `tls_native.cyr` PRF and call
-      `tls12_prf_sha256/384`.** Per-bite audit
-      `docs/audit/2026-06-03-3.6.1-tls12-prf-audit.md`; canonical IETF
-      RFC 5246 §5 vectors (+9 assertions, `tests/tcyr/tls12_prf.tcyr`).
-
-### 3.5.12 — Closeout (audit / security / hardening) — **last 3.5.x tag**
-
-Ships only after 3.5.7–3.5.11 land. Runs the full CLAUDE.md Closeout
-Pass over the entire 3.5.5 → 3.5.11 delta and absorbs the retro-items
-the 3.5.6 forcing-function patch deferred.
-
-- [ ] **Dedicated audit doc for the 3.5.6 primitives.** File
-      `docs/audit/<date>-3.5.6-hmac-hkdf-sha384-audit.md` covering
-      `src/hmac_sha384.cyr` + `src/hkdf_sha384.cyr`: constant-time
-      review (only branch is the public `key_len > 128` key-hash
-      path), buffer-size verification (`kprime384[128]`, 48-byte
-      digests, `48 + info_len + 1` scratch), `secret var` + `memset`
-      zeroization, the 255×48 = 12240 OKM cap. Inline review at
-      implementation was clean; this formalises it.
-- [ ] **Verify the per-bite audit docs (3.5.7–3.5.11) are filed and
-      clean** — every new crypto path has constant-time, buffer,
-      zeroization, and known-CVE coverage. Roll any open findings
-      forward to the audit floor in `state.md`.
-- [ ] **Bench coverage sweep.** Confirm `history.csv` rows exist for
-      AES-128-GCM, ECDSA sign, RSA sign/verify (+ HMAC/HKDF-SHA384
-      `v3.5.x-sha384-kdf`); compare against the prior closeout.
-- [ ] **Doc-health refresh.** `docs/doc-health.md` last swept at the
-      3.5.4 closeout — refresh the ledger + `sources.md` / `state.md`
-      / `CHANGELOG.md` rows to the full 3.5.5–3.5.11 state. New RFC /
-      FIPS citations (RFC 6979, RFC 8017, RFC 5208/5958/8410, FIPS
-      197 AES-128) land in `sources.md`.
-- [ ] **Closeout Pass.** Full suite (all `.tcyr`, zero failures),
-      dead-code audit, stale-comment sweep, security re-scan,
-      downstream check (consumers in `state.md` build against the
-      tag), clean build from scratch (`rm -rf build && cyrius deps &&
-      cyrius build`), version verify (`VERSION` == `cyrius.cyml` ==
-      tag).
-
-## v3.6 — parallel verify (SHIPPED 3.6.0, 2026-06-03)
-
-Dropped `_sigil_batch_mutex` so `sv_verify_batch` runs the crypto
-concurrently across workers. **3.42×** at 64 artifacts / 4 workers
-(422.867 ms → 123.563 ms vs `v3.2.0-allocfree`); `batch_parallel.tcyr`
-stays 228/228 mutex-off (35/35 clean runs); CSV row
-`v3.6-parallel-crypto`. Audit:
-`docs/audit/2026-06-03-3.6.0-parallel-verify-audit.md`.
-
-**Forcing function:** cyrius **6.0.52** shipped thread-local storage
-(`lib/thread_local.cyr`), which made the cheaper mechanism below
-possible.
-
-**What actually shipped vs the original sketch.** The 3.3-era plan was
-to thread a *caller-provided scratch pointer* through every crypto
-primitive (≈14 signatures + every caller — invasive, error-prone).
-With TLS available, 3.6 instead gave each worker a private **bank**
-(lane) of every racing `var X[N]`: the array is widened to `[N*8]` and
-sliced by `cbank()*N`, where `cbank()` reads the worker's bank index
-from a thread-local slot (`src/crypto_scratch.cyr`). **No signature
-changes, no caller changes, no cross-function offset map** — each
-function owns its array; lanes are disjoint by construction. `var X[N]`
-remaining a static function-scope global (CLAUDE.md quirk #1, still
-true under cycc 6.0.52) is *accommodated*, not fought. `ge_identity`
-was also made alloc-free (it called `u256_from` → `alloc`, which would
-race once the mutex was gone).
-
-### Follow-up — revisit when cyrius threading matures
-
-- [ ] **Retire the bank-indexing workaround if cyrius grows native
-      per-thread arrays.** The bank scheme exists only because `var
-      X[N]` is a static function-scope global and cyrius TLS is
-      slot-based (no `threadlocal var X[N]` qualifier). If a future
-      cyrius lands a true stack-local or thread-local *array*
-      qualifier — or otherwise makes per-call/per-thread arrays the
-      default — collapse the `[N*8]` banks back to plain `var X[N]`
-      and drop `src/crypto_scratch.cyr`. **Check the cyrius language
-      on each toolchain bump; adopt if the current bank approach
-      proves inadequate** (e.g. the ~8× `.bss` growth or the per-call
-      `cbank()` read becomes a real cost, or a consumer wants parallel
-      *signing*, which would need the `secret var` paths banked too —
-      unsafe under the current scope-exit-zeroizes-all-lanes shape).
-      File as an upstream forcing-function candidate against cyrius if
-      a milestone needs it.
+- [ ] **cyrius-native-TLS closeout (last 3.6.x tag).** Full CLAUDE.md
+      Closeout Pass over the whole 3.6.x delta + the deferred
+      **3.5.6 HMAC/HKDF-SHA384 audit doc**
+      (`docs/audit/<date>-3.5.6-hmac-hkdf-sha384-audit.md`: constant-time
+      review, buffer sizes, `secret var`/`memset` zeroization, the
+      255×48 OKM cap). Includes the downstream-consumer check, dead-code
+      + stale-comment sweep, security re-scan, clean-from-scratch build,
+      and version verify.
 
 ## Road to v3.7 — perf tuning: field arithmetic + alloc-free
 
@@ -241,7 +111,8 @@ The 3.2.x verify paths are correct but slow:
 
 3.7 closes the bump-allocator-lifetime LOW findings (now seven
 across the 3.2.x + 3.4 cycles) and lands Solinas reduction for
-both curves.
+both curves. (The general bignum modexp from 3.6 could also gain
+Barrett/Montgomery here — cross-reference the 3.6.5+ RSA bench item.)
 
 ### 3.7 work items
 
@@ -291,6 +162,19 @@ INFO docs.
 Items with a clear shape but no forcing function. Land
 in-place when an adjacent edit touches the relevant module.
 
+- [ ] **Retire the per-thread bank-indexing workaround if cyrius
+      grows native thread-local arrays.** The 3.6 bank scheme
+      (`src/crypto_scratch.cyr`) exists only because `var X[N]` is a
+      static function-scope global and cyrius TLS is slot-based (no
+      `threadlocal var X[N]` qualifier). If a future cyrius lands a
+      true stack-local / thread-local *array* qualifier, collapse the
+      `[N*8]` banks back to plain `var X[N]` and drop the module.
+      Check the cyrius language on each toolchain bump; adopt if the
+      bank approach proves inadequate (e.g. the `.bss` growth becomes a
+      real cost, or a consumer wants parallel *signing*, which would
+      need the `secret var` paths banked too — unsafe under the current
+      scope-exit-zeroizes-all-lanes shape).
+
 - [ ] **x509 chain-link verify for non-ECDSA-P256 issuers.**
       3.4.1 lets the leaf cert be P-384 but every issuer in a
       verified chain must remain P-256 (chain-link signatures
@@ -303,12 +187,13 @@ in-place when an adjacent edit touches the relevant module.
         the cert parser would accept ecdsa-with-SHA384 OID
         (1.2.840.10045.4.3.3 → DER `06 08 2A 86 48 CE 3D 04
         03 03`) and tag certs accordingly.
-      - **RSA chain-link verify**: out of scope for sigil
-        today — sigil has no RSA primitive. Real AMD ARK/ASK
-        links are RSA-4096 + SHA-384. Surfaces only when a
-        consumer integrates against real AMD KDS chains
-        end-to-end via sigil (vs. external pre-walk + sigil
-        ASK→VCEK fragment).
+      - **RSA chain-link verify**: now *unblocked* — sigil has
+        RSA PKCS#1 v1.5 verify (3.6.2). Wire `_x509_verify_link`
+        to dispatch RSA-with-SHA256/384 issuers (real AMD ARK/ASK
+        links are RSA-4096 + SHA-384) to `rsa_pkcs1v15_verify_*`
+        once the cert parser tags RSA SPKIs + sig algorithms.
+        Surfaces when a consumer integrates real AMD KDS chains
+        end-to-end via sigil.
 
 - [ ] **Scatter-store for the fixed-base comb.** Distribute
       the 128-byte point entries across cache lines so a
@@ -328,24 +213,6 @@ in-place when an adjacent edit touches the relevant module.
       — without it CLMUL adds another `[rbp-N]`-coupled asm
       site to maintain.
 
-- [x] **`secret var` ambient adoption.** ~20 `memset(..., 0,
-      ...)` sites across `src/hkdf.cyr` / `src/aes_gcm.cyr` /
-      `src/mldsa.cyr` (counted post-3.0 merge); roughly 8 are
-      true private-key / PRK / round-key / GHASH-state
-      buffers, the rest intermediate scratch. `secret var`
-      (cyrius 5.3.5) gives compiler-guaranteed zeroization.
-      **Closed in 3.4.3:** `aes_gcm.cyr` was the last
-      unconverted module — 12 stack-local secret buffers
-      (GHASH H, GHASH state, AES-CTR keystream,
-      encrypt/decrypt tag, GHASH-mul scratch) moved to
-      `secret var`. The hkdf/hmac/ed25519/mldsa/trust
-      conversions already landed across earlier cycles.
-      Module-global workspace buffers (`_mldsa_ws_seedbuf`,
-      `_mldsa_sample_state`) and heap allocations
-      (`round_keys`) remain on explicit `memset` since
-      `secret var` is stack-scope only. Audit:
-      `docs/audit/2026-05-23-3.4.3-audit.md`.
-
 - [ ] **NI dispatch structural fix.** When the upstream
       cyrius `asm`-block global-symbol pseudo lands (issue
       linked above), migrate
@@ -358,11 +225,6 @@ in-place when an adjacent edit touches the relevant module.
       removes the brittleness entirely. Keep the self-test
       gate even after the structural fix lands — defence-in-
       depth.
-
-> The **ChaCha20 + ChaCha20-Poly1305 AEAD** and **X25519 key
-> agreement** items were promoted out of this backlog into the
-> [Road to v3.5](#road-to-v35--modern-aead--key-agreement-primitives)
-> cycle (2026-05-27).
 
 ## Possible future surfaces
 

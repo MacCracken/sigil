@@ -237,9 +237,11 @@ their specs inline; this file is the cross-module overview.
 - **RFC 5758** — Additional Algorithms and Identifiers for DSA
   and ECDSA (2010-01). Defines ecdsa-with-SHA256 OID.
   - https://www.rfc-editor.org/rfc/rfc5758.txt
-- Scope cuts deliberately taken (see ADR pending): ECDSA-SHA256
-  only chain-link signatures; P-256 and P-384 SPKIs; no policy
-  mapping; no name constraints; no CRL fetching; no RSA.
+- Scope cuts deliberately taken: ECDSA-SHA256-only chain-link
+  signatures; P-256 and P-384 SPKIs; no policy mapping; no name
+  constraints; no CRL fetching. RSA chain-link verify is not wired
+  into `x509.cyr` yet (backlog) — though sigil does have standalone
+  RSA PKCS#1 v1.5 verify in `rsa.cyr` (3.6.2).
 
 ### PEM decoder — `src/pem.cyr`
 

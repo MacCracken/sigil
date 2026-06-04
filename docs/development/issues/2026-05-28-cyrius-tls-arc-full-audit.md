@@ -10,8 +10,15 @@ below either holds a future cyrius slot or forces a 2-of-3 / 4-of-6
 incomplete-ciphersuite ship). Sigil maintainers can re-rate any
 individual line item; the issue exists as ONE filing to avoid the
 piecemeal-per-cyrius-slot pattern.
-**Status:** open — **triaged + scheduled** into the sigil 3.5.x line
-2026-05-28 (see the Triage section below).
+**Status:** **substantially RESOLVED** (2026-06-03). All five line
+items shipped; the cycle was **renumbered from 3.5.x to 3.6.x** when
+3.6.0 opened the 3.6 line early (parallel verify). AES-128-GCM (3.5.7),
+EC+Ed25519 key parsers (3.5.8), ECDSA sign (3.5.9), TLS 1.2 PRF (3.6.1),
+and the full RSA PKCS#1 v1.5 surface — verify + key parsing + sign with
+blinding/CRT (3.6.2–3.6.4) — are all in. **Remaining tail (3.6.5+):**
+RSA-**PSS** (the only un-shipped part of line item 2) and the
+cycle Closeout Pass. See `docs/development/roadmap.md` § "v3.6.x" and
+CHANGELOG for per-tag detail.
 
 ## Triage — scheduled into sigil 3.5.x (2026-05-28)
 
@@ -23,14 +30,20 @@ ships. Cyrius bumps its sigil pin and resumes the held slot at each
 tag. Tracking: [`docs/development/roadmap.md`](../roadmap.md) §
 "Planned — v3.5.7 → v3.5.12 (cyrius native-TLS arc support)".
 
-| Issue line item | Sigil tag | Cyrius forcing slot |
+Final disposition (tags as actually shipped; the cycle renumbered
+3.5.x → 3.6.x mid-flight):
+
+| Issue line item | Sigil tag (shipped) | Cyrius forcing slot |
 |---|---|---|
-| 1. AES-128-GCM | **3.5.7** (shipped 2026-05-28) | v6.0.14 |
-| 4. Private-key parsers — EC + Ed25519 part | **3.5.8** | v6.0.15 / .23 |
+| 1. AES-128-GCM | **3.5.7** | v6.0.14 |
+| 4. Private-key parsers — EC + Ed25519 | **3.5.8** | v6.0.15 / .23 |
 | 3. ECDSA P-256/P-384 sign | **3.5.9** | v6.0.17 / .25 |
-| 2. RSA sign+verify (PKCS#1 v1.5 + PSS) **+ 4. RSA private-key parser** | **3.5.10** (Large — likely splits) | v6.0.17 / .25 / .29–.34 |
-| 5. TLS 1.2 PRF (optional) | **3.5.11** (ship-or-decline) | v6.0.29–.34 |
-| — Closeout Pass | **3.5.12** (last 3.5.x tag) | — |
+| 2. RSA PKCS#1 v1.5 verify + bignum engine | **3.6.2** | v6.0.17 / .25 |
+| 2/4. RSA key parsing + PKCS#1 v1.5 sign | **3.6.3** | v6.0.17 / .25 |
+| 2. RSA sign hardening (blinding + CRT) | **3.6.4** | v6.0.17 / .25 |
+| 5. TLS 1.2 PRF | **3.6.1** (decision: SHIP) | v6.0.29–.34 |
+| 2. RSA-PSS (remaining) | **3.6.5+** (pending) | v6.0.29–.34 |
+| — Closeout Pass | **3.6.5+** (pending) | — |
 
 > **Line-item-4 split (2026-05-28):** the RSA private-key parser moved
 > from 3.5.8 to 3.5.10. RSA keys have no representation in sigil until
