@@ -91,12 +91,13 @@ held as the last 3.5.x tag (3.5.12)**.
 >   matches an external Python RSA byte-for-byte). Cut deliberately
 >   WITHOUT CRT/blinding — a correct, CT-in-exponent, fault-checked
 >   signer. Audit `docs/audit/2026-06-03-3.6.3-rsa-keys-sign-audit.md`.
-> - **3.6.4** — **RSA sign hardening + security audit pass:** **CRT**
->   (sign mod p,q then recombine; ~4×) + **base blinding** (`s =
->   (m·r^e)^d·r^-1 mod n`; needs a new `bn_modinv` (binary ext-GCD) +
->   a CSPRNG read), then a dedicated **security audit pass** over the
->   whole RSA surface. (LOW-1 in the 3.6.3 audit tracks the blinding
->   gap.)
+> - **3.6.4 SHIPPED** — RSA sign hardening + security audit pass:
+>   **base blinding** (`s = (m·r^e)^d·r^-1 mod n`; new `bn_modinv` via
+>   binary inversion + `/dev/urandom`) + **CRT** (Garner, ~4×) on the
+>   CT Montgomery ladder + verify-after-sign; consolidated security
+>   audit over verify+keys+sign (resolves 3.6.3 LOW-1; caught+fixed a
+>   `bn_modinv` non-coprime infinite loop). RSA PKCS#1 v1.5 surface
+>   complete. Audit `docs/audit/2026-06-03-3.6.4-rsa-hardening-audit.md`.
 > - **3.6.5+** — **PSS** (MGF1) verify + sign, SHA-256/384; switch the
 >   verify path to the Montgomery modexp + benchmark; wire
 >   `pem_decode_privkey` to emit an RSAK struct; and the

@@ -319,16 +319,106 @@ fn rsa_privkey_from_der(der, der_len, key): i64 {
 # `m` — the Bellcore fault-attack guard (a faulty modexp could
 # otherwise leak the key).
 #
-# This bite uses the full-width `d` (no CRT yet) for a correct,
-# constant-time, fault-checked signer; CRT (~4x) and base blinding
-# (DPA/timing decorrelation) are the next 3.6.3 sub-steps. `_rsa_sign_*`
-# hold message/signature-derived values (public); the secret is `d`
-# inside `key` (caller zeroizes).
+# Hardened in 3.6.4: **base blinding** (`s = (m·r^e)^d·r^-1 mod n`, fresh
+# random r per signature — decorrelates the secret modexp from the key)
+# and **CRT** (sign mod p,q then recombine, ~4×; the verify-after-sign
+# guards the CRT fault surface). `_rsa_sign_*` / `_rsa_blind_*` /
+# `_rsa_crt_*` hold message/signature-derived values; the secret is `d`
+# (and p, q, dp, dq) inside `key` (caller zeroizes).
 var _rsa_sign_em[512];
 var _rsa_sign_m[512];
 var _rsa_sign_s[512];
 var _rsa_sign_chk[512];
 var _rsa_sign_n[512];       # modulus as a bignum (little-endian limbs)
+
+# Base-blinding scratch (3.6.4). The blinding factor r is a fresh
+# per-signature random; blinding decorrelates the secret-exponent
+# modexp's timing/power from the key (DPA / timing-correlation
+# defense). The final signature is unchanged (deterministic v1.5).
+var _rsa_blind_rand[512];   # raw CSPRNG bytes
+var _rsa_blind_r[512];      # r in [1, n)
+var _rsa_blind_rinv[512];   # r^-1 mod n
+var _rsa_blind_re[512];     # r^e mod n
+var _rsa_blind_mb[512];     # blinded message m * r^e mod n
+var _rsa_blind_sb[512];     # blinded signature (m*r^e)^d mod n
+var _rsa_blind_prod[1024];  # 2*limbs multiply scratch
+
+# Generate a fresh blinding pair (r, r^-1 mod n) with r in [1, n) and
+# invertible. Reads /dev/urandom. Returns 0 on success, -1 if no
+# entropy or no invertible r within a few tries (effectively never).
+fn _rsa_gen_blind(r_out, rinv_out, n_bn, nlen, limbs): i64 {
+    var fd = file_open("/dev/urandom", 0, 0);
+    if (fd < 0) { return 0 - 1; }
+    var tries = 0;
+    var ok = 0;
+    while (ok == 0) {
+        if (tries >= 16) { file_close(fd); return 0 - 1; }
+        tries = tries + 1;
+        var got = 0;
+        while (got < nlen) {
+            var nr = file_read(fd, (&_rsa_blind_rand) + got, nlen - got);
+            if (nr <= 0) { file_close(fd); return 0 - 1; }
+            got = got + nr;
+        }
+        bn_from_be(r_out, limbs, &_rsa_blind_rand, nlen);
+        bn_mod(r_out, r_out, limbs, n_bn, limbs);          # r in [0, n)
+        if (bn_is_zero(r_out, limbs) == 0) {
+            if (bn_modinv(rinv_out, r_out, n_bn, limbs) == 0) { ok = 1; }
+        }
+    }
+    file_close(fd);
+    return 0;
+}
+
+# CRT exponentiation scratch (3.6.4). Half-width (RSA-4096 prime side).
+var _rsa_crt_p[256];
+var _rsa_crt_q[256];
+var _rsa_crt_qinv[256];
+var _rsa_crt_mp[256];
+var _rsa_crt_mq[256];
+var _rsa_crt_s1[256];
+var _rsa_crt_s2[256];
+var _rsa_crt_s2full[512];
+var _rsa_crt_h[256];
+var _rsa_crt_prod[512];
+var _rsa_crt_qh[512];
+
+# sb_out = mb^d mod n via the CRT (Garner): sign mod p and mod q with
+# the constant-time Montgomery ladder, then recombine — ~4× faster
+# than the full-width modexp. Returns 0, or -1 if the key lacks CRT
+# parameters (caller falls back to the full-width path). The
+# verify-after-sign in the caller guards the CRT fault surface.
+fn _rsa_crt_modexp(key, mb, sb_out, limbs): i64 {
+    var plen = load64(key + RSAK_PLEN);
+    var qlen = load64(key + RSAK_QLEN);
+    if (plen == 0) { return 0 - 1; }
+    if (qlen == 0) { return 0 - 1; }
+    var hl = limbs / 2;                 # half-width limbs (n_limbs is even)
+
+    bn_from_be(&_rsa_crt_p, hl, key + RSAK_P, plen);
+    bn_from_be(&_rsa_crt_q, hl, key + RSAK_Q, qlen);
+    bn_from_be(&_rsa_crt_qinv, hl, key + RSAK_QINV, load64(key + RSAK_QINVLEN));
+
+    # s1 = (mb mod p)^dp mod p ; s2 = (mb mod q)^dq mod q
+    bn_mod(&_rsa_crt_mp, mb, limbs, &_rsa_crt_p, hl);
+    bn_mod(&_rsa_crt_mq, mb, limbs, &_rsa_crt_q, hl);
+    bn_mont_modexp(&_rsa_crt_s1, &_rsa_crt_mp, key + RSAK_DP, load64(key + RSAK_DPLEN), &_rsa_crt_p, hl);
+    bn_mont_modexp(&_rsa_crt_s2, &_rsa_crt_mq, key + RSAK_DQ, load64(key + RSAK_DQLEN), &_rsa_crt_q, hl);
+
+    # h = (s1 - s2) * qinv mod p
+    bn_copy(&_rsa_crt_h, &_rsa_crt_s1, hl);
+    _bn_submod(&_rsa_crt_h, &_rsa_crt_s2, &_rsa_crt_p, hl);
+    bn_mul(&_rsa_crt_prod, &_rsa_crt_h, &_rsa_crt_qinv, hl);
+    bn_mod(&_rsa_crt_h, &_rsa_crt_prod, 2 * hl, &_rsa_crt_p, hl);
+
+    # sb = s2 + q*h   (< n by construction; no final reduction needed)
+    bn_mul(&_rsa_crt_qh, &_rsa_crt_q, &_rsa_crt_h, hl);   # 2*hl == limbs
+    bn_zero(&_rsa_crt_s2full, limbs);
+    bn_copy(&_rsa_crt_s2full, &_rsa_crt_s2, hl);
+    bn_copy(sb_out, &_rsa_crt_qh, limbs);
+    bn_add_assign(sb_out, &_rsa_crt_s2full, limbs);
+    return 0;
+}
 
 # Core signer. `key` is an RSAK struct; prefix/hash form the DigestInfo.
 # Writes the k-byte signature to `sig_out`. Returns k (>0), or -1 on a
@@ -338,18 +428,33 @@ fn _rsa_pkcs1v15_sign(key, prefix, prefix_len, hash, hash_len, sig_out): i64 {
     if (nlen > 512) { return 0 - 1; }
     var limbs = (nlen + 7) / 8;
 
-    # EM = EMSA-PKCS1-v1.5(hash), m = OS2IP(EM). Convert the modulus
-    # from its stored big-endian bytes to a little-endian limb bignum.
+    var dlen = load64(key + RSAK_DLEN);
+    var elen = load64(key + RSAK_ELEN);
+
+    # EM = EMSA-PKCS1-v1.5(hash); m = OS2IP(EM); n as a bignum.
     if (_rsa_emsa_encode(&_rsa_sign_em, nlen, prefix, prefix_len, hash, hash_len) < 0) { return 0 - 1; }
     bn_from_be(&_rsa_sign_m, limbs, &_rsa_sign_em, nlen);
     bn_from_be(&_rsa_sign_n, limbs, key + RSAK_N, nlen);
 
-    # s = m^d mod n  (constant-time; d is secret)
-    var dlen = load64(key + RSAK_DLEN);
-    bn_mont_modexp(&_rsa_sign_s, &_rsa_sign_m, key + RSAK_D, dlen, &_rsa_sign_n, limbs);
+    # Base blinding: fresh random r, mb = m * r^e mod n  (r^e via the
+    # public-exponent modexp). Decorrelates the secret modexp from the
+    # key; the final s is unchanged.
+    if (_rsa_gen_blind(&_rsa_blind_r, &_rsa_blind_rinv, &_rsa_sign_n, nlen, limbs) < 0) { return 0 - 1; }
+    bn_modexp(&_rsa_blind_re, &_rsa_blind_r, key + RSAK_E, elen, &_rsa_sign_n, limbs);
+    bn_mul(&_rsa_blind_prod, &_rsa_sign_m, &_rsa_blind_re, limbs);
+    bn_mod(&_rsa_blind_mb, &_rsa_blind_prod, 2 * limbs, &_rsa_sign_n, limbs);
+
+    # sb = mb^d mod n  (constant-time). CRT when the key has p/q/dp/dq/
+    # qinv (~4×); else the full-width Montgomery ladder.
+    if (_rsa_crt_modexp(key, &_rsa_blind_mb, &_rsa_blind_sb, limbs) < 0) {
+        bn_mont_modexp(&_rsa_blind_sb, &_rsa_blind_mb, key + RSAK_D, dlen, &_rsa_sign_n, limbs);
+    }
+
+    # Unblind: s = sb * r^-1 mod n.
+    bn_mul(&_rsa_blind_prod, &_rsa_blind_sb, &_rsa_blind_rinv, limbs);
+    bn_mod(&_rsa_sign_s, &_rsa_blind_prod, 2 * limbs, &_rsa_sign_n, limbs);
 
     # Verify-after-sign (Bellcore guard): s^e mod n must equal m.
-    var elen = load64(key + RSAK_ELEN);
     bn_modexp(&_rsa_sign_chk, &_rsa_sign_s, key + RSAK_E, elen, &_rsa_sign_n, limbs);
     if (bn_cmp(&_rsa_sign_chk, &_rsa_sign_m, limbs) != 0) {
         bn_zero(&_rsa_sign_s, limbs);   # discard a faulty signature

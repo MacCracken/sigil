@@ -7,7 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-(none — tip is 3.6.3.)
+(none — tip is 3.6.4.)
+
+## [3.6.4] — 2026-06-03
+
+RSA sign-path hardening — **base blinding** + **CRT** — and a
+consolidated **security audit pass** over the whole RSA surface. The
+3.6.3 signer was already constant-time in the exponent and
+fault-checked; this resolves the 3.6.3 LOW-1 (blinding) and adds the
+~4× CRT speed-up. Signatures are unchanged (deterministic v1.5), so
+they still match the external reference byte-for-byte.
+
+### Added
+
+- **Base blinding** (`src/rsa.cyr`) — `s = (m·r^e)^d·r^-1 mod n` with a
+  fresh `/dev/urandom` factor `r` per signature, decorrelating the
+  secret-exponent modexp's timing/power from the key. Fails closed if
+  entropy is unavailable.
+- **CRT signing** (`src/rsa.cyr`) — Garner recombination (sign mod p
+  and mod q with the constant-time Montgomery ladder, then combine);
+  ~4× over the full-width modexp. The existing verify-after-sign
+  (Bellcore) guard covers the CRT fault surface; a full-width fallback
+  remains for keys without CRT parameters.
+- **`bn_modinv`** (`src/bignum.cyr`) — modular inverse via binary
+  inversion (odd modulus), plus `bn_add_assign` / `bn_shr1` /
+  `bn_is_one`. Used for the blinding factor's inverse and CRT recombine.
+  Non-constant-time (only ever applied to the ephemeral random `r`).
+- **Tests** — `tests/tcyr/bignum.tcyr` (+5: `bn_modinv` self-check
+  `r·r^-1 ≡ 1 mod n` at 256/2048-bit + the non-coprime `-1` path).
+  `rsa.tcyr` signing now exercises the blinded + CRT path (still
+  matching the Python reference). Suite 50 files / 1334 assertions.
+
+### Security
+
+- Consolidated audit `docs/audit/2026-06-03-3.6.4-rsa-hardening-audit.md`
+  over the full RSA surface (verify + keys + sign): secret-exponent
+  modexps are CT Montgomery ladders, now blinded; verify-after-sign
+  guards the CRT fault surface; `bn_modinv` non-CT only on the
+  ephemeral `r`. **3.6.3 LOW-1 (base blinding) resolved.** A real bug
+  was caught and fixed: `bn_modinv` looped forever on non-coprime input
+  (`u→0`) — now guarded to return -1. 0 CRITICAL / HIGH / MEDIUM / LOW.
+
+### Changed
+
+- **Dist regenerated** — `dist/sigil.cyr` picks up the hardened signer
+  + `bn_modinv`; `cyrius doc --check` 0 undocumented.
 
 ## [3.6.3] — 2026-06-03
 

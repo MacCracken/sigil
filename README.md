@@ -28,8 +28,9 @@ All cryptography implemented in Cyrius — no external dependencies:
 - **TLS 1.2 PRF** (RFC 5246 §5) — P_SHA256 / P_SHA384 key schedule
 - **RSA PKCS#1 v1.5** (RFC 8017) — signature verify **and** sign,
   SHA-256/384, with DER/PEM key parsing (PKCS#1, SPKI, PKCS#8); on a
-  general big-integer engine (constant-time Montgomery modexp for the
-  secret exponent; verify-after-sign fault guard)
+  general big-integer engine — constant-time Montgomery modexp for the
+  secret exponent, **base blinding + CRT**, and a verify-after-sign
+  (Bellcore) fault guard
 - **AES-256-GCM / AES-128-GCM** (FIPS 197 + NIST SP 800-38D) — AEAD
   with runtime-detected AES-NI dispatch
 - **ChaCha20-Poly1305** (RFC 8439) — AEAD (ChaCha20 cipher +
@@ -165,7 +166,7 @@ Requires **cyrius ≥ 6.0.52** (the release that shipped `lib/thread_local.cyr`)
 
 ## Tests
 
-1329 assertions across 50 test files, 0 failures (3.6.3). Crypto
+1334 assertions across 50 test files, 0 failures (3.6.4). Crypto
 suites use published known-answer vectors (RFC / FIPS / NIST); the
 TEE attestation arc ships synthesised end-to-end fixtures.
 `tests/tcyr/batch_parallel.tcyr` doubles as the parallel-verify race
@@ -183,9 +184,10 @@ for t in tests/tcyr/*.tcyr; do cyrius test "$t"; done
   HMAC/HKDF-SHA384), AES-128-GCM, EC + Ed25519 private-key parsers,
   ECDSA P-256/P-384 deterministic signing, TLS 1.2 PRF (3.6.1), RSA
   PKCS#1 v1.5 **verify** + bignum/modexp engine (3.6.2), RSA key
-  parsing + PKCS#1 v1.5 **sign** (3.6.3). Remaining (3.6.x): RSA sign
-  hardening — CRT + blinding — with a security audit pass (3.6.4),
-  then PSS + cycle closeout.
+  parsing + PKCS#1 v1.5 **sign** (3.6.3), RSA sign hardening — CRT +
+  blinding + security audit (3.6.4). The PKCS#1 v1.5 surface is
+  complete. Remaining (3.6.5+): PSS, Montgomery-on-verify, cycle
+  closeout.
 - **v3.6** — parallel verify (**shipped 3.6.0**): dropped
   `_sigil_batch_mutex` via per-thread crypto-scratch banks over
   cyrius 6.0.52 thread-local storage (3.42× at 64 artifacts / 4

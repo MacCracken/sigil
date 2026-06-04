@@ -118,6 +118,54 @@ fn bn_shl1(a, limbs): i64 {
     return carry;
 }
 
+# a >>= 1 (logical) over `limbs` limbs; returns the bit shifted out of
+# the bottom. The 0x7FFF.. mask clears the sign bit that cyrius's
+# arithmetic `>>` would otherwise smear in.
+fn bn_shr1(a, limbs): i64 {
+    var carry = 0;                  # bit descending from the limb above
+    var i = limbs - 1;
+    while (i >= 0) {
+        var v = load64(a + i * 8);
+        var low = v & 1;
+        store64(a + i * 8, ((v >> 1) & 0x7FFFFFFFFFFFFFFF) | (carry << 63));
+        carry = low;
+        i = i - 1;
+    }
+    return carry;
+}
+
+# a += b (both `limbs` limbs); returns the carry out.
+fn bn_add_assign(a, b, limbs): i64 {
+    var sbit = 1 << 63;
+    var carry = 0;
+    var i = 0;
+    while (i < limbs) {
+        var av = load64(a + i * 8);
+        var bv = load64(b + i * 8);
+        var s1 = av + bv;
+        var c1 = 0;
+        if ((s1 ^ sbit) < (av ^ sbit)) { c1 = 1; }
+        var s2 = s1 + carry;
+        var c2 = 0;
+        if ((s2 ^ sbit) < (s1 ^ sbit)) { c2 = 1; }
+        store64(a + i * 8, s2);
+        carry = c1 + c2;
+        i = i + 1;
+    }
+    return carry;
+}
+
+# 1 if the `limbs`-limb value equals 1, else 0.
+fn bn_is_one(a, limbs): i64 {
+    if (load64(a) != 1) { return 0; }
+    var i = 1;
+    while (i < limbs) {
+        if (load64(a + i * 8) != 0) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
 # Index of the highest set bit + 1 (0 for a zero value).
 fn bn_bitlen(a, limbs): i64 {
     var i = limbs - 1;
@@ -318,6 +366,85 @@ var _bn_mont_base[512];     # base in Montgomery form
 var _bn_mont_res[512];      # running result (Montgomery form)
 var _bn_mont_tmp[512];      # multiply temp
 var _bn_mont_one[512];      # the integer 1
+
+# ================================================================
+# Modular inverse (binary inversion, odd modulus)
+# ================================================================
+# Used only for the ephemeral per-signature RSA blinding factor (r is
+# random, not the key), so this is NOT constant-time. GECC Alg. 2.22
+# shape, kept fully reduced in [0, n) throughout.
+var _bn_inv_u[512];
+var _bn_inv_v[512];
+var _bn_inv_x1[512];
+var _bn_inv_x2[512];
+
+# x = x/2 mod n (n odd): if x even, plain halve; else (x+n)/2 — x+n is
+# even and < 2n, so capture the add-carry into the top bit after the
+# shift.
+fn _bn_halve_mod(x, n, limbs): i64 {
+    if ((load64(x) & 1) == 0) {
+        bn_shr1(x, limbs);
+    } else {
+        var c = bn_add_assign(x, n, limbs);
+        bn_shr1(x, limbs);
+        if (c == 1) {
+            store64(x + (limbs - 1) * 8, load64(x + (limbs - 1) * 8) | (1 << 63));
+        }
+    }
+    return 0;
+}
+
+# a = (a - b) mod n, with a, b in [0, n).
+fn _bn_submod(a, b, n, limbs): i64 {
+    if (bn_cmp(a, b, limbs) < 0) { bn_add_assign(a, n, limbs); }
+    bn_sub_assign(a, b, limbs);
+    return 0;
+}
+
+# rinv = r^-1 mod n  (n odd, gcd(r,n)=1). Returns 0 on success, -1 if r
+# is 0 or not invertible (iteration cap). NOT constant-time.
+fn bn_modinv(rinv, r, n, limbs): i64 {
+    if (bn_is_zero(r, limbs) == 1) { return 0 - 1; }
+    bn_copy(&_bn_inv_u, r, limbs);
+    bn_copy(&_bn_inv_v, n, limbs);
+    bn_zero(&_bn_inv_x1, limbs);
+    store64(&_bn_inv_x1, 1);
+    bn_zero(&_bn_inv_x2, limbs);
+
+    var cap = 64 * limbs * 4;
+    var it = 0;
+    var done = 0;
+    while (done == 0) {
+        if (bn_is_one(&_bn_inv_u, limbs) == 1) { done = 1; }
+        else { if (bn_is_one(&_bn_inv_v, limbs) == 1) { done = 2; }
+        else { if (bn_is_zero(&_bn_inv_u, limbs) == 1) { done = 3; }   # gcd>1: not invertible
+        else { if (bn_is_zero(&_bn_inv_v, limbs) == 1) { done = 3; }
+        else { if (it >= cap) { done = 3; }
+        else {
+            while ((load64(&_bn_inv_u) & 1) == 0) {
+                bn_shr1(&_bn_inv_u, limbs);
+                _bn_halve_mod(&_bn_inv_x1, n, limbs);
+            }
+            while ((load64(&_bn_inv_v) & 1) == 0) {
+                bn_shr1(&_bn_inv_v, limbs);
+                _bn_halve_mod(&_bn_inv_x2, n, limbs);
+            }
+            if (bn_cmp(&_bn_inv_u, &_bn_inv_v, limbs) >= 0) {
+                bn_sub_assign(&_bn_inv_u, &_bn_inv_v, limbs);
+                _bn_submod(&_bn_inv_x1, &_bn_inv_x2, n, limbs);
+            } else {
+                bn_sub_assign(&_bn_inv_v, &_bn_inv_u, limbs);
+                _bn_submod(&_bn_inv_x2, &_bn_inv_x1, n, limbs);
+            }
+            it = it + 1;
+        } } } } }
+    }
+
+    if (done == 3) { return 0 - 1; }
+    if (done == 1) { bn_copy(rinv, &_bn_inv_x1, limbs); }
+    else { bn_copy(rinv, &_bn_inv_x2, limbs); }
+    return 0;
+}
 
 # -n[0]^-1 mod 2^64 via Newton's iteration (n0 odd). Each step doubles
 # the number of correct low bits: 1 -> 2 -> 4 -> ... -> 64.

@@ -133,6 +133,36 @@ fn main() {
         "mont 2048-bit s^65537 == schoolbook");
 
     # ============================================================
+    # Modular inverse (self-checking: r * r^-1 == 1 mod n)
+    # ============================================================
+    test_group("bignum modinv");
+
+    # 256-bit success (base coprime to n256): r * r^-1 == 1 mod n.
+    var cb = hex_decode("1111111111111111111111111111111111111111111111111111111111111111", 64);
+    var cbn[64];
+    bn_from_be(&cbn, 4, cb, 32);
+    var rinv256[64];
+    assert_eq(bn_modinv(&rinv256, &cbn, &n256bn, 4), 0, "modinv 256 ok");
+    var ip[64];
+    bn_mul(&ip, &cbn, &rinv256, 4);
+    var ipr[64];
+    bn_mod(&ipr, &ip, 8, &n256bn, 4);
+    assert_eq(bn_is_one(&ipr, 4), 1, "r * r^-1 == 1 mod n (256-bit)");
+
+    # Not invertible: gcd(b256, n256) = 5 -> -1 (no infinite loop).
+    var rinvbad[64];
+    assert_eq(bn_modinv(&rinvbad, &b256bn, &n256bn, 4), 0 - 1, "non-coprime returns -1");
+
+    # 2048-bit success (RSA-modulus-sized): r * r^-1 == 1 mod n.
+    var rinv2[256];
+    assert_eq(bn_modinv(&rinv2, &b2bn, &n2bn, 32), 0, "modinv 2048 ok");
+    var ip2[512];
+    bn_mul(&ip2, &b2bn, &rinv2, 32);
+    var ip2r[256];
+    bn_mod(&ip2r, &ip2, 64, &n2bn, 32);
+    assert_eq(bn_is_one(&ip2r, 32), 1, "r * r^-1 == 1 mod n (2048-bit)");
+
+    # ============================================================
     # Edge cases
     # ============================================================
     test_group("bignum modexp edges");

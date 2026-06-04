@@ -107,7 +107,10 @@ their specs inline; this file is the cross-module overview.
   (`bn_mont_modexp`); cf. Koç, Acar, Kaliski, "Analyzing and Comparing
   Montgomery Multiplication Algorithms" (1996). A **verify-after-sign**
   step (recompute `s^e mod n`) is the Boneh–DeMillo–Lipton ("Bellcore")
-  fault-attack guard. Base blinding + CRT land in 3.6.4.
+  fault-attack guard. **Base blinding** (`s=(m·r^e)^d·r^-1 mod n`,
+  random `r`; defends DPA / timing-correlation) and **CRT** (Garner
+  recombination, ~4×) shipped in 3.6.4; the modular inverse for `r^-1`
+  uses binary inversion (`bn_modinv`).
 - **Verify hygiene** — sigil reconstructs the full expected `EM` and
   compares all octets (rather than parsing/skipping), the recommended
   defense against the PKCS#1 v1.5 forgery class (Bleichenbacher 2006 /

@@ -6,7 +6,19 @@ type: state
 
 # Documentation Health — sigil
 
-> **Last refresh**: 2026-06-03 (**3.6.3 — RSA key parse + PKCS#1 v1.5 sign**).
+> **Last refresh**: 2026-06-03 (**3.6.4 — RSA sign hardening + audit**).
+> Added base **blinding** + **CRT** to the RSA signer (`src/rsa.cyr`)
+> and `bn_modinv` (+ `bn_add_assign`/`bn_shr1`/`bn_is_one`) to
+> `src/bignum.cyr`; `bignum.tcyr` +5 (modinv self-checks + non-coprime
+> path), 1329→1334. Consolidated security audit
+> `docs/audit/2026-06-03-3.6.4-rsa-hardening-audit.md` over the whole
+> RSA surface (resolves 3.6.3 LOW-1; caught+fixed a `bn_modinv`
+> infinite loop on non-coprime input). RSA PKCS#1 v1.5 surface
+> complete; PSS + Montgomery-on-verify + cyrius-TLS closeout = 3.6.5+.
+> Earlier same-day refreshes (3.6.3 sign, 3.6.2 verify, 3.6.1 PRF,
+> 3.6.0 parallel verify) below.
+>
+> **Earlier 2026-06-03 (3.6.3 — RSA key parse + PKCS#1 v1.5 sign).**
 > Added to `src/rsa.cyr`: `rsa_pubkey_from_der` (PKCS#1 + SPKI),
 > `rsa_privkey_from_der` (PKCS#1 + PKCS#8, reusing x509 `der_walk`),
 > `rsa_pkcs1v15_sign_sha256/384` (CT ladder + verify-after-sign); and
