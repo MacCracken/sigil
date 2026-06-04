@@ -6,74 +6,38 @@ type: state
 
 # Documentation Health — sigil
 
-> **Last refresh**: 2026-06-03 (**3.6.4 — RSA sign hardening + audit**).
-> Added base **blinding** + **CRT** to the RSA signer (`src/rsa.cyr`)
-> and `bn_modinv` (+ `bn_add_assign`/`bn_shr1`/`bn_is_one`) to
-> `src/bignum.cyr`; `bignum.tcyr` +5 (modinv self-checks + non-coprime
-> path), 1329→1334. Consolidated security audit
-> `docs/audit/2026-06-03-3.6.4-rsa-hardening-audit.md` over the whole
-> RSA surface (resolves 3.6.3 LOW-1; caught+fixed a `bn_modinv`
-> infinite loop on non-coprime input). RSA PKCS#1 v1.5 surface
-> complete; PSS + Montgomery-on-verify + cyrius-TLS closeout = 3.6.5+.
-> Earlier same-day refreshes (3.6.3 sign, 3.6.2 verify, 3.6.1 PRF,
-> 3.6.0 parallel verify) below.
+> **Last refresh**: 2026-06-04 (**3.7.3 — caller-scratch `_into` API +
+> audit-floor clear**). The 3.6 cyrius-native-TLS arc closed at 3.6.8
+> and the v3.7 perf cycle is in progress; this is a consolidated refresh
+> across the whole 3.6.5 → 3.7.3 run. Per-version detail lives in
+> [`CHANGELOG.md`](../CHANGELOG.md) and per-cycle audit docs in
+> [`docs/audit/`](audit/) — the daily-stack notes that used to live here
+> were retired in favour of those sources.
 >
-> **Earlier 2026-06-03 (3.6.3 — RSA key parse + PKCS#1 v1.5 sign).**
-> Added to `src/rsa.cyr`: `rsa_pubkey_from_der` (PKCS#1 + SPKI),
-> `rsa_privkey_from_der` (PKCS#1 + PKCS#8, reusing x509 `der_walk`),
-> `rsa_pkcs1v15_sign_sha256/384` (CT ladder + verify-after-sign); and
-> `bn_mont_modexp` (constant-time Montgomery) to `src/bignum.cyr`.
-> Tests `rsa.tcyr` +21 / `bignum.tcyr` +3 (50 files, 1305→1329).
-> Audit `docs/audit/2026-06-03-3.6.3-rsa-keys-sign-audit.md` (LOW-1:
-> base blinding deferred to 3.6.4). `sources.md` extended (RFC 8017
-> §8.2.1/§A.1.2, Montgomery, Bellcore); `privkey.cyr` stale "3.5.10"
-> comments refreshed to point at `rsa_privkey_from_der`. **CRT +
-> blinding + a security audit pass = 3.6.4.** Earlier same-day
-> refreshes (3.6.2 RSA verify, 3.6.1 PRF, 3.6.0 parallel verify) below.
+> **Headline changes since the last full row-refresh (3.4.1 inventory):**
+> - **Version `3.7.3`**, cyrius pin **`6.0.62`** (was 3.5.4 / 6.0.3 at
+>   the 3.4.1 inventory). Deps agnosys 1.3.2, sakshi 2.2.6.
+> - **Audit floor: EMPTY** (cleared at 3.7.3 — see state.md). The seven
+>   bump-allocator LOWs ADR 0003 batched are resolved/reclassified; ADR
+>   0003 is now closed-out.
+> - **52 `.tcyr` files / 1431 assertions** (was ~1178 at the 3.4.1
+>   inventory). New modules across 3.6/3.7: `bignum`, `tls12_prf`,
+>   `hmac_sha384`, `hkdf_sha384` and the RSA / PSS / Solinas / `_into`
+>   surfaces; new bench files `tests/bcyr/{rsa,ecdsa_p384}.bcyr`.
+> - **Audit docs**: 3.5.6 retro + 3.6.0–3.6.8 + 3.7.0–3.7.3 added under
+>   `docs/audit/` (per-cycle, dated artifacts).
+> - **CHANGELOG / roadmap / state.md** are current through 3.7.3;
+>   roadmap.md was de-cluttered 2026-06-04 (shipped detail moved to
+>   "Closed cycles" + CHANGELOG; only open items remain).
 >
-> **Earlier 2026-06-03 (3.6.2 — RSA PKCS#1 v1.5 verify).**
-> Added `src/bignum.cyr` (general big-int + modexp engine) +
-> `src/rsa.cyr` (`rsa_pkcs1v15_verify_sha256/384`, RFC 8017) +
-> `tests/tcyr/{bignum,rsa}.tcyr` (+12, KAT-validated to RSA-2048) +
-> audit `docs/audit/2026-06-03-3.6.2-rsa-verify-audit.md` +
-> `sources.md` (RFC 8017) + roadmap (RSA verify shipped; DER-parse /
-> sign / PSS remain) + README/state.md. Suite 48→50 files,
-> 1293→1305 assertions. Verify-only, public-data path (no CT/zeroize
-> obligation; engine is single-threaded/unbanked, flagged not-for-sign).
-> Same-day prior refreshes (3.6.1 PRF, 3.6.0 parallel verify) below.
->
-> **Earlier 2026-06-03 (3.6.1 — TLS 1.2 PRF).**
-> Added `src/tls12_prf.cyr` (RFC 5246 §5 `tls12_prf_sha256/384`) +
-> `tests/tcyr/tls12_prf.tcyr` (+9, canonical IETF vectors) + audit
-> `docs/audit/2026-06-03-3.6.1-tls12-prf-audit.md` + `sources.md`
-> (RFC 5246 §5) + roadmap (PRF marked shipped, flagged to cyrius).
-> Toolchain pin 6.0.52 → **6.0.53** (README + state.md + roadmap).
-> Suite 47→48 files, 1284→1293 assertions. Same-day prior refresh
-> (3.6.0 — parallel verify) summarized below.
->
-> **Earlier 2026-06-03 (3.6.0 — parallel verify).**
-> Dropped `_sigil_batch_mutex`; `sv_verify_batch` now runs the
-> crypto concurrently (3.42× at 64 artifacts / 4 workers) on the
-> back of cyrius 6.0.52 thread-local storage. This sweep: added
-> `src/crypto_scratch.cyr` (per-thread crypto banks) + the
-> `docs/audit/2026-06-03-3.6.0-parallel-verify-audit.md` audit +
-> `benches/history.csv` row `v3.6-parallel-crypto`; per-thread
-> banking landed across `sha_ni`/`sha256`/`sha512`/`bigint_ext`/
-> `ed25519`/`trust`; toolchain pin 6.0.14 → **6.0.52**, agnosys
-> 1.2.7 → 1.3.2, sakshi 2.2.5 → 2.2.6 (README + state.md + roadmap
-> repinned); **ADR 0001 marked Superseded** (mutex dropped via TLS
-> banks, not the caller-scratch design it anticipated). The three
-> unshipped cyrius-native-TLS items (RSA, TLS 1.2 PRF, closeout)
-> were renumbered 3.5.10–12 → **3.6.x** in `state.md` + `roadmap.md`.
-> No new RFC/FIPS surface (threading refactor) — `sources.md`
-> unchanged. Injected `lib/thread_local.cyr` + `src/crypto_scratch.cyr`
-> includes into the 36 standalone test/bench files that compile a
-> banked module. Prior refresh: 2026-05-27 (3.5.4 arc closeout); see
-> git history for the 3.5.x sweep detail.
+> The per-tier tables below predate this run and are **partially stale
+> on dates/counts** (flagged inline where load-bearing); a full
+> row-by-row re-sweep is the next doc-health task (queued for the v3.7
+> closeout).
 >
 > **Refresh cadence**: when docs are touched, update the
 > affected row inline. Full audit at minor closeout
-> (next: the 3.6.x cyrius-native-TLS items → close).
+> (next: the v3.7 perf cycle close).
 >
 > **Scope**: this repo only (`sigil`) — the entire `docs/` tree
 > plus root-level files (README, CHANGELOG, CLAUDE.md, VERSION,
@@ -140,17 +104,17 @@ citation index for every crypto primitive.
 | File | Last touched | Status | Notes |
 |---|---|---|---|
 | `README.md` | 2026-05-22 | ✅ Fresh | Rewritten this sweep; trimmed module-list duplication against `docs/architecture/overview.md`. |
-| `CHANGELOG.md` | 2026-05-27 | ✅ Fresh | Source of truth per CLAUDE.md. Through 3.5.4. Refreshed every release. |
-| `CLAUDE.md` | 2026-05-22 | ✅ Fresh | Restructured to agnosticos `example_claude.md` template. Durable rules only — volatile state moved to `docs/development/state.md`. |
-| `CONTRIBUTING.md` | 2026-05-22 | ✅ Fresh | Rewritten this sweep — removed Rust/cargo references; Cyrius work loop + commit / hook rules from CLAUDE.md. |
-| `SECURITY.md` | 2026-05-22 | ✅ Fresh | Rewritten this sweep — supported versions table moved to 3.4.x / 3.3.x; full crypto-primitive surface (added ECDSA, AES-GCM, HKDF, ML-DSA, X.509, PEM). |
-| `CODE_OF_CONDUCT.md` | (per upstream) | 🔵 Evergreen | Standard contributor covenant. Refresh only when upstream covenant rev. |
+| `CHANGELOG.md` | 2026-06-04 | ✅ Fresh | Source of truth per CLAUDE.md. **Through 3.7.3.** Refreshed every release. |
+| `CLAUDE.md` | 2026-06-04 | ✅ Fresh | agnosticos `example_claude.md` template; durable rules only. 3.6.8 fixed the stale `benches/sigil.bcyr` → `tests/bcyr/sigil.bcyr` Quick-Start path. |
+| `CONTRIBUTING.md` | 2026-05-22 | ✅ Fresh | Cyrius work loop + commit/hook rules; no Rust/cargo references. |
+| `SECURITY.md` | 2026-05-22 | 🟡 Stale | Supported-versions table topped at 3.4.x/3.3.x — refresh to 3.7.x at the v3.7 closeout. Crypto-primitive surface predates the RSA/PSS/GCM-IV additions. |
+| `CODE_OF_CONDUCT.md` | (per upstream) | 🔵 Evergreen | Standard contributor covenant. |
 | `LICENSE` | (per upstream) | 🔵 Evergreen | GPL-3.0-only. |
-| `VERSION` | 2026-05-27 | ✅ Fresh | `3.5.4`. Bumped every release. |
-| `cyrius.cyml` | 2026-05-27 | ✅ Fresh | 3.5 arc added `poly1305`, `chacha20`, `chacha20poly1305`, `x25519` to `[lib].modules`; toolchain pin bumped 6.0.1 → 6.0.3. (3.4.2 added `pem.cyr` + the test-layout comment block.) |
-| `scripts/regen-dist.sh` | 2026-05-27 | ✅ Fresh | New at 3.4.2 (replaces the retired `cyrius distlib`). 3.5 arc added the four new crypto modules to its `MODULES` list (kept in sync with `cyrius.cyml`). Re-run when `[lib].modules` changes. |
-| `dist/sigil.cyr` | 2026-05-27 | ✅ Fresh | Regenerated each 3.5.x bite. ~14,768 lines after the four crypto modules landed (14,086 at 3.4.2). |
-| `benchmarks-rust-v-cyrius.md` | (closed) | 🔵 Evergreen | Frozen cross-implementation perf baseline. CLAUDE.md (Current Status, retired) declares this archived comparison — not rebuilt per release. |
+| `VERSION` | 2026-06-04 | ✅ Fresh | **`3.7.3`**. Bumped every release. |
+| `cyrius.cyml` | 2026-06-04 | ✅ Fresh | `[lib].modules` extended across 3.6/3.7 (bignum, tls12_prf, hmac/hkdf_sha384, …); toolchain pin **`6.0.62`** (6.0.3 → .14 → .52/.53 → .58 → .61 → .62 over the 3.5→3.7 run). |
+| `scripts/regen-dist.sh` | 2026-06-04 | ✅ Fresh | Replaces the retired `cyrius distlib`. `MODULES` kept in sync with `cyrius.cyml [lib].modules`. Re-run after every VERSION bump (embeds the header). |
+| `dist/sigil.cyr` | 2026-06-04 | ✅ Fresh | Regenerated every release (last, after the VERSION bump). ~18.5k lines at 3.7.3. |
+| `benchmarks-rust-v-cyrius.md` | (closed) | 🔵 Evergreen | Frozen cross-implementation perf baseline; not rebuilt per release. |
 
 ---
 
@@ -171,7 +135,7 @@ citation index for every crypto primitive.
 | `template.md` | 2026-05-22 | ✅ Fresh | New this sweep. Verbatim shape from `sit/docs/adr/template.md`. |
 | `0001-retain-batch-mutex-until-caller-scratch.md` | 2026-05-27 | ✅ Fresh / 🔵 Evergreen-ish | Mutex-drop deferral rationale. **Amended 2026-05-27**: parallel-verify cycle renumbered 3.5 → 3.6 (the 3.5 slot became the modern-crypto arc). Re-read at 3.6 cycle open. |
 | `0002-mldsa-cmdline-gate.md` | 2026-05-22 | ✅ Fresh | Captures the `-D SIGIL_PQC` gate rationale (cyrius preprocessor 1 MB cap). Re-read when cyrius raises the cap. |
-| `0003-bump-alloc-drift-acceptable-until-3-6.md` | 2026-05-27 | ✅ Fresh | Seven open LOW findings as a batched closure target. **Amended 2026-05-27**: cycle renumbered 3.6 → 3.7 (filename keeps its immutable NNNN index). Re-read at 3.7 cycle open. |
+| `0003-bump-alloc-drift-acceptable-until-3-6.md` | 2026-06-04 | 🟡 Superseded-ish | The batched-closure target it tracked is **done**: the audit floor was cleared at 3.7.3 (4 LOWs resolved via the `_into` API, 4 reclassified as correct init-once). Mark Resolved/Superseded in the ADR body at the v3.7 closeout. |
 
 ---
 
@@ -197,15 +161,20 @@ finding closes).
 | `2026-05-23-3.4.3-audit.md` | 2026-05-23 | 🔵 Dated artifact (3.4.3 — `secret var` aes_gcm sweep) |
 | `2026-05-27-3.5-arc-audit.md` | 2026-05-27 | 🔵 Dated artifact (**3.5 arc, 3.5.0–3.5.4**) — consolidates the four per-bite audits; the per-bite `3.5.0/.1/.2/.3-audit.md` files were merged here and removed. |
 
-**Audit floor**: 7 open LOW findings (bump-allocator
-lifetime), batched closure at **3.7** per ADR 0003 (renumbered
-from 3.6 when the 3.5 slot became the modern-crypto arc). Zero
-CRITICAL / HIGH / MEDIUM outstanding.
+> **Stale table** — the per-audit rows above stop at the 3.5 arc. The
+> 3.5.6 retro + 3.6.0–3.6.8 + 3.7.0–3.7.3 audit docs (all dated
+> artifacts under `docs/audit/`) are not yet itemised here; full
+> re-sweep queued for the v3.7 closeout.
 
-Naming convention note: multi-cycle days (e.g. 2026-05-22
-shipped 3.3.0 + 3.4.0 + 3.4.1) disambiguate via
-`YYYY-MM-DD-<version>-audit.md`. The bare `YYYY-MM-DD-audit.md`
-form is reserved for the first cycle of a day.
+**Audit floor**: **EMPTY (cleared at 3.7.3).** The seven (then eight,
++3.6.5 RSA SPKI block) bump-allocator LOWs ADR 0003 batched are
+resolved (4 via the `_into` caller-scratch API) or reclassified as
+correct init-once singletons (4). Zero findings of any severity
+outstanding.
+
+Naming convention note: multi-cycle days disambiguate via
+`YYYY-MM-DD-<version>-audit.md`; the bare `YYYY-MM-DD-audit.md` form is
+reserved for the first cycle of a day.
 
 ---
 
@@ -213,8 +182,8 @@ form is reserved for the first cycle of a day.
 
 | File | Last touched | Status | Notes |
 |---|---|---|---|
-| `roadmap.md` | 2026-05-27 | ✅ Fresh | 3.5 arc: new v3.5 crypto cycle (Poly1305/ChaCha20/AEAD/X25519, all shipped), parallel-verify slid to v3.6 and perf/Solinas to v3.7; 3.5.4 closeout note added. |
-| `state.md` | 2026-05-27 | ✅ Fresh | Live state snapshot — bumped every release. Through 3.5.4; in-flight slots show the shipped 3.5 bites + planned 3.6/3.7 gating. |
+| `roadmap.md` | 2026-06-04 | ✅ Fresh | **De-cluttered 2026-06-04**: shipped detail moved to "Closed cycles" + CHANGELOG; only open items remain (3.7.4 EC scalar-mult, bench re-run, gated backlog). Fixed a stale pin, a duplicate P-384 entry, and an unchecked-but-shipped closeout. |
+| `state.md` | 2026-06-04 | ✅ Fresh | Live state snapshot — bumped every release. **Through 3.7.3**; audit floor EMPTY; in-flight = 3.7.4 + bench re-run. |
 | `3.0-handoff-2026-04-22.md` | 2026-04-22 | 📦 Archive | Frozen by design — closed-cycle handoff doc. |
 | `3.0-scope.md` | (closed) | 📦 Archive | Frozen by design — closed-cycle scope doc. |
 | `3.2-scope.md` | (closed) | 📦 Archive | Frozen by design — closed-cycle scope doc. |
