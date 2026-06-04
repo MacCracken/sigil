@@ -7,7 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-(none — tip is 3.6.2.)
+(none — tip is 3.6.3.)
+
+## [3.6.3] — 2026-06-03
+
+RSA key parsing + PKCS#1 v1.5 **signing**. Second RSA bite of the
+cyrius native-TLS arc. The sign-path **hardening (CRT + base blinding)
+and a dedicated security audit pass are 3.6.4** — what ships here is a
+correct, constant-time-in-the-exponent, fault-checked signer.
+
+### Added
+
+- **`rsa_pubkey_from_der`** (`src/rsa.cyr`) — parse an RSA public key
+  from a bare PKCS#1 `RSAPublicKey` or an X.509 SubjectPublicKeyInfo
+  (rsaEncryption). RSA verify now works straight off a cert/TLS key.
+- **`rsa_privkey_from_der`** (`src/rsa.cyr`) — parse PKCS#1
+  `RSAPrivateKey` (RFC 8017 §A.1.2) or PKCS#8 into an `RSAK` struct
+  (n, e, d, p, q, dp, dq, qinv). Both parsers reuse the audited
+  `der_walk` from `src/x509.cyr`.
+- **`bn_mont_modexp`** (`src/bignum.cyr`) — constant-time Montgomery
+  (CIOS) modular exponentiation for the secret exponent: square-and-
+  multiply-always over a fixed bit width with a constant-time select,
+  so timing/control-flow don't depend on the exponent bits. Odd
+  modulus required (RSA n/p/q). KAT-validated equal to the schoolbook
+  `bn_modexp` at 256-bit and 2048-bit.
+- **`rsa_pkcs1v15_sign_sha256` / `_sha384`** (`src/rsa.cyr`) —
+  RSASSA-PKCS1-v1.5 (RFC 8017 §8.2.1): `s = m^d mod n` via the CT
+  ladder, with **verify-after-sign** (recompute `s^e mod n`, refuse to
+  emit unless it equals `m` — the Bellcore fault guard). The
+  EMSA-PKCS1-v1.5 encoder is now shared with verify.
+- **Tests** — `tests/tcyr/rsa.tcyr` (+21: pubkey/privkey DER parse incl.
+  `p·q == n`, deterministic sign matching an independent Python RSA
+  reference byte-for-byte for SHA-256/384, sign→verify roundtrips) and
+  `tests/tcyr/bignum.tcyr` (+3: Montgomery == schoolbook). Suite now 50
+  files / 1329 assertions.
+
+### Security
+
+- Per-bite audit `docs/audit/2026-06-03-3.6.3-rsa-keys-sign-audit.md`:
+  constant-time secret-exponent modexp; verify-after-sign; bounds-safe
+  DER parsing (reused audited walker; magnitude over-length rejected);
+  signatures match an external reference. **LOW-1: base blinding
+  deferred to 3.6.4** (the signer is CT-in-exponent and fault-checked;
+  blinding adds DPA/timing-correlation defense). 0 CRITICAL / HIGH /
+  MEDIUM.
+
+### Changed
+
+- **Dist regenerated** — `dist/sigil.cyr` picks up the new RSA + bignum
+  surface; `cyrius doc --check` 0 undocumented.
+- `src/privkey.cyr` comments refreshed: the RSA DER parser referenced
+  as "arrives in 3.5.10" is now `rsa_privkey_from_der` (3.6.3);
+  `pem_decode_privkey` still returns the `SIG_PRIVKEY_RSA` sentinel
+  (full RSAK-struct integration is a later follow-up).
 
 ## [3.6.2] — 2026-06-03
 

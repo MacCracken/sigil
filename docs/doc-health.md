@@ -6,7 +6,20 @@ type: state
 
 # Documentation Health — sigil
 
-> **Last refresh**: 2026-06-03 (**3.6.2 — RSA PKCS#1 v1.5 verify**).
+> **Last refresh**: 2026-06-03 (**3.6.3 — RSA key parse + PKCS#1 v1.5 sign**).
+> Added to `src/rsa.cyr`: `rsa_pubkey_from_der` (PKCS#1 + SPKI),
+> `rsa_privkey_from_der` (PKCS#1 + PKCS#8, reusing x509 `der_walk`),
+> `rsa_pkcs1v15_sign_sha256/384` (CT ladder + verify-after-sign); and
+> `bn_mont_modexp` (constant-time Montgomery) to `src/bignum.cyr`.
+> Tests `rsa.tcyr` +21 / `bignum.tcyr` +3 (50 files, 1305→1329).
+> Audit `docs/audit/2026-06-03-3.6.3-rsa-keys-sign-audit.md` (LOW-1:
+> base blinding deferred to 3.6.4). `sources.md` extended (RFC 8017
+> §8.2.1/§A.1.2, Montgomery, Bellcore); `privkey.cyr` stale "3.5.10"
+> comments refreshed to point at `rsa_privkey_from_der`. **CRT +
+> blinding + a security audit pass = 3.6.4.** Earlier same-day
+> refreshes (3.6.2 RSA verify, 3.6.1 PRF, 3.6.0 parallel verify) below.
+>
+> **Earlier 2026-06-03 (3.6.2 — RSA PKCS#1 v1.5 verify).**
 > Added `src/bignum.cyr` (general big-int + modexp engine) +
 > `src/rsa.cyr` (`rsa_pkcs1v15_verify_sha256/384`, RFC 8017) +
 > `tests/tcyr/{bignum,rsa}.tcyr` (+12, KAT-validated to RSA-2048) +

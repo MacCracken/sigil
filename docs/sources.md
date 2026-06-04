@@ -93,12 +93,21 @@ their specs inline; this file is the cross-module overview.
   published vector byte-for-byte (the validation anchor for the
   SHA-384 emission).
 
-### RSA PKCS#1 v1.5 verify — `src/rsa.cyr`, `src/bignum.cyr`
+### RSA PKCS#1 v1.5 verify + sign + key parsing — `src/rsa.cyr`, `src/bignum.cyr`
 
 - **RFC 8017** — PKCS #1: RSA Cryptography Specifications Version 2.2
-  (2016-11). §8.2.2 RSASSA-PKCS1-v1_5 verification, §9.2 EMSA-PKCS1-v1_5
-  encoding (incl. the DigestInfo prefixes), §5.2.1 RSAVP1.
+  (2016-11). §8.2.2 RSASSA-PKCS1-v1_5 verification, §8.2.1 signing,
+  §9.2 EMSA-PKCS1-v1_5 encoding (incl. the DigestInfo prefixes),
+  §5.2.1/§5.2.2 RSAVP1/RSASP1, §A.1.1/§A.1.2 the `RSAPublicKey` /
+  `RSAPrivateKey` ASN.1 (parsed by `rsa_pubkey_from_der` /
+  `rsa_privkey_from_der`, also accepting X.509 SPKI / PKCS#8).
   - https://www.rfc-editor.org/rfc/rfc8017.txt
+- **Constant-time signing** — the secret-exponent modexp uses a
+  Montgomery (CIOS) square-and-multiply-always ladder
+  (`bn_mont_modexp`); cf. Koç, Acar, Kaliski, "Analyzing and Comparing
+  Montgomery Multiplication Algorithms" (1996). A **verify-after-sign**
+  step (recompute `s^e mod n`) is the Boneh–DeMillo–Lipton ("Bellcore")
+  fault-attack guard. Base blinding + CRT land in 3.6.4.
 - **Verify hygiene** — sigil reconstructs the full expected `EM` and
   compares all octets (rather than parsing/skipping), the recommended
   defense against the PKCS#1 v1.5 forgery class (Bleichenbacher 2006 /

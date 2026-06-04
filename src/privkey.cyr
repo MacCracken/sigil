@@ -1,8 +1,10 @@
 # privkey.cyr — private-key parsers (DER, PEM follows) for the EC +
 # Ed25519 key types sigil already owns. First half of issue line
 # item 4 (docs/development/issues/2026-05-28-cyrius-tls-arc-full-audit.md);
-# the RSA private-key parser lands with the RSA engine in 3.5.10
-# (no RSA key type exists to parse into until then).
+# the RSA private-key DER parser shipped in 3.6.3 as
+# `rsa_privkey_from_der` (src/rsa.cyr, into an RSAK struct);
+# `pem_decode_privkey` below still returns the SIG_PRIVKEY_RSA sentinel
+# (emitting an RSAK struct from here is a later follow-up).
 #
 # Scope:
 #   - Ed25519 PKCS#8 / RFC 8410 → 32-byte seed.
@@ -34,7 +36,7 @@ var SIG_PRIVKEY_UNKNOWN    = 0;
 var SIG_PRIVKEY_ED25519    = 1;
 var SIG_PRIVKEY_ECDSA_P256 = 2;
 var SIG_PRIVKEY_ECDSA_P384 = 3;
-var SIG_PRIVKEY_RSA        = 4;   # recognized; parser arrives in 3.5.10
+var SIG_PRIVKEY_RSA        = 4;   # DER parser: rsa_privkey_from_der (3.6.3)
 
 # DER [1] EXPLICIT context tag (SEC1 publicKey field). [0] (params)
 # is DER_TAG_CONTEXT_0_EXP, already defined in src/x509.cyr.
@@ -268,10 +270,12 @@ fn ecdsa_p384_privkey_from_der(der, der_len, d_out): i64 {
 #   -----BEGIN EC PRIVATE KEY-----    SEC1 (RFC 5915)
 #   -----BEGIN PRIVATE KEY-----       PKCS#8 (RFC 5208) — any algo
 #   -----BEGIN RSA PRIVATE KEY-----   PKCS#1 RSA
-# RSA is recognized but not yet parseable (the engine + parser land
-# in 3.5.10); it returns the dedicated `0 - SIG_PRIVKEY_RSA` sentinel
-# so a caller can tell "RSA, wait for 3.5.10" apart from a malformed
-# blob (-1).
+# RSA returns the dedicated `0 - SIG_PRIVKEY_RSA` sentinel (vs -1 for a
+# malformed blob). The DER parse itself shipped in 3.6.3
+# (`rsa_privkey_from_der`, src/rsa.cyr) into an RSAK struct; a caller
+# that sees this sentinel base64-decodes the PEM body and calls it.
+# (Having `pem_decode_privkey` emit the RSAK struct directly is a later
+# follow-up — its EC/Ed25519 contract decodes into a single scalar.)
 
 # rsaEncryption OID 1.2.840.113549.1.1.1 → content 2A 86 48 86 F7 0D 01 01 01.
 fn _privkey_oid_is_rsa(buf, off, len): i64 {

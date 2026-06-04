@@ -83,21 +83,25 @@ held as the last 3.5.x tag (3.5.12)**.
 > Bleichenbacher/BERserk forgery class). Audit
 > `docs/audit/2026-06-03-3.6.2-rsa-verify-audit.md`.
 >
-> **Remaining sub-bites — agreed sequencing (2026-06-03):**
-> - **3.6.3** — `rsa_pubkey_from_der` (SPKI + PKCS#1 `RSAPublicKey`, so
->   verify works straight off a cert/TLS key) **+** the RSA private-key
->   type + `rsa_privkey_from_der` (fills the 3.5.8 `pem_decode_privkey`
->   stub) **+ PKCS#1 v1.5 SIGN**. Signing uses the secret exponent `d`,
->   so it gets a **blinded, constant-time Montgomery ladder** (the
->   verify `bn_modexp` is public-exponent only and MUST NOT be reused),
->   **CRT** (sign mod p,q then recombine; ~4x), and **verify-after-sign**
->   (Bellcore/CRT-fault guard). The constant-time Montgomery modexp
->   lands here because safe signing requires it — not deferred to perf.
-> - **3.6.4** — **PSS** (MGF1) verify + sign, SHA-256/384 **+** extend
->   the Montgomery modexp to the (public) verify path + benchmark both.
-> - **3.6.5** — **cyrius-native-TLS closeout / hardening:** full
->   CLAUDE.md Closeout Pass over the whole 3.6.x delta + the deferred
->   3.5.6 HMAC/HKDF-SHA384 audit doc. Last 3.6.x tag before 3.7.
+> **Sub-bite sequencing (revised 2026-06-03):**
+> - **3.6.3 SHIPPED** — `rsa_pubkey_from_der` (PKCS#1 + SPKI) +
+>   `rsa_privkey_from_der` (PKCS#1 + PKCS#8) + `bn_mont_modexp`
+>   (constant-time Montgomery, == schoolbook KAT) + `rsa_pkcs1v15_sign_
+>   sha256/384` (CT ladder for secret `d` + verify-after-sign/Bellcore;
+>   matches an external Python RSA byte-for-byte). Cut deliberately
+>   WITHOUT CRT/blinding — a correct, CT-in-exponent, fault-checked
+>   signer. Audit `docs/audit/2026-06-03-3.6.3-rsa-keys-sign-audit.md`.
+> - **3.6.4** — **RSA sign hardening + security audit pass:** **CRT**
+>   (sign mod p,q then recombine; ~4×) + **base blinding** (`s =
+>   (m·r^e)^d·r^-1 mod n`; needs a new `bn_modinv` (binary ext-GCD) +
+>   a CSPRNG read), then a dedicated **security audit pass** over the
+>   whole RSA surface. (LOW-1 in the 3.6.3 audit tracks the blinding
+>   gap.)
+> - **3.6.5+** — **PSS** (MGF1) verify + sign, SHA-256/384; switch the
+>   verify path to the Montgomery modexp + benchmark; wire
+>   `pem_decode_privkey` to emit an RSAK struct; and the
+>   **cyrius-native-TLS closeout** (full CLAUDE.md Closeout Pass over
+>   the 3.6.x delta + the deferred 3.5.6 HMAC/HKDF-SHA384 audit doc).
 
 - [ ] **RSA PKCS#1 v1.5 + PSS, sign + verify, SHA-256 + SHA-384.**
       `rsa_pkcs1_{sign,verify}_sha{256,384}` +
