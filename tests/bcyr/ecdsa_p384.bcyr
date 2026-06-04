@@ -1,0 +1,68 @@
+# ecdsa_p384.bcyr — verify-path benchmark for the P-384 surface.
+# Single row: ecdsa_p384_verify on the RFC 6979 §A.2.6 "sample" vector.
+# Captures the 3.7.1 Solinas-reduction before/after for p384.
+
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/string.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fmt.cyr"
+include "lib/json.cyr"
+include "lib/sakshi.cyr"
+include "lib/chrono.cyr"
+include "lib/bench.cyr"
+include "lib/bigint.cyr"
+include "lib/ct.cyr"
+
+include "lib/thread_local.cyr"
+include "src/crypto_scratch.cyr"
+include "src/types.cyr"
+include "src/error.cyr"
+include "src/sha_ni.cyr"
+include "src/sha256.cyr"
+include "src/hex.cyr"
+include "src/sha512.cyr"
+include "src/sha384.cyr"
+include "src/bigint_ext.cyr"
+include "src/ed25519.cyr"
+include "src/ecdsa_p256.cyr"
+include "src/ecdsa_p384.cyr"
+
+fn main() {
+    alloc_init();
+    _p384_init();
+
+    var benches = vec_new();
+
+    # RFC 6979 §A.2.6 vector (P-384 / SHA-384), message "sample".
+    var pk = hex_decode("ec3a4e415b4e19a4568618029f427fa5da9a8bc4ae92e02e06aae5286b300c64def8f0ea9055866064a254515480bc138015d9b72d7d57244ea8ef9ac0c621896708a59367f9dfb9f54ca84b3f1c9db1288b231c3ae0d4fe7344fd2533264720", 192);
+    var sig = hex_decode("94edbb92a5ecb8aad4736e56c691916b3f88140666ce9fa73d64c4ea95ad133c81a648152e44acf96e36dd1e80fabe4699ef4aeb15f178cea1fe40db2603138f130e740a19624526203b6351d0a3a94fa329c145786e679e7b82c71a38628ac8", 192);
+
+    # Warm caches — first verify also pulls in init tables.
+    ecdsa_p384_verify(pk, "sample", 6, sig);
+
+    var b_verify = bench_new("ecdsa_p384_verify");
+    var ri = 0;
+    while (ri < 5) {
+        bench_batch_start(b_verify);
+        var bi = 0;
+        while (bi < 3) {
+            ecdsa_p384_verify(pk, "sample", 6, sig);
+            bi = bi + 1;
+        }
+        bench_batch_stop(b_verify, 3);
+        ri = ri + 1;
+    }
+    vec_push(benches, b_verify);
+
+    syscall(1, 1, "=== ECDSA P-384 Benchmarks ===\n", 30);
+    bench_report_all(benches);
+    return 0;
+}
+
+var r = main();
+syscall(60, r);

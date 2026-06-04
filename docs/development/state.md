@@ -12,31 +12,32 @@
 
 | Field | Value |
 |---|---|
-| Current version | **3.7.0** (`VERSION`) |
+| Current version | **3.7.1** (`VERSION`) |
 | Cyrius toolchain pin | **6.0.61** (`cyrius.cyml [package].cyrius`) |
 | Dependencies | agnosys **1.3.2**, sakshi **2.2.6** |
 | Last release date | 2026-06-04 |
-| Last release audit | [`2026-06-04-3.7.0-p256-solinas-audit.md`](../audit/2026-06-04-3.7.0-p256-solinas-audit.md) |
-| Phase | Released. **3.7.0 opens the v3.7 perf cycle** (un-gated by maintainer decision) with **Solinas fast reduction for P-256** (`_p256_solinas_reduce`, FIPS 186-4 App. D) replacing the bit-by-bit long division on the field reduction: **`ecdsa_p256_verify` 147.5 → 26.1 ms (5.65×)**, transitively speeding every P-256 chain verify. The aspirational **≤ 10 ms** target is NOT met by reduction alone (the scalar-mult now dominates) — carried to a new v3.7 EC scalar-mult speedup item. Pin 6.0.58 → 6.0.61. **Remaining v3.7 (gated only by sequencing now):** Solinas P-384 (3.7.1), the EC scalar-mult speedup (≤ 10 ms), and the unified `_into` API (clears the 8-LOW audit floor). |
+| Last release audit | [`2026-06-04-3.7.1-p384-solinas-audit.md`](../audit/2026-06-04-3.7.1-p384-solinas-audit.md) |
+| Phase | Released. **3.7.1 added Solinas fast reduction for P-384** (`_p384_solinas_reduce`, the mirror of the 3.7.0 P-256 work; eleven-term layout derived from the prime's folding relation + verified 5000/5000 vs `x mod p`): **`ecdsa_p384_verify` 339.2 → 54.6 ms (6.21×)**, transitively speeding the SEV-SNP P-384 chain. `_p384_reduce_longdiv` retained as the differential-KAT reference. The ≤ 10 ms target remains gated on the EC scalar-mult speedup (the scalar mult dominates, not the reduction). **Remaining v3.7:** EC scalar-mult speedup (carries ≤ 10 ms), unified `_into` API (clears the 8-LOW audit floor), full bench re-run. |
 
 ## Test surface
 
 | Metric | Value |
 |---|---|
 | `.tcyr` test files | 51 |
-| Total assertions | **1390**, 0 failures |
-| Benchmark suite | `benches/` — `history.csv`; RSA rows via `tests/bcyr/rsa.bcyr`, P-256 verify via `tests/bcyr/ecdsa_p256.bcyr` |
+| Total assertions | **1393**, 0 failures |
+| Benchmark suite | `benches/` — `history.csv`; RSA via `tests/bcyr/rsa.bcyr`, P-256/P-384 verify via `tests/bcyr/ecdsa_p256.bcyr` / `ecdsa_p384.bcyr` |
 
 > Counting note: the 3 `*_verify_full.tcyr` tests (sgx 11 + tdx 16 +
 > snp 11 = 38) emit their `N passed` summary in a tty-sensitive way that
 > is dropped under any pipe or file redirect, so a scripted `grep`-sum of
-> `cyrius test` output yields **1352** across the other 48 files and
-> silently omits those 38. Add them back for the true total: **1390**.
+> `cyrius test` output yields **1355** across the other 48 files and
+> silently omits those 38. Add them back for the true total: **1393**.
 > (Each verify_full still prints its summary on an interactive run; it's
 > only the redirected/scripted sum that loses them.)
 
 Per-cycle assertion delta:
 
+- 3.7.1 ship: +3 (`ecdsa_p384.tcyr` +3 — Solinas-vs-long-div differential KAT over 64 SHA-384-seeded random 768-bit inputs + 2^768−1 / high-half-all-ones edges)
 - 3.7.0 ship: +3 (`ecdsa_p256.tcyr` +3 — Solinas-vs-long-div differential KAT over 64 SHA-256-seeded random 512-bit inputs + 2^512−1 / high-half-all-ones edges)
 - 3.6.8 ship: +0 (closeout — stale-comment/doc fixes only; no source-logic or test change)
 - 3.6.7 ship: +18 (`x509_p384.tcyr` +9 — P-384 CA→leaf SHA-384 chain verify, tamper reject, SHA256-vs-P384-issuer regression; `seal.tcyr` +9 — AES-128 derive/seal/unseal, width validation, 256-bit back-compat)
@@ -79,6 +80,7 @@ Consumers that link or rely on sigil for trust verification:
 
 | Version | Date | Headline |
 |---|---|---|
+| 3.7.1 | 2026-06-04 | **Solinas reduction for P-384.** `_p384_solinas_reduce` (FIPS 186-4 App. D, `p384 = 2^384−2^128−2^96+2^32−1`), the mirror of the 3.7.0 P-256 work; the 11-term layout was derived from the prime's folding relation + verified 5000/5000 vs `x mod p`. **`ecdsa_p384_verify` 339.2 → 54.6 ms (6.21×)** (`history.csv` row `v3.7.1-p384-solinas`, new `tests/bcyr/ecdsa_p384.bcyr`), transitively speeding the SEV-SNP P-384 chain. +3 assertions (differential KAT). Audit: `docs/audit/2026-06-04-3.7.1-p384-solinas-audit.md`. |
 | 3.7.0 | 2026-06-04 | **Opens v3.7 perf — Solinas reduction for P-256.** `_p256_solinas_reduce` (FIPS 186-4 App. D) replaces the bit-by-bit long division on the field reduction (`_p256_reduce_longdiv` retained as the differential-KAT reference). **`ecdsa_p256_verify` 147.5 → 26.1 ms (5.65×)** on 6.0.61 (`history.csv` row `v3.7.0-p256-solinas`), transitively speeding all P-256 chain verifies. The ≤ 10 ms target needs the (carried-forward) EC scalar-mult speedup — reduction alone reached 26 ms. Pin 6.0.58→6.0.61. +3 assertions. Audit: `docs/audit/2026-06-04-3.7.0-p256-solinas-audit.md`. |
 | 3.6.8 | 2026-06-04 | **cyrius-native-TLS arc closeout** (last 3.6.x tag). CLAUDE.md Closeout Pass over 3.6.0–3.6.7: full suite green, bench baseline re-captured (no regressions), dead-code + security re-scan clean, stale-comment/doc sweep. Fixed the `_into`-in-3.6 comments (`sgx.cyr`/`tdx.cyr` → gated v3.7) and the stale `benches/sigil.bcyr` path in CLAUDE.md. No functional change; 3.6.x verified API-additive. +0 assertions. Audit: `docs/audit/2026-06-04-3.6.8-closeout-audit.md`. |
 | 3.6.7 | 2026-06-04 | **x509 P-384 chain-link verify + AES-128 seal keys.** `_x509_verify_link` dispatches `ecdsa-with-SHA384` issuers (`X509_SIG_ECDSA_SHA384`, `X509_CURVE_P384`) to `ecdsa_p384_verify`; width-parameterized `_ecdsa_der_int_w` (32/48). `sgx_derive_seal_key_n`/`sgx_seal_key_n`/`sgx_unseal_key_n` add a 16-byte AES-128 option (`SGX_SEAL_KEY_SIZE_128`); the 7-arg fns stay byte-for-byte 256-bit wrappers. Cut after a 29-agent adversarial review; its real finding (a latent pre-3.6.7 DER-strictness `sb_np` clobber on the shared ECDSA parse) fixed in-cycle for both curves. +18 assertions. Audit: `docs/audit/2026-06-04-3.6.7-p384-chainlink-aes128-seal-audit.md`. |
@@ -117,13 +119,17 @@ list).
 
 | Slot | State | Notes |
 |---|---|---|
-| 3.7.1 — Solinas P-384 | pending | Word-level reduction against `p384 = 2^384 − 2^128 − 2^96 + 2^32 − 1` (mirrors the 3.7.0 P-256 structure). |
-| 3.7.x — EC scalar-mult speedup | pending | Fixed-base comb for `G` + wNAF for `Q`; **carries the ≤ 10 ms `ecdsa_p256_verify` target** (Solinas reduction alone reached 26 ms). |
+| 3.7.x — EC scalar-mult speedup | pending | Fixed-base comb for `G` + wNAF for `Q`; **carries the ≤ 10 ms `ecdsa_p256_verify` target** (Solinas reduction alone reached 26 ms P-256 / 55 ms P-384). |
 | 3.7.x — unified `_into` API | pending | Eliminate per-call bump `alloc` in `x509_parse` / `_snp_v_init` / `_sgxv_init` / `_tdxv_init` / `_pem_init` / `sgx`+`tdx_quote_verify_full` (+ the 3.6.5 RSA SPKI block). Closes all 8 audit-floor LOWs. Needs the caller-scratch-vs-pool API-shape decision. |
+| 3.7.x — full crypto bench re-run | pending | Capture before/after rows for every verify-path bench at the cycle close. |
 
 The 3.6.x cyrius-native-TLS arc is **closed** (3.6.0–3.6.8). The **v3.7
-perf cycle is OPEN** (un-gated 2026-06-04): Solinas P-256 shipped 3.7.0;
-remaining items above sequence as 3.7.x tags.
+perf cycle is OPEN**: Solinas P-256 (3.7.0) + Solinas P-384 (3.7.1)
+shipped; remaining items above sequence as 3.7.x tags. The user also
+asked to fold ungated backlog items into 3.7.x — **AES-GCM
+arbitrary-length IVs** is the one ready candidate (the bank-retire /
+CLMUL-GHASH / NI-dispatch items remain blocked on cyrius features absent
+in 6.0.61); decision pending at the 3.7.1 handoff.
 
 When a cycle is opened, list each work-item bite here as it
 moves through `pending → in_progress → completed`. The release

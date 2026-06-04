@@ -91,6 +91,42 @@ fn main() {
     assert_eq(load64(reduced + 8), 0, "reduce(p+1) limb 1");
     assert_eq(load64(reduced + 40), 0, "reduce(p+1) limb 5");
 
+    # Differential KAT (3.7.1) — the Solinas fast path (p384_reduce) must
+    # agree byte-for-byte with the long-division reference
+    # (_p384_reduce_longdiv) over 64 pseudo-random 768-bit inputs
+    # (two SHA-384 blocks fill each 96-byte value) + edge cases.
+    var ld48 = alloc(48);
+    var pctr = alloc(8);
+    var ph = alloc(48);
+    var pki = 0;
+    var pdiffs = 0;
+    while (pki < 64) {
+        store64(pctr, pki);
+        sha384(pctr, 8, ph);
+        memcpy(val768, ph, 48);
+        store64(pctr, pki + 1000);
+        sha384(pctr, 8, ph);
+        memcpy(val768 + 48, ph, 48);
+        p384_reduce(reduced, val768);
+        _p384_reduce_longdiv(ld48, val768);
+        if (u384_eq(reduced, ld48) == 0) { pdiffs = pdiffs + 1; }
+        pki = pki + 1;
+    }
+    assert_eq(pdiffs, 0, "Solinas == long-div over 64 random 768-bit inputs");
+
+    # Edge: all-ones (2^768 - 1).
+    memset(val768, 0xFF, 96);
+    p384_reduce(reduced, val768);
+    _p384_reduce_longdiv(ld48, val768);
+    assert_eq(u384_eq(reduced, ld48), 1, "Solinas == long-div for 2^768-1");
+
+    # Edge: high half all-ones, low half zero.
+    memset(val768, 0, 96);
+    memset(val768 + 48, 0xFF, 48);
+    p384_reduce(reduced, val768);
+    _p384_reduce_longdiv(ld48, val768);
+    assert_eq(u384_eq(reduced, ld48), 1, "Solinas == long-div for high-half all-ones");
+
     # ============================================================
     # Group 3 — fp_p384 arithmetic
     # ============================================================

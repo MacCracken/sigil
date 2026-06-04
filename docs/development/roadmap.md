@@ -16,7 +16,7 @@ Detail for each is in its section below.
 
 **v3.7 — perf (OPEN; un-gated 2026-06-04)**
 - [x] Solinas reduction for P-256 — **shipped 3.7.0** (verify 147→26 ms, 5.65×)
-- [ ] Solinas reduction for P-384 — next (3.7.1)
+- [x] Solinas reduction for P-384 — **shipped 3.7.1** (verify 339→55 ms, 6.21×)
 - [ ] Unified `_into`-shape API (closes the 8 open bump-allocator LOWs)
 - [ ] Re-run full crypto bench suite
 - [ ] **EC scalar-mult speedup** (fixed-base comb for G + wNAF for Q) — carries the **≤10 ms ecdsa_p256_verify** target that Solinas-reduction alone did not reach (26 ms); the scalar-mult, not the reduction, is now the dominant cost
@@ -153,11 +153,13 @@ Barrett/Montgomery here — cross-reference the 3.6.5+ RSA bench item.)
       the fixed-base comb" backlog item (cache-timing) if the comb is
       adopted on a secret path.
 
-- [ ] **Solinas reduction for P-384.** Same shape against
-      `p384 = 2^384 − 2^128 − 2^96 + 2^32 − 1`. The P-384
-      Solinas decomposition is wider (more word-level
-      shuffles) but the structure is identical. CSV row
-      `v3.7-p384-solinas`. **Next up (3.7.1).**
+- [x] **Solinas reduction for P-384.** **Shipped 3.7.1.** Same shape
+      against `p384 = 2^384 − 2^128 − 2^96 + 2^32 − 1`; the 11-term
+      layout was derived from the prime's folding relation and verified
+      5000/5000 vs `x mod p` before coding (`_p384_reduce_longdiv` kept
+      as the differential-KAT reference). `ecdsa_p384_verify` **339.2 →
+      54.6 ms (6.21×)** (CSV row `v3.7.1-p384-solinas`, new
+      `tests/bcyr/ecdsa_p384.bcyr`).
 
 - [ ] **Solinas reduction for P-384.** Same shape against
       `p384 = 2^384 − 2^128 − 2^96 + 2^32 − 1`. The P-384

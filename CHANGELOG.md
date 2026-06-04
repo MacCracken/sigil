@@ -7,7 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-(none — tip is 3.7.0.)
+(none — tip is 3.7.1.)
+
+## [3.7.1] — 2026-06-04
+
+Second v3.7 perf item: **Solinas fast reduction for P-384**, the
+structural mirror of the 3.7.0 P-256 work.
+
+### Added
+
+- **Solinas reduction mod p384** (`src/ecdsa_p384.cyr`,
+  `_p384_solinas_reduce`) — word-level reduction against
+  `p384 = 2^384 − 2^128 − 2^96 + 2^32 − 1` (FIPS 186-4 App. D). The
+  eleven-term layout (8 positive + 3 negative, one positive doubled for
+  the coeff-2 columns) was derived from the prime's folding relation and
+  verified 5000/5000 against `x mod p` before coding. `p384_reduce` now
+  uses it; `_p384_reduce_longdiv` is retained as the differential-KAT
+  reference.
+- **Tests** — `ecdsa_p384.tcyr` +3: differential KAT (Solinas ==
+  long-div byte-for-byte over 64 SHA-384-seeded random 768-bit inputs +
+  edges `2^768−1` / high-half all-ones), on top of the existing reduce
+  KATs + RFC 6979 P-384 verify suite. Suite **51 files / 1393
+  assertions**, 0 failures.
+
+### Performance
+
+- **`ecdsa_p384_verify` 339.2 ms → 54.6 ms (6.21×)** on the dev host
+  (cyrius 6.0.61), `benches/history.csv` row `v3.7.1-p384-solinas` (new
+  `tests/bcyr/ecdsa_p384.bcyr`). Transitively speeds the SEV-SNP P-384
+  attestation chain (`snp_verify_full`). As with P-256, the ≤ 10 ms
+  target is gated on the separate EC scalar-mult speedup item (the
+  scalar mult, not the reduction, now dominates).
+
+### Security
+
+- 3.7.1 audit: `docs/audit/2026-06-04-3.7.1-p384-solinas-audit.md`.
+  CT posture unchanged (the long division it replaced was equally
+  data-dependent; P-384 verify is public-data). Audit floor unchanged at
+  8 LOW.
 
 ## [3.7.0] — 2026-06-04
 
