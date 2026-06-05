@@ -9,9 +9,32 @@ shipped").
 The only open items. The 3.6 cyrius-native-TLS arc and most of the v3.7
 perf cycle have shipped — see "Closed cycles" below + CHANGELOG.
 
+**Tooling / process — committed for the next release**
+
+- [ ] **Buried-deferral gate.** A closeout/CI check that greps `src/`
+      for deferral language in comments — `deferred`, `TODO`, `FIXME`,
+      `XXX`, `HACK`, `follow-up`, `for now`, `not yet`, `later bite`,
+      `a future bite`, `out of scope`, `defer-to-` — and **fails (or
+      reports) any hit not cross-referenced by a roadmap entry**. This
+      converts the recurring "scope cut buried in a source comment"
+      failure mode (the hard rule's exact target — every deferral is
+      Robert's call, never a silent comment) from a human-caught
+      regression into a mechanical gate the next cycle can't ship past
+      without either doing the work or surfacing it. Wire it into the
+      CLAUDE.md Closeout Pass (and/or sigil's pre-release verification,
+      e.g. `programs/check.cyr` if that's where it lands). Start in
+      *report* mode, flip to *fail* once the vocabulary is tuned and the
+      tree is clean. The grep vocabulary is the only repo-specific part —
+      the check itself generalizes across the AGNOS first-party repos
+      (worth lifting into the shared tooling once proven here). Extends
+      the `docs/doc-health.md` "Programmatic gates (future)" family.
+
 **v3.7 — perf (OPEN)**
 
-- [ ] **EC scalar-mult speedup** — next (3.7.4). Carries the **≤ 10 ms
+- [ ] **EC scalar-mult speedup** — the next *perf* bite (the
+      buried-deferral gate above is the committed next *release*;
+      maintainer picks whether the gate ships as its own small tag ahead
+      of this, or they ride together). Carries the **≤ 10 ms
       `ecdsa_p256_verify`** target that Solinas reduction alone did not
       reach (26 ms P-256 / 55 ms P-384): with the field reduction now
       fast, the double-and-add scalar multiplication (`u1·G + u2·Q`,
