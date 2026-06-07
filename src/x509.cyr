@@ -75,11 +75,11 @@ var X509_SIG_ECDSA_SHA384    = 4;   # P-384 chain-link issuers (3.6.7)
 # 96-byte pubkey slot; RSA keys (3.6.5) don't fit there, so an RSA cert
 # stows its (n, e) in a separate heap block referenced from cert+248
 # (see x509_cert_rsa_pubkey). Chain-link signatures (root → intermediates
-# → leaf) may now be ECDSA-SHA256 (P-256 issuer) OR RSA-PKCS#1 (RSA
-# issuer). A P-384 issuer signing a link is still out of scope — it would
-# need ecdsa_p384_verify dispatch in `_x509_verify_link`. The leaf may be
-# any of the three; the issuer restriction applies only to certs that
-# SIGN a subsequent link.
+# → leaf) may be ECDSA (any {P-256, P-384} issuer × {SHA-256, SHA-384}
+# hash — including off-diagonal, where the hash and the issuer curve
+# differ; see `_x509_verify_link`) OR RSA-PKCS#1 (RSA issuer). The leaf
+# may be any of these; the issuer curve/key restriction applies only to
+# certs that SIGN a subsequent link.
 var X509_CURVE_P256          = 1;
 var X509_CURVE_P384          = 2;
 var X509_CURVE_RSA           = 3;
@@ -921,18 +921,28 @@ fn x509_parse_into(der, der_len, out_cert, arena): i64 {
     var inner_sig_len = sb_len - 1;
 
     # ECDSA signature field width. The r,s width is the ISSUER key's curve
-    # order size, which we can't see at parse time — the signature hash algo
-    # (SHA-256/384) is only a proxy. The proxy holds for the diagonal cases,
-    # but a P-384 key self-signing with ecdsa-with-SHA256 (the SSL.com Root ECC
-    # + ~12 other public roots) has 48-byte r,s that overflow ec_fw=32. So we
-    # START from the hash-derived width and, in the parse below, RETRY at 48 if
-    # the r,s actually overflow — discovering the issuer curve from the
-    # signature itself. (Must NOT widen by the cert's OWN key curve: a P-384
-    # leaf signed by a P-256 issuer — the SEV-SNP VCEK — has 32-byte r,s, and
-    # verify_link requires sig_len 64.)
+    # order size — NOT the signature hash. We cannot see the issuer cert at
+    # parse time, but the r,s DER INTEGER widths reveal the issuer curve
+    # directly, so we START at the P-256 width (32) for any ECDSA hash and
+    # RETRY once at 48 below iff an integer overflows 32 (the issuer is
+    # P-384). This makes the stored sig_len track the ISSUER curve
+    # (P-256 -> 64, P-384 -> 96) INDEPENDENT of the hash — required for
+    # off-diagonal links, where the hash and the issuer curve differ:
+    #   - P-384 issuer + SHA-256 child (SSL.com Root ECC class): 48-byte r,s
+    #     overflow 32 -> widen to 48 -> sig_len 96.
+    #   - P-256 issuer + SHA-384 child: 32-byte r,s fit 32 -> sig_len 64.
+    #     (The old hash-derived start of 48 would have mis-sized this to 96
+    #     and the decoupled verify, which wants 64 for a P-256 issuer, would
+    #     false-reject.)
+    #   - SEV-SNP VCEK (P-256 issuer + SHA-256 child): 32-byte r,s -> 64.
+    #     (Must NOT widen by the cert's OWN key curve — the VCEK is a P-384
+    #     leaf, but its r,s are 32-byte and verify_link requires sig_len 64.)
+    # A P-384 signature whose r AND s both fit in 32 bytes (probability
+    # ~2^-256) is indistinguishable from P-256 here — inherent to deriving
+    # width from r,s, and unreachable with honest signers.
     var ec_fw = 0;
     if (outer_algo == X509_SIG_ECDSA_SHA256) { ec_fw = 32; }
-    if (outer_algo == X509_SIG_ECDSA_SHA384) { ec_fw = 48; }
+    if (outer_algo == X509_SIG_ECDSA_SHA384) { ec_fw = 32; }
 
     if (ec_fw > 0) {
         # ECDSA: the BIT STRING wraps a DER SEQUENCE of two INTEGERs. Unwrap
@@ -951,15 +961,18 @@ fn x509_parse_into(der, der_len, out_cert, arena): i64 {
         # The inner SEQUENCE must consume the entire BIT STRING content
         # (the 1 unused-bits byte + this SEQUENCE) — no slack.
         if (inner_seq_end != sb_np) { return 0; }
-        # Parse r,s at the hash-derived width; if they overflow it (the issuer
-        # curve is wider than the hash implied — the self-signed P-384/SHA-256
-        # root case), retry once at 48. fw = 32 (P-256) or 48 (P-384).
+        # Parse r,s starting at fw=32; if either overflows it (the issuer
+        # curve is P-384 — its 48-byte r,s), retry once at 48. The scratch
+        # is allocated ONCE at the 96-byte max (2*48) and REUSED across the
+        # retry: the widen path re-parses into the same buffer rather than
+        # abandoning a transient 64-byte block, so a looping consumer on the
+        # global-bump path sees one alloc per parse, not two (no drift).
+        var raw_sig = _x509_scratch(arena, 96);
+        if (raw_sig == 0) { return 0; }
         var sig_ok = 0;
         var tries = 0;
         while (tries < 2) {
             var ec_sz = 2 * ec_fw;
-            var raw_sig = _x509_scratch(arena, ec_sz);
-            if (raw_sig == 0) { return 0; }
             memset(raw_sig, 0, ec_sz);
             var r_next = _ecdsa_der_int_w(der, pos_after_seq_tag, inner_seq_end, raw_sig, ec_fw);
             var s_next2 = 0 - 1;
@@ -1001,8 +1014,9 @@ fn x509_parse_into(der, der_len, out_cert, arena): i64 {
 #     → leaf. (Caller supplies intermediates in issuer-towards-leaf
 #     order; `intermediates_len` may be 0 for a directly-root-signed
 #     leaf.)
-#   • For every link: hash issuer-cert's TBS, verify the child's
-#     signature against the issuer's pubkey via ecdsa_p256_verify;
+#   • For every link: hash the child's TBS, verify the child's
+#     signature against the issuer's pubkey via the issuer-curve ECDSA
+#     primitive (any hash×curve combo) or the issuer's RSA primitive;
 #     check child.issuer DN bytes == parent.subject DN bytes; check
 #     child.not_before ≤ now_unix ≤ child.not_after; intermediates
 #     must have basicConstraints CA bit set.
@@ -1029,11 +1043,26 @@ fn _x509_dn_eq(buf_a, off_a, len_a, buf_b, off_b, len_b): i64 {
 # against the *issuer pubkey* — i.e. the signature on `child` was
 # produced by the holder of `issuer_cert`'s private key. Dispatches on
 # the child's signature algorithm:
-#   • ECDSA-SHA256 → ecdsa_p256_verify (issuer must be P-256).
+#   • ECDSA (SHA-256/384) → the HASH is chosen by the signature
+#     algorithm, the CURVE + verify primitive by the issuer key,
+#     INDEPENDENTLY — so all four {P-256,P-384} × {SHA-256,SHA-384}
+#     combos verify, off-diagonal links included (FIPS 186-4 §6.4 maps
+#     the digest to the scalar via the leftmost-bits rule).
 #   • RSA-SHA256/384 (3.6.5) → rsa_pkcs1v15_verify_sha{256,384} against
 #     the issuer's RSA (n, e) (issuer must be X509_CURVE_RSA). Real AMD
 #     ARK/ASK links are RSA-4096 + SHA-384.
-# The verify primitives hash the raw TBS bytes internally.
+# The ECDSA path hashes the TBS here and feeds the digest; the RSA path
+# hashes the raw TBS bytes internally.
+# Scratch digest for chain-link verify — the hash named by the child's
+# signature-algorithm OID (up to SHA-384 = 48 bytes). Init-once, on the
+# single-threaded verify path (not the parallel batch), so a plain
+# init-once alloc matches the endorsed `alloc()`-for-init-once pattern.
+var _xvl_digest = 0;
+fn _xvl_init(): i64 {
+    if (_xvl_digest == 0) { _xvl_digest = alloc(48); }
+    return 0;
+}
+
 fn _x509_verify_link(child, issuer_cert): i64 {
     var algo = x509_cert_sig_algo(child);
     var der_ptr = load64(child + 0);
@@ -1042,26 +1071,33 @@ fn _x509_verify_link(child, issuer_cert): i64 {
     var sig_addr = load64(child + 200);
     var sig_len  = load64(child + 208);
 
-    if (algo == X509_SIG_ECDSA_SHA256) {
-        if (sig_len != 64) { return 0; }
-        # Issuer must be P-256 — the ECDSA verify primitive only
-        # understands P-256 pubkeys. A P-384 issuer (P-384 chain-link
-        # signature) is still out of scope. The leaf may be P-384; this
-        # restriction applies only to certs that SIGN a subsequent link.
-        if (x509_cert_curve(issuer_cert) != X509_CURVE_P256) { return 0; }
-        var pk = x509_cert_pubkey(issuer_cert);
-        return ecdsa_p256_verify(pk, der_ptr + tbs_off, tbs_len, sig_addr);
-    }
+    # ECDSA chain-link verify. The HASH comes from the child's signature
+    # -algorithm OID; the CURVE + verify primitive + signature width come
+    # INDEPENDENTLY from the issuer key (FIPS 186-4 / RFC 5758 — the sig
+    # algorithm names the hash, the issuer SPKI names the curve). This
+    # covers all four {P-256,P-384} × {SHA-256,SHA-384} combos, including
+    # off-diagonal links (a P-384 issuer signing a SHA-256 child, or a
+    # P-256 issuer signing a SHA-384 child). The signature r||s width is
+    # the issuer curve's (P-256 → 64, P-384 → 96) — the same width that
+    # x509_parse's 3.7.4 retry-widen discovers from the signature itself.
+    if ((algo == X509_SIG_ECDSA_SHA256) || (algo == X509_SIG_ECDSA_SHA384)) {
+        var icurve = x509_cert_curve(issuer_cert);
+        var want_len = 0;
+        if (icurve == X509_CURVE_P256) { want_len = 64; }
+        if (icurve == X509_CURVE_P384) { want_len = 96; }
+        if (want_len == 0)       { return 0; }   # issuer is not an ECDSA curve
+        if (sig_len != want_len) { return 0; }
 
-    if (algo == X509_SIG_ECDSA_SHA384) {
-        # P-384 chain-link (3.6.7): issuer must be P-384; the 96-byte
-        # (Qx||Qy) pubkey slot feeds ecdsa_p384_verify, which SHA-384
-        # -hashes the raw TBS internally. Real AMD ARK/ASK are RSA, but
-        # P-384 EC CAs (and SEV-SNP P-384 issuer chains) need this path.
-        if (sig_len != 96) { return 0; }
-        if (x509_cert_curve(issuer_cert) != X509_CURVE_P384) { return 0; }
-        var pk384 = x509_cert_pubkey(issuer_cert);
-        return ecdsa_p384_verify(pk384, der_ptr + tbs_off, tbs_len, sig_addr);
+        # Digest the TBS with the hash named by the signature algorithm.
+        _xvl_init();
+        var dlen = 0;
+        if (algo == X509_SIG_ECDSA_SHA256) { sha256(der_ptr + tbs_off, tbs_len, _xvl_digest); dlen = 32; }
+        if (algo == X509_SIG_ECDSA_SHA384) { sha384(der_ptr + tbs_off, tbs_len, _xvl_digest); dlen = 48; }
+
+        # Dispatch the verify primitive by issuer curve, feeding the digest.
+        var pk = x509_cert_pubkey(issuer_cert);
+        if (icurve == X509_CURVE_P256) { return _ecdsa_p256_verify_digest(pk, _xvl_digest, dlen, sig_addr); }
+        return _ecdsa_p384_verify_digest(pk, _xvl_digest, dlen, sig_addr);
     }
 
     if (algo == X509_SIG_RSA_SHA256) {

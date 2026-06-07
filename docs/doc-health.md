@@ -6,27 +6,29 @@ type: state
 
 # Documentation Health — sigil
 
-> **Last refresh**: 2026-06-04 (**3.7.3 — caller-scratch `_into` API +
-> audit-floor clear**). The 3.6 cyrius-native-TLS arc closed at 3.6.8
-> and the v3.7 perf cycle is in progress; this is a consolidated refresh
-> across the whole 3.6.5 → 3.7.3 run. Per-version detail lives in
+> **Last refresh**: 2026-06-07 (**3.7.5 — off-diagonal ECDSA chain-link
+> verify (P1) + toolchain pin 6.0.62 → 6.0.87**). The 3.6
+> cyrius-native-TLS arc closed at 3.6.8 and the v3.7 cycle is in progress;
+> this is a consolidated refresh across the whole 3.6.5 → 3.7.5 run.
+> Per-version detail lives in
 > [`CHANGELOG.md`](../CHANGELOG.md) and per-cycle audit docs in
 > [`docs/audit/`](audit/) — the daily-stack notes that used to live here
 > were retired in favour of those sources.
 >
 > **Headline changes since the last full row-refresh (3.4.1 inventory):**
-> - **Version `3.7.3`**, cyrius pin **`6.0.62`** (was 3.5.4 / 6.0.3 at
+> - **Version `3.7.5`**, cyrius pin **`6.0.87`** (was 3.5.4 / 6.0.3 at
 >   the 3.4.1 inventory). Deps agnosys 1.3.2, sakshi 2.2.6.
-> - **Audit floor: EMPTY** (cleared at 3.7.3 — see state.md). The seven
->   bump-allocator LOWs ADR 0003 batched are resolved/reclassified; ADR
->   0003 is now closed-out.
-> - **52 `.tcyr` files / 1431 assertions** (was ~1178 at the 3.4.1
+> - **Audit floor: EMPTY** (cleared at 3.7.3, holds through 3.7.5 — see
+>   state.md). The seven bump-allocator LOWs ADR 0003 batched are
+>   resolved/reclassified; ADR 0003 is now closed-out.
+> - **53 `.tcyr` files / 1459 assertions** (was ~1178 at the 3.4.1
 >   inventory). New modules across 3.6/3.7: `bignum`, `tls12_prf`,
->   `hmac_sha384`, `hkdf_sha384` and the RSA / PSS / Solinas / `_into`
->   surfaces; new bench files `tests/bcyr/{rsa,ecdsa_p384}.bcyr`.
-> - **Audit docs**: 3.5.6 retro + 3.6.0–3.6.8 + 3.7.0–3.7.3 added under
+>   `hmac_sha384`, `hkdf_sha384` and the RSA / PSS / Solinas / `_into` /
+>   off-diagonal-ECDSA surfaces; new bench files
+>   `tests/bcyr/{rsa,ecdsa_p384}.bcyr`; new test `tests/tcyr/x509_offdiag.tcyr`.
+> - **Audit docs**: 3.5.6 retro + 3.6.0–3.6.8 + 3.7.0–3.7.5 added under
 >   `docs/audit/` (per-cycle, dated artifacts).
-> - **CHANGELOG / roadmap / state.md** are current through 3.7.3;
+> - **CHANGELOG / roadmap / state.md** are current through 3.7.5;
 >   roadmap.md was de-cluttered 2026-06-04 (shipped detail moved to
 >   "Closed cycles" + CHANGELOG; only open items remain).
 >
@@ -104,16 +106,16 @@ citation index for every crypto primitive.
 | File | Last touched | Status | Notes |
 |---|---|---|---|
 | `README.md` | 2026-05-22 | ✅ Fresh | Rewritten this sweep; trimmed module-list duplication against `docs/architecture/overview.md`. |
-| `CHANGELOG.md` | 2026-06-04 | ✅ Fresh | Source of truth per CLAUDE.md. **Through 3.7.3.** Refreshed every release. |
+| `CHANGELOG.md` | 2026-06-07 | ✅ Fresh | Source of truth per CLAUDE.md. **Through 3.7.5.** Refreshed every release. |
 | `CLAUDE.md` | 2026-06-04 | ✅ Fresh | agnosticos `example_claude.md` template; durable rules only. 3.6.8 fixed the stale `benches/sigil.bcyr` → `tests/bcyr/sigil.bcyr` Quick-Start path. |
 | `CONTRIBUTING.md` | 2026-05-22 | ✅ Fresh | Cyrius work loop + commit/hook rules; no Rust/cargo references. |
 | `SECURITY.md` | 2026-05-22 | 🟡 Stale | Supported-versions table topped at 3.4.x/3.3.x — refresh to 3.7.x at the v3.7 closeout. Crypto-primitive surface predates the RSA/PSS/GCM-IV additions. |
 | `CODE_OF_CONDUCT.md` | (per upstream) | 🔵 Evergreen | Standard contributor covenant. |
 | `LICENSE` | (per upstream) | 🔵 Evergreen | GPL-3.0-only. |
-| `VERSION` | 2026-06-04 | ✅ Fresh | **`3.7.3`**. Bumped every release. |
-| `cyrius.cyml` | 2026-06-04 | ✅ Fresh | `[lib].modules` extended across 3.6/3.7 (bignum, tls12_prf, hmac/hkdf_sha384, …); toolchain pin **`6.0.62`** (6.0.3 → .14 → .52/.53 → .58 → .61 → .62 over the 3.5→3.7 run). |
+| `VERSION` | 2026-06-07 | ✅ Fresh | **`3.7.5`**. Bumped every release. |
+| `cyrius.cyml` | 2026-06-07 | ✅ Fresh | `[lib].modules` extended across 3.6/3.7 (bignum, tls12_prf, hmac/hkdf_sha384, …); toolchain pin **`6.0.87`** (6.0.3 → .14 → .52/.53 → .58 → .61 → .62 → .87 over the 3.5→3.7 run; 3.7.5 bump 6.0.62 → 6.0.87). |
 | `scripts/regen-dist.sh` | 2026-06-04 | ✅ Fresh | Replaces the retired `cyrius distlib`. `MODULES` kept in sync with `cyrius.cyml [lib].modules`. Re-run after every VERSION bump (embeds the header). |
-| `dist/sigil.cyr` | 2026-06-04 | ✅ Fresh | Regenerated every release (last, after the VERSION bump). ~18.5k lines at 3.7.3. |
+| `dist/sigil.cyr` | 2026-06-07 | ✅ Fresh | Regenerated every release (last, after the VERSION bump). Regenerated at 3.7.5 (off-diagonal ECDSA verify folded in). |
 | `benchmarks-rust-v-cyrius.md` | (closed) | 🔵 Evergreen | Frozen cross-implementation perf baseline; not rebuilt per release. |
 
 ---
@@ -162,11 +164,11 @@ finding closes).
 | `2026-05-27-3.5-arc-audit.md` | 2026-05-27 | 🔵 Dated artifact (**3.5 arc, 3.5.0–3.5.4**) — consolidates the four per-bite audits; the per-bite `3.5.0/.1/.2/.3-audit.md` files were merged here and removed. |
 
 > **Stale table** — the per-audit rows above stop at the 3.5 arc. The
-> 3.5.6 retro + 3.6.0–3.6.8 + 3.7.0–3.7.3 audit docs (all dated
+> 3.5.6 retro + 3.6.0–3.6.8 + 3.7.0–3.7.5 audit docs (all dated
 > artifacts under `docs/audit/`) are not yet itemised here; full
 > re-sweep queued for the v3.7 closeout.
 
-**Audit floor**: **EMPTY (cleared at 3.7.3).** The seven (then eight,
+**Audit floor**: **EMPTY (cleared at 3.7.3, holds through 3.7.5).** The seven (then eight,
 +3.6.5 RSA SPKI block) bump-allocator LOWs ADR 0003 batched are
 resolved (4 via the `_into` caller-scratch API) or reclassified as
 correct init-once singletons (4). Zero findings of any severity
@@ -182,8 +184,8 @@ reserved for the first cycle of a day.
 
 | File | Last touched | Status | Notes |
 |---|---|---|---|
-| `roadmap.md` | 2026-06-04 | ✅ Fresh | **De-cluttered 2026-06-04**: shipped detail moved to "Closed cycles" + CHANGELOG; only open items remain (3.7.4 EC scalar-mult, bench re-run, gated backlog). Fixed a stale pin, a duplicate P-384 entry, and an unchecked-but-shipped closeout. |
-| `state.md` | 2026-06-04 | ✅ Fresh | Live state snapshot — bumped every release. **Through 3.7.3**; audit floor EMPTY; in-flight = 3.7.4 + bench re-run. |
+| `roadmap.md` | 2026-06-07 | ✅ Fresh | Through 3.7.5: the P1 off-diagonal ECDSA item is **closed**; open items are EC scalar-mult speedup, the buried-deferral gate, the bench re-run, and the (mostly cyrius-gated) backlog. Pin line updated to 6.0.87. |
+| `state.md` | 2026-06-07 | ✅ Fresh | Live state snapshot — bumped every release. **Through 3.7.5**; audit floor EMPTY; in-flight = EC scalar-mult + buried-deferral gate + bench re-run. |
 | `3.0-handoff-2026-04-22.md` | 2026-04-22 | 📦 Archive | Frozen by design — closed-cycle handoff doc. |
 | `3.0-scope.md` | (closed) | 📦 Archive | Frozen by design — closed-cycle scope doc. |
 | `3.2-scope.md` | (closed) | 📦 Archive | Frozen by design — closed-cycle scope doc. |

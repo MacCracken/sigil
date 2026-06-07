@@ -112,19 +112,22 @@ fn main() {
               "now_unix=0 disables time check (still verifies)");
 
     # ============================================================
-    # Group 4 — Algorithm/curve consistency guard
+    # Group 4 — wrong-issuer rejection (signature-width guard)
     # ============================================================
-    # 3.6.7 added P-384 chain-link verify, but a P-384 ISSUER is only
-    # valid for an ECDSA-with-SHA384 link. Here the child's sig_algo is
-    # ECDSA-SHA256 (vcek was signed by a P-256 root), so verifying it
-    # against a P-384 issuer must still be REJECTED — the SHA-256 path
-    # requires a P-256 issuer. (The real P-384 green path is Group 5.)
-    test_group("x509_verify_chain — SHA256 sig + P-384 issuer rejected");
+    # Off-diagonal links ARE now supported — a P-384 issuer can sign a
+    # SHA-256 child (see x509_offdiag.tcyr). But `vcek` was actually signed
+    # by the P-256 root, so its stored signature is 64 bytes. Verifying it
+    # against the P-384 `vcek`-as-issuer must still be REJECTED: a P-384
+    # issuer's r,s are 96 bytes, so the 64-byte signature cannot match that
+    # width — the link did not happen. (Genuine off-diagonal P-384-issuer
+    # green paths live in x509_offdiag.tcyr; the diagonal P-384 path is
+    # Group 5.)
+    test_group("x509_verify_chain — 64-byte sig vs P-384 issuer rejected");
 
     var leaf_clone = x509_cert_alloc();
     memcpy(leaf_clone, vcek, 256);
     assert_eq(x509_verify_chain(leaf_clone, inters, 0, vcek, NOW_IN_WINDOW), 0,
-              "SHA-256-signed child rejected against a P-384 issuer");
+              "64-byte (P-256-signed) child rejected against a P-384 issuer");
 
     # ============================================================
     # Group 5 — P-384 chain-link green path (3.6.7)

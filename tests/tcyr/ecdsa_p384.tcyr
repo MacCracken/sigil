@@ -336,6 +336,43 @@ fn main() {
     assert_eq(ecdsa_p384_verify(pk_bad, "sample", 6, sig1), 0,
         "off-curve pubkey rejected");
 
+    # ============================================================
+    # Group 9 — off-diagonal: P-384 issuer key, SHA-256 hash.
+    # FIPS 186-4 §6.4 leftmost-bits: the 32-byte digest is shorter than
+    # the 48-byte field, so it is used whole, left-zero-padded into the
+    # scalar. Vector from OpenSSL (P-384 key, ecdsa-with-SHA256),
+    # independently `openssl dgst -sha256 -verify`-confirmed. Exercises
+    # the `_ecdsa_p384_verify_digest` core that x509 off-diagonal
+    # chain-link verify dispatches to.
+    # ============================================================
+    test_group("ecdsa_p384 off-diagonal — P-384 key / SHA-256 digest");
+
+    var pkA = hex_decode("8b5019d9258d9dfc05f3728b90846015f56e80ef5c789eaa167e90c0a524e16d7bf45fbada06f8ce119f7a2811f94bf0e9f75f46a3a292593e33d6bee91e4a649f31316f34686f4519fe96fd0a611c586d7036b7bccedc5411a405bf2fff7e5e", 192);
+    var sigA = hex_decode("73ace52e6129ca0d8501ec4eeeca6051fdf3eaf6078f67cbbdf04bc58ca27de2937ebfd4fe41d037aec43decbbb7e7780ba96a248706bae38bc894b2f839a8bea16a06b2b0de361a5a03d7b8b49f2f3556de14d2ea6785b1735770f07e1ae4c7", 192);
+    var digA = hex_decode("d9b564c30b1327c91925ffe8fc78582f65e434a87dad39452af4c23b386bc2df", 64);
+
+    assert_eq(_ecdsa_p384_verify_digest(pkA, digA, 32, sigA), 1,
+        "P-384 key + SHA-256 digest (off-diagonal) verifies");
+
+    # Tampered digest → reject.
+    store8(digA, (load8(digA) & 0xFF) ^ 0x01);
+    assert_eq(_ecdsa_p384_verify_digest(pkA, digA, 32, sigA), 0,
+        "off-diagonal P-384/SHA-256: tampered digest rejected");
+    store8(digA, (load8(digA) & 0xFF) ^ 0x01);
+
+    # Tampered signature (r) → reject.
+    store8(sigA, (load8(sigA) & 0xFF) ^ 0x01);
+    assert_eq(_ecdsa_p384_verify_digest(pkA, digA, 32, sigA), 0,
+        "off-diagonal P-384/SHA-256: tampered r rejected");
+    store8(sigA, (load8(sigA) & 0xFF) ^ 0x01);
+
+    # Hash-decoupling cross-check: feeding a different 48-byte digest (as
+    # if the diagonal SHA-384 path) must reject — the signature commits to
+    # the SHA-256 digest, so the digest value is load-bearing, not just Q.
+    var digA_wrong = hex_decode("6b15f1d2e9185279a9e2b97cdda95bff3c3a909f6a35338bae11fb02e0e9785d6747716ca2112142d3574b840deeb2ca", 96);
+    assert_eq(_ecdsa_p384_verify_digest(pkA, digA_wrong, 48, sigA), 0,
+        "off-diagonal P-384: wrong 48-byte digest rejected");
+
     return assert_summary();
 }
 

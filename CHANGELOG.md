@@ -7,6 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.7.5] — 2026-06-07
+
+The off-diagonal ECDSA chain-link closer (P1), plus the 6.0.87 toolchain bump.
+
+### Added
+
+- **Off-diagonal ECDSA chain-link verification.** `_x509_verify_link`
+  now picks the signature **hash** from the child's signature-algorithm
+  OID and the **curve / verify primitive** from the issuer key
+  *independently*, so all four `{P-256, P-384} × {SHA-256, SHA-384}`
+  combos verify — including the off-diagonal links (a P-384 issuer
+  signing a SHA-256 child, or a P-256 issuer signing a SHA-384 child)
+  that real-world chains use. Closes the P1 follow-up to 3.7.4's
+  parse-side fix (`docs/development/issues/2026-06-06-x509-off-diagonal-ecdsa-verify.md`).
+  New digest-taking cores `_ecdsa_p256_verify_digest` /
+  `_ecdsa_p384_verify_digest` map the digest to the scalar via the
+  FIPS 186-4 §6.4 leftmost-bits rule (P-256 + SHA-384 → leftmost 32 of
+  the 48-byte digest; P-384 + SHA-256 → the 32-byte digest used whole,
+  left-zero-padded). The public 4-arg `ecdsa_p256_verify` /
+  `ecdsa_p384_verify` entries are preserved byte-for-byte as
+  SHA-256/384-hashing wrappers (sgx/tdx/snp/dist callers unchanged).
+  `x509_parse_into` now seeds the ECDSA signature field width at 32 for
+  any hash and widens to 48 only on r,s overflow, so the stored
+  `sig_len` tracks the **issuer** curve (P-256 → 64, P-384 → 96) rather
+  than the hash — required for the P-256-issuer + SHA-384-child case
+  (the old SHA-384-derived width would have stored 96 and false-rejected
+  a 64-byte P-256 signature). The parse scratch is now allocated once at
+  the 96-byte max and reused across the widen retry (no per-call drift).
+  +28 assertions: off-diagonal primitive KATs in `ecdsa_p256.tcyr` (+4)
+  and `ecdsa_p384.tcyr` (+4) from OpenSSL ground truth (each
+  `openssl dgst -verify`-confirmed, including the leftmost-bits
+  truncation semantics), and a new `x509_offdiag.tcyr` (+20) with two
+  real off-diagonal OpenSSL cert chains (`openssl verify` OK) covering
+  link-verify, full-chain verify, tamper-reject, and cross-issuer
+  width rejection. Suite **53 files / 1459 assertions**, 0 failures.
+  Reviewed via a 4-lens adversarial pass (digest mapping, parse width,
+  algorithm/curve substitution, caller compatibility) — no false-accept,
+  diagonal paths byte-identical.
+
+### Changed
+
+- **Cyrius toolchain pin `6.0.62` → `6.0.87`** (`cyrius.cyml [package].cyrius`).
+  Re-synced the vendored `lib/` stdlib snapshot (90 files) and regenerated
+  `cyrius.lock` to match. Eliminates the prior driver-vs-compiler drift (the
+  6.0.62 pin was driving the installed `cycc` 6.0.87). Tracked footprint is
+  `cyrius.cyml` + `cyrius.lock` only (`lib/` is gitignored, regenerated from
+  the pin). No sigil source change from the bump itself.
+
 ## [3.7.4] — 2026-06-06
 
 ### Fixed

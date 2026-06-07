@@ -997,6 +997,7 @@ var _ecv384_u2       = 0;
 var _ecv384_qx       = 0;
 var _ecv384_qy       = 0;
 var _ecv384_digest   = 0;
+var _ecv384_eb       = 0;
 var _ecv384_P_u1G    = 0;
 var _ecv384_P_u2Q    = 0;
 var _ecv384_R        = 0;
@@ -1019,6 +1020,7 @@ fn _ecv384_init(): i64 {
     _ecv384_qx       = alloc(48);
     _ecv384_qy       = alloc(48);
     _ecv384_digest   = alloc(48);
+    _ecv384_eb       = alloc(48);
     _ecv384_P_u1G    = pt384_alloc();
     _ecv384_P_u2Q    = pt384_alloc();
     _ecv384_R        = pt384_alloc();
@@ -1032,10 +1034,26 @@ fn _ecv384_init(): i64 {
     return 0;
 }
 
+# Public entry. Hashes msg with SHA-384 internally, then defers to the
+# digest-taking core. The 4-arg signature is preserved byte-for-byte for
+# the sgx/tdx/snp/dist callers.
 fn ecdsa_p384_verify(pk, msg, msg_len, sig): i64 {
     _ecv384_init();
+    sha384(msg, msg_len, _ecv384_digest);
+    return _ecdsa_p384_verify_digest(pk, _ecv384_digest, 48, sig);
+}
 
-    # 1. Decode r, s
+# Digest-taking core — the P-384 mirror of _ecdsa_p256_verify_digest.
+# e = leftmost bitlen(n) = 384 bits of the digest (FIPS 186-4 §6.4):
+# a digest of >= 48 bytes contributes its leftmost 48 bytes (the diagonal
+# SHA-384 case uses the whole 48-byte digest); a SHORTER digest (the
+# off-diagonal case — a P-384 issuer signing a SHA-256 child) is used
+# whole, left-zero-padded into 48 bytes. Since a sub-384-bit value is
+# already < n, the conditional reduce is then a no-op.
+fn _ecdsa_p384_verify_digest(pk, digest, digest_len, sig): i64 {
+    _ecv384_init();
+
+    # 1. Decode r, s; range check ∈ [1, n-1].
     u384_load_be(_ecv384_r, sig);
     u384_load_be(_ecv384_s, sig + 48);
     if (u384_is_zero(_ecv384_r) == 1) { return 0; }
@@ -1043,17 +1061,23 @@ fn ecdsa_p384_verify(pk, msg, msg_len, sig): i64 {
     if (u384_cmp(_ecv384_r, _p384_n) >= 0) { return 0; }
     if (u384_cmp(_ecv384_s, _p384_n) >= 0) { return 0; }
 
-    # 2. Decode + validate Q
+    # 2. Decode + validate Q (on-curve).
     u384_load_be(_ecv384_qx, pk);
     u384_load_be(_ecv384_qy, pk + 48);
     if (pt_p384_is_on_curve(_ecv384_qx, _ecv384_qy) == 0) { return 0; }
     pt384_from_affine(_ecv384_Q, _ecv384_qx, _ecv384_qy);
 
-    # 3. e = SHA-384(msg) reduced mod n (the message representative has
-    # the same bit length as the field; for P-384 / SHA-384 it matches
-    # exactly so we just load BE and reduce once if ≥ n).
-    sha384(msg, msg_len, _ecv384_digest);
-    u384_load_be(_ecv384_e, _ecv384_digest);
+    # 3. e = leftmost 384 bits of digest, mod n (FIPS 186-4 §6.4).
+    var take = 48;
+    if (digest_len < 48) { take = digest_len; }
+    var pad = 48 - take;
+    memset(_ecv384_eb, 0, 48);
+    var i = 0;
+    while (i < take) {
+        store8(_ecv384_eb + pad + i, load8(digest + i) & 0xFF);
+        i = i + 1;
+    }
+    u384_load_be(_ecv384_e, _ecv384_eb);
     if (u384_cmp(_ecv384_e, _p384_n) >= 0) { u384_sub(_ecv384_e, _ecv384_e, _p384_n); }
 
     # 4. w = s^-1 mod n

@@ -1,0 +1,130 @@
+# x509_offdiag.tcyr — off-diagonal ECDSA chain-link verification.
+#
+# P1 roadmap item (docs/development/issues/2026-06-06-x509-off-diagonal
+# -ecdsa-verify.md): a chain LINK whose signature HASH differs from the
+# issuer key's CURVE. `_x509_verify_link` now picks the hash from the
+# child's sig-algorithm OID and the curve/primitive from the issuer key
+# INDEPENDENTLY, so all four {P-256,P-384} x {SHA-256,SHA-384} combos
+# verify (FIPS 186-4 §6.4 maps the digest to the scalar). The two
+# DIAGONAL combos are already covered (x509.tcyr / x509_p384.tcyr); this
+# file covers the two OFF-DIAGONAL ones with real OpenSSL-issued certs,
+# each independently confirmed with `openssl verify`.
+#
+# Chain C: P-384 CA signs a leaf with ecdsa-with-SHA256
+#          -> off-diagonal: P-384 issuer + SHA-256 child (sig_len 96).
+# Chain D: P-256 CA signs a leaf with ecdsa-with-SHA384
+#          -> off-diagonal: P-256 issuer + SHA-384 child (sig_len 64).
+# Chain D also pins the 3.7.x parse "point 3" width fix: a SHA-384 child
+# signed by a P-256 issuer has 32-byte r,s and must store sig_len 64
+# (not the 96 the old hash-derived width would have produced).
+
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/string.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fmt.cyr"
+include "lib/json.cyr"
+include "lib/sakshi.cyr"
+include "lib/chrono.cyr"
+include "lib/bigint.cyr"
+include "lib/ct.cyr"
+
+include "lib/thread_local.cyr"
+include "src/crypto_scratch.cyr"
+include "src/types.cyr"
+include "src/error.cyr"
+include "src/sha256.cyr"
+include "src/hex.cyr"
+include "src/sha512.cyr"
+include "src/sha384.cyr"
+include "src/bigint_ext.cyr"
+include "src/ecdsa_p256.cyr"
+include "src/ecdsa_p384.cyr"
+include "src/x509.cyr"
+
+# Chain C — P-384 CA (self-signed SHA-256) signs a P-256 leaf with SHA-256.
+var C_CA_LEN = 419;
+var C_CA_HEX = "3082019f30820126a003020102020101300a06082a8648ce3d0403023020311e301c06035504030c15736967696c2d6f6666646961672d746573742d63613020170d3236303630373231333335395a180f32303831303331303231333335395a3020311e301c06035504030c15736967696c2d6f6666646961672d746573742d63613076301006072a8648ce3d020106052b81040022036200048ef63f74e9acd81e949cc38b89a77a906a43f18063623e73ea633be556863489a3b6c4afb91c960f137aa58dc093ffc16f6f77acb934d0d07fea3b4c06c08226e398691d5b8995cdbb01a376cb0a4f50a7d6768c404906506f3c4df593463037a3323030300f0603551d130101ff040530030101ff301d0603551d0e041604147743e8d9d193667b4ebe7fa5b02011ca24d4e2d4300a06082a8648ce3d040302036700306402300e47e05c9d2b623e268c202049ec6d21ba2ff9d46bd2640e673c518b6c4dcd9709700a332e37f91e16f7b6462a54a382023017324ec9dc3ce5d1317b574417e0564724ae5d4f9527758be8dba1cf645bd4fe75ea38d445beead2e32c0fbfc83bb47d";
+var C_LEAF_LEN = 408;
+var C_LEAF_HEX = "308201943082011ba003020102020102300a06082a8648ce3d0403023020311e301c06035504030c15736967696c2d6f6666646961672d746573742d63613020170d3236303630373231333335395a180f32303735303931383231333335395a30223120301e06035504030c17736967696c2d6f6666646961672d746573742d6c6561663059301306072a8648ce3d020106082a8648ce3d03010703420004ee7f79abd093e3ea5f830b502f96297c56b779daedcd2506fe708b00b8431a6b45a1d4d6a5d0faf6d8a7cb11b645c031e36318603ffb717151ee29ef6e03f038a3423040301d0603551d0e04160414e62de64ba78f5b80c0b6987f0293ef2645bf22d4301f0603551d230418301680147743e8d9d193667b4ebe7fa5b02011ca24d4e2d4300a06082a8648ce3d0403020367003064023074e517c78f4c3f34f92dfd4cddad9637a1a64891016f1c34df239f717491be06960854d3cc9673937c1f37161bef622a023045fadc7fd183c44943dd216e72926ea17077092227349aa8938693c0fe2195e052619f4fe4e6427d01a6d89553788d7a";
+
+# Chain D — P-256 CA (self-signed SHA-384) signs a P-256 leaf with SHA-384.
+var D_CA_LEN = 359;
+var D_CA_HEX = "3082016330820109a003020102020101300a06082a8648ce3d0403033020311e301c06035504030c15736967696c2d6f6666646961672d746573742d63613020170d3236303630373231333335395a180f32303831303331303231333335395a3020311e301c06035504030c15736967696c2d6f6666646961672d746573742d63613059301306072a8648ce3d020106082a8648ce3d0301070342000486e1834dcc54d92200767d4e503b829fb1a0eaa4b73feb361d866ef3d1b5d1e8b05386676978e11098ab173b2d4d0d93df312d44a793250de42dc679c71f398aa3323030300f0603551d130101ff040530030101ff301d0603551d0e0416041427e168fda6f2bcfcdcbb101548856c511ae134f1300a06082a8648ce3d0403030348003045022100c644edbff5d3e6b487dc9c538acec82d5532f93a5e2c857ff5aee3928026f93502205ccf9ee030b2501853e053396f498f6f2228fb29e6a6df408ad6ecad6e789774";
+var D_LEAF_LEN = 377;
+var D_LEAF_HEX = "308201753082011ba003020102020102300a06082a8648ce3d0403033020311e301c06035504030c15736967696c2d6f6666646961672d746573742d63613020170d3236303630373231333335395a180f32303735303931383231333335395a30223120301e06035504030c17736967696c2d6f6666646961672d746573742d6c6561663059301306072a8648ce3d020106082a8648ce3d030107034200040a0bdb8d5b42b7c1105026141cb993ef10cf21cf5e213c680a0d0f1bf04f10d9e4b2921d81c81c9fe51522269b32356da6816c2611906011be8fa7baaaca335ba3423040301d0603551d0e04160414df262f242edf3b69c153a079b7fca5a84e5cfcef301f0603551d2304183016801427e168fda6f2bcfcdcbb101548856c511ae134f1300a06082a8648ce3d0403030348003045022100c755097c93610ad212477df804254035b82b2a300a9a222cf801df7f83f914bd02204770967790452ddd889a1ad0c389453add888aa7e5a45545bb2d9fa4844f830a";
+
+var NOW_IN_WINDOW = 1782518400;   # 2026-06-15, inside both certs' windows
+
+fn main() {
+    alloc_init();
+    sakshi_set_level(SK_WARN);
+    var inters = alloc(8);    # empty intermediates list (direct root->leaf)
+
+    # ============================================================
+    # Chain C — off-diagonal: P-384 issuer + SHA-256 child.
+    # ============================================================
+    test_group("off-diagonal link — P-384 issuer signs SHA-256 child");
+
+    var c_ca = x509_cert_alloc();
+    var c_leaf = x509_cert_alloc();
+    assert_eq(x509_parse(hex_decode(C_CA_HEX, 2 * C_CA_LEN), C_CA_LEN, c_ca), 1, "C: P-384 CA parses");
+    assert_eq(x509_cert_curve(c_ca), X509_CURVE_P384, "C: CA curve = P-384");
+    assert_eq(x509_cert_is_ca(c_ca), 1, "C: CA basicConstraints CA:TRUE");
+    assert_eq(x509_parse(hex_decode(C_LEAF_HEX, 2 * C_LEAF_LEN), C_LEAF_LEN, c_leaf), 1, "C: leaf parses");
+    assert_eq(x509_cert_sig_algo(c_leaf), X509_SIG_ECDSA_SHA256, "C: leaf sig algo = ECDSA-SHA256");
+    # P-384 issuer -> the parse must store the 48-byte r,s (sig_len 96).
+    assert_eq(load64(c_leaf + 208), 96, "C: leaf sig_len = 96 (P-384 issuer width)");
+    assert_eq(_x509_verify_link(c_leaf, c_ca), 1, "C: off-diagonal P-384/SHA-256 link verifies");
+    assert_eq(x509_verify_chain(c_leaf, inters, 0, c_ca, NOW_IN_WINDOW), 1, "C: full chain verifies");
+
+    # Tamper the stored signature -> reject.
+    var c_sp = load64(c_leaf + 200);
+    store8(c_sp + 10, (load8(c_sp + 10) & 0xFF) ^ 0x01);
+    assert_eq(_x509_verify_link(c_leaf, c_ca), 0, "C: tampered signature rejected");
+    store8(c_sp + 10, (load8(c_sp + 10) & 0xFF) ^ 0x01);   # restore
+
+    # ============================================================
+    # Chain D — off-diagonal: P-256 issuer + SHA-384 child.
+    # ============================================================
+    test_group("off-diagonal link — P-256 issuer signs SHA-384 child");
+
+    var d_ca = x509_cert_alloc();
+    var d_leaf = x509_cert_alloc();
+    assert_eq(x509_parse(hex_decode(D_CA_HEX, 2 * D_CA_LEN), D_CA_LEN, d_ca), 1, "D: P-256 CA parses");
+    assert_eq(x509_cert_curve(d_ca), X509_CURVE_P256, "D: CA curve = P-256");
+    assert_eq(x509_cert_is_ca(d_ca), 1, "D: CA basicConstraints CA:TRUE");
+    assert_eq(x509_parse(hex_decode(D_LEAF_HEX, 2 * D_LEAF_LEN), D_LEAF_LEN, d_leaf), 1, "D: leaf parses");
+    assert_eq(x509_cert_sig_algo(d_leaf), X509_SIG_ECDSA_SHA384, "D: leaf sig algo = ECDSA-SHA384");
+    # P-256 issuer -> 32-byte r,s -> sig_len 64 (the parse "point 3" fix;
+    # the old SHA-384-derived width would have stored 96 and false-rejected).
+    assert_eq(load64(d_leaf + 208), 64, "D: leaf sig_len = 64 (P-256 issuer width)");
+    assert_eq(_x509_verify_link(d_leaf, d_ca), 1, "D: off-diagonal P-256/SHA-384 link verifies");
+    assert_eq(x509_verify_chain(d_leaf, inters, 0, d_ca, NOW_IN_WINDOW), 1, "D: full chain verifies");
+
+    # Tamper the stored signature -> reject.
+    var d_sp = load64(d_leaf + 200);
+    store8(d_sp + 10, (load8(d_sp + 10) & 0xFF) ^ 0x01);
+    assert_eq(_x509_verify_link(d_leaf, d_ca), 0, "D: tampered signature rejected");
+    store8(d_sp + 10, (load8(d_sp + 10) & 0xFF) ^ 0x01);   # restore
+
+    # ============================================================
+    # Cross-issuer negatives — wrong CA must reject (no false-accept
+    # across the width/curve boundary).
+    # ============================================================
+    test_group("off-diagonal — wrong-issuer rejection");
+
+    # C leaf (96-byte sig, P-384 issuer expected) against the D P-256 CA:
+    # want_len for a P-256 issuer is 64, the stored sig_len is 96 -> reject.
+    assert_eq(_x509_verify_link(c_leaf, d_ca), 0, "C leaf under P-256 CA rejected (width mismatch)");
+    # D leaf (64-byte sig, P-256 issuer expected) against the C P-384 CA:
+    # want_len for a P-384 issuer is 96, the stored sig_len is 64 -> reject.
+    assert_eq(_x509_verify_link(d_leaf, c_ca), 0, "D leaf under P-384 CA rejected (width mismatch)");
+
+    return assert_summary();
+}

@@ -444,6 +444,44 @@ fn main() {
     assert_eq(ecdsa_p256_verify_der(pk, "sample", 6, sig_der, 5), 0,
         "truncated DER rejected");
 
+    # ============================================================
+    # Group 6 — off-diagonal: P-256 issuer key, SHA-384 hash.
+    # FIPS 186-4 §6.4 leftmost-bits: the 48-byte digest is LONGER than the
+    # 32-byte field, so e is its leftmost 32 bytes (the MSBs). Vector from
+    # OpenSSL (P-256 key, ecdsa-with-SHA384), independently
+    # `openssl dgst -sha384 -verify`-confirmed. Exercises the
+    # `_ecdsa_p256_verify_digest` core that x509 off-diagonal chain-link
+    # verify dispatches to.
+    # ============================================================
+    test_group("ecdsa_p256 off-diagonal — P-256 key / SHA-384 digest");
+
+    var pkB = hex_decode("fbc7e7d4c340eab11516e1a6e566aa109ec4b4671949adc1481953ec496126b8817b604280b0d37200e5ad02afdec6acf5a922f1527bc8028632e12c176452fa", 128);
+    var sigB = hex_decode("d4a01f2965d34d287ddfe15a38db7d240f9cc7641bd3ea9d7c7e02f82bdb35841efb5973c4aef869fb122cf88c277de91aa809938c952ab9335f4117f8bfb137", 128);
+    var digB = hex_decode("6b15f1d2e9185279a9e2b97cdda95bff3c3a909f6a35338bae11fb02e0e9785d6747716ca2112142d3574b840deeb2ca", 96);
+
+    assert_eq(_ecdsa_p256_verify_digest(pkB, digB, 48, sigB), 1,
+        "P-256 key + SHA-384 digest (off-diagonal) verifies");
+
+    # Tampered in the LEFTMOST 32 bytes (the bytes actually used) → reject.
+    store8(digB, (load8(digB) & 0xFF) ^ 0x01);
+    assert_eq(_ecdsa_p256_verify_digest(pkB, digB, 48, sigB), 0,
+        "off-diagonal P-256/SHA-384: tampered MSB digest byte rejected");
+    store8(digB, (load8(digB) & 0xFF) ^ 0x01);
+
+    # Tampered signature (s) → reject.
+    store8(sigB + 32, (load8(sigB + 32) & 0xFF) ^ 0x01);
+    assert_eq(_ecdsa_p256_verify_digest(pkB, digB, 48, sigB), 0,
+        "off-diagonal P-256/SHA-384: tampered s rejected");
+    store8(sigB + 32, (load8(sigB + 32) & 0xFF) ^ 0x01);
+
+    # Leftmost-bits truncation check: only the leftmost 32 bytes feed e,
+    # so flipping a byte in the truncated-away TAIL (byte 40 of 48) must
+    # still VERIFY — proving the mapping discards the low bits per spec.
+    store8(digB + 40, (load8(digB + 40) & 0xFF) ^ 0x01);
+    assert_eq(_ecdsa_p256_verify_digest(pkB, digB, 48, sigB), 1,
+        "off-diagonal P-256/SHA-384: truncated-away tail byte does not affect e");
+    store8(digB + 40, (load8(digB + 40) & 0xFF) ^ 0x01);
+
     return assert_summary();
 }
 

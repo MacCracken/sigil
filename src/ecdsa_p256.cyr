@@ -1003,15 +1003,31 @@ fn _ecv_init(): i64 {
     return 0;
 }
 
-# Public entry. Returns 1 on valid, 0 on invalid.
+# Public entry. Returns 1 on valid, 0 on invalid. Hashes msg with
+# SHA-256 internally, then defers to the digest-taking core. The 4-arg
+# signature is preserved byte-for-byte for the sgx/tdx/snp/dist callers.
 fn ecdsa_p256_verify(pk, msg, msg_len, sig): i64 {
     _ecv_init();
+    sha256(msg, msg_len, _ecv_digest);
+    return _ecdsa_p256_verify_digest(pk, _ecv_digest, 32, sig);
+}
 
-    # 1. Decode r, s from sig (big-endian).
+# Digest-taking core. Verifies a P-256 signature against a PRECOMPUTED
+# digest of `digest_len` bytes — the hash is the caller's choice,
+# DECOUPLED from the curve. This is what lets x509 verify an off-diagonal
+# chain link (a P-256 issuer signing a SHA-384 child). The message
+# representative e is the leftmost bitlen(n) = 256 bits of the digest
+# (FIPS 186-4 §6.4 / SEC 1 §4.1.4 step 3): bitlen(n_p256) is exactly 256,
+# so for a digest of >= 32 bytes that is its leftmost 32 bytes (the MSBs;
+# e.g. the top 32 of a 48-byte SHA-384 digest); a shorter digest is used
+# whole, left-zero-padded. e is then reduced mod n with a single
+# conditional subtract (e < 2^256 < 2n, so one subtract is exact).
+fn _ecdsa_p256_verify_digest(pk, digest, digest_len, sig): i64 {
+    _ecv_init();
+
+    # 1. Decode r, s from sig (big-endian). Range check r, s ∈ [1, n-1].
     u256_load_be(_ecv_r, sig);
     u256_load_be(_ecv_s, sig + 32);
-
-    # Range check r, s ∈ [1, n-1].
     if (u256_is_zero(_ecv_r) == 1) { return 0; }
     if (u256_is_zero(_ecv_s) == 1) { return 0; }
     if (u256_cmp(_ecv_r, _p256_n) >= 0) { return 0; }
@@ -1026,10 +1042,20 @@ fn ecdsa_p256_verify(pk, msg, msg_len, sig): i64 {
     if (pt_is_on_curve(_ecv_qx, _ecv_qy) == 0) { return 0; }
     pt_from_affine(_ecv_Q, _ecv_qx, _ecv_qy);
 
-    # 3. e = SHA-256(msg) mod n.
-    sha256(msg, msg_len, _ecv_digest);
-    # The digest is big-endian (SEC 1 §4.1.4 step 3). Load as BE int.
-    u256_load_be(_ecv_e, _ecv_digest);
+    # 3. e = leftmost 256 bits of digest, mod n (FIPS 186-4 §6.4).
+    #    Assemble the 32 scalar bytes big-endian: leftmost 32 of the
+    #    digest when it is >= 32 bytes (pad == 0); whole digest left-
+    #    zero-padded otherwise. (_ecv_digest_padded is 64-byte scratch.)
+    var take = 32;
+    if (digest_len < 32) { take = digest_len; }
+    var pad = 32 - take;
+    memset(_ecv_digest_padded, 0, 32);
+    var i = 0;
+    while (i < take) {
+        store8(_ecv_digest_padded + pad + i, load8(digest + i) & 0xFF);
+        i = i + 1;
+    }
+    u256_load_be(_ecv_e, _ecv_digest_padded);
     if (u256_cmp(_ecv_e, _p256_n) >= 0) { u256_sub(_ecv_e, _ecv_e, _p256_n); }
 
     # 4. w = s^-1 mod n

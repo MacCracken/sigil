@@ -12,31 +12,33 @@
 
 | Field | Value |
 |---|---|
-| Current version | **3.7.3** (`VERSION`) |
-| Cyrius toolchain pin | **6.0.62** (`cyrius.cyml [package].cyrius`) |
+| Current version | **3.7.5** (`VERSION`) |
+| Cyrius toolchain pin | **6.0.87** (`cyrius.cyml [package].cyrius`) |
 | Dependencies | agnosys **1.3.2**, sakshi **2.2.6** |
-| Last release date | 2026-06-04 |
-| Last release audit | [`2026-06-04-3.7.3-into-api-audit.md`](../audit/2026-06-04-3.7.3-into-api-audit.md) |
-| Phase | Released. **3.7.3 added the caller-scratch `_into` API and cleared the audit floor (8 LOW → 0).** New `x509_parse_into` / `x509_cert_alloc_into` + `sgx`/`tdx`/`snp` `*_verify_full_into` draw all per-call scratch from a caller arena (stdlib `arena_new`; `arena_reset` between verifications) — drift-free for a looping consumer; the original entries stay byte-for-byte `arena==0` wrappers. Of the 8 audit-floor LOWs: 4 genuine per-call-drift findings (x509 raw_sig, RSA block, SGX/TDX/SNP orchestrator drift) are **resolved** via the `_into` path; 4 (`_sgxv_init`/`_tdxv_init`/`_snp_v_init`/`_pem_init` tables) are **reclassified as correct** init-once singletons (never drifted). **Remaining v3.7:** EC scalar-mult speedup (carries ≤ 10 ms) + full bench re-run. |
+| Last release date | 2026-06-07 |
+| Last release audit | [`2026-06-07-3.7.5-offdiag-ecdsa-audit.md`](../audit/2026-06-07-3.7.5-offdiag-ecdsa-audit.md) |
+| Phase | Released. **3.7.5 closed the P1 off-diagonal ECDSA chain-link verification and bumped the toolchain pin 6.0.62 → 6.0.87.** `_x509_verify_link` now picks the signature hash from the child's sig-algo OID and the curve/primitive from the issuer key *independently*, verifying all four `{P-256, P-384} × {SHA-256, SHA-384}` combos — including off-diagonal links (P-384 issuer + SHA-256 child, P-256 issuer + SHA-384 child). New `_ecdsa_p{256,384}_verify_digest` cores apply the FIPS 186-4 §6.4 leftmost-bits digest→scalar mapping; the public 4-arg `ecdsa_p{256,384}_verify` entries stay byte-for-byte hashing wrappers (sgx/tdx/snp/dist callers unchanged). `x509_parse_into` sizes the stored `sig_len` by the issuer curve (P-256 → 64, P-384 → 96), not the hash. 4-lens adversarial review: no false-accept, diagonal paths byte-identical. (3.7.4 had shipped the off-diagonal **parse**-side fix — the SSL.com Root ECC class — on 2026-06-06.) **Remaining v3.7:** EC scalar-mult speedup (carries ≤ 10 ms) + full bench re-run. |
 
 ## Test surface
 
 | Metric | Value |
 |---|---|
-| `.tcyr` test files | 52 |
-| Total assertions | **1431**, 0 failures |
+| `.tcyr` test files | 53 |
+| Total assertions | **1459**, 0 failures |
 | Benchmark suite | `benches/` — `history.csv`; RSA via `tests/bcyr/rsa.bcyr`, P-256/P-384 verify via `tests/bcyr/ecdsa_p256.bcyr` / `ecdsa_p384.bcyr` |
 
 > Counting note: the 3 `*_verify_full.tcyr` tests (sgx 17 + tdx 16 +
 > snp 11 = 44) emit their `N passed` summary in a tty-sensitive way that
 > is dropped under any pipe or file redirect, so a scripted `grep`-sum of
-> `cyrius test` output yields **1387** across the other 49 files and
-> silently omits those 44. Add them back for the true total: **1431**.
+> `cyrius test` output yields **1415** across the other 50 files and
+> silently omits those 44. Add them back for the true total: **1459**.
 > (Each verify_full still prints its summary on an interactive run; it's
 > only the redirected/scripted sum that loses them.)
 
 Per-cycle assertion delta:
 
+- 3.7.5 ship: +28 (off-diagonal ECDSA chain-link verify — `ecdsa_p256.tcyr` +4 / `ecdsa_p384.tcyr` +4: OpenSSL-ground-truth off-diagonal primitive KATs (P-256 key/SHA-384, P-384 key/SHA-256), each `openssl dgst -verify`-confirmed, incl. leftmost-bits truncation; `x509_offdiag.tcyr` +20, new — two real off-diagonal OpenSSL cert chains (`openssl verify` OK): link-verify, full-chain, issuer-curve `sig_len` 96/64, tamper + cross-issuer width rejects)
+- 3.7.4 ship: +0 (x509 off-diagonal **parse**-side fix — `ec_fw` widened to 48 on r,s overflow so a P-384/SHA-256 self-signed anchor (SSL.com Root ECC class) parses; verified against existing `x509`/`x509_p384`/`snp_verify_full` suites, no new assertions)
 - 3.7.3 ship: +14 (`_into` arena no-drift tests with a **global-heap witness** (`alloc_used()` delta == 0 across 50 reset+parse iterations): `sgx_verify_full.tcyr` +6 (orchestrator path), `x509_rsa.tcyr` +4 (RSA 544-byte block arena-routing), `x509_p384.tcyr` +4 (P-384 raw_sig arena-routing); proves no residual global-bump alloc)
 - 3.7.2 ship: +24 (`aes_gcm_iv.tcyr` +24, new — AES-256/128 GCM arbitrary-IV KATs vs OpenSSL at 60/8/1-byte IVs (60-byte = McGrew-Viega TC6/TC18), decrypt roundtrips, tamper reject, 12-byte consistency, iv_len validation)
 - 3.7.1 ship: +3 (`ecdsa_p384.tcyr` +3 — Solinas-vs-long-div differential KAT over 64 SHA-384-seeded random 768-bit inputs + 2^768−1 / high-half-all-ones edges)
@@ -69,6 +71,8 @@ Consumers that link or rely on sigil for trust verification:
 
 | Version | Date | Headline |
 |---|---|---|
+| 3.7.5 | 2026-06-07 | **Off-diagonal ECDSA chain-link verification (P1 complete) + toolchain pin 6.0.62 → 6.0.87.** `_x509_verify_link` decouples the signature hash (child sig-algo OID) from the issuer curve, verifying all four `{P-256, P-384} × {SHA-256, SHA-384}` combos — off-diagonal links included (P-384 issuer + SHA-256 child, P-256 issuer + SHA-384 child). New `_ecdsa_p{256,384}_verify_digest` cores apply the FIPS 186-4 §6.4 leftmost-bits digest→scalar mapping; the public 4-arg `ecdsa_p{256,384}_verify` entries stay byte-for-byte hashing wrappers (sgx/tdx/snp/dist unchanged). `x509_parse_into` sizes `sig_len` by the issuer curve (64/96), not the hash, and reuses one 96-byte scratch across the widen retry (no drift). +28 assertions (off-diagonal primitive KATs + new `x509_offdiag.tcyr` with two real OpenSSL cert chains). 4-lens adversarial review: no false-accept, diagonals byte-identical. Pin 6.0.62→6.0.87. Audit: `docs/audit/2026-06-07-3.7.5-offdiag-ecdsa-audit.md`. |
+| 3.7.4 | 2026-06-06 | **x509 off-diagonal ECDSA parse-side fix.** `x509_parse_into` derived the ECDSA signature width `ec_fw` from the signature *hash*, but the r,s width is the *issuer key's curve* — so a P-384 key self-signing with ecdsa-with-SHA256 (the **SSL.com Root ECC CA** + ~12 OS-trust-store roots, which root Cloudflare's `one.one.one.one` chain) overflowed `ec_fw=32` and was silently dropped from the trust store. Fixed by starting at the hash-derived width and retrying once at 48 on r,s overflow — discovering the issuer curve from the signature itself (not the cert's own key, which would mis-size the SEV-SNP VCEK). The off-diagonal **verify** side remained a P1 follow-up (shipped 3.7.5). +0 assertions (Fixed-only; verified against existing x509/x509_p384/snp suites). Issue: `docs/development/issues/2026-06-06-x509-off-diagonal-ecdsa-verify.md`. |
 | 3.7.3 | 2026-06-04 | **Caller-scratch `_into` API — audit floor cleared (8 LOW → 0).** `x509_parse_into`/`x509_cert_alloc_into` + `sgx`/`tdx`/`snp` `*_verify_full_into` draw per-call scratch from a caller arena (stdlib `arena_new`; `arena_reset` between calls) — drift-free for a looping consumer; the original entries are byte-for-byte `arena==0` wrappers. 4 genuine-drift LOWs resolved via `_into`; 4 init-once LOWs reclassified as correct. +14 assertions (50× no-drift loops with `alloc_used()` global-heap witness across the orchestrator + RSA + P-384 paths). Audit: `docs/audit/2026-06-04-3.7.3-into-api-audit.md`. |
 | 3.7.2 | 2026-06-04 | **AES-GCM arbitrary-length IVs** (backlog cleanup in the v3.7 arc). `_gcm_compute_j0` adds the NIST SP 800-38D §7.1 GHASH-based J0 for non-96-bit IVs; new `aes_gcm_encrypt_iv`/`_decrypt_iv` + AES-128 variants take `iv_len`; the 8-arg entries stay byte-for-byte 12-byte wrappers. Interop-verified vs OpenSSL (AES-256/128 at 60/8/1-byte IVs; 60-byte = McGrew-Viega TC6/TC18). +24 assertions (new `aes_gcm_iv.tcyr`). Pin 6.0.61→6.0.62. Audit: `docs/audit/2026-06-04-3.7.2-gcm-arbitrary-iv-audit.md`. |
 | 3.7.1 | 2026-06-04 | **Solinas reduction for P-384.** `_p384_solinas_reduce` (FIPS 186-4 App. D, `p384 = 2^384−2^128−2^96+2^32−1`), the mirror of the 3.7.0 P-256 work; the 11-term layout was derived from the prime's folding relation + verified 5000/5000 vs `x mod p`. **`ecdsa_p384_verify` 339.2 → 54.6 ms (6.21×)** (`history.csv` row `v3.7.1-p384-solinas`, new `tests/bcyr/ecdsa_p384.bcyr`), transitively speeding the SEV-SNP P-384 chain. +3 assertions (differential KAT). Audit: `docs/audit/2026-06-04-3.7.1-p384-solinas-audit.md`. |
@@ -96,16 +100,21 @@ list).
 
 | Slot | State | Notes |
 |---|---|---|
-| 3.7.4 — EC scalar-mult speedup | pending (next) | Fixed-base comb for `G` + wNAF for `Q`; **carries the ≤ 10 ms `ecdsa_p256_verify` target** (Solinas reduction alone reached 26 ms P-256 / 55 ms P-384). |
+| 3.7.6 — EC scalar-mult speedup | pending (next) | Fixed-base comb for `G` + wNAF for `Q`; **carries the ≤ 10 ms `ecdsa_p256_verify` target** (Solinas reduction alone reached 26 ms P-256 / 55 ms P-384). |
 | 3.7.x — full crypto bench re-run | pending | Capture before/after rows for every verify-path bench at the cycle close. |
+| 3.7.x — buried-deferral gate | committed (next release) | Grep `src/` for deferral vocabulary not cross-referenced by the roadmap; report mode first. Tree is **not** yet clean (~9 uncatalogued deferral comments surfaced 2026-06-07). |
 
 The 3.6.x cyrius-native-TLS arc is **closed** (3.6.0–3.6.8). The **v3.7
-perf cycle is OPEN**: Solinas P-256 (3.7.0), Solinas P-384 (3.7.1),
-AES-GCM arbitrary IVs (3.7.2), and the caller-scratch `_into` API +
-audit-floor clear (3.7.3) shipped. **Next: 3.7.4 = EC scalar-mult
-speedup.** Backlog: the one ungated item (AES-GCM IVs) is done; the
-bank-retire / CLMUL-GHASH / NI-dispatch items remain blocked on cyrius
-features absent in 6.0.62.
+cycle is OPEN**: Solinas P-256 (3.7.0), Solinas P-384 (3.7.1), AES-GCM
+arbitrary IVs (3.7.2), the caller-scratch `_into` API + audit-floor clear
+(3.7.3), the x509 off-diagonal ECDSA **parse** fix (3.7.4) and **verify**
+closer + pin 6.0.62→6.0.87 (3.7.5) shipped. **Next: EC scalar-mult
+speedup** (the ≤ 10 ms target) + the buried-deferral gate (maintainer's
+pick of order). Backlog: the bank-retire / CLMUL-GHASH / NI-dispatch
+items remain blocked on cyrius `asm`/thread-local-array features still
+absent in 6.0.87 (re-checked at the pin bump; the 1 MB preprocessor cap
+that gated PQC-default **appears lifted** in 6.0.87 — unconditional mldsa
+now builds, pending a decision to drop the `-D SIGIL_PQC` gate).
 
 When a cycle is opened, list each work-item bite here as it
 moves through `pending → in_progress → completed`. The release
@@ -120,9 +129,13 @@ CI fleet, list the hosts here.
 
 ## Audit floor
 
-**EMPTY — cleared at 3.7.3.** Zero findings of any severity outstanding
-(first time since the 3.2.x TEE arc). The eight prior LOWs (all
-bump-allocator-lifetime shape) were resolved as follows:
+**EMPTY — cleared at 3.7.3, holds through 3.7.5.** Zero findings of any
+severity outstanding. The 3.7.5 off-diagonal ECDSA change passed a 4-lens
+adversarial review with no false-accept and only one confirmed finding (a
+stale `dist/` bundle) + one LOW (parse scratch reuse), **both resolved
+in-cycle** — see `docs/audit/2026-06-07-3.7.5-offdiag-ecdsa-audit.md`. The
+eight prior LOWs (all bump-allocator-lifetime shape) were resolved as
+follows:
 
 **Resolved via the `_into` caller-scratch API (3.7.3)** — genuine
 per-call drift, now with a drift-free path (the one-shot bump wrappers

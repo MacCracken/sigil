@@ -5,7 +5,13 @@
 - **Reporter**: cyrius native-TLS **Mini-arc E** real-peer dev-check (verifying the live
   `one.one.one.one:443` Cloudflare chain through a real OS trust store).
 - **Affects**: `src/x509.cyr` → `_x509_verify_link` (and the ECDSA verify primitives it calls).
-- **Status**: follow-up to the **3.7.4** fix, which addressed the *parse* side only.
+- **Status**: **RESOLVED in 3.7.5.** The *parse* side was fixed in 3.7.4; the *verify*
+  side (this issue) shipped in 3.7.5 — `_x509_verify_link` decouples hash from curve and
+  verifies all four `{P-256, P-384} × {SHA-256, SHA-384}` combos via the new
+  `_ecdsa_p{256,384}_verify_digest` cores (FIPS 186-4 §6.4 leftmost-bits), and
+  `x509_parse_into` sizes `sig_len` by the issuer curve. Tests: off-diagonal primitive
+  KATs (`ecdsa_p256.tcyr`/`ecdsa_p384.tcyr`, OpenSSL-confirmed) + `x509_offdiag.tcyr`
+  (two real off-diagonal cert chains). See CHANGELOG 3.7.5.
 
 ## Background — what 3.7.4 fixed (parse side)
 

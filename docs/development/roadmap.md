@@ -9,27 +9,15 @@ shipped").
 The only open items. The 3.6 cyrius-native-TLS arc and most of the v3.7
 perf cycle have shipped — see "Closed cycles" below + CHANGELOG.
 
-**x509 — cert verification**
-
-- [ ] **(P1) Off-diagonal ECDSA chain-link verification.** `_x509_verify_link`
-      (`src/x509.cyr`) hardcodes the hash↔curve diagonal: `ECDSA_SHA256` ⟹
-      P-256 issuer + 64-byte sig, `ECDSA_SHA384` ⟹ P-384 issuer + 96-byte sig.
-      Real-world certs decouple these — the signature **hash** (from the sig
-      algorithm OID) is independent of the issuer key's **curve**. 3.7.4 fixed
-      the **parse** side (a P-384 key signing with ecdsa-with-SHA256, e.g. the
-      SSL.com Root ECC, now parses instead of being dropped — that was breaking
-      Cloudflare-class chains at the trust anchor). The **verify** side remains:
-      sigil cannot yet *verify* a chain LINK signed off-diagonal — a P-384 key
-      signing a child with SHA-256, or a P-256 key signing with SHA-384.
-      Needs: (1) decouple hash-selection (sig algo OID) from curve-selection
-      (issuer `x509_cert_curve`) in `_x509_verify_link`; (2) ECDSA verify
-      primitives for all four combos `{P-256,P-384} × {SHA-256,SHA-384}` —
-      today only the two diagonal primitives exist (`ecdsa_p256_verify` hashes
-      SHA-256 internally; `ecdsa_p384_verify` hashes SHA-384). Not needed for
-      cloudflare-class chains (the only off-diagonal cert there is the anchor,
-      never link-verified), so P1 not P0 — but required for full real-world
-      chain coverage as the cyrius native-TLS Mini-arc E real-peer work lands.
-      Detail + repro: `docs/development/issues/2026-06-06-x509-off-diagonal-ecdsa-verify.md`.
+**x509 — cert verification: COMPLETE.** The P1 off-diagonal ECDSA
+chain-link verification **shipped in 3.7.5** — `_x509_verify_link` now
+decouples hash-selection (child sig-algo OID) from curve-selection
+(issuer key), verifying all four `{P-256, P-384} × {SHA-256, SHA-384}`
+combos (FIPS 186-4 §6.4 leftmost-bits digest mapping; new
+`_ecdsa_p{256,384}_verify_digest` cores), and `x509_parse_into` sizes
+the stored `sig_len` by the issuer curve rather than the hash. See
+CHANGELOG 3.7.5 + the now-resolved
+`docs/development/issues/2026-06-06-x509-off-diagonal-ecdsa-verify.md`.
 
 **Tooling / process — committed for the next release**
 
@@ -137,10 +125,14 @@ audits in [`docs/audit/`](../audit/).
   + un-burying three hidden deferrals). Issue cross-walk:
   [`issues/2026-05-28-cyrius-tls-arc-full-audit.md`](issues/2026-05-28-cyrius-tls-arc-full-audit.md)
   (all five line items delivered).
-- **3.7 — perf (IN PROGRESS)** — Solinas reduction for P-256 (3.7.0,
-  verify 147→26 ms, 5.65×) and P-384 (3.7.1, 339→55 ms, 6.21×); AES-GCM
-  arbitrary-length IVs (3.7.2, SP 800-38D §7.1); the caller-scratch
-  `_into` API + **audit-floor clear (8 → 0)** (3.7.3). Remaining: the EC
-  scalar-mult speedup + the bench re-run (see Outstanding above).
+- **3.7 — perf + x509 (IN PROGRESS)** — Solinas reduction for P-256
+  (3.7.0, verify 147→26 ms, 5.65×) and P-384 (3.7.1, 339→55 ms, 6.21×);
+  AES-GCM arbitrary-length IVs (3.7.2, SP 800-38D §7.1); the
+  caller-scratch `_into` API + **audit-floor clear (8 → 0)** (3.7.3);
+  x509 off-diagonal ECDSA **parse**-side fix (3.7.4, SSL.com Root ECC
+  class) and the **verify**-side closer (3.7.5, all four hash×curve
+  combos — P1 complete); toolchain pin 6.0.62 → 6.0.87 (3.7.5).
+  Remaining: the EC scalar-mult speedup + the bench re-run (see
+  Outstanding above).
 
-**Cyrius pin:** `6.0.62` (synced across `cyrius.cyml` and CI).
+**Cyrius pin:** `6.0.87` (synced across `cyrius.cyml` and CI).
