@@ -326,8 +326,10 @@ fn _p384_init(): i64 {
 # shl1 + conditional subtract). Same shape as `p256_reduce`; the
 # carry-bit invariant analysis carries over (V = 2·R + bit < 2p,
 # so one conditional subtract per iteration suffices). Slow but
-# correct and easy to audit; Solinas word-level reduction is the
-# bench-tuning follow-up tracked in roadmap.
+# correct and easy to audit; the Solinas word-level reduction that
+# superseded this on the hot path shipped in 3.7.1
+# (`_p384_solinas_reduce`); this long-division form is the retained
+# differential-KAT reference.
 # ================================================================
 
 var _p384_R = 0;

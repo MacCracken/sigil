@@ -314,10 +314,11 @@ fn pem_decode_certs_into(pem, pem_len, out_chain, max_certs,
 # (3/4) × PEM, plus a small overhead for markers/whitespace; pem_len
 # is conservative).
 #
-# NOTE (audit follow-up): the bump-allocator pool is freed only at
-# program exit. Long-running consumers (kavach attestation loop)
-# should call `pem_decode_certs_into` with their own pool to avoid
-# slow allocator drift; see roadmap 3.5 "_into-shape variants".
+# NOTE: the bump-allocator pool is freed only at program exit. The
+# drift-free path shipped in 3.7.3 — long-running consumers (kavach
+# attestation loop) should call `pem_decode_certs_into` with their own
+# arena (`arena_reset` between calls). This wrapper remains for one-shot
+# use.
 fn pem_decode_certs(pem, pem_len, out_chain, max_certs): i64 {
     if (pem_len <= 0) { return 0 - 1; }
     var pool = alloc(pem_len);

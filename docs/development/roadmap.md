@@ -38,6 +38,13 @@ CHANGELOG 3.7.5 + the now-resolved
       the check itself generalizes across the AGNOS first-party repos
       (worth lifting into the shared tooling once proven here). Extends
       the `docs/doc-health.md` "Programmatic gates (future)" family.
+      **Tree status (3.7.7 sweep):** the genuine deferrals were surfaced
+      to the Backlog above and the stale comments updated to mark shipped
+      work, so the tree is clean except a **known allowlist of false
+      positives**: `src/policy.cyr:329,347` (the literal `\uXXXX` JSON
+      unicode-escape notation, where `XXX` is a substring — not a
+      deferral). The gate must allowlist these (and re-scan as new
+      false-positive shapes appear) before flipping to *fail*.
 
 **v3.7 — perf (OPEN)**
 
@@ -59,6 +66,38 @@ CHANGELOG 3.7.5 + the now-resolved
       transitive SEV-SNP / TDX deltas.
 
 **Backlog — unscheduled** (open; gated as noted)
+
+The following were surfaced from in-source deferral comments in the 3.7.7
+buried-deferral sweep (previously tracked only in code comments — now
+promoted here so they are visible, not buried):
+
+- [ ] **ChaCha20 + X25519 on the parallel batch path.** Both
+      (`src/chacha20.cyr`, `src/x25519.cyr`) use function-scope `var`
+      working state (quirk #1) and are correct for serial use only — they
+      are NOT banked for the parallel batch-verify path. If a consumer
+      puts either on a concurrent path, give them the 3.6 per-worker bank
+      treatment (`src/crypto_scratch.cyr`). Not needed today (only Ed25519
+      verify is batched).
+
+- [ ] **TDX / SGX in-quote PCK X.509 chain walk.** The TEE orchestrators
+      (`src/tdx.cyr`, `src/sgx.cyr`) take a *pre-validated* PCK pubkey; the
+      X.509 walk from the in-quote PCK leaf up to the Intel SGX Root CA is
+      currently the caller's responsibility (kavach reuses its external
+      walk). Owning the walk inside sigil would make the orchestrators
+      self-contained — consider when a consumer needs it.
+
+- [ ] **Scalar-inversion addition-chain.** `fn_p256_inv` / the field/scalar
+      inversions (`src/ecdsa_p256.cyr`) use generic square-and-multiply
+      (~256 sq + ~128 mul). A fixed addition chain (à la `fp_inv` in
+      `bigint_ext.cyr`) drops this to ~265 muls. Small verify-path win;
+      pairs with the EC scalar-mult speedup bite.
+
+- [ ] **`bn_modexp` dead-code decision.** `bn_modexp` (`src/bignum.cyr`,
+      schoolbook non-CT public-data modexp) has no call sites since 3.6.6
+      moved RSA verify+sign to `bn_mont_modexp`. Either remove it or keep
+      it explicitly as the schoolbook reference — maintainer's call at the
+      next dead-code closeout. (Its "do not use for secret exponents"
+      warnings stay valid while it exists.)
 
 - [ ] **Retire the per-thread bank-indexing workaround** if cyrius gains
       a native thread-local *array* qualifier (`threadlocal var X[N]`).
@@ -91,10 +130,12 @@ CHANGELOG 3.7.5 + the now-resolved
 **Possible future surfaces** (consumer-demand-gated)
 
 - [ ] **ML-KEM-768** (PQC KEM) — belongs in a sibling `kem.cyr` if an
-      AGNOS consumer needs key agreement. (ML-DSA-65 PQC sign already
-      ships behind `-D SIGIL_PQC`.)
-- [ ] **PQC-default builds** — drop the `-D SIGIL_PQC` gate when cyrius
-      raises the 1 MB preprocessor cap (CLAUDE.md quirk #8).
+      AGNOS consumer needs key agreement. (ML-DSA-65 PQC sign ships
+      default-on since 3.7.6.)
+- [x] **PQC-default builds** — **DONE in 3.7.6.** Cyrius 6.0.87 raised the
+      1 MB preprocessor cap; the `#ifdef SIGIL_PQC` gate was dropped in
+      `src/lib.cyr` so ML-DSA-65 is default-on (matching the dist bundle,
+      which always included it). `-D SIGIL_PQC` is now a back-compat no-op.
 
 **Open audit findings — NONE.** The audit floor was **cleared at 3.7.3**
 (4 genuine per-call-drift LOWs resolved via the `_into` caller-scratch
@@ -131,8 +172,12 @@ audits in [`docs/audit/`](../audit/).
   caller-scratch `_into` API + **audit-floor clear (8 → 0)** (3.7.3);
   x509 off-diagonal ECDSA **parse**-side fix (3.7.4, SSL.com Root ECC
   class) and the **verify**-side closer (3.7.5, all four hash×curve
-  combos — P1 complete); toolchain pin 6.0.62 → 6.0.87 (3.7.5).
-  Remaining: the EC scalar-mult speedup + the bench re-run (see
+  combos — P1 complete); toolchain pin 6.0.62 → 6.0.87 (3.7.5);
+  **PQC-default** — ML-DSA-65 default-on, gate dropped now the 6.0.87 cap
+  allows it (3.7.6); the **buried-deferral sweep** — genuine deferrals
+  surfaced to the Backlog, stale comments marked shipped, false positives
+  reduced to a `\uXXXX` allowlist (3.7.7). Remaining: the EC scalar-mult
+  speedup, the buried-deferral *gate*, and the bench re-run (see
   Outstanding above).
 
 **Cyrius pin:** `6.0.87` (synced across `cyrius.cyml` and CI).

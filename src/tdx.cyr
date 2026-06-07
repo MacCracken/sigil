@@ -16,9 +16,10 @@
 # Scope (per the 3.2.3 / 3.2.4 pattern): parser-only with a
 # verify orchestrator that takes a pre-validated PCK pubkey. The
 # X.509 chain walk from the in-quote PCK leaf up to Intel SGX
-# Root CA is the caller's responsibility for now — TDX shares
+# Root CA is currently the caller's responsibility — TDX shares
 # the SGX cert chain so reusing kavach's external walk is the
-# natural fit.
+# natural fit. Owning the walk inside sigil is a roadmap backlog
+# item ("TDX / SGX in-quote PCK X.509 chain walk").
 #
 # Both att_key_type variants are supported as of 3.5:
 #   • att_key_type = 2 (ECDSA P-256 / SHA-256) — TDX 1.0 default.
@@ -395,10 +396,11 @@ fn tdx_quote_verify_with_pck(quote, pck_pk): i64 {
 # (type=2 → P-256/SHA-256, type=3 → P-384/SHA-384), so both TDX 1.0
 # and TDX 1.5+ deployments traverse the same entry point.
 #
-# Same alloc-drift LOW as sgx_quote_verify_full carries here —
-# tracked in the same 2026-05-22 audit follow-up; closes with the
-# gated v3.7 unified `_into` API (gated on a latency forcing function
-# per roadmap.md).
+# Same alloc-drift LOW as sgx_quote_verify_full carried here —
+# RESOLVED in 3.7.3 by the `_into` API: `tdx_quote_verify_full_into`
+# draws all per-call scratch from a caller arena (drift-free for a
+# looping consumer). This bump wrapper remains, suitable for one-shot
+# use.
 # ================================================================
 
 var TDX_VERIFY_FULL_MAX_CERTS = 4;

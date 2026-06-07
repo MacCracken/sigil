@@ -27,7 +27,8 @@
 #
 # THREAD-SAFETY: `W` is a function-scope `var` array (Cyrius static
 # global, quirk #1); each x25519 call reinitializes it up front, so
-# serial use is correct. Not yet on a parallel path.
+# serial use is correct. Not on the parallel batch path; banking it is
+# a roadmap backlog item ("ChaCha20 + X25519 on the parallel batch path").
 #
 # Citation: RFC 7748 §5 (the ladder + clamp), §5.2 / §6.1 (test
 # vectors). a24 = (486662 - 2) / 4 = 121665. See docs/sources.md.

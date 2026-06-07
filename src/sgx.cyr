@@ -408,15 +408,15 @@ fn sgx_quote_verify_with_pck(quote, pck_pk): i64 {
 # return values — matches the safety stance for attacker-controlled
 # input.
 #
-# NOTE (audit follow-up — 2026-05-22): this entry point uses the
-# bump allocator on every call: it decodes a PEM scratch pool
-# proportional to qe_cert_data_len, parses up to N certs (each
-# x509_cert_alloc + raw_sig alloc) and the root. For long-running
-# consumers (kavach attestation loop), per-call drift is ~5–8 KB.
-# The gated v3.7 `_into` API will eliminate the drift (matches the
-# 3.2.x/3.4 LOW findings; tracked in state.md "Audit floor", gated on
-# a latency forcing function per roadmap.md). Audit reference:
-# `docs/audit/2026-05-22-audit.md`.
+# NOTE (audit item 2026-05-22, RESOLVED 3.7.3): this one-shot
+# entry point uses the bump allocator on every call (decodes a PEM
+# scratch pool proportional to qe_cert_data_len, parses up to N certs +
+# the root), so a looping consumer drifts ~5–8 KB/call. The drift-free
+# path shipped in 3.7.3: `sgx_quote_verify_full_into` draws all per-call
+# scratch from a caller arena (`arena_reset` between calls). This bump
+# wrapper remains, suitable for one-shot use. Audit reference:
+# `docs/audit/2026-05-22-audit.md` (closed in
+# `docs/audit/2026-06-04-3.7.3-into-api-audit.md`).
 # ================================================================
 
 # Max in-quote PCK certs we'll accept. Intel's PCK chain ships as

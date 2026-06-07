@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.7.7] — 2026-06-07
+
+### Changed
+
+- **Buried-deferral sweep — surfaced genuine work, marked shipped work.**
+  Triaged all 19 deferral-vocabulary hits in `src/` (the recurring
+  "scope cut buried in a source comment" failure mode). **Genuine pending
+  work was promoted to the roadmap Backlog (not deleted):** ChaCha20 +
+  X25519 on the parallel batch path, the TDX/SGX in-quote PCK X.509 chain
+  walk, the scalar-inversion addition-chain optimization, and a
+  `bn_modexp` dead-code decision (no call sites since 3.6.6 moved RSA
+  verify+sign to `bn_mont_modexp`). **Stale comments were updated to
+  reflect work that already shipped:** Solinas P-256/P-384 (3.7.0/.1), RSA
+  signing + blinding (3.6.4), Montgomery modexp (3.6.6), the `_into`
+  caller-scratch API resolving the SGX/TDX/PEM alloc-drift LOWs (3.7.3),
+  and `pem_decode_privkey` (3.6.6). **False positives** were reduced to a
+  documented `\uXXXX` allowlist (`src/policy.cyr`) for the future
+  buried-deferral gate. Comment-only changes — no code, no behavior
+  change; suite 53 files / 1459 assertions, 0 failures.
+
+## [3.7.6] — 2026-06-07
+
+### Changed
+
+- **ML-DSA-65 (FIPS 204) post-quantum signing is now default-on.** Dropped
+  the `#ifdef SIGIL_PQC` gate in `src/lib.cyr`, so the `src/lib.cyr` build
+  path includes the mldsa surface unconditionally — matching the
+  `dist/sigil.cyr` bundle, which already bundled mldsa (via
+  `cyrius.cyml [lib].modules`, which does not honour the `#ifdef`). PQC was
+  a `-D SIGIL_PQC` cmdline opt-in through 3.7.5 because the unconditional
+  preprocessor expansion (~1,049,596 B on cc5) exceeded cyrius's 1 MB
+  preprocessor-output cap; **cyrius 6.0.87 raised that cap**, so the full
+  build now compiles clean. The `-D SIGIL_PQC` flag is retained as a
+  back-compat no-op. Binary cost: **+~40 KB** on the smoke build (1103128 →
+  1144536 bytes — the mldsa code + static NTT tables, which stay in `.bss`
+  even under `CYRIUS_DCE=1`). `programs/smoke.cyr` gains an ML-DSA-65
+  keygen → sign → verify round-trip proving the PQC surface is consumable
+  in the default build. No mldsa *code* change; the 8 `tests/tcyr/mldsa*.tcyr`
+  suites are unchanged and green (suite 53 files / 1459 assertions, 0
+  failures). Closes the roadmap "PQC-default builds" item. Updates
+  CLAUDE.md quirk #8 (preprocessor cap raised in 6.0.87).
+
 ## [3.7.5] — 2026-06-07
 
 The off-diagonal ECDSA chain-link closer (P1), plus the 6.0.87 toolchain bump.

@@ -19,7 +19,7 @@
 # Layout:
 #   +0   index           (i64, PCR index 0-23)
 #   +8   expected_digest (C-string ptr, hex)
-#   +16  actual_digest   (C-string ptr, hex, 0 = not yet read)
+#   +16  actual_digest   (C-string ptr, hex, 0 = unread)
 
 fn pcr_measurement_new(index, expected_digest): i64 {
     var m = fl_alloc(24);

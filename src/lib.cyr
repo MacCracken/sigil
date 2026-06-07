@@ -90,29 +90,21 @@ include "src/sgx.cyr"
 include "src/sev_snp.cyr"
 include "src/tdx.cyr"
 include "src/seal.cyr"
-# ML-DSA-65 (FIPS 204) — post-quantum signing.
+# ML-DSA-65 (FIPS 204) — post-quantum signing. DEFAULT-ON since 3.7.6.
 #
-# Opt-in via `-D SIGIL_PQC` at the cyrius build invocation
-# (cmdline flag, not an in-source #define — see below). The
-# mldsa chain adds ~2100 lines of Cyrius on top of the Ed25519
-# baseline. Re-measured on cc5 5.5.32:
-#   - Default build (no flag):    ~930 KB expansion, under cap
-#   - With `-D SIGIL_PQC`:        ~1,047 KB expansion, under cap
-#   - Unconditional (no #ifdef):  1,049,596 B expansion, **over cap**
-# The cmdline-`-D` path squeaks in under the 1 MB preprocessor
-# output cap by ~1 KB. Moving the define into source (via
-# `#define SIGIL_PQC 1`) or deleting the #ifdef entirely both
-# overflow the cap. The gate therefore stays as a cmdline-only
-# opt-in until cyrius raises the preprocess_out buffer beyond
-# 1 MB — tracked for a future cyrius minor; not sigil's work.
-#
-# Consumers that need PQC (daimon, kavach) pass `-D SIGIL_PQC`;
-# the default build keeps the ed25519-only surface.
-#
-# Tests reference the individual src/mldsa_*.cyr files directly
-# (see tests/tcyr/mldsa*.tcyr), so they remain exercised in CI
-# regardless of the gate.
-#ifdef SIGIL_PQC
+# The mldsa chain adds ~2100 lines of Cyrius on top of the Ed25519
+# baseline. It was a `-D SIGIL_PQC` cmdline opt-in through 3.7.5 because
+# the unconditional `src/lib.cyr` expansion (~1,049,596 B on cc5 5.5.32)
+# overflowed cyrius's 1 MB preprocessor-output cap (CLAUDE.md quirk #8).
+# Cyrius 6.0.87 raised that cap — the full unconditional sigil + mldsa
+# build now compiles clean — so the `#ifdef SIGIL_PQC` gate was dropped
+# in 3.7.6 and PQC is part of the default surface. This also makes the
+# `src/lib.cyr` build path match the `dist/sigil.cyr` bundle, which
+# always included mldsa (via `cyrius.cyml [lib].modules`, which does not
+# honour the #ifdef). The `-D SIGIL_PQC` flag is now a harmless no-op,
+# kept for back-compat. Consumers that never call the PQC surface get it
+# eliminated by the DCE release build (`CYRIUS_DCE=1`). The mldsa modules
+# are also exercised standalone by `tests/tcyr/mldsa*.tcyr`.
 include "src/mldsa_params.cyr"
 include "src/mldsa_reduce.cyr"
 include "src/mldsa_ntt.cyr"
@@ -121,7 +113,6 @@ include "src/mldsa_rounding.cyr"
 include "src/mldsa_encode.cyr"
 include "src/mldsa_sample.cyr"
 include "src/mldsa.cyr"
-#endif
 include "src/trust.cyr"
 include "src/integrity.cyr"
 include "src/policy.cyr"

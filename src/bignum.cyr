@@ -18,17 +18,20 @@
 # public exponent e -- so:
 #   * no constant-time requirement (data-dependent branches in the
 #     reduction loop are fine; there is no secret to leak). RSA *sign*
-#     (a later bite) must use blinding + a constant-time ladder; do NOT
-#     reuse `bn_modexp` for secret exponents without that work.
+#     shipped in 3.6.4 — it uses blinding + a constant-time ladder
+#     (`bn_mont_modexp`); do NOT reuse this non-CT `bn_modexp` for
+#     secret exponents.
 #   * not on the parallel batch-verify path (that is Ed25519); like
 #     sigil's HMAC/HKDF/PRF surface the working buffers are plain
 #     static function-scope scratch, single-threaded by construction.
 #     If RSA ever joins a parallel path, these need the 3.6 bank
 #     treatment (see src/crypto_scratch.cyr).
 #
-# Correctness is the bar; speed is not (schoolbook + bit-by-bit
-# reduction). A Montgomery/Barrett pass is a later perf bite, mirroring
-# the EC Solinas follow-up.
+# Correctness is the bar for this schoolbook engine; the Montgomery pass
+# shipped in 3.6.6 (`bn_mont_modexp`) and carries the live RSA verify +
+# sign paths. This bit-by-bit `bn_modexp` now has no call sites — retained
+# as the schoolbook reference (see the `bn_modexp` dead-code backlog item
+# in docs/development/roadmap.md).
 
 # Max width: 64 limbs = 4096 bits (RSA-4096). Products are 2x = 128
 # limbs. The reduction's running remainder needs 1 extra limb.

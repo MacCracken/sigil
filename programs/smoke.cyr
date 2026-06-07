@@ -37,6 +37,18 @@ fn main() {
     sigil_err_free(err);
     if (rc != ERR_NONE) { sakshi_span_exit(); return 4; }
 
+    # 5. ML-DSA-65 (FIPS 204) post-quantum round-trip. Default-on since
+    # 3.7.6 — this exercises the PQC surface in the DEFAULT build path
+    # (no `-D SIGIL_PQC`). mldsa65_verify returns 0 on a valid signature.
+    var mseed = alloc(32);
+    memset(mseed, 7, 32);
+    var mpk = alloc(MLDSA65_PK_BYTES);
+    var msk = alloc(MLDSA65_SK_BYTES);
+    mldsa65_keypair_from_seed(mseed, mpk, msk);
+    var msig = alloc(MLDSA65_SIG_BYTES);
+    mldsa65_sign(msig, "sigil", 5, msk);
+    if (mldsa65_verify(msig, "sigil", 5, mpk) != 0) { sakshi_span_exit(); return 5; }
+
     sakshi_span_exit();
     return 0;
 }

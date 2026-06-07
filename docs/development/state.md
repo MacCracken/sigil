@@ -12,12 +12,12 @@
 
 | Field | Value |
 |---|---|
-| Current version | **3.7.5** (`VERSION`) |
+| Current version | **3.7.7** (`VERSION`) |
 | Cyrius toolchain pin | **6.0.87** (`cyrius.cyml [package].cyrius`) |
 | Dependencies | agnosys **1.3.2**, sakshi **2.2.6** |
 | Last release date | 2026-06-07 |
-| Last release audit | [`2026-06-07-3.7.5-offdiag-ecdsa-audit.md`](../audit/2026-06-07-3.7.5-offdiag-ecdsa-audit.md) |
-| Phase | Released. **3.7.5 closed the P1 off-diagonal ECDSA chain-link verification and bumped the toolchain pin 6.0.62 → 6.0.87.** `_x509_verify_link` now picks the signature hash from the child's sig-algo OID and the curve/primitive from the issuer key *independently*, verifying all four `{P-256, P-384} × {SHA-256, SHA-384}` combos — including off-diagonal links (P-384 issuer + SHA-256 child, P-256 issuer + SHA-384 child). New `_ecdsa_p{256,384}_verify_digest` cores apply the FIPS 186-4 §6.4 leftmost-bits digest→scalar mapping; the public 4-arg `ecdsa_p{256,384}_verify` entries stay byte-for-byte hashing wrappers (sgx/tdx/snp/dist callers unchanged). `x509_parse_into` sizes the stored `sig_len` by the issuer curve (P-256 → 64, P-384 → 96), not the hash. 4-lens adversarial review: no false-accept, diagonal paths byte-identical. (3.7.4 had shipped the off-diagonal **parse**-side fix — the SSL.com Root ECC class — on 2026-06-06.) **Remaining v3.7:** EC scalar-mult speedup (carries ≤ 10 ms) + full bench re-run. |
+| Last release audit | [`2026-06-07-3.7.5-offdiag-ecdsa-audit.md`](../audit/2026-06-07-3.7.5-offdiag-ecdsa-audit.md) (3.7.6 build-config + 3.7.7 comment-only — no new crypto, no separate audit docs) |
+| Phase | Released. **3.7.7 was a buried-deferral sweep** — triaged all 19 deferral-vocabulary hits in `src/`: genuine pending work (ChaCha20/X25519 parallel-path, TDX chain walk, scalar-inversion addition-chain, `bn_modexp` dead-code) **promoted to the roadmap Backlog, not deleted**; stale comments referencing shipped work (Solinas, RSA sign, Montgomery, `_into`, `pem_decode_privkey`) updated; false positives reduced to a `\uXXXX` allowlist. Comment-only; no behavior change. **3.7.6** made ML-DSA-65 post-quantum signing default-on (dropped `#ifdef SIGIL_PQC`; 6.0.87 cap raise; +~40 KB smoke). **3.7.5** closed the P1 off-diagonal ECDSA chain-link verification + bumped the pin 6.0.62 → 6.0.87. **Remaining v3.7:** EC scalar-mult speedup (≤ 10 ms), the buried-deferral *gate*, + full bench re-run. |
 
 ## Test surface
 
@@ -37,6 +37,8 @@
 
 Per-cycle assertion delta:
 
+- 3.7.7 ship: +0 (buried-deferral sweep — comment-only; genuine deferrals promoted to the roadmap Backlog, stale comments marked shipped, false positives allowlisted; no source-logic or test change)
+- 3.7.6 ship: +0 (PQC default-on — build-config change, no new `.tcyr` assertions; the 8 `mldsa*.tcyr` suites were already counted, and `programs/smoke.cyr` gained a runtime ML-DSA round-trip that is not a `.tcyr` assertion)
 - 3.7.5 ship: +28 (off-diagonal ECDSA chain-link verify — `ecdsa_p256.tcyr` +4 / `ecdsa_p384.tcyr` +4: OpenSSL-ground-truth off-diagonal primitive KATs (P-256 key/SHA-384, P-384 key/SHA-256), each `openssl dgst -verify`-confirmed, incl. leftmost-bits truncation; `x509_offdiag.tcyr` +20, new — two real off-diagonal OpenSSL cert chains (`openssl verify` OK): link-verify, full-chain, issuer-curve `sig_len` 96/64, tamper + cross-issuer width rejects)
 - 3.7.4 ship: +0 (x509 off-diagonal **parse**-side fix — `ec_fw` widened to 48 on r,s overflow so a P-384/SHA-256 self-signed anchor (SSL.com Root ECC class) parses; verified against existing `x509`/`x509_p384`/`snp_verify_full` suites, no new assertions)
 - 3.7.3 ship: +14 (`_into` arena no-drift tests with a **global-heap witness** (`alloc_used()` delta == 0 across 50 reset+parse iterations): `sgx_verify_full.tcyr` +6 (orchestrator path), `x509_rsa.tcyr` +4 (RSA 544-byte block arena-routing), `x509_p384.tcyr` +4 (P-384 raw_sig arena-routing); proves no residual global-bump alloc)
@@ -71,6 +73,8 @@ Consumers that link or rely on sigil for trust verification:
 
 | Version | Date | Headline |
 |---|---|---|
+| 3.7.7 | 2026-06-07 | **Buried-deferral sweep.** Triaged all 19 deferral-vocabulary hits in `src/`. Genuine pending work **surfaced to the roadmap Backlog (not deleted)**: ChaCha20/X25519 parallel-path banking, the TDX/SGX in-quote PCK X.509 chain walk, the scalar-inversion addition-chain, and a `bn_modexp` dead-code decision. Stale comments referencing shipped work (Solinas, RSA sign, Montgomery, `_into`, `pem_decode_privkey`) updated to mark them shipped. False positives reduced to a documented `\uXXXX` allowlist for the future buried-deferral gate. Comment-only — no code change, suite unchanged at 53 files / 1459 assertions. |
+| 3.7.6 | 2026-06-07 | **ML-DSA-65 post-quantum signing is now default-on.** Dropped the `#ifdef SIGIL_PQC` gate in `src/lib.cyr` — cyrius 6.0.87 raised the 1 MB preprocessor cap that had forced the `-D SIGIL_PQC` opt-in. The `dist` bundle already bundled mldsa (via `[lib].modules`), so this only changed the `src/lib.cyr` build path; `-D SIGIL_PQC` is now a back-compat no-op. +~40 KB smoke binary (mldsa code + `.bss` NTT tables, retained under DCE). `programs/smoke.cyr` gains an ML-DSA keygen→sign→verify round-trip. No mldsa code change; the 8 `mldsa*.tcyr` suites unchanged. Closes the roadmap "PQC-default builds" item; updates CLAUDE.md quirk #8. |
 | 3.7.5 | 2026-06-07 | **Off-diagonal ECDSA chain-link verification (P1 complete) + toolchain pin 6.0.62 → 6.0.87.** `_x509_verify_link` decouples the signature hash (child sig-algo OID) from the issuer curve, verifying all four `{P-256, P-384} × {SHA-256, SHA-384}` combos — off-diagonal links included (P-384 issuer + SHA-256 child, P-256 issuer + SHA-384 child). New `_ecdsa_p{256,384}_verify_digest` cores apply the FIPS 186-4 §6.4 leftmost-bits digest→scalar mapping; the public 4-arg `ecdsa_p{256,384}_verify` entries stay byte-for-byte hashing wrappers (sgx/tdx/snp/dist unchanged). `x509_parse_into` sizes `sig_len` by the issuer curve (64/96), not the hash, and reuses one 96-byte scratch across the widen retry (no drift). +28 assertions (off-diagonal primitive KATs + new `x509_offdiag.tcyr` with two real OpenSSL cert chains). 4-lens adversarial review: no false-accept, diagonals byte-identical. Pin 6.0.62→6.0.87. Audit: `docs/audit/2026-06-07-3.7.5-offdiag-ecdsa-audit.md`. |
 | 3.7.4 | 2026-06-06 | **x509 off-diagonal ECDSA parse-side fix.** `x509_parse_into` derived the ECDSA signature width `ec_fw` from the signature *hash*, but the r,s width is the *issuer key's curve* — so a P-384 key self-signing with ecdsa-with-SHA256 (the **SSL.com Root ECC CA** + ~12 OS-trust-store roots, which root Cloudflare's `one.one.one.one` chain) overflowed `ec_fw=32` and was silently dropped from the trust store. Fixed by starting at the hash-derived width and retrying once at 48 on r,s overflow — discovering the issuer curve from the signature itself (not the cert's own key, which would mis-size the SEV-SNP VCEK). The off-diagonal **verify** side remained a P1 follow-up (shipped 3.7.5). +0 assertions (Fixed-only; verified against existing x509/x509_p384/snp suites). Issue: `docs/development/issues/2026-06-06-x509-off-diagonal-ecdsa-verify.md`. |
 | 3.7.3 | 2026-06-04 | **Caller-scratch `_into` API — audit floor cleared (8 LOW → 0).** `x509_parse_into`/`x509_cert_alloc_into` + `sgx`/`tdx`/`snp` `*_verify_full_into` draw per-call scratch from a caller arena (stdlib `arena_new`; `arena_reset` between calls) — drift-free for a looping consumer; the original entries are byte-for-byte `arena==0` wrappers. 4 genuine-drift LOWs resolved via `_into`; 4 init-once LOWs reclassified as correct. +14 assertions (50× no-drift loops with `alloc_used()` global-heap witness across the orchestrator + RSA + P-384 paths). Audit: `docs/audit/2026-06-04-3.7.3-into-api-audit.md`. |
@@ -100,21 +104,23 @@ list).
 
 | Slot | State | Notes |
 |---|---|---|
-| 3.7.6 — EC scalar-mult speedup | pending (next) | Fixed-base comb for `G` + wNAF for `Q`; **carries the ≤ 10 ms `ecdsa_p256_verify` target** (Solinas reduction alone reached 26 ms P-256 / 55 ms P-384). |
+| 3.7.6 — PQC default-on | **completed** | ML-DSA-65 default-on; `#ifdef SIGIL_PQC` gate dropped (6.0.87 cap raise). Shipped 2026-06-07. |
+| 3.7.7 — buried-deferral sweep | **completed** | Triaged all 19 `src/` deferral-vocabulary hits: genuine pending work (ChaCha20/X25519 parallel, TDX chain walk, scalar-inversion addition-chain, `bn_modexp` dead-code) **surfaced to the roadmap Backlog** (not deleted); stale comments referencing shipped work (Solinas, RSA sign, Montgomery, `_into`, `pem_decode_privkey`) updated; false positives reduced to a `\uXXXX` allowlist. Shipped 2026-06-07. |
+| 3.7.x — buried-deferral gate | committed | Grep `src/` for deferral vocabulary not cross-referenced by the roadmap; report mode first, flip to fail once the (now-clean, post-3.7.7) tree + the `\uXXXX` allowlist are wired in. |
+| 3.7.x — EC scalar-mult speedup | pending | Fixed-base comb for `G` + wNAF for `Q`; **carries the ≤ 10 ms `ecdsa_p256_verify` target** (now ~24 ms P-256 / 51 ms P-384 on 6.0.87). |
 | 3.7.x — full crypto bench re-run | pending | Capture before/after rows for every verify-path bench at the cycle close. |
-| 3.7.x — buried-deferral gate | committed (next release) | Grep `src/` for deferral vocabulary not cross-referenced by the roadmap; report mode first. Tree is **not** yet clean (~9 uncatalogued deferral comments surfaced 2026-06-07). |
 
 The 3.6.x cyrius-native-TLS arc is **closed** (3.6.0–3.6.8). The **v3.7
 cycle is OPEN**: Solinas P-256 (3.7.0), Solinas P-384 (3.7.1), AES-GCM
 arbitrary IVs (3.7.2), the caller-scratch `_into` API + audit-floor clear
 (3.7.3), the x509 off-diagonal ECDSA **parse** fix (3.7.4) and **verify**
-closer + pin 6.0.62→6.0.87 (3.7.5) shipped. **Next: EC scalar-mult
-speedup** (the ≤ 10 ms target) + the buried-deferral gate (maintainer's
-pick of order). Backlog: the bank-retire / CLMUL-GHASH / NI-dispatch
-items remain blocked on cyrius `asm`/thread-local-array features still
-absent in 6.0.87 (re-checked at the pin bump; the 1 MB preprocessor cap
-that gated PQC-default **appears lifted** in 6.0.87 — unconditional mldsa
-now builds, pending a decision to drop the `-D SIGIL_PQC` gate).
+closer + pin 6.0.62→6.0.87 (3.7.5), **PQC default-on** (3.7.6), and the
+**buried-deferral sweep** (3.7.7) shipped. **Remaining: the EC scalar-mult
+speedup, the buried-deferral gate, and the bench re-run** close the cycle.
+Backlog: bank-retire / CLMUL-GHASH / NI-dispatch remain blocked on cyrius
+`asm`/thread-local-array features still absent in 6.0.87; plus the work
+surfaced from the 3.7.7 sweep (ChaCha20/X25519 parallel, TDX chain walk,
+scalar-inversion addition-chain, `bn_modexp` dead-code decision).
 
 When a cycle is opened, list each work-item bite here as it
 moves through `pending → in_progress → completed`. The release

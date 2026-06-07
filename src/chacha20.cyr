@@ -15,9 +15,10 @@
 # THREAD-SAFETY: the `chacha20_block` working state lives in
 # function-scope `var` arrays (Cyrius static globals, quirk #1);
 # each call fully writes them before reading, so serial use is
-# correct. Multi-threaded callers follow the per-worker-scratch
-# discipline of the v3.6 cycle — ChaCha20 is not yet on a parallel
-# path.
+# correct. ChaCha20 is not on the parallel batch path; if a consumer
+# puts it there, give it the v3.6 per-worker bank treatment — tracked
+# as a roadmap backlog item ("ChaCha20 + X25519 on the parallel batch
+# path").
 #
 # Citation: RFC 8439 §2.1 (quarter round), §2.3 (block function),
 # §2.3.2 / §2.4.2 (test vectors). See docs/sources.md.

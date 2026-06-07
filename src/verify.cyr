@@ -1025,8 +1025,8 @@ fn sv_save_trust_store(sv, path): i64 {
 #   function-scope global**, NOT a stack-local (CLAUDE.md quirk
 #   #1) — so the crypto primitives' transient working arrays are
 #   shared across threads. That was the sole remaining reason for
-#   the mutex, and the mutex-drop was deferred until there was a
-#   way to give each worker its own working state.
+#   the mutex, which remained in place until there was a way to give
+#   each worker its own working state.
 # - 3.6 drops the mutex. cyrius 6.0.52 shipped thread-local storage
 #   (lib/thread_local.cyr); src/crypto_scratch.cyr uses it to give
 #   each worker a private *bank* (lane) of every racing crypto

@@ -23,7 +23,7 @@ Sigil is the **single crypto / trust boundary** for AGNOS. It owns:
 - SHA-256 / SHA-384 / SHA-512 hashing (file integrity, signature schemes)
 - HMAC-SHA256 (RFC 2104) and HKDF-SHA256 (RFC 5869)
 - AES-256-GCM (FIPS 197 + NIST SP 800-38D) AEAD
-- ML-DSA-65 (FIPS 204) post-quantum signing (opt-in via `-D SIGIL_PQC`)
+- ML-DSA-65 (FIPS 204) post-quantum signing (default-on since 3.7.6; `-D SIGIL_PQC` is now a back-compat no-op)
 - X.509 + PEM parsing for TEE attestation
 - TEE attestation orchestrators for Intel SGX DCAP v3, Intel TDX v4, AMD SEV-SNP
 - Trust chain: boot chain → agent binaries → configs → packages
@@ -163,7 +163,7 @@ Most cc3-era workarounds documented in earlier sigil versions are now resolved u
 5. **Fixup-table cap: 16384** — up from 8192 in cc3. Individual `store8` init blocks of 256+ entries can hit this; see `src/aes_gcm.cyr`'s S-box init for the workaround (decode from hex string literal).
 6. **Array globals are 16-byte-aligned (since 5.5.21)** — any `var X[N]` with N > 8 lands on a 16-byte boundary. Removes the prior SSE-load #GP shape sensitivity for AES-NI round-key globals.
 7. **Stdlib thread-safety (5.5.31/32)** — atomics + race-free mutex are available; `string.cyr` is safe by construction. **But:** `alloc`, `hashmap`, and `vec` are NOT thread-safe. Multi-threaded sigil paths must pre-allocate per-worker scratch on the main thread before spawn.
-8. **Preprocessor output cap: 1 MB** — sigil + stdlib + agnosys + mldsa expansion sits right at the cap. PQC stays a cmdline-opt-in (`-D SIGIL_PQC`) until cyrius raises this buffer.
+8. **Preprocessor output cap (was 1 MB, raised in cyrius 6.0.87)** — through 3.7.5 the sigil + stdlib + agnosys + mldsa expansion sat just over the 1 MB cap, so PQC was a `-D SIGIL_PQC` cmdline opt-in. **6.0.87 raised the cap**: the full unconditional build now compiles clean, so **3.7.6 made PQC default-on** (dropped the `#ifdef SIGIL_PQC` in `src/lib.cyr`; the flag is now a no-op). The `dist/sigil.cyr` bundle always included mldsa (via `[lib].modules`), so this only changed the `src/lib.cyr` build path. If a future stdlib growth re-approaches the cap, re-gate or split the bundle.
 
 ## CI / Release
 

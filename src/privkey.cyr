@@ -30,9 +30,9 @@
 #   - Fixed-length scalar copy left-pads short values and rejects
 #     over-length ones — no buffer overrun on a malformed length.
 
-# Private-key algorithm tags (returned by pem_decode_privkey in the
-# PEM follow-up; defined here so the DER layer and the PEM layer
-# share one vocabulary).
+# Private-key algorithm tags (returned by pem_decode_privkey, shipped
+# 3.6.6; defined here so the DER layer and the PEM layer share one
+# vocabulary).
 var SIG_PRIVKEY_UNKNOWN    = 0;
 var SIG_PRIVKEY_ED25519    = 1;
 var SIG_PRIVKEY_ECDSA_P256 = 2;

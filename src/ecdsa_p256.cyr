@@ -140,9 +140,9 @@ fn u256_store_be(dst, src): i64 {
 # R < p again, restoring the loop invariant.
 #
 # 256 iterations × ~12 limb ops per iteration — slow but trivially
-# correct. A Solinas word-level reduction is the natural follow-up
-# optimisation for the 3.2.x cycle's bench tuning pass once the
-# arithmetic surface is well-exercised by tests.
+# correct. The Solinas word-level reduction that superseded this on the
+# hot path shipped in 3.7.0 (`_p256_solinas_reduce`); this long-division
+# form is retained as the differential-KAT reference.
 # ================================================================
 
 # Process bits 255 .. 0 of `lo` into accumulator R (mod p),
@@ -403,8 +403,8 @@ fn pt_is_on_curve(x, y): i64 {
 # Generic square-and-multiply over the 256-bit exponent p-2.
 # Cost: 256 squarings + ~128 multiplies (Hamming weight of p-2 ≈ 128).
 # An addition-chain optimisation (à la `fp_inv` in `bigint_ext.cyr`)
-# can drop this to ~265 muls; deferred to the 3.2.x bench-tuning
-# pass once verify is end-to-end green.
+# can drop this to ~265 muls — tracked as the "scalar-inversion
+# addition-chain" backlog item in docs/development/roadmap.md.
 # ================================================================
 
 var _p256_inv_tmp = 0;
@@ -943,7 +943,7 @@ fn pt_scalarmul(out, k, P): i64 {
 #
 # Inputs:
 #   pk    — 64 bytes, Qx || Qy (big-endian)
-#   msg   — message bytes (caller has not yet hashed)
+#   msg   — raw message bytes (this entry hashes them internally)
 #   sig   — 64 bytes, r || s   (big-endian)
 #
 # Algorithm:
