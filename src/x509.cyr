@@ -920,10 +920,20 @@ fn x509_parse_into(der, der_len, out_cert, arena): i64 {
     var inner_sig_off = sb_cp + 1;
     var inner_sig_len = sb_len - 1;
 
-    # ECDSA field width by algorithm: P-256/SHA-256 = 32, P-384/SHA-384 = 48.
+    # ECDSA signature field width. The hash algo (SHA-256/384) is only a
+    # PROXY for the issuer's curve order size; the real r,s width is the
+    # ISSUER's curve, which we can't see here. The hash proxy holds for the
+    # common diagonal cases, but a P-384 key signing with ecdsa-with-SHA256
+    # (e.g. the SSL.com Root ECC and ~12 other public roots) has 48-byte r,s
+    # — ec_fw=32 would reject the cert at parse. Widen to the cert's OWN key
+    # curve when it is larger: self-signed anchors (issuer == self) then parse,
+    # and a P-256 cert signed by a P-384 issuer already gets 48 via SHA-384.
     var ec_fw = 0;
     if (outer_algo == X509_SIG_ECDSA_SHA256) { ec_fw = 32; }
     if (outer_algo == X509_SIG_ECDSA_SHA384) { ec_fw = 48; }
+    if (ec_fw > 0) {
+        if (x509_cert_curve(out_cert) == X509_CURVE_P384) { ec_fw = 48; }
+    }
 
     if (ec_fw > 0) {
         # ECDSA: the BIT STRING wraps a DER SEQUENCE of two INTEGERs.

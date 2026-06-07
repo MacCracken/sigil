@@ -7,7 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-(none — tip is 3.7.3.)
+## [3.7.4] — 2026-06-06
+
+### Fixed
+
+- **`x509_parse` rejected real-world ECDSA roots whose key curve is wider than their
+  signature hash** — e.g. the **SSL.com Root Certification Authority ECC** (P-384 key,
+  self-signed with ecdsa-with-SHA256) and ~12 other public roots in a typical OS trust
+  store. The signature field width `ec_fw` was derived from the signature *hash* algorithm
+  (SHA-256 → 32, SHA-384 → 48), but the r,s width is actually the **issuer key's curve**.
+  A P-384 key signing with SHA-256 has 48-byte r,s, which `ec_fw = 32` could not hold, so
+  `_ecdsa_der_int_w` failed and `x509_parse` returned 0 — silently dropping the root from
+  any consumer's trust store and breaking otherwise-valid chains (e.g. Cloudflare's
+  `one.one.one.one` chain, which roots at the SSL.com ECC CA). Now `ec_fw` widens to 48
+  when the cert's own key curve is P-384, so self-signed P-384 anchors parse. Verified: the
+  full live Cloudflare → SSL.com chain now validates through a real OS trust store, with no
+  regression to the existing P-256/P-384 suites. (`src/x509.cyr` `x509_parse_into`.)
+  Reported by the cyrius native-TLS Mini-arc E real-peer dev-check.
+
+  Note: `_x509_verify_link` still couples hash↔curve (ECDSA-SHA256 ⟹ P-256 issuer,
+  ECDSA-SHA384 ⟹ P-384 issuer), so sigil cannot yet *verify* an off-diagonal chain link
+  (a P-384 key signing a child with SHA-256). That is not needed for cloudflare-class
+  chains, where the only off-diagonal cert is the trust anchor (never link-verified).
+  Full off-diagonal ECDSA support is a follow-up.
 
 ## [3.7.3] — 2026-06-04
 
