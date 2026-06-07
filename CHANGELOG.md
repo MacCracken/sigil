@@ -19,11 +19,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A P-384 key signing with SHA-256 has 48-byte r,s, which `ec_fw = 32` could not hold, so
   `_ecdsa_der_int_w` failed and `x509_parse` returned 0 — silently dropping the root from
   any consumer's trust store and breaking otherwise-valid chains (e.g. Cloudflare's
-  `one.one.one.one` chain, which roots at the SSL.com ECC CA). Now `ec_fw` widens to 48
-  when the cert's own key curve is P-384, so self-signed P-384 anchors parse. Verified: the
-  full live Cloudflare → SSL.com chain now validates through a real OS trust store, with no
-  regression to the existing P-256/P-384 suites. (`src/x509.cyr` `x509_parse_into`.)
-  Reported by the cyrius native-TLS Mini-arc E real-peer dev-check.
+  `one.one.one.one` chain, which roots at the SSL.com ECC CA). Fixed by **starting from the
+  hash-derived width and retrying once at 48 if the r,s actually overflow** — discovering the
+  issuer's curve from the signature itself, rather than guessing it from the cert's own key
+  (which would mis-size a P-384 leaf signed by a P-256 issuer — the SEV-SNP VCEK — whose r,s
+  are 32-byte and whose `verify_link` requires `sig_len == 64`). Verified: the full live
+  Cloudflare → SSL.com chain validates through a real OS trust store, **and** the existing
+  P-256/P-384 + SEV-SNP suites (`x509_p384`, `snp_verify_full`, `x509`) all pass.
+  (`src/x509.cyr` `x509_parse_into`.) Reported by the cyrius native-TLS Mini-arc E real-peer
+  dev-check.
 
   Note: `_x509_verify_link` still couples hash↔curve (ECDSA-SHA256 ⟹ P-256 issuer,
   ECDSA-SHA384 ⟹ P-384 issuer), so sigil cannot yet *verify* an off-diagonal chain link
