@@ -12,12 +12,12 @@
 
 | Field | Value |
 |---|---|
-| Current version | **3.7.7** (`VERSION`) |
-| Cyrius toolchain pin | **6.0.87** (`cyrius.cyml [package].cyrius`) |
+| Current version | **3.7.8** (`VERSION`) |
+| Cyrius toolchain pin | **6.1.20** (`cyrius.cyml [package].cyrius`) |
 | Dependencies | agnosys **1.3.2**, sakshi **2.2.6** |
-| Last release date | 2026-06-07 |
-| Last release audit | [`2026-06-07-3.7.5-offdiag-ecdsa-audit.md`](../audit/2026-06-07-3.7.5-offdiag-ecdsa-audit.md) (3.7.6 build-config + 3.7.7 comment-only — no new crypto, no separate audit docs) |
-| Phase | Released. **3.7.7 was a buried-deferral sweep** — triaged all 19 deferral-vocabulary hits in `src/`: genuine pending work (ChaCha20/X25519 parallel-path, TDX chain walk, scalar-inversion addition-chain, `bn_modexp` dead-code) **promoted to the roadmap Backlog, not deleted**; stale comments referencing shipped work (Solinas, RSA sign, Montgomery, `_into`, `pem_decode_privkey`) updated; false positives reduced to a `\uXXXX` allowlist. Comment-only; no behavior change. **3.7.6** made ML-DSA-65 post-quantum signing default-on (dropped `#ifdef SIGIL_PQC`; 6.0.87 cap raise; +~40 KB smoke). **3.7.5** closed the P1 off-diagonal ECDSA chain-link verification + bumped the pin 6.0.62 → 6.0.87. **Remaining v3.7:** EC scalar-mult speedup (≤ 10 ms), the buried-deferral *gate*, + full bench re-run. |
+| Last release date | 2026-06-09 |
+| Last release audit | [`2026-06-07-3.7.5-offdiag-ecdsa-audit.md`](../audit/2026-06-07-3.7.5-offdiag-ecdsa-audit.md) (3.7.6 build-config + 3.7.7 comment-only + 3.7.8 docs/asm-pseudo/pin — no new crypto, no separate audit docs) |
+| Phase | Released. **3.7.8 resolved the cyrius-6.1.20 bundle-consumer SIGILL** reported as an NI re-break. Root cause was NOT the asm `[rbp-N]` param-load drift but **missing opt-in stdlib deps in bundle builds**: cyrius stdlib is opt-in, and a consumer including only `dist/sigil.cyr` leaves `thread_local_*` / `ct_eq_bytes_lens` / `shake256` undefined → cyrius 6.1.x emits `ud2` → SIGILL on the first banked crypto call (`sha256`/`ed25519`/`aes`). Fixed by documenting all four required includes (`lib/ct.cyr`, `lib/keccak.cyr`, `lib/thread.cyr`, `lib/thread_local.cyr`) in the README "Usage" section. Belt-and-suspenders: the long-queued NI structural fix landed — `sha_ni.cyr`/`aes_ni.cyr` migrated off hardcoded `mov r__, [rbp-N]` loads to the `param_load(reg, idx)` pseudo (cyrius 6.0.67+). Pin 6.0.87 → 6.1.20. **3.7.7 was a buried-deferral sweep** — triaged all 19 deferral-vocabulary hits in `src/`: genuine pending work (ChaCha20/X25519 parallel-path, TDX chain walk, scalar-inversion addition-chain, `bn_modexp` dead-code) **promoted to the roadmap Backlog, not deleted**; stale comments referencing shipped work (Solinas, RSA sign, Montgomery, `_into`, `pem_decode_privkey`) updated; false positives reduced to a `\uXXXX` allowlist. Comment-only; no behavior change. **3.7.6** made ML-DSA-65 post-quantum signing default-on (dropped `#ifdef SIGIL_PQC`; 6.0.87 cap raise; +~40 KB smoke). **3.7.5** closed the P1 off-diagonal ECDSA chain-link verification + bumped the pin 6.0.62 → 6.0.87. **Remaining v3.7:** EC scalar-mult speedup (≤ 10 ms), the buried-deferral *gate*, + full bench re-run. |
 
 ## Test surface
 
@@ -37,6 +37,7 @@
 
 Per-cycle assertion delta:
 
+- 3.7.8 ship: +0 (cyrius-6.1.20 bundle-consumer SIGILL fix — README docs for the four required opt-in stdlib includes + NI `param_load` structural migration + pin 6.0.87→6.1.20; no source-logic or test change. Suite unchanged at 53 files / 1459 assertions, 0 failures; verified under cycc 6.1.20 incl. a bundle-repro consumer: `sha256("abc")[0]==0xba`, Ed25519 sign→verify→tamper-reject)
 - 3.7.7 ship: +0 (buried-deferral sweep — comment-only; genuine deferrals promoted to the roadmap Backlog, stale comments marked shipped, false positives allowlisted; no source-logic or test change)
 - 3.7.6 ship: +0 (PQC default-on — build-config change, no new `.tcyr` assertions; the 8 `mldsa*.tcyr` suites were already counted, and `programs/smoke.cyr` gained a runtime ML-DSA round-trip that is not a `.tcyr` assertion)
 - 3.7.5 ship: +28 (off-diagonal ECDSA chain-link verify — `ecdsa_p256.tcyr` +4 / `ecdsa_p384.tcyr` +4: OpenSSL-ground-truth off-diagonal primitive KATs (P-256 key/SHA-384, P-384 key/SHA-256), each `openssl dgst -verify`-confirmed, incl. leftmost-bits truncation; `x509_offdiag.tcyr` +20, new — two real off-diagonal OpenSSL cert chains (`openssl verify` OK): link-verify, full-chain, issuer-curve `sig_len` 96/64, tamper + cross-issuer width rejects)
@@ -73,6 +74,7 @@ Consumers that link or rely on sigil for trust verification:
 
 | Version | Date | Headline |
 |---|---|---|
+| 3.7.8 | 2026-06-09 | **cyrius-6.1.20 bundle-consumer SIGILL fixed — reported NI re-break was mis-diagnosed.** A downstream hit SIGILL/exit-132 on `sha256`/`ed25519_*` (software `sha1` fine) building against `dist/sigil.cyr` under cycc 6.1.x. gdb proved the fault is a cyrius `ud2`, not asm `[rbp-N]` drift: the banked crypto hot path runs `cbank()`→`thread_local_*` on every call, verify runs `ct_eq_bytes_lens`, ML-DSA runs `shake256` — all **opt-in** cyrius stdlib the bundle doesn't carry, so a bundle-only consumer leaves them undefined and cyrius 6.1.x compiles each to `ud2`. **Fix: README "Usage" now documents all four required includes** (`lib/ct.cyr`, `lib/keccak.cyr`, `lib/thread.cyr`, `lib/thread_local.cyr`) and warns it's a runtime crash, not a build error. Belt-and-suspenders: the queued NI structural fix landed — `sha_ni.cyr`/`aes_ni.cyr` moved off hardcoded `mov r__, [rbp-N]` loads to the `param_load(reg,idx)` pseudo (6.0.67+). Pin 6.0.87→6.1.20. Suite 1459/1459, bundle repro exits 0 with correct digests. Issue: `docs/development/issues/2026-06-09-cyrius-6120-rebreaks-ni-paths-sigill.md`. |
 | 3.7.7 | 2026-06-07 | **Buried-deferral sweep.** Triaged all 19 deferral-vocabulary hits in `src/`. Genuine pending work **surfaced to the roadmap Backlog (not deleted)**: ChaCha20/X25519 parallel-path banking, the TDX/SGX in-quote PCK X.509 chain walk, the scalar-inversion addition-chain, and a `bn_modexp` dead-code decision. Stale comments referencing shipped work (Solinas, RSA sign, Montgomery, `_into`, `pem_decode_privkey`) updated to mark them shipped. False positives reduced to a documented `\uXXXX` allowlist for the future buried-deferral gate. Comment-only — no code change, suite unchanged at 53 files / 1459 assertions. |
 | 3.7.6 | 2026-06-07 | **ML-DSA-65 post-quantum signing is now default-on.** Dropped the `#ifdef SIGIL_PQC` gate in `src/lib.cyr` — cyrius 6.0.87 raised the 1 MB preprocessor cap that had forced the `-D SIGIL_PQC` opt-in. The `dist` bundle already bundled mldsa (via `[lib].modules`), so this only changed the `src/lib.cyr` build path; `-D SIGIL_PQC` is now a back-compat no-op. +~40 KB smoke binary (mldsa code + `.bss` NTT tables, retained under DCE). `programs/smoke.cyr` gains an ML-DSA keygen→sign→verify round-trip. No mldsa code change; the 8 `mldsa*.tcyr` suites unchanged. Closes the roadmap "PQC-default builds" item; updates CLAUDE.md quirk #8. |
 | 3.7.5 | 2026-06-07 | **Off-diagonal ECDSA chain-link verification (P1 complete) + toolchain pin 6.0.62 → 6.0.87.** `_x509_verify_link` decouples the signature hash (child sig-algo OID) from the issuer curve, verifying all four `{P-256, P-384} × {SHA-256, SHA-384}` combos — off-diagonal links included (P-384 issuer + SHA-256 child, P-256 issuer + SHA-384 child). New `_ecdsa_p{256,384}_verify_digest` cores apply the FIPS 186-4 §6.4 leftmost-bits digest→scalar mapping; the public 4-arg `ecdsa_p{256,384}_verify` entries stay byte-for-byte hashing wrappers (sgx/tdx/snp/dist unchanged). `x509_parse_into` sizes `sig_len` by the issuer curve (64/96), not the hash, and reuses one 96-byte scratch across the widen retry (no drift). +28 assertions (off-diagonal primitive KATs + new `x509_offdiag.tcyr` with two real OpenSSL cert chains). 4-lens adversarial review: no false-accept, diagonals byte-identical. Pin 6.0.62→6.0.87. Audit: `docs/audit/2026-06-07-3.7.5-offdiag-ecdsa-audit.md`. |
@@ -106,6 +108,7 @@ list).
 |---|---|---|
 | 3.7.6 — PQC default-on | **completed** | ML-DSA-65 default-on; `#ifdef SIGIL_PQC` gate dropped (6.0.87 cap raise). Shipped 2026-06-07. |
 | 3.7.7 — buried-deferral sweep | **completed** | Triaged all 19 `src/` deferral-vocabulary hits: genuine pending work (ChaCha20/X25519 parallel, TDX chain walk, scalar-inversion addition-chain, `bn_modexp` dead-code) **surfaced to the roadmap Backlog** (not deleted); stale comments referencing shipped work (Solinas, RSA sign, Montgomery, `_into`, `pem_decode_privkey`) updated; false positives reduced to a `\uXXXX` allowlist. Shipped 2026-06-07. |
+| 3.7.8 — cyrius-6.1.20 bundle-consumer SIGILL fix | **completed** | Reported NI re-break was missing **opt-in** stdlib deps in bundle builds (`thread_local_*`/`ct_*`/`shake256` → `ud2` → SIGILL), NOT asm `[rbp-N]` drift. Fixed via README docs for the four required includes; belt-and-suspenders NI `param_load` structural migration; pin 6.0.87→6.1.20. Shipped 2026-06-09. |
 | 3.7.x — buried-deferral gate | committed | Grep `src/` for deferral vocabulary not cross-referenced by the roadmap; report mode first, flip to fail once the (now-clean, post-3.7.7) tree + the `\uXXXX` allowlist are wired in. |
 | 3.7.x — EC scalar-mult speedup | pending | Fixed-base comb for `G` + wNAF for `Q`; **carries the ≤ 10 ms `ecdsa_p256_verify` target** (now ~24 ms P-256 / 51 ms P-384 on 6.0.87). |
 | 3.7.x — full crypto bench re-run | pending | Capture before/after rows for every verify-path bench at the cycle close. |
@@ -114,11 +117,14 @@ The 3.6.x cyrius-native-TLS arc is **closed** (3.6.0–3.6.8). The **v3.7
 cycle is OPEN**: Solinas P-256 (3.7.0), Solinas P-384 (3.7.1), AES-GCM
 arbitrary IVs (3.7.2), the caller-scratch `_into` API + audit-floor clear
 (3.7.3), the x509 off-diagonal ECDSA **parse** fix (3.7.4) and **verify**
-closer + pin 6.0.62→6.0.87 (3.7.5), **PQC default-on** (3.7.6), and the
-**buried-deferral sweep** (3.7.7) shipped. **Remaining: the EC scalar-mult
-speedup, the buried-deferral gate, and the bench re-run** close the cycle.
-Backlog: bank-retire / CLMUL-GHASH / NI-dispatch remain blocked on cyrius
-`asm`/thread-local-array features still absent in 6.0.87; plus the work
+closer + pin 6.0.62→6.0.87 (3.7.5), **PQC default-on** (3.7.6), the
+**buried-deferral sweep** (3.7.7), and the **cyrius-6.1.20 bundle-consumer
+SIGILL fix** (3.7.8 — README opt-in-include docs + NI `param_load` structural
+fix + pin 6.0.87→6.1.20) shipped. **Remaining: the EC scalar-mult speedup,
+the buried-deferral gate, and the bench re-run** close the cycle. Backlog:
+bank-retire / CLMUL-GHASH remain blocked on cyrius `asm` global-symbol /
+thread-local-array features still absent in 6.1.20 (the **NI-dispatch
+structural fix shipped in 3.7.8** via the `param_load` pseudo); plus the work
 surfaced from the 3.7.7 sweep (ChaCha20/X25519 parallel, TDX chain walk,
 scalar-inversion addition-chain, `bn_modexp` dead-code decision).
 

@@ -132,18 +132,23 @@ for the full module map and data flow.
 Sigil is consumed as a vendored distlib: `cyrius deps` resolves it into your
 `lib/sigil.cyr`, which you then `include`.
 
-**Since 3.6, two stdlib modules must be `include`d _before_ `lib/sigil.cyr`** —
-and they are *not* part of the cyrius auto-prepend union (the base stdlib —
-`string`/`alloc`/`str`/`vec`/`io`/… — is, so those stay automatic). This is the
-same opt-in pattern as [mabda](https://github.com/MacCracken/mabda)'s manual
-deps:
+**Four stdlib modules must be `include`d _before_ `lib/sigil.cyr`.** They are
+*not* part of the cyrius auto-prepend union — cyrius stdlib is **opt-in**, not
+auto-associated. The base stdlib (`string`/`alloc`/`str`/`vec`/`io`/…) *is* in
+the auto union, so those stay automatic; these four are not, and sigil's bundle
+deliberately does **not** carry them (it bundles only sigil's own crypto/trust
+modules, leaving lib selection to you). This is the same opt-in pattern as
+[mabda](https://github.com/MacCracken/mabda)'s manual deps:
 
 ```cyrius
+include "lib/ct.cyr"             # ct_eq_bytes / ct_eq_bytes_lens / ct_select — every constant-time compare (all verify paths)
+include "lib/keccak.cyr"         # shake256 / _keccak_* — ML-DSA-65 post-quantum signing (default-on since 3.7.6)
 include "lib/thread.cyr"         # thread_create / thread_join — parallel-batch verify
 include "lib/thread_local.cyr"   # thread_local_init/get/set — per-thread crypto banks
 include "lib/sigil.cyr"          # sigil itself — MUST come last
 
 fn main(): i64 {
+    alloc_init();
     # build a PublisherKeyring + TrustPolicy, then:
     var sv = sigil_verifier_new(keyring, policy);
     var r = sv_verify_agent(sv, "/path/to/agent");
@@ -152,21 +157,34 @@ fn main(): i64 {
 }
 ```
 
-**Why it's now required (and why ≤ 3.5.x consumers break on upgrade):** 3.6
-replaced the `_sigil_batch_mutex` with per-thread crypto-scratch *banks* backed
-by thread-local storage (the threading-safety contract at the top of
-`dist/sigil.cyr` has the full mechanism). `cbank()` is on the hot path of
-**every** banked primitive (`sha_ni` onward) and lazily calls
-`thread_local_init()`, so even a single *serial* `sv_verify_*` reaches it — the
-dependency is unconditional, not parallel-batch-only. Omitting the includes
-fails the build with `undefined variable 'thread_local_init'` (or
-`'thread_create'`) sourced from inside `sigil.cyr`.
+**Why these four are required:**
+
+- **`lib/ct.cyr`** — `ct_eq_bytes_lens` / `ct_select` back **every** constant-time
+  comparison: Ed25519/ECDSA verify, HMAC/AEAD tag checks, hash compares.
+- **`lib/keccak.cyr`** — `shake256` drives ML-DSA-65, which is **default-on since
+  3.7.6** (the `-D SIGIL_PQC` gate was dropped). Required even if you never call
+  the PQC surface, unless you DCE it out (`CYRIUS_DCE=1`).
+- **`lib/thread.cyr` / `lib/thread_local.cyr`** — 3.6 replaced the
+  `_sigil_batch_mutex` with per-thread crypto-scratch *banks* backed by
+  thread-local storage. `cbank()` is on the hot path of **every** banked
+  primitive (`sha_ni` onward) and lazily calls `thread_local_init()`, so even a
+  single *serial* `sha256` / `ed25519_verify` / `sv_verify_*` reaches it — the
+  dependency is unconditional, not parallel-batch-only.
+
+> ⚠️ **Omitting any of these is a runtime crash, not a build failure.** Cyrius
+> only *warns* on an undefined function (`undefined function 'thread_local_init'`,
+> `'ct_eq_bytes_lens'`, `'shake256'`, …) and compiles the call site to a `ud2`
+> trap. Under **cyrius 6.1.x** that means the program builds, then **SIGILLs
+> (exit 132)** the moment a crypto path touches the missing symbol — e.g.
+> `sha256("abc")` dies while software `sha1` runs fine. Add the four includes
+> above and the crash disappears. (This was the 3.7.8 fix; see
+> `docs/development/issues/2026-06-09-cyrius-6120-rebreaks-ni-paths-sigill.md`.)
 
 Requires **cyrius ≥ 6.0.52** (the release that shipped `lib/thread_local.cyr`).
 
 ## Tests
 
-1334 assertions across 50 test files, 0 failures (3.6.4). Crypto
+1459 assertions across 53 test files, 0 failures (3.7.8). Crypto
 suites use published known-answer vectors (RFC / FIPS / NIST); the
 TEE attestation arc ships synthesised end-to-end fixtures.
 `tests/tcyr/batch_parallel.tcyr` doubles as the parallel-verify race

@@ -9,6 +9,32 @@ shipped").
 The only open items. The 3.6 cyrius-native-TLS arc and most of the v3.7
 perf cycle have shipped — see "Closed cycles" below + CHANGELOG.
 
+**P1 — cyrius-6.1.20 bundle-consumer SIGILL: RESOLVED in 3.7.8.** The
+reported symptom (SIGILL/exit 132 on `sha256` + `ed25519_*` under cyrius
+6.1.x, software `sha1` fine) was real, but the **suspected cause was
+wrong**. It was *not* the asm `[rbp-N]` param-load drift — it was **missing
+opt-in stdlib deps in bundle-consumer builds.** Cyrius stdlib is opt-in
+(not auto-associated); `dist/sigil.cyr` carries none. Since 3.6 the banked
+crypto hot path runs `cbank()` → `thread_local_*` on **every**
+`sha256`/`ed25519`/`aes` call, every constant-time compare runs
+`ct_eq_bytes_lens`, and ML-DSA (default-on @3.7.6) runs `shake256`. A
+consumer including only the bundle leaves those undefined — cyrius 6.1.x
+*warns* and compiles each unresolved call to a `ud2`, so the program
+builds then SIGILLs the instant a crypto path hits one. **Fix:** the
+README "Usage — stdlib include order" section now documents all four
+required opt-in includes (`lib/ct.cyr`, `lib/keccak.cyr`, `lib/thread.cyr`,
+`lib/thread_local.cyr`) and warns it is a *runtime* crash, not a build
+error. **Belt-and-suspenders:** the predicted **3.2.0 structural NI fix
+also landed** — `src/sha_ni.cyr` / `src/aes_ni.cyr` migrated off hardcoded
+`mov r__, [rbp-N]` param loads to the prologue-drift-proof
+`param_load(reg, idx)` pseudo (cyrius 6.0.67+), closing the latent
+fragility the 2026-05-10 issue warned about. Pin bumped 6.0.87 → **6.1.20**;
+verified green (suite 1459/1459, bundle repro exits 0 with correct digests
+once the four includes are present). See
+[`docs/development/issues/2026-06-09-cyrius-6120-rebreaks-ni-paths-sigill.md`](issues/2026-06-09-cyrius-6120-rebreaks-ni-paths-sigill.md)
+and the originating
+[`2026-05-10-cyrius-510-asm-stack-frame-drift-breaks-ni-paths.md`](issues/2026-05-10-cyrius-510-asm-stack-frame-drift-breaks-ni-paths.md).
+
 **x509 — cert verification: COMPLETE.** The P1 off-diagonal ECDSA
 chain-link verification **shipped in 3.7.5** — `_x509_verify_link` now
 decouples hash-selection (child sig-algo OID) from curve-selection
@@ -122,10 +148,17 @@ promoted here so they are visible, not buried):
       GF(2^128) multiply) now dominates. PCLMULQDQ/VPCLMULQDQ closes the
       gap, same byte-encoding pattern as the SHA-NI/AES-NI dispatchers.
 
-- [ ] **NI dispatch structural fix** — same gate. Migrate
-      `aes_ni.cyr` / `sha_ni.cyr` dispatchers off hardcoded `[rbp-N]`
-      parameter loads when the asm pseudo lands. Keep the 3.2.0 runtime
-      self-test gate as defence-in-depth even after the fix.
+- [x] **NI dispatch structural fix** — **DONE in 3.7.8.** Migrated
+      `aes_ni.cyr` / `sha_ni.cyr` dispatchers (cpuid probes + compress /
+      encrypt-block fns) off the hardcoded `mov r__, [rbp-N]` parameter
+      loads to the prologue-drift-proof `param_load(reg, idx)` pseudo
+      (cyrius 6.0.67+; the "asm pseudo" this was gated on). The 3.2.0
+      runtime self-test gate is kept as defence-in-depth against any
+      future *wrong-output* asm regression. (Note: this was belt-and-
+      suspenders — the actual 6.1.20 SIGILL was missing opt-in stdlib
+      deps in bundle-consumer builds, fixed via README docs; see the
+      resolved P1 above. The CLMUL-GHASH item below stays gated on the
+      *separate* asm-block **global-symbol** pseudo, still absent.)
 
 **Possible future surfaces** (consumer-demand-gated)
 
@@ -176,8 +209,11 @@ audits in [`docs/audit/`](../audit/).
   **PQC-default** — ML-DSA-65 default-on, gate dropped now the 6.0.87 cap
   allows it (3.7.6); the **buried-deferral sweep** — genuine deferrals
   surfaced to the Backlog, stale comments marked shipped, false positives
-  reduced to a `\uXXXX` allowlist (3.7.7). Remaining: the EC scalar-mult
-  speedup, the buried-deferral *gate*, and the bench re-run (see
-  Outstanding above).
+  reduced to a `\uXXXX` allowlist (3.7.7); the **cyrius-6.1.20 bundle-
+  consumer SIGILL fix** — README now documents the four required opt-in
+  stdlib includes (the real root cause), plus the belt-and-suspenders NI
+  `param_load` structural fix + pin 6.0.87 → 6.1.20 (3.7.8). Remaining: the
+  EC scalar-mult speedup, the buried-deferral *gate*, and the bench re-run
+  (see Outstanding above).
 
-**Cyrius pin:** `6.0.87` (synced across `cyrius.cyml` and CI).
+**Cyrius pin:** `6.1.20` (synced across `cyrius.cyml` and CI).

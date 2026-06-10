@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.7.8] — 2026-06-09
+
+### Fixed
+
+- **cyrius-6.1.20 bundle-consumer SIGILL — the reported NI re-break was
+  real but mis-diagnosed.** A downstream (cyrius-yeomans-descent, Ed25519
+  player auth) hit **SIGILL / exit 132** on `sha256` and `ed25519_*` when
+  building against `dist/sigil.cyr` under cycc 6.1.x, while software `sha1`
+  ran fine. The report (and a 2026-05-10 predecessor) blamed the
+  hand-emitted NI asm `[rbp-N]` parameter-load drift. **gdb showed the real
+  cause:** the fault is a cyrius-emitted `ud2`, not an asm misexecution.
+  Since 3.6 the banked crypto hot path runs `cbank()` → `thread_local_*` on
+  **every** `sha256`/`ed25519`/`aes` call; every constant-time compare runs
+  `ct_eq_bytes_lens`; ML-DSA-65 (default-on since 3.7.6) runs `shake256`.
+  Cyrius stdlib is **opt-in (not auto-associated)** and the bundle carries
+  no stdlib includes, so a consumer including only `dist/sigil.cyr` leaves
+  those symbols **undefined** — cyrius 6.1.x only *warns* and compiles each
+  unresolved call to a `ud2`, so the program builds then SIGILLs the moment
+  a crypto path touches one. (The self-test in `sha_ni_available()` doesn't
+  call `cbank()`, which is why it completed while the production `sha256`
+  call faulted — proof the asm param loads were never at fault.)
+  - **Fix: document the opt-in includes for consumers.** The README "Usage
+    — stdlib include order" section now lists **all four** required opt-in
+    stdlib includes before `lib/sigil.cyr` — `lib/ct.cyr`, `lib/keccak.cyr`,
+    `lib/thread.cyr`, `lib/thread_local.cyr` — and states plainly that
+    omission is a **runtime SIGILL, not a build error** under cyrius 6.1.x
+    (previously only `thread` + `thread_local` were listed, and it wrongly
+    claimed a build failure). The bundle stays clean — libs are the
+    consumer's opt-in, never auto-injected.
+
+### Changed
+
+- **NI dispatch structural fix (belt-and-suspenders).** Migrated the
+  hand-emitted NI dispatch sites in `src/sha_ni.cyr` and `src/aes_ni.cyr`
+  (the CPUID probes plus `_sha_ni_compress_one` /
+  `aes{256,128}_encrypt_block_ni`) off the hardcoded `mov r__, [rbp-8/16/24]`
+  byte-literal parameter loads to the prologue-drift-proof
+  **`param_load(reg, idx)`** pseudo (cyrius 6.0.67+, the asm pseudo this had
+  been gated on). This closes the latent frame-layout fragility the
+  2026-05-10 issue predicted — even though it was not the cause of *this*
+  SIGILL. The runtime FIPS self-test gates remain as defence-in-depth
+  against any future *wrong-output* asm regression.
+- **Toolchain pin 6.0.87 → 6.1.20** (`cyrius.cyml`). Full suite verified
+  green: 53 files / 1459 assertions, 0 failures; smoke clean; the bundle
+  repro now exits 0 with correct digests (`sha256("abc")[0]==0xba`,
+  Ed25519 sign→verify→tamper-reject) once the four documented includes are
+  present.
+
+See `docs/development/issues/2026-06-09-cyrius-6120-rebreaks-ni-paths-sigill.md`
+(resolution banner) and `2026-05-10-cyrius-510-asm-stack-frame-drift-breaks-ni-paths.md`.
+
 ## [3.7.7] — 2026-06-07
 
 ### Changed

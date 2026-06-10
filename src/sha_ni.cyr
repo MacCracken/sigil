@@ -35,10 +35,12 @@
 
 # _sha_ni_cache: 2 = uncached, 0 = unavailable, 1 = available.
 # Same sentinel discipline as _aes_ni_cache; one CPUID probe
-# per process. The "available" gate now requires BOTH the CPUID
-# bit AND the FIPS 180-4 "abc" self-test passing — defense-in-
-# depth against cyrius prologue drift breaking the `[rbp-N]`
-# parameter loads inside `_sha_ni_compress_one`.
+# per process. The "available" gate requires BOTH the CPUID bit
+# AND the FIPS 180-4 "abc" self-test passing. The parameter loads
+# inside `_sha_ni_compress_one` now use the prologue-drift-proof
+# `param_load` pseudo (3.7.8), so the primary SIGILL re-break class
+# is fixed at the source; the self-test stays as defense-in-depth
+# against any future wrong-output asm regression.
 var _sha_ni_cache = 2;
 var _sha_ni_probe_out = 0;      # 8-byte scratch for the probe's *out param
 
@@ -66,12 +68,13 @@ fn sha_ni_available(): i64 {
         return 0;
     }
     # Defense-in-depth: confirm the NI compress produces the FIPS
-    # 180-4 §B.1 single-block "abc" digest before going live. Same
-    # rationale as aes_ni — catches asm-misencode caused by cyrius
-    # prologue drift breaking the `[rbp-N]` parameter loads inside
-    # `_sha_ni_compress_one`. Downgrades to the software path on
-    # mismatch. See docs/development/issues/2026-05-10-cyrius-510-
-    # asm-stack-frame-drift-breaks-ni-paths.md.
+    # 180-4 §B.1 single-block "abc" digest before going live. The
+    # `[rbp-N]` parameter-load coupling that caused the original
+    # SIGILL re-break is now removed (param_load, 3.7.8); this self-
+    # test remains to downgrade to software on any *wrong-output* asm
+    # regression the compiler change could still introduce. See
+    # docs/development/issues/2026-05-10-cyrius-510-asm-stack-frame-
+    # drift-breaks-ni-paths.md and the 2026-06-09 re-break issue.
     if (_sha_ni_self_test() == 0) {
         _sha_ni_cache = 1;
     } else {
@@ -86,8 +89,10 @@ fn sha_ni_available(): i64 {
 fn _sha_ni_cpuid_probe(out): i64 {
     #ifdef CYRIUS_ARCH_X86
     asm {
-        # Param out = [rbp-8]. Load into rdi.
-        0x48; 0x8B; 0x7D; 0xF8;        # mov rdi, [rbp-8]
+        # Param out -> rdi via the prologue-drift-proof param_load
+        # pseudo (cyrius 6.0.67+): the slot offset is resolved at emit
+        # time, so it cannot read garbage if the prologue layout drifts.
+        param_load(rdi, 0);            # out
         0x53;                          # push rbx (callee-saved; CPUID clobbers it)
         0xB8; 0x07; 0x00; 0x00; 0x00;  # mov eax, 7   (leaf 7)
         0x31; 0xC9;                    # xor ecx, ecx (sub-leaf 0)
@@ -238,21 +243,23 @@ fn _sha_ni_init(): i64 {
 # ================================================================
 # _sha_ni_compress_one — single-block SHA-NI compress.
 #
-# Parameters arrive on the stack at:
-#   [rbp-8]  ctx     — 144-byte SHA-256 context (h0..h7 at +0,
-#                       block buffer at +64)
-#   [rbp-16] buf     — 80-byte module global. Layout:
+# Parameters (loaded via the prologue-drift-proof `param_load`
+# pseudo, cyrius 6.0.67+ — slots resolved at emit time):
+#   idx 0  ctx     — 144-byte SHA-256 context (h0..h7 at +0,
+#                     block buffer at +64)            -> rdi
+#   idx 1  buf     — 80-byte per-call working area. Layout:
 #                        +0..31  packed state in/out
 #                        +32..47 ABEF_save
 #                        +48..63 CDGH_save
-#                        +64..79 PSHUFFLE_BYTE_FLIP_MASK
-#   [rbp-24] kbuf    — 256-byte packed K table
+#                        +64..79 PSHUFFLE_BYTE_FLIP_MASK  -> rsi
+#   idx 2  kbuf    — 256-byte packed K table            -> rcx
 #
-# 3 params (rather than 4) so the [rbp-N] spill convention is the
-# one cc5 has used reliably for asm-block functions since 2.9.1
-# (`aes_ni.cyr`'s 3-param `aes256_encrypt_block_ni`); cc5.5.30 may
-# spill a 4th param into a register rather than the stack, which
-# breaks the `mov ..., [rbp-32]` form.
+# Pre-3.7.8 these were hand-emitted `mov r__, [rbp-N]` byte
+# literals, which coupled to the cyrius prologue layout and
+# SIGILL-re-broke when 6.1.20 shifted the param spill slots (see
+# docs/development/issues/2026-06-09-cyrius-6120-rebreaks-ni-paths-
+# sigill.md). `param_load` resolves each slot at emit time, so the
+# loads track the prologue automatically.
 #
 # Register usage inside the asm block:
 #   rdi = ctx, rsi = buf, rcx = kbuf, rdx = scalar tmp
@@ -267,10 +274,13 @@ fn _sha_ni_init(): i64 {
 fn _sha_ni_compress_one(ctx, buf, kbuf): i64 {
     #ifdef CYRIUS_ARCH_X86
     asm {
-        # -- Param loads --
-        0x48; 0x8B; 0x7D; 0xF8;    # mov rdi, [rbp-8]   (ctx)
-        0x48; 0x8B; 0x75; 0xF0;    # mov rsi, [rbp-16]  (buf)
-        0x48; 0x8B; 0x4D; 0xE8;    # mov rcx, [rbp-24]  (kbuf)
+        # -- Param loads (prologue-drift-proof param_load, cyrius 6.0.67+) --
+        #    The pseudo resolves each param's spill slot at emit time,
+        #    so a future cyrius prologue change cannot shift these reads
+        #    onto the wrong slot (the SIGILL re-break class, see header).
+        param_load(rdi, 0);        # ctx
+        param_load(rsi, 1);        # buf
+        param_load(rcx, 2);        # kbuf
 
         # ── Pack ctx h0..h7 (8 sparse 64-bit slots, low 32 bits each)
         #    into scratch[0..31] (8 packed little-endian dwords).

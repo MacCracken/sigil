@@ -62,18 +62,16 @@ fn aes_ni_available(): i64 {
         return 0;
     }
     # Defense-in-depth: confirm the NI asm path produces FIPS 197 §C.3
-    # output before going live. Catches the class of bug documented in
-    # docs/development/issues/2026-05-10-cyrius-510-asm-stack-frame-
-    # drift-breaks-ni-paths.md — hardcoded `[rbp-N]` parameter loads
-    # coupling to a cyrius prologue layout that drifts across toolchain
-    # versions. If the prologue ever shifts so that aes256_encrypt_block_ni
-    # reads garbage from the wrong stack slot, the dispatcher would have
-    # historically gone live on a broken NI path. Now it silently
-    # downgrades to software. Catches wrong-output cases (asm reads a
-    # mis-spilled pointer, executes against unrelated memory, produces
-    # nonsense). Does NOT catch SIGILL (no cyrius signal-handling
-    # primitive); for that, see the upstream cyrius ask filed alongside
-    # this fix (asm-block global-symbol pseudo for [rip+global] loads).
+    # output before going live. The hardcoded `[rbp-N]` parameter loads
+    # that originally coupled to the cyrius prologue layout — and
+    # SIGILL-re-broke under 6.1.20 when the param spill slots shifted —
+    # are now replaced by the prologue-drift-proof `param_load` pseudo
+    # (3.7.8; docs/development/issues/2026-06-09-cyrius-6120-rebreaks-ni-
+    # paths-sigill.md). This self-test stays as belt-and-suspenders:
+    # it catches any *wrong-output* asm regression a future compiler
+    # change could still introduce (asm executes but produces nonsense)
+    # and downgrades to software. It does NOT catch SIGILL — but
+    # param_load removes the param-slot drift that caused it.
     # Validate both the AES-256 (§C.3) and AES-128 (§C.1) NI paths.
     # They share the CPUID feature bit and the asm-prologue parameter
     # shape, so a single mismatch in either downgrades both key sizes
@@ -97,8 +95,10 @@ fn aes_ni_available(): i64 {
 fn _aes_ni_cpuid_probe(out): i64 {
     #ifdef CYRIUS_ARCH_X86
     asm {
-        # Param out = [rbp-8]. Load into rdi.
-        0x48; 0x8B; 0x7D; 0xF8;        # mov rdi, [rbp-8]
+        # Param out -> rdi via the prologue-drift-proof param_load
+        # pseudo (cyrius 6.0.67+): the slot offset is resolved at emit
+        # time, so it cannot read garbage if the prologue layout drifts.
+        param_load(rdi, 0);            # out
         0x53;                          # push rbx (callee-saved; CPUID clobbers it)
         0xB8; 0x01; 0x00; 0x00; 0x00;  # mov eax, 1
         0x31; 0xC9;                    # xor ecx, ecx (subleaf 0)
@@ -125,10 +125,12 @@ fn _aes_ni_cpuid_probe(out): i64 {
 fn aes256_encrypt_block_ni(round_keys, in_block, out_block): i64 {
     #ifdef CYRIUS_ARCH_X86
     asm {
-        # Params: round_keys=[rbp-8], in_block=[rbp-16], out_block=[rbp-24]
-        0x48; 0x8B; 0x7D; 0xF8;        # mov rdi, [rbp-8]   (round_keys)
-        0x48; 0x8B; 0x75; 0xF0;        # mov rsi, [rbp-16]  (in_block)
-        0x48; 0x8B; 0x55; 0xE8;        # mov rdx, [rbp-24]  (out_block)
+        # Params -> regs via the prologue-drift-proof param_load pseudo
+        # (cyrius 6.0.67+): slot offsets resolved at emit time, immune to
+        # prologue-layout drift (the SIGILL re-break class; see header).
+        param_load(rdi, 0);            # round_keys
+        param_load(rsi, 1);            # in_block
+        param_load(rdx, 2);            # out_block
 
         # movdqu xmm0, [rsi]           ; state = in_block
         0xF3; 0x0F; 0x6F; 0x06;
@@ -174,10 +176,12 @@ fn aes256_encrypt_block_ni(round_keys, in_block, out_block): i64 {
 fn aes128_encrypt_block_ni(round_keys, in_block, out_block): i64 {
     #ifdef CYRIUS_ARCH_X86
     asm {
-        # Params: round_keys=[rbp-8], in_block=[rbp-16], out_block=[rbp-24]
-        0x48; 0x8B; 0x7D; 0xF8;        # mov rdi, [rbp-8]   (round_keys)
-        0x48; 0x8B; 0x75; 0xF0;        # mov rsi, [rbp-16]  (in_block)
-        0x48; 0x8B; 0x55; 0xE8;        # mov rdx, [rbp-24]  (out_block)
+        # Params -> regs via the prologue-drift-proof param_load pseudo
+        # (cyrius 6.0.67+): slot offsets resolved at emit time, immune to
+        # prologue-layout drift (the SIGILL re-break class; see header).
+        param_load(rdi, 0);            # round_keys
+        param_load(rsi, 1);            # in_block
+        param_load(rdx, 2);            # out_block
 
         # movdqu xmm0, [rsi]           ; state = in_block
         0xF3; 0x0F; 0x6F; 0x06;
