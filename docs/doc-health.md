@@ -6,18 +6,21 @@ type: state
 
 # Documentation Health — sigil
 
-> **Last refresh**: 2026-06-07 (**3.7.7 — buried-deferral sweep**; prior
-> same-day: 3.7.6 PQC default-on, 3.7.5 off-diagonal ECDSA verify + pin
-> 6.0.62 → 6.0.87). The 3.6 cyrius-native-TLS arc closed at 3.6.8 and the
-> v3.7 cycle is in progress; this is a consolidated refresh across the
-> whole 3.6.5 → 3.7.7 run.
+> **Last refresh**: 2026-06-09 (**3.7.8 — cyrius-6.1.20 bundle-consumer
+> SIGILL fix (README opt-in stdlib-include docs + NI `param_load` fix),
+> ECDSA verify scalar-mult speedup (~2× both curves), README
+> dependency-section sweep, and a roadmap completed-item cleanup**; prior:
+> 3.7.7 buried-deferral sweep, 3.7.6 PQC default-on, 3.7.5 off-diagonal
+> ECDSA verify). The 3.6 cyrius-native-TLS arc closed at 3.6.8 and the v3.7
+> cycle is in progress; this is a consolidated refresh across the whole
+> 3.6.5 → 3.7.8 run.
 > Per-version detail lives in
 > [`CHANGELOG.md`](../CHANGELOG.md) and per-cycle audit docs in
 > [`docs/audit/`](audit/) — the daily-stack notes that used to live here
 > were retired in favour of those sources.
 >
 > **Headline changes since the last full row-refresh (3.4.1 inventory):**
-> - **Version `3.7.7`**, cyrius pin **`6.0.87`** (was 3.5.4 / 6.0.3 at
+> - **Version `3.7.8`**, cyrius pin **`6.1.20`** (was 3.5.4 / 6.0.3 at
 >   the 3.4.1 inventory). Deps agnosys 1.3.2, sakshi 2.2.6.
 > - **Audit floor: EMPTY** (cleared at 3.7.3, holds through 3.7.5 — see
 >   state.md). The seven bump-allocator LOWs ADR 0003 batched are
@@ -29,9 +32,12 @@ type: state
 >   `tests/bcyr/{rsa,ecdsa_p384}.bcyr`; new test `tests/tcyr/x509_offdiag.tcyr`.
 > - **Audit docs**: 3.5.6 retro + 3.6.0–3.6.8 + 3.7.0–3.7.5 added under
 >   `docs/audit/` (per-cycle, dated artifacts).
-> - **CHANGELOG / roadmap / state.md** are current through 3.7.7;
->   roadmap.md was de-cluttered 2026-06-04 (shipped detail moved to
->   "Closed cycles" + CHANGELOG; only open items remain).
+> - **CHANGELOG / roadmap / state.md** are current through 3.7.8;
+>   roadmap.md "Outstanding work" was re-cleaned 2026-06-09 (the resolved
+>   cyrius-6.1.20 P1, x509-complete note, done NI-dispatch fix, and done
+>   PQC-default item removed; EC scalar-mult trimmed to its open ≤ 10 ms
+>   squeeze). README gained a **Dependencies** section identifying the
+>   cyrius stdlib (auto + the four opt-in modules) plus sakshi/agnosys.
 >
 > The per-tier tables below predate this run and are **partially stale
 > on dates/counts** (flagged inline where load-bearing); a full

@@ -238,25 +238,22 @@ for t in tests/tcyr/*.tcyr; do cyrius test "$t"; done
 
 ## Roadmap
 
-- **v3.5.x — cyrius native-TLS arc support** (in progress). Shipped:
-  modern AEAD + key agreement (Poly1305/ChaCha20/AEAD/X25519,
-  HMAC/HKDF-SHA384), AES-128-GCM, EC + Ed25519 private-key parsers,
-  ECDSA P-256/P-384 deterministic signing, TLS 1.2 PRF (3.6.1), RSA
-  PKCS#1 v1.5 **verify** + bignum/modexp engine (3.6.2), RSA key
-  parsing + PKCS#1 v1.5 **sign** (3.6.3), RSA sign hardening — CRT +
-  blinding + security audit (3.6.4). The PKCS#1 v1.5 surface is
-  complete. Remaining (3.6.5+): PSS, Montgomery-on-verify, cycle
-  closeout.
-- **v3.6** — parallel verify (**shipped 3.6.0**): dropped
-  `_sigil_batch_mutex` via per-thread crypto-scratch banks over
-  cyrius 6.0.52 thread-local storage (3.42× at 64 artifacts / 4
-  workers).
-- **v3.7** — perf tuning: Solinas word-level field reduction for
-  P-256/P-384 (target ≤ 10 ms/verify) + unified `_into` API
-  (closes the open bump-allocator LOWs).
+**Current cycle — v3.7 (perf + x509), in progress.** Shipped highlights:
+Solinas word-level field reduction for P-256/P-384 (3.7.0/.1), AES-GCM
+arbitrary-length IVs (3.7.2), the `_into` caller-scratch API + audit-floor
+clear (3.7.3), off-diagonal ECDSA x509 chain-link verify (3.7.4/.5),
+**ML-DSA-65 PQC default-on** (3.7.6), and the **ECDSA verify scalar-mult
+speedup** — fixed-base comb + windowed mul, ~2× both curves
+(`ecdsa_p256_verify` 24.7 → 11.6 ms, `ecdsa_p384_verify` 54.6 → 26.3 ms)
+(3.7.8). The 3.6 cyrius-native-TLS arc closed at 3.6.8 (parallel batch
+verify, full RSA PKCS#1 v1.5 + PSS, RSA/P-384 x509 chain-link).
 
-See [`docs/development/roadmap.md`](docs/development/roadmap.md)
-for the active backlog and possible future surfaces.
+Open: the ≤ 10 ms P-256 verify squeeze, a buried-deferral CI gate, and the
+cycle-close bench re-run.
+
+See [`docs/development/roadmap.md`](docs/development/roadmap.md) for the full
+forward-looking work + backlog, and [`CHANGELOG.md`](CHANGELOG.md) for
+per-version detail.
 
 ## Documentation
 
