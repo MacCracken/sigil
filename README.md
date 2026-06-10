@@ -10,13 +10,15 @@ revocation management.
 ## Language
 
 Cyrius (ported from Rust v1.0.0; original Rust source removed in
-2.7.0). Zero external dependencies.
+2.7.0). **Zero external _crypto_ dependencies** — every primitive is
+implemented in-house. The full (small) dependency set — cyrius stdlib +
+two AGNOS first-party crates — is listed under [Dependencies](#dependencies).
 
-**Cyrius pin:** `6.0.53` (synced across `cyrius.cyml` and CI).
+**Cyrius pin:** `6.1.20` (synced across `cyrius.cyml` and CI).
 
 ## Crypto stack
 
-All cryptography implemented in Cyrius — no external dependencies:
+All cryptography implemented in Cyrius — no external crypto libraries:
 
 - **Ed25519** (RFC 8032) — asymmetric signing/verification
 - **ECDSA P-256 / P-384** (FIPS 186-4) — secp256r1 / secp384r1
@@ -35,8 +37,8 @@ All cryptography implemented in Cyrius — no external dependencies:
   with runtime-detected AES-NI dispatch
 - **ChaCha20-Poly1305** (RFC 8439) — AEAD (ChaCha20 cipher +
   Poly1305 one-time MAC)
-- **ML-DSA-65** (FIPS 204) — post-quantum signing, gated behind
-  `-D SIGIL_PQC` until the cyrius preprocessor cap raises
+- **ML-DSA-65** (FIPS 204) — post-quantum signing, **default-on since
+  3.7.6** (`-D SIGIL_PQC` is now a back-compat no-op; needs `lib/keccak.cyr`)
 - **Private-key parsers** — PEM + DER for ECDSA P-256/P-384 (SEC1 /
   PKCS#8) and Ed25519 (PKCS#8); X.509 + PEM cert parsing
 - **Constant-time comparison** — bitwise-OR accumulation; no
@@ -63,7 +65,7 @@ All cryptography implemented in Cyrius — no external dependencies:
 - **`aes_gcm.cyr`**, **`aes_ni.cyr`** — AES-256/128-GCM AEAD
 - **`chacha20.cyr`**, **`poly1305.cyr`**, **`chacha20poly1305.cyr`**
   — ChaCha20-Poly1305 AEAD
-- **`mldsa_*.cyr`** — ML-DSA-65 (PQC, opt-in)
+- **`mldsa_*.cyr`** — ML-DSA-65 (PQC, default-on since 3.7.6)
 - **`hex.cyr`** — hex encode/decode
 
 ### Trust engine
@@ -126,6 +128,45 @@ All cryptography implemented in Cyrius — no external dependencies:
 
 See [`docs/architecture/overview.md`](docs/architecture/overview.md)
 for the full module map and data flow.
+
+## Dependencies
+
+Sigil implements **all cryptography itself** — there are no external crypto
+libraries. The complete dependency set (declared in [`cyrius.cyml`](cyrius.cyml))
+is the Cyrius standard library plus two AGNOS first-party crates:
+
+### Cyrius stdlib — pinned `6.1.20`
+
+- **Auto-included** (cyrius pulls these on symbol reference — nothing for a
+  consumer to do): `syscalls`, `alloc`, `freelist`, `assert`, `str`,
+  `string`, `vec`, `hashmap`, `io`, `fs`, `fmt`, `json`, `chrono`, `bigint`,
+  `tagged`, `process`, `slice` (`bench` for the benchmark harness).
+- **Opt-in — the consumer MUST `include` these** (they are *not* in the
+  cyrius auto-prepend union, and `dist/sigil.cyr` does not carry them):
+  - `lib/ct.cyr` — constant-time compares (`ct_eq_bytes_lens` / `ct_select`),
+    every verify path
+  - `lib/keccak.cyr` — `shake256` for ML-DSA-65 (default-on since 3.7.6)
+  - `lib/thread.cyr` — `thread_create` / `thread_join`, parallel batch verify
+  - `lib/thread_local.cyr` — per-thread crypto banks (`cbank()`), every banked
+    primitive
+
+  See [Usage](#usage--stdlib-include-order-36) below for the include order and
+  why omitting these is a **runtime** crash under cyrius 6.1.x. Requires
+  **cyrius ≥ 6.0.52** (the release that shipped `lib/thread_local.cyr`).
+
+### AGNOS first-party crates (git deps)
+
+| Crate | Pin | Provides | Required by |
+|---|---|---|---|
+| [**sakshi**](https://github.com/MacCracken/sakshi) | `2.2.6` | structured tracing / spans (`dist/sakshi.cyr`) | `programs/smoke.cyr` and the full `src/lib.cyr` build — **not** referenced by the `dist/sigil.cyr` crypto bundle |
+| [**agnosys**](https://github.com/MacCracken/agnosys) | `1.3.2` | AGNOS kernel interfaces — TPM seal/unseal, IMA measurements, Secure Boot state (`dist/agnosys.cyr`) | **only** the kernel-integration modules (`tpm.cyr`, `ima.cyr`, `secureboot.cyr`, `certpin.cyr`) |
+
+**`dist/sigil.cyr` is self-contained** beyond the four opt-in stdlib modules
+above: it references **no sakshi and no agnosys** symbols. The four
+agnosys-wrapping modules are deliberately excluded from the bundle —
+consumers who need the kernel layer include via `src/lib.cyr` against a
+sibling agnosys checkout (which pulls agnosys as a proper dep). The bundle is
+the self-contained crypto + trust engine core.
 
 ## Usage — stdlib include order (3.6+)
 
