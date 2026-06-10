@@ -1,10 +1,17 @@
 # sigil: NI-path inline-asm `[rbp-N]` parameter loads SIGILL again
 under cyrius 6.1.20 — the predicted re-break
 
-> **RESOLVED in 3.7.8 (2026-06-09).** **The reported symptom was real but
-> the suspected cause was wrong.** The SIGILL was NOT the asm `[rbp-N]`
-> param-load drift — it was **missing opt-in stdlib deps in bundle-consumer
-> builds.** Since 3.6 the banked crypto hot path runs `cbank()` →
+> **RESOLVED in 3.7.8 (2026-06-09) — no functional code defect; the fix was
+> documentation.** **The reported symptom was real but the suspected cause
+> was wrong, so there was nothing in sigil's logic to repair.** The SIGILL
+> was NOT the asm `[rbp-N]` param-load drift — it was a **usage gap:
+> bundle-consumer builds were missing the opt-in stdlib deps sigil's crypto
+> surface requires.** The resolution was **cleaning up the docs to make
+> consumer usage clear** (the README now spells out the required includes);
+> the one source change (the NI `param_load` migration) is **behaviorally a
+> no-op** — pure belt-and-suspenders hardening, not a bug fix.
+>
+> The SIGILL was **missing opt-in stdlib deps in bundle-consumer builds.** Since 3.6 the banked crypto hot path runs `cbank()` →
 > `thread_local_*` on **every** `sha256`/`ed25519`/`aes` call, and every
 > constant-time compare runs `ct_eq_bytes_lens`; ML-DSA (default-on @3.7.6)
 > runs `shake256`. Cyrius stdlib is **opt-in, not auto-associated**, and

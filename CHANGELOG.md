@@ -47,8 +47,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   **`param_load(reg, idx)`** pseudo (cyrius 6.0.67+, the asm pseudo this had
   been gated on). This closes the latent frame-layout fragility the
   2026-05-10 issue predicted — even though it was not the cause of *this*
-  SIGILL. The runtime FIPS self-test gates remain as defence-in-depth
-  against any future *wrong-output* asm regression.
+  SIGILL, so it is **behaviorally a no-op** (the param loads already resolved
+  correctly): pure belt-and-suspenders hardening, not a bug fix. The actual
+  resolution was the README docs cleanup above. The runtime FIPS self-test
+  gates remain as defence-in-depth against any future *wrong-output* asm
+  regression.
 - **Toolchain pin 6.0.87 → 6.1.20** (`cyrius.cyml`). Full suite verified
   green: 53 files / 1459 assertions, 0 failures; smoke clean; the bundle
   repro now exits 0 with correct digests (`sha256("abc")[0]==0xba`,
