@@ -58,6 +58,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Ed25519 sign→verify→tamper-reject) once the four documented includes are
   present.
 
+### Performance
+
+- **ECDSA verify scalar-mult speedup — ~2× on both curves.** The verify
+  point arithmetic `R = u1·G + u2·Q` previously ran two constant-time
+  Montgomery ladders (256/384 add+double each). Since **verify consumes
+  only public data** (digest, signature, public key), it now uses faster
+  non-constant-time methods: a **fixed-base 4-bit comb for `u1·G`** (G is a
+  public constant — precomputed `64×16` / `96×16` point table, built once,
+  zero doublings on the hot path) and a **4-bit windowed double-and-add for
+  `u2·Q`** (Q varies per call). New `p256_scalarmul_base` /
+  `p256_scalarmul_var` (+ P-384 mirrors); the public `ecdsa_p{256,384}_verify`
+  entry points are unchanged.
+  - **`ecdsa_p256_verify` 24.675 → 11.600 ms (2.13×)**
+  - **`ecdsa_p384_verify` 54.6 → 26.263 ms (2.08×)**
+  - (`benches/history.csv` row `v3.7.8-ec-comb-window`; baselines re-measured
+    on cycc 6.1.20.) Transitively speeds every P-256/P-384 chain verify,
+    incl. the SEV-SNP / TDX / SGX attestation paths.
+  - **Security:** the comb/window are deliberately **verify-only**. The
+    secret-nonce signing path (`ecdsa_sign.cyr`, `pt{,384}_scalarmul`) keeps
+    the constant-time Montgomery ladder — the non-CT table index must never
+    touch a secret scalar. Correctness covered by the existing
+    OpenSSL/FIPS KAT suites (`ecdsa_p256` 61, `ecdsa_p384` 43, the x509
+    on/off-diagonal chains, and the sgx/tdx/snp `*_verify_full` fixtures),
+    all green; signing KATs (`ecdsa_sign` 20) byte-identical.
+  - The roadmap's ≤ 10 ms P-256 target is **not yet reached** (11.6 ms); the
+    remaining squeeze (inversion addition-chain, mixed Jacobian+affine
+    addition, optional Karatsuba `u256_mul_full`) is tracked as an open
+    roadmap item, not dropped.
+
 See `docs/development/issues/2026-06-09-cyrius-6120-rebreaks-ni-paths-sigill.md`
 (resolution banner) and `2026-05-10-cyrius-510-asm-stack-frame-drift-breaks-ni-paths.md`.
 

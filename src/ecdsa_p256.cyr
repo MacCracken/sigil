@@ -939,6 +939,137 @@ fn pt_scalarmul(out, k, P): i64 {
 }
 
 # ================================================================
+# Fixed-base comb for the generator G (verify-only, NON-constant-time)
+#
+# G is a public constant, and `ecdsa_p256_verify` consumes only public
+# data (digest, signature, public key), so the `u1·G` term can use a
+# fast table-indexed comb instead of the constant-time Montgomery ladder
+# (`pt_scalarmul`). **This must never be used on a secret scalar** — the
+# table index leaks the scalar nibble via cache timing. The signing path
+# (`ecdsa_sign.cyr`, secret nonce k·G) deliberately stays on
+# `pt_scalarmul`; only the verify `u1·G` site calls this.
+#
+# 4-bit windowed comb (the same shape ed25519 uses for its base point):
+#   table[i][k] = k · 16^i · G   for window i ∈ [0,64), digit k ∈ [0,16)
+#   k·G = Σ_i table[i][ nibble_i(k) ]
+# Cost: 64 table reads + 64 Jacobian adds, zero doublings on the hot
+# path (the 4 doublings per window happen once, at table-build time).
+# Table: 64 × 16 × 96 B = 98304 B, built once on the main thread (ECDSA
+# verify is not on the parallel batch path, so no banking is needed).
+# ================================================================
+
+var _p256_G_table   = 0;    # 64*16 Jacobian points (96 B each)
+var _p256_Gt_inited = 0;
+var _p256_gt_tmp    = 0;    # scratch point for the 4× doubling at build time
+
+# Build table[i][k] = k · 16^i · G. Runs once; not perf-critical.
+fn _build_p256_G_table(): i64 {
+    if (_p256_Gt_inited == 1) { return 0; }
+    _p256_init();
+    _ptm_init();
+    _p256_G_table = alloc(98304);                 # 64 * 16 * 96
+    if (_p256_gt_tmp == 0) { _p256_gt_tmp = pt_alloc(); }
+
+    # basept walks Bi = 16^i · G, starting at B0 = G.
+    var basept = pt_alloc();
+    pt_from_affine(basept, _p256_gx, _p256_gy);
+
+    var i = 0;
+    while (i < 64) {
+        var row = _p256_G_table + i * 16 * 96;
+        pt_set_infinity(row);                     # table[i][0] = O
+        pt_copy(row + 96, basept);                # table[i][1] = Bi
+        var k = 2;
+        while (k < 16) {                          # table[i][k] = table[i][k-1] + Bi
+            pt_add(row + k * 96, row + (k - 1) * 96, basept);
+            k = k + 1;
+        }
+        if (i < 63) {                             # Bi+1 = 16·Bi (four doublings)
+            pt_double(_p256_gt_tmp, basept);      # 2Bi
+            pt_double(basept, _p256_gt_tmp);      # 4Bi
+            pt_double(_p256_gt_tmp, basept);      # 8Bi
+            pt_double(basept, _p256_gt_tmp);      # 16Bi
+        }
+        i = i + 1;
+    }
+    _p256_Gt_inited = 1;
+    return 0;
+}
+
+# out = k · G via the fixed-base comb. PUBLIC scalar only (non-CT).
+# k is 256-bit LE limbs (4 × i64); nibble i = bits [4i, 4i+3].
+fn p256_scalarmul_base(out, k): i64 {
+    if (_p256_Gt_inited == 0) { _build_p256_G_table(); }
+    pt_set_infinity(out);
+    var i = 0;
+    while (i < 64) {
+        var limb = load64(k + (i / 16) * 8);
+        var nib  = (limb >> ((i % 16) * 4)) & 0xF;
+        pt_add(out, out, _p256_G_table + (i * 16 + nib) * 96);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ================================================================
+# Windowed scalar mul for a VARIABLE point Q (verify-only, NON-CT).
+#
+# Q (the public key) changes every verify, so a fixed-base comb does
+# not apply — but the scalar (u2) and Q are still public, so we replace
+# the constant-time Montgomery ladder (`pt_scalarmul`, 256 adds + 256
+# doubles) with a 4-bit left-to-right windowed double-and-add:
+#   precompute Qtab[k] = k·Q for k ∈ [0,16)   (15 adds, once per call)
+#   acc = O; for nibble i = 63..0: acc = 16·acc + Qtab[nibble_i]
+# Cost: 256 doubles + 64 adds + 15 precompute ≈ 1.5× fewer point ops
+# than the ladder. **Public data only** (table index leaks the nibble);
+# the secret-nonce signing path stays on `pt_scalarmul`.
+# ================================================================
+
+var _ecq_tab    = 0;    # 16 Jacobian multiples k·Q (96 B each)
+var _ecq_acc    = 0;    # accumulator
+var _ecq_inited = 0;
+
+fn _ecq_init(): i64 {
+    if (_ecq_inited == 1) { return 0; }
+    _ecq_tab = alloc(1536);     # 16 * 96
+    _ecq_acc = pt_alloc();
+    _ecq_inited = 1;
+    return 0;
+}
+
+fn p256_scalarmul_var(out, k, Q): i64 {
+    _p256_init();
+    _ecq_init();
+
+    # Qtab[0] = O, Qtab[1] = Q, Qtab[k] = Qtab[k-1] + Q.
+    pt_set_infinity(_ecq_tab);
+    pt_copy(_ecq_tab + 96, Q);
+    var j = 2;
+    while (j < 16) {
+        pt_add(_ecq_tab + j * 96, _ecq_tab + (j - 1) * 96, Q);
+        j = j + 1;
+    }
+
+    # acc = Σ nibble_i · 16^i · Q, scanning MS→LS. pt_double/pt_add are
+    # safe in place (all reads precede the writes), and pt_double(O)=O so
+    # the leading no-op doublings need no special case.
+    pt_set_infinity(_ecq_acc);
+    var i = 63;
+    while (i >= 0) {
+        pt_double(_ecq_acc, _ecq_acc);
+        pt_double(_ecq_acc, _ecq_acc);
+        pt_double(_ecq_acc, _ecq_acc);
+        pt_double(_ecq_acc, _ecq_acc);
+        var limb = load64(k + (i / 16) * 8);
+        var nib  = (limb >> ((i % 16) * 4)) & 0xF;
+        pt_add(_ecq_acc, _ecq_acc, _ecq_tab + nib * 96);
+        i = i - 1;
+    }
+    pt_copy(out, _ecq_acc);
+    return 0;
+}
+
+# ================================================================
 # ECDSA verify (SEC 1 v2.0 §4.1.4 / FIPS 186-5 §6.4.2)
 #
 # Inputs:
@@ -973,7 +1104,6 @@ var _ecv_R        = 0;
 var _ecv_Rx       = 0;
 var _ecv_Ry       = 0;
 var _ecv_Rx_modn  = 0;
-var _ecv_G        = 0;
 var _ecv_Q        = 0;
 var _ecv_inited   = 0;
 
@@ -996,9 +1126,8 @@ fn _ecv_init(): i64 {
     _ecv_Rx       = alloc(32);
     _ecv_Ry       = alloc(32);
     _ecv_Rx_modn  = alloc(32);
-    _ecv_G        = pt_alloc();
     _ecv_Q        = pt_alloc();
-    pt_from_affine(_ecv_G, _p256_gx, _p256_gy);
+    _build_p256_G_table();        # fixed-base comb for the u1·G term
     _ecv_inited = 1;
     return 0;
 }
@@ -1065,9 +1194,11 @@ fn _ecdsa_p256_verify_digest(pk, digest, digest_len, sig): i64 {
     fn_p256_mul(_ecv_u1, _ecv_e, _ecv_w);
     fn_p256_mul(_ecv_u2, _ecv_r, _ecv_w);
 
-    # 6. R = u1*G + u2*Q
-    pt_scalarmul(_ecv_P_u1G, _ecv_u1, _ecv_G);
-    pt_scalarmul(_ecv_P_u2Q, _ecv_u2, _ecv_Q);
+    # 6. R = u1*G + u2*Q. u1·G via the fixed-base comb (public scalar);
+    #    u2·Q via the Montgomery ladder (Q varies per call). Both inputs
+    #    are public, so the comb's non-CT table index is acceptable here.
+    p256_scalarmul_base(_ecv_P_u1G, _ecv_u1);
+    p256_scalarmul_var(_ecv_P_u2Q, _ecv_u2, _ecv_Q);
     pt_add(_ecv_R, _ecv_P_u1G, _ecv_P_u2Q);
 
     if (pt_is_infinity(_ecv_R) == 1) { return 0; }

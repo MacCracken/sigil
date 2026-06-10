@@ -152,3 +152,5 @@ timestamp,label,benchmark,estimate,unit
 2026-06-04T00:00:00Z,v3.7.0-p256-solinas,ecdsa_p256_verify_longdiv_baseline,147.488,ms
 2026-06-04T00:00:00Z,v3.7.1-p384-solinas,ecdsa_p384_verify,54.613,ms
 2026-06-04T00:00:00Z,v3.7.1-p384-solinas,ecdsa_p384_verify_longdiv_baseline,339.182,ms
+2026-06-09T00:00:00Z,v3.7.8-ec-comb-window,ecdsa_p256_verify,11.600,ms
+2026-06-09T00:00:00Z,v3.7.8-ec-comb-window,ecdsa_p384_verify,26.263,ms

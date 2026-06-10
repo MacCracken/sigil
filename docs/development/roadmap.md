@@ -74,18 +74,34 @@ CHANGELOG 3.7.5 + the now-resolved
 
 **v3.7 — perf (OPEN)**
 
-- [ ] **EC scalar-mult speedup** — the next *perf* bite (the
-      buried-deferral gate above is the committed next *release*;
-      maintainer picks whether the gate ships as its own small tag ahead
-      of this, or they ride together). Carries the **≤ 10 ms
-      `ecdsa_p256_verify`** target that Solinas reduction alone did not
-      reach (26 ms P-256 / 55 ms P-384): with the field reduction now
-      fast, the double-and-add scalar multiplication (`u1·G + u2·Q`,
-      ~6000 field-muls) and the schoolbook `u256_mul_full` dominate. A
-      fixed-base comb for `G` (like ed25519 already uses) + a wNAF /
-      windowed ladder for the variable `Q`, optionally Karatsuba
-      `u256_mul_full`. Pairs with the "scatter-store comb" backlog item
-      if the comb lands on a secret path.
+- [~] **EC scalar-mult speedup — PARTIALLY DONE in 3.7.8 (~2× both
+      curves); ≤ 10 ms P-256 target still open.** Shipped: a fixed-base
+      4-bit comb for `u1·G` (`p256_scalarmul_base` / `p384_scalarmul_base`,
+      precomputed `64×16`/`96×16` table, zero hot-path doublings) + a 4-bit
+      windowed double-and-add for the variable `u2·Q`
+      (`p256_scalarmul_var` / `p384_scalarmul_var`), both **verify-only /
+      non-CT** (verify is public data; the secret-nonce signing path stays
+      on the constant-time `pt{,384}_scalarmul` ladder). **`ecdsa_p256_verify`
+      24.675 → 11.600 ms (2.13×)`; `ecdsa_p384_verify` 54.6 → 26.263 ms
+      (2.08×)** (`history.csv` row `v3.7.8-ec-comb-window`).
+      **STILL OPEN — the ≤ 10 ms `ecdsa_p256_verify` target is not yet met
+      (11.6 ms).** The remaining squeeze, in rising risk order:
+      1. **Inversion addition-chain** for `fn_p256_inv` (s⁻¹) and the
+         `pt_to_affine` field inverse — the existing generic
+         square-and-multiply is ~256 sq + ~128 mul each; a fixed chain
+         drops to ~265 muls (this is the standalone Backlog item below —
+         now explicitly paired with this bite). Isolated, ~5% × 2.
+      2. **Mixed Jacobian+affine addition** with an affine comb table —
+         saves ~4 muls on each of the ~143 verify-path adds. Isolated to
+         the verify path; needs a new add formula (point-add correctness
+         risk, KAT-gated).
+      3. **Karatsuba `u256_mul_full`** — biggest single lever (~15–25% on
+         every field mul) but touches the **audited shared 256-bit
+         multiply** used by all P-256 field + scalar ops; a carry bug =
+         signature-verify mis-accept, so it needs a full security
+         re-review before landing.
+      Pairs with the "scatter-store comb" backlog item if a comb is ever
+      put on a secret path (it must not be on the current non-CT shape).
 
 - [ ] **Re-run the full crypto bench suite** at the cycle close —
       before/after rows for every verify-path bench; cross-check the
@@ -212,8 +228,11 @@ audits in [`docs/audit/`](../audit/).
   reduced to a `\uXXXX` allowlist (3.7.7); the **cyrius-6.1.20 bundle-
   consumer SIGILL fix** — README now documents the four required opt-in
   stdlib includes (the real root cause), plus the belt-and-suspenders NI
-  `param_load` structural fix + pin 6.0.87 → 6.1.20 (3.7.8). Remaining: the
-  EC scalar-mult speedup, the buried-deferral *gate*, and the bench re-run
-  (see Outstanding above).
+  `param_load` structural fix + pin 6.0.87 → 6.1.20, **and the EC
+  scalar-mult speedup** — fixed-base comb for `u1·G` + windowed `u2·Q`
+  (verify-only), `ecdsa_p256_verify` 24.7 → 11.6 ms (2.13×) /
+  `ecdsa_p384_verify` 54.6 → 26.3 ms (2.08×) (3.7.8). Remaining: the ≤ 10 ms
+  P-256 squeeze (inversion-chain / mixed-add / Karatsuba), the
+  buried-deferral *gate*, and the full bench re-run (see Outstanding above).
 
 **Cyrius pin:** `6.1.20` (synced across `cyrius.cyml` and CI).

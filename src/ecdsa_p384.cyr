@@ -982,6 +982,108 @@ fn pt384_scalarmul(out, k, P): i64 {
 }
 
 # ================================================================
+# Fixed-base comb (G) + windowed variable mul (Q) — verify-only, NON-CT.
+# Direct mirror of the P-256 comb/window (see src/ecdsa_p256.cyr for the
+# full rationale). Both verify inputs are public, so the non-CT table
+# index is acceptable; the secret-nonce signing path stays on
+# `pt384_scalarmul`. P-384: 144 B points, 96 four-bit windows (384/4).
+# G table: 96 × 16 × 144 B = 221184 B, built once on the main thread
+# (P-384 verify is not on the parallel batch path).
+# ================================================================
+
+var _p384_G_table   = 0;
+var _p384_Gt_inited = 0;
+var _p384_gt_tmp    = 0;
+
+fn _build_p384_G_table(): i64 {
+    if (_p384_Gt_inited == 1) { return 0; }
+    _p384_init();
+    _ptm384_init();
+    _p384_G_table = alloc(221184);                # 96 * 16 * 144
+    if (_p384_gt_tmp == 0) { _p384_gt_tmp = pt384_alloc(); }
+
+    var basept = pt384_alloc();
+    pt384_from_affine(basept, _p384_gx, _p384_gy);
+
+    var i = 0;
+    while (i < 96) {
+        var row = _p384_G_table + i * 16 * 144;
+        pt384_set_infinity(row);                  # table[i][0] = O
+        pt384_copy(row + 144, basept);            # table[i][1] = Bi
+        var k = 2;
+        while (k < 16) {
+            pt384_add(row + k * 144, row + (k - 1) * 144, basept);
+            k = k + 1;
+        }
+        if (i < 95) {                             # Bi+1 = 16·Bi
+            pt384_double(_p384_gt_tmp, basept);
+            pt384_double(basept, _p384_gt_tmp);
+            pt384_double(_p384_gt_tmp, basept);
+            pt384_double(basept, _p384_gt_tmp);
+        }
+        i = i + 1;
+    }
+    _p384_Gt_inited = 1;
+    return 0;
+}
+
+# out = k · G via the fixed-base comb. PUBLIC scalar only (non-CT).
+# k is 384-bit LE limbs (6 × i64); nibble i = bits [4i, 4i+3], i ∈ [0,96).
+fn p384_scalarmul_base(out, k): i64 {
+    if (_p384_Gt_inited == 0) { _build_p384_G_table(); }
+    pt384_set_infinity(out);
+    var i = 0;
+    while (i < 96) {
+        var limb = load64(k + (i / 16) * 8);
+        var nib  = (limb >> ((i % 16) * 4)) & 0xF;
+        pt384_add(out, out, _p384_G_table + (i * 16 + nib) * 144);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Windowed scalar mul for the VARIABLE point Q. PUBLIC scalar/point only.
+var _ecq384_tab    = 0;    # 16 multiples k·Q (144 B each)
+var _ecq384_acc    = 0;
+var _ecq384_inited = 0;
+
+fn _ecq384_init(): i64 {
+    if (_ecq384_inited == 1) { return 0; }
+    _ecq384_tab = alloc(2304);     # 16 * 144
+    _ecq384_acc = pt384_alloc();
+    _ecq384_inited = 1;
+    return 0;
+}
+
+fn p384_scalarmul_var(out, k, Q): i64 {
+    _p384_init();
+    _ecq384_init();
+
+    pt384_set_infinity(_ecq384_tab);
+    pt384_copy(_ecq384_tab + 144, Q);
+    var j = 2;
+    while (j < 16) {
+        pt384_add(_ecq384_tab + j * 144, _ecq384_tab + (j - 1) * 144, Q);
+        j = j + 1;
+    }
+
+    pt384_set_infinity(_ecq384_acc);
+    var i = 95;
+    while (i >= 0) {
+        pt384_double(_ecq384_acc, _ecq384_acc);
+        pt384_double(_ecq384_acc, _ecq384_acc);
+        pt384_double(_ecq384_acc, _ecq384_acc);
+        pt384_double(_ecq384_acc, _ecq384_acc);
+        var limb = load64(k + (i / 16) * 8);
+        var nib  = (limb >> ((i % 16) * 4)) & 0xF;
+        pt384_add(_ecq384_acc, _ecq384_acc, _ecq384_tab + nib * 144);
+        i = i - 1;
+    }
+    pt384_copy(out, _ecq384_acc);
+    return 0;
+}
+
+# ================================================================
 # ECDSA P-384 verify (SEC 1 v2.0 §4.1.4)
 #
 # Inputs:
@@ -1006,7 +1108,6 @@ var _ecv384_R        = 0;
 var _ecv384_Rx       = 0;
 var _ecv384_Ry       = 0;
 var _ecv384_Rx_modn  = 0;
-var _ecv384_G        = 0;
 var _ecv384_Q        = 0;
 var _ecv384_inited   = 0;
 
@@ -1029,9 +1130,8 @@ fn _ecv384_init(): i64 {
     _ecv384_Rx       = alloc(48);
     _ecv384_Ry       = alloc(48);
     _ecv384_Rx_modn  = alloc(48);
-    _ecv384_G        = pt384_alloc();
     _ecv384_Q        = pt384_alloc();
-    pt384_from_affine(_ecv384_G, _p384_gx, _p384_gy);
+    _build_p384_G_table();        # fixed-base comb for the u1·G term
     _ecv384_inited = 1;
     return 0;
 }
@@ -1089,9 +1189,10 @@ fn _ecdsa_p384_verify_digest(pk, digest, digest_len, sig): i64 {
     fn_p384_mul(_ecv384_u1, _ecv384_e, _ecv384_w);
     fn_p384_mul(_ecv384_u2, _ecv384_r, _ecv384_w);
 
-    # 6. R = u1*G + u2*Q
-    pt384_scalarmul(_ecv384_P_u1G, _ecv384_u1, _ecv384_G);
-    pt384_scalarmul(_ecv384_P_u2Q, _ecv384_u2, _ecv384_Q);
+    # 6. R = u1*G + u2*Q. u1·G via the fixed-base comb (public scalar);
+    #    u2·Q via the 4-bit windowed mul. Both inputs public → non-CT OK.
+    p384_scalarmul_base(_ecv384_P_u1G, _ecv384_u1);
+    p384_scalarmul_var(_ecv384_P_u2Q, _ecv384_u2, _ecv384_Q);
     pt384_add(_ecv384_R, _ecv384_P_u1G, _ecv384_P_u2Q);
 
     if (pt384_is_infinity(_ecv384_R) == 1) { return 0; }
