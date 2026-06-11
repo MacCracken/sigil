@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.7.10] — 2026-06-11
+
+### Fixed
+- **Dist bundle is now self-contained — the redundant `include "src/sha_ni.cyr"` /
+  `include "src/aes_ni.cyr"` directives no longer survive into `dist/sigil.cyr`.**
+  Those HW-acceleration modules are already inlined into the bundle (they're in
+  the `[lib].modules` list), but `sha256.cyr` / `aes_gcm.cyr` / `lib.cyr` also
+  `include` them so single-file consumers (e.g. a harness that pulls only
+  `src/sha256.cyr`) link cleanly. In the bundle those re-includes pointed at
+  `src/sha_ni.cyr` / `src/aes_ni.cyr` — files absent from the fold — and only
+  "worked" because older cyrius silently skipped an unopenable include. Cyrius
+  v6.1.35 hard-errors on a missing include (CVE-31), so the bundle failed to
+  compile downstream (cyrius tls tests, any sigil consumer). Fix: guard each
+  re-include with `#ifndef _SIGIL_{SHA,AES}_NI_INCLUDED` and have
+  `sha_ni.cyr` / `aes_ni.cyr` `#define` the marker. The guarded include
+  self-skips once the module is present (bundle: inlined first; single-file:
+  fires once), satisfying the dist's "must be self-contained" contract. No API
+  or codegen change — software/HW dispatch and single-checkout builds via
+  `src/lib.cyr` are unchanged.
+
 ## [3.7.9] — 2026-06-10
 
 ### Added

@@ -44,7 +44,9 @@ include "src/error.cyr"
 # Per-thread crypto scratch banks (3.6) — must precede every banked
 # crypto module (sha_ni onward) since they call `cbank()`.
 include "src/crypto_scratch.cyr"
+#ifndef _SIGIL_SHA_NI_INCLUDED
 include "src/sha_ni.cyr"
+#endif
 include "src/sha256.cyr"
 include "src/hex.cyr"
 # src/ct.cyr retired at sigil 3.0.2 — `ct_eq` lifted to cyrius
@@ -55,7 +57,9 @@ include "src/hex.cyr"
 # length form covers the same shape.
 include "src/hmac.cyr"
 include "src/hkdf.cyr"
+#ifndef _SIGIL_AES_NI_INCLUDED
 include "src/aes_ni.cyr"
+#endif
 include "src/aes_gcm.cyr"
 include "src/poly1305.cyr"
 include "src/chacha20.cyr"

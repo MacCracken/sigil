@@ -15,7 +15,9 @@
 # infrastructure in so single-file consumers (test harnesses that
 # include only `src/sha256.cyr`) link cleanly.
 
+#ifndef _SIGIL_SHA_NI_INCLUDED
 include "src/sha_ni.cyr"
+#endif
 
 var MASK32 = 0xFFFFFFFF;
 

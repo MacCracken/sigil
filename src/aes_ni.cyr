@@ -1,5 +1,11 @@
 # aes_ni.cyr — AES-NI hardware-acceleration dispatch (live since 2.9.1).
 #
+# Include-guard marker (see sha_ni.cyr for the full rationale): the dist bundle
+# inlines this module, so the redundant `include "src/aes_ni.cyr"` in
+# aes_gcm.cyr / lib.cyr is #ifndef-guarded against this marker and self-skips
+# once present (cyrius hard-errors on the now-absent file since v6.1.35).
+#define _SIGIL_AES_NI_INCLUDED
+#
 # Cyrius 5.5.21's array-global 16-byte alignment fix closed out the
 # SSE m128-operand fault that had kept this path dormant through
 # 2.9.0 and part of 2.9.x development. With `var rk[240]` reliably

@@ -41,7 +41,9 @@
 # for the dispatcher in aes256_encrypt_block below. Including it
 # here means any consumer of aes_gcm automatically pulls the
 # hardware path in without having to list it separately.
+#ifndef _SIGIL_AES_NI_INCLUDED
 include "src/aes_ni.cyr"
+#endif
 
 # ================================================================
 # AES S-box (forward direction, FIPS 197 Fig. 7)

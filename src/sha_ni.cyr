@@ -1,5 +1,13 @@
 # sha_ni.cyr — SHA-NI hardware-acceleration dispatch.
 #
+# Include-guard marker: single-file consumers pull this in via the
+# `#ifndef`-guarded `include "src/sha_ni.cyr"` in sha256.cyr / aes_gcm.cyr /
+# lib.cyr, but the dist bundle (dist/sigil.cyr) already inlines this module —
+# so the bundle's redundant include must NOT re-fire (the file is absent in the
+# fold, and cyrius hard-errors on a missing include since v6.1.35). This marker
+# makes those guarded includes self-skip once this module is present.
+#define _SIGIL_SHA_NI_INCLUDED
+#
 # Lays the CPUID-probe + dispatch infrastructure for the Intel SHA
 # extensions (SHA256RNDS2 / SHA256MSG1 / SHA256MSG2) and ships a
 # byte-encoded single-block SHA-256 compress that `sha256_transform`
