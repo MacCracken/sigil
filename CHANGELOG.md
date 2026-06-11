@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.7.12] — 2026-06-11
+
+### Added
+- **x509 keyUsage + extendedKeyUsage are now parsed and stored** (for cyrius
+  CVE-17 TLS chain-verification hardening). `X509Cert` grew 256 → 272 bytes:
+  `x509_cert_key_usage(c)` (`+256`) holds `0x100 | bits` where the low byte is
+  the first keyUsage BIT STRING octet (digitalSignature=0x80, keyEncipherment=
+  0x20, keyAgreement=0x08, keyCertSign=0x04, cRLSign=0x02); `x509_cert_eku(c)`
+  (`+264`) holds `0x100 | serverAuth` (serverAuth set for id-kp-serverAuth or
+  anyExtendedKeyUsage). `0` for either field means the extension is absent
+  (RFC 5280: no restriction). The struct grows only via `x509_cert_alloc_into`
+  (the single canonical allocator — attestation modules inherit it; their raw
+  256-byte report/quote buffers are unrelated and unchanged).
+
+### Fixed
+- **`x509_verify_chain` now enforces pathLenConstraint** (RFC 5280 §4.2.1.9): a
+  CA's pathLen bounds how many intermediates may appear below it toward the
+  leaf (`-1` = unset). Previously parsed but never checked, so an intermediate
+  with `pathlen:0` could over-issue. The serverAuth/leaf keyUsage checks are
+  deliberately NOT in this general walker (it also verifies SEV-SNP/TDX/SGX
+  attestation chains, which legitimately lack serverAuth) — those live in the
+  consumer's TLS walker (cyrius `tls_native_client_verify_chain`).
+
 ## [3.7.11] — 2026-06-11
 
 ### Fixed

@@ -1,0 +1,46 @@
+# x509_keyusage_eku.tcyr — keyUsage + extendedKeyUsage parsing (CVE-17).
+#
+# A P-256 cert with X509v3 extensions:
+#   keyUsage         = critical, digitalSignature + keyCertSign
+#   extendedKeyUsage = serverAuth
+#   basicConstraints = critical, CA:TRUE, pathlen:3
+# Verifies the v3.7.12 keyUsage/EKU parse + the grown (256→272) struct fields.
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/string.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fmt.cyr"
+include "lib/json.cyr"
+include "lib/sakshi.cyr"
+include "lib/chrono.cyr"
+include "lib/bigint.cyr"
+include "lib/ct.cyr"
+include "lib/thread_local.cyr"
+include "dist/sigil.cyr"
+
+test_group("x509 keyUsage + extendedKeyUsage parse (CVE-17)");
+
+var der = hex_decode("308201aa3082014fa00302010202147a8bccb2c25b00ad95c0937600c91f247067804d300a06082a8648ce3d04030230163114301206035504030c0b6b752d656b752d74657374301e170d3236303631313233303433315a170d3336303630383233303433315a30163114301206035504030c0b6b752d656b752d746573743059301306072a8648ce3d020106082a8648ce3d03010703420004dd4c38507fc2d515b27c1708ebe5f2440aa2deadec8ecad055b14b3c1d22fc2f48d159a0386bc4f25083fa8c8c5d5aec046e271b9a4539e387ecf447a7b2cabba37b3079301d0603551d0e0416041480e883005a2be9ffb2a1c824f824a634ef67dce6301f0603551d2304183016801480e883005a2be9ffb2a1c824f824a634ef67dce6300e0603551d0f0101ff04040302028430130603551d25040c300a06082b0601050507030130120603551d130101ff040830060101ff020103300a06082a8648ce3d040302034900304602210095eeae5a4f7c1c2055b4b61b9039ca552045b36fd2d7a6b774d34521a59a7cfb022100e375224192cfbb7a06bb02270ce07c6f1eed15f184103401795ef6c825483264", 860);
+var cert = x509_cert_alloc();
+assert_eq(x509_parse(der, 430, cert), 1, "keyUsage/EKU cert parses");
+
+# keyUsage = present(0x100) | digitalSignature(0x80) + keyCertSign(0x04) = 0x184
+assert_eq(x509_cert_key_usage(cert), 0x184, "keyUsage bits = digitalSignature + keyCertSign");
+# the individual bits the TLS walker checks:
+assert_eq(x509_cert_key_usage(cert) & 0x80, 0x80, "  digitalSignature bit set");
+assert_eq(x509_cert_key_usage(cert) & 0x04, 0x04, "  keyCertSign bit set");
+assert_eq(x509_cert_key_usage(cert) & 0x100, 0x100, "  keyUsage present marker");
+
+# EKU = present(0x100) | serverAuth(0x01) = 0x101
+assert_eq(x509_cert_eku(cert), 0x101, "EKU = serverAuth");
+
+# basicConstraints
+assert_eq(x509_cert_is_ca(cert), 1, "basicConstraints CA:TRUE");
+assert_eq(x509_cert_path_len(cert), 3, "pathLenConstraint = 3");
+
+var r = assert_summary();
