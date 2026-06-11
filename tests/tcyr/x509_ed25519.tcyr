@@ -1,0 +1,48 @@
+# x509_ed25519.tcyr (3.7.9) — Ed25519 leaf certificate support (RFC 8410).
+# Parses a real openssl self-signed Ed25519 cert + verifies its self-signature.
+# Regression for the cyrius tls_native Ed25519-server-cert failure (sit v0.8.8):
+# x509_parse rejected Ed25519 certs (the parser was ECDSA/RSA-only).
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/string.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fmt.cyr"
+include "lib/json.cyr"
+include "lib/sakshi.cyr"
+include "lib/chrono.cyr"
+include "lib/bigint.cyr"
+include "lib/ct.cyr"
+include "lib/thread_local.cyr"
+include "dist/sigil.cyr"
+
+test_group("x509 Ed25519 cert (RFC 8410)");
+
+var cert = hex_decode("3082013c3081efa00302010202146f270712a3903ffd2c16beb02b1ddac6d8ec2e31300506032b657030143112301006035504030c093132372e302e302e31301e170d3236303631313034333035395a170d3236303631323034333035395a30143112301006035504030c093132372e302e302e31302a300506032b6570032100b83296da752a714efff5d1ac23384bd55e1d3e7a09b52d9f5aa3b248cb52388fa3533051301d0603551d0e04160414da1359a574f0e44c08a2c4a0953feb245e258069301f0603551d23041830168014da1359a574f0e44c08a2c4a0953feb245e258069300f0603551d130101ff040530030101ff300506032b6570034100e37e115584d6d72ae3adf09fff610f2ee2771691b853b5e3be1558e3738cf032fa239b682be3faf4b4d2ef30e31da3729de0913837f93ef3b5cc305c35c3380a", 640);
+var leaf = x509_cert_alloc();
+assert_eq(x509_parse(cert, 320, leaf), 1, "x509_parse accepts an Ed25519 cert");
+assert_eq(x509_cert_curve(leaf), X509_CURVE_ED25519, "curve = Ed25519");
+assert_eq(x509_cert_sig_algo(leaf), X509_SIG_ED25519, "sig_algo = Ed25519");
+assert_eq(x509_cert_pubkey_len(leaf), 32, "pubkey_len = 32");
+var pk = x509_cert_pubkey(leaf);
+assert_eq(load8(pk) & 0xFF, 0xb8, "pubkey[0]=0xb8 (real SPKI key)");
+assert_eq(load8(pk + 31) & 0xFF, 0x8f, "pubkey[31]=0x8f");
+assert_eq(_x509_verify_link(leaf, leaf), 1, "self-signature verifies (ed25519_verify)");
+
+# Negative / security: a TAMPERED signature (last byte 0x0a → 0x0b) still parses
+# (structure intact) but MUST NOT verify — no false-accept.
+var tampered = hex_decode("3082013c3081efa00302010202146f270712a3903ffd2c16beb02b1ddac6d8ec2e31300506032b657030143112301006035504030c093132372e302e302e31301e170d3236303631313034333035395a170d3236303631323034333035395a30143112301006035504030c093132372e302e302e31302a300506032b6570032100b83296da752a714efff5d1ac23384bd55e1d3e7a09b52d9f5aa3b248cb52388fa3533051301d0603551d0e04160414da1359a574f0e44c08a2c4a0953feb245e258069301f0603551d23041830168014da1359a574f0e44c08a2c4a0953feb245e258069300f0603551d130101ff040530030101ff300506032b6570034100e37e115584d6d72ae3adf09fff610f2ee2771691b853b5e3be1558e3738cf032fa239b682be3faf4b4d2ef30e31da3729de0913837f93ef3b5cc305c35c3380b", 640);
+var leaf_t = x509_cert_alloc();
+assert_eq(x509_parse(tampered, 320, leaf_t), 1, "tampered-sig cert still parses");
+assert_eq(_x509_verify_link(leaf_t, leaf_t), 0, "tampered signature REJECTED (no false-accept)");
+
+# A malformed (truncated) Ed25519 cert must be rejected by the parser.
+var bad = hex_decode("3013020100300506032b65700400", 28);
+var leaf_b = x509_cert_alloc();
+assert_eq(x509_parse(bad, 14, leaf_b), 0, "malformed Ed25519 cert rejected");
+
+var r = assert_summary();

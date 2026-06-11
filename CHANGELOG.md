@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.7.9] — 2026-06-10
+
+### Added
+- **Ed25519 X.509 leaf certificates (RFC 8410).** `x509_parse` now accepts Ed25519
+  certs, where it was ECDSA/RSA-only:
+  - `_xp_parse_sig_algid` recognizes id-Ed25519 (OID 1.3.101.112 = `2b 65 70`),
+    with no algorithm parameters → new `X509_SIG_ED25519`.
+  - `_xp_parse_spki` extracts the raw 32-byte Ed25519 public key (no parameters, no
+    `0x04` uncompressed-point prefix) → new `X509_CURVE_ED25519`; the P-256/P-384
+    on-curve check is skipped (not applicable to Edwards keys).
+  - `_x509_verify_link` verifies an Ed25519-signed cert with **PureEd25519**
+    (`ed25519_verify` over the raw TBS — no pre-hash). The 64-byte raw signature
+    rides the existing non-ECDSA storage path (no change there).
+  - Fixes the cyrius `tls_native` Ed25519-**server-cert** handshake failure (filed
+    from sit v0.8.8). The TLS CertVerify sign + verify paths already handled
+    Ed25519; the **cert parser** was the gap — `load_creds` rejected the leaf before
+    the handshake even ran. Purely additive (existing ECDSA/RSA paths untouched).
+  - `tests/tcyr/x509_ed25519.tcyr`: real openssl Ed25519 cert — parse, curve /
+    sig-algo / 32-byte pubkey, self-signature verify, **tampered-sig reject**
+    (no false-accept), malformed-cert reject. Full suite **54/54**.
+
 ## [3.7.8] — 2026-06-09
 
 ### Fixed
