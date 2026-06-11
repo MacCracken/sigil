@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.7.11] — 2026-06-11
+
+### Fixed
+- **Dist inliner now resolves the bundle at the source — the 3.7.10 `#ifndef`
+  guards are no longer what makes the fold self-contained.** `scripts/regen-dist.sh`
+  was a dumb `cat` of the `[lib].modules` files: every module is concatenated
+  once, but `sha256.cyr` / `aes_gcm.cyr` (and `lib.cyr`) *also* `include
+  "src/sha_ni.cyr"` / `"src/aes_ni.cyr"` for the sibling-checkout path, and those
+  directives were copied verbatim into `dist/sigil.cyr` as **un-inlined
+  `include "src/*.cyr"`** — paths absent in the fold. 3.7.10 papered over this
+  by guarding the re-includes so they self-skip in the bundle; the dist still
+  *shipped* the include lines, and the fix was per-include + dependent on module
+  ordering. Now `regen-dist.sh` **strips** `include "src/*.cyr"` directives
+  during concatenation (every target is already a `[lib].modules` entry, so they
+  are redundant in the bundle), and asserts a **self-contained invariant** —
+  it `exit 1`s if any `include "src/"` survives into the bundle. The bundle went
+  from 2 un-inlined includes to 0; it no longer depends on the guards for
+  correctness. The `#ifndef _SIGIL_{SHA,AES}_NI_INCLUDED` guards **stay** — they
+  remain the correct include-once mechanism for the sibling-checkout path (where
+  `lib.cyr` and `sha256.cyr` both pull `sha_ni`), and `sha_ni`/`aes_ni` keep
+  their internal `#ifdef CYRIUS_ARCH_X86` platform guards (an orthogonal
+  concern — those modules are x86-only HW crypto with a software fallback).
+  This is the systemic fix for the un-inlined-`src/`-include bug class that a
+  strict-include consumer (cyrius ≥ 6.1.35, CVE-31) surfaces.
+
 ## [3.7.10] — 2026-06-11
 
 ### Fixed

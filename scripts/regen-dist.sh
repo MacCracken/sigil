@@ -88,8 +88,27 @@ OUT=dist/sigil.cyr
     echo ""
     echo "# --- $base ---"
     echo ""
-    cat "$m"
+    # The bundle concatenates every MODULES entry exactly once, so a module's
+    # own `include "src/*.cyr"` directives (e.g. sha256.cyr pulling sha_ni.cyr,
+    # aes_gcm.cyr pulling aes_ni.cyr — needed for the sibling-checkout path)
+    # are REDUNDANT here. Left in, they ship as un-inlined includes that a
+    # strict-include consumer (cyrius >= 6.1.35) hard-errors on (the file is
+    # absent in the fold). Strip them so the bundle is genuinely self-contained;
+    # the `#ifndef`-guards around them stay as harmless empty conditionals, and
+    # still do their job on the sibling-checkout path. See cyrius CHANGELOG
+    # [6.1.36] — this replaces the per-include `#ifndef` paper-over.
+    sed '/^[[:space:]]*include "src\/[^"]*\.cyr"/d' "$m"
   done
 } > "$OUT"
+
+# Self-contained invariant: the bundle MUST NOT reference any src/ path (those
+# files do not exist at the consumer). Fail loudly if an un-inlined include
+# slipped through — that is exactly the distlib bug the strip above fixes.
+if grep -nE '^[[:space:]]*include "src/' "$OUT" >/dev/null 2>&1; then
+  echo "ERROR: $OUT still contains un-inlined src/ includes (distlib self-containment violated):" >&2
+  grep -nE '^[[:space:]]*include "src/' "$OUT" >&2
+  rm -f "$OUT"
+  exit 1
+fi
 
 echo "wrote $OUT ($(wc -l < $OUT) lines, $(wc -c < $OUT) bytes)"
