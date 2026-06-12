@@ -7,7 +7,7 @@ include "lib/vec.cyr"
 include "lib/syscalls.cyr"
 include "lib/io.cyr"
 include "lib/fmt.cyr"
-include "lib/bigint.cyr"
+include "lib/bayan.cyr"
 
 fn main() {
     alloc_init();

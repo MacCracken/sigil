@@ -312,7 +312,7 @@ fn snp_report_verify_full_into(report, vcek_chain_pem, vcek_chain_pem_len,
                               &chain, SNP_VERIFY_FULL_MAX_CERTS, der_pool, vcek_chain_pem_len);
     if (n < 1) { return 0; }
 
-    var parsed[4];
+    var parsed: i64[4];   # 4 cert-pointer slots (was [4]=8B=1 slot → store64(&parsed+i*8) OOB); i64[N] slot spelling, cyrius >=6.2.1
     var i = 0;
     while (i < n) {
         var c = x509_cert_alloc_into(arena);
@@ -336,7 +336,7 @@ fn snp_report_verify_full_into(report, vcek_chain_pem, vcek_chain_pem_len,
         if (_snp_cert_is_self_issued(top) == 1) { top_idx = top_idx - 1; }
     }
 
-    var inters[4];
+    var inters: i64[4];   # 4 cert-pointer slots (memset(&inters,0,32) needs 32B; was [4]=8B)
     memset(&inters, 0, 32);
     var inters_n = 0;
     i = top_idx;

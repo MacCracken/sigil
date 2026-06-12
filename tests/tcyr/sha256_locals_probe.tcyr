@@ -25,7 +25,7 @@ include "lib/hashmap.cyr"
 include "lib/syscalls.cyr"
 include "lib/io.cyr"
 include "lib/fmt.cyr"
-include "lib/json.cyr"
+include "lib/bayan.cyr"
 include "lib/sakshi.cyr"
 include "lib/chrono.cyr"
 

@@ -462,7 +462,7 @@ fn sgx_quote_verify_full_into(quote, root_ca_der, root_ca_der_len, now_unix, are
     if (n < 1) { return 0; }
 
     # Step 3 — parse each in-quote cert + the caller's root anchor.
-    var parsed[4];                # array of cert pointers
+    var parsed: i64[4];           # 4 cert-pointer slots (was [4]=8B=1 slot → OOB; needs cyrius >=6.2.1)
     var i = 0;
     while (i < n) {
         var c = x509_cert_alloc_into(arena);
@@ -489,7 +489,7 @@ fn sgx_quote_verify_full_into(quote, root_ca_der, root_ca_der_len, now_unix, are
         if (_sgx_cert_is_self_issued(top) == 1) { top_idx = top_idx - 1; }
     }
 
-    var inters[4];                # cert pointer array, max 4
+    var inters: i64[4];           # 4 cert-pointer slots (memset(&inters,0,32) needs 32B; was [4]=8B)
     memset(&inters, 0, 32);
     var inters_n = 0;
     i = top_idx;

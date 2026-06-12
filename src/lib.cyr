@@ -13,10 +13,15 @@ include "lib/syscalls.cyr"
 include "lib/io.cyr"
 include "lib/fs.cyr"
 include "lib/fmt.cyr"
-include "lib/json.cyr"
+# bayan replaces the standalone stdlib json + bigint modules carved into it
+# @cyrius 6.1.25 (6.2.x ships no lib/json.cyr / lib/bigint.cyr). It re-exports
+# the legacy u256_* big-integer API via compat aliases; its dist needs result +
+# fnptr in scope (NOT auto-prepended for sibling-checkout consumers).
+include "lib/result.cyr"
+include "lib/fnptr.cyr"
+include "lib/bayan.cyr"
 include "lib/sakshi.cyr"
 include "lib/chrono.cyr"
-include "lib/bigint.cyr"
 include "lib/tagged.cyr"
 include "lib/process.cyr"
 include "lib/ct.cyr"

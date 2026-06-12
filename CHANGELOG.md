@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.7.13] — 2026-06-12
+
+**cyrius pin `6.1.20` → `6.2.1` + attestation cert-array daimon-class fix
+(ecosystem-wide stdlib pin sweep).**
+
+### Fixed
+
+- **Attestation cert-pointer arrays were byte-undersized (daimon byte-vs-slot
+  class).** `snp_report_verify_full_into` (`src/sev_snp.cyr`),
+  `sgx_quote_verify_full_into` (`src/sgx.cyr`), and `tdx_quote_verify_full_into`
+  (`src/tdx.cyr`) each declared their `parsed` / `inters` cert-pointer arrays as
+  `var name[4]`. Cyrius `var[N]` is **byte-sized**, so `[4]` reserved 8 bytes
+  (1 slot) — but the code stores 4 cert pointers via `store64(&name + i*8)` and
+  `memset(&name, 0, 32)`, running 24 bytes past the buffer into adjacent stack
+  locals. All 6 sites fixed to the canonical `var name: i64[4]` slot spelling
+  (4 × i64 = 32 bytes) introduced for exactly this idiom in cyrius 6.2.1. Latent
+  (layout-masked) until now; surfaced by the cyrius v6.2.1 address-taken-local
+  -array audit.
+
+### Changed
+
+- **cyrius pin → 6.2.1.** The `i64[N]` element-typed-array spelling above
+  requires 6.2.1.
+- **`[deps]`: dropped `json`, replaced `bigint` with `bayan`.** Both standalone
+  stdlib modules were carved into **bayan** at cyrius 6.1.25, so 6.2.x ships no
+  `lib/json.cyr` / `lib/bigint.cyr`.
+  - `json` was dead weight — sigil rolls its own `json_write_escaped`
+    (`src/trust.cyr`) and calls no stdlib `json_*` symbols.
+  - sigil's u256_* big-integer arithmetic (12 external symbols across ed25519 /
+    ecdsa / x25519 / x509) now resolves through `bayan`, which re-exports the
+    legacy `u256_*` names via its compat aliases. Added `result` + `fnptr` to
+    `[deps]` (bayan's dist needs them) and to `src/lib.cyr` for sibling-checkout
+    consumers. All 61 test/program `include "lib/{json,bigint}.cyr"` lines
+    repointed to `lib/bayan.cyr`.
+- Verified green on 6.2.1: `cyrius deps` resolves cleanly, full `.tcyr` suite
+  55/55 (exit-code-checked), bench 5/5, `dist/sigil.cyr` regenerated
+  self-contained via `scripts/regen-dist.sh`.
+
 ## [3.7.12] — 2026-06-11
 
 ### Added

@@ -5,7 +5,7 @@ description = "Sigil — system-wide trust verification for AGNOS. Ed25519, SHA-
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/sigil"
 language = "cyrius"
-cyrius = "6.1.20"
+cyrius = "6.2.1"
 
 [build]
 entry = "programs/smoke.cyr"
@@ -102,7 +102,11 @@ modules = [
 ]
 
 [deps]
-stdlib = ["syscalls", "alloc", "freelist", "assert", "str", "string", "vec", "hashmap", "io", "fmt", "json", "chrono", "bigint", "tagged", "process", "fs", "bench", "slice"]
+# json + bigint dropped at the 6.2.1 pin: both carved into bayan @6.1.25, so 6.2.x
+# ships no lib/json.cyr / lib/bigint.cyr. sigil rolls its own json_write_escaped
+# (src/trust.cyr) so it never needed stdlib-json; its u256_* big-integer arithmetic
+# now comes from bayan, which re-exports the legacy u256_* names via compat aliases.
+stdlib = ["syscalls", "alloc", "freelist", "assert", "str", "string", "vec", "hashmap", "io", "fmt", "result", "fnptr", "bayan", "chrono", "tagged", "process", "fs", "bench", "slice"]
 
 # Sakshi is not yet folded into the Cyrius stdlib distribution (2.0.0 pending).
 # Pin to the published tag via git until the toolchain vendors it.
