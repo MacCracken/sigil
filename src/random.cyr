@@ -1,0 +1,35 @@
+# random.cyr — sigil's single entropy boundary.
+#
+# Every sigil keygen / nonce / blinding draw funnels through this one
+# function so the entropy source is per-target-correct and auditable in a
+# single place. It routes through the cyrius stdlib `random_bytes`
+# (lib/random.cyr), which dispatches to the right kernel CSPRNG per
+# platform:
+#
+#   - Linux / AGNOS : getrandom(2)
+#   - macOS         : getentropy (normalized to the Linux byte-count contract)
+#   - Windows (PE)  : bcryptprimitives.dll!ProcessPrng via the 0xF01A reroute
+#                     (cyrius 6.2.12 — CVE-19 follow-on)
+#
+# This replaces the prior direct `/dev/urandom` open/read path used at
+# every keygen/nonce/blinding site, which was NON-FUNCTIONAL on Windows
+# (there is no `/dev/urandom` and no path translation for it, so
+# `file_open` failed and those paths fell closed). See
+# docs/development/issues/2026-06-15-sigil-windows-entropy-not-via-getrandom.md.
+#
+# FAIL-CLOSED (the CVE-19 invariant): on any short read or error the caller
+# buffer is NOT usable and we return -1. There is NO weak/partial fallback
+# anywhere — a predictable key/nonce/blind is strictly worse than a failed
+# operation. `random_bytes` loops internally until the full request is
+# satisfied or a real error surfaces, so a non-`n` return is always a hard
+# failure. Callers MUST treat a non-zero return as a fatal entropy failure
+# and abort the operation (zeroizing any secret scratch on the way out).
+
+# Fill `out` with exactly `n` cryptographically-strong random bytes.
+# Returns 0 on success, -1 on any failure (short read or error — caller
+# must abort; never emit a partially-filled buffer).
+fn _sigil_random_fill(out, n): i64 {
+    if (n == 0) { return 0; }
+    if (random_bytes(out, n) != n) { return 0 - 1; }
+    return 0;
+}

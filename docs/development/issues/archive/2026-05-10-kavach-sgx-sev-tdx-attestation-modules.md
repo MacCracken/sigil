@@ -1,3 +1,6 @@
+> **ARCHIVED — RESOLVED (2026-06-15).** Sigil-owned. The full requested attestation surface (sgx/sev_snp/tdx quote parse+verify, ECDSA P-256/P-384, x509 chain-link, sgx seal keys) shipped in the **3.4 TEE arc** and hardened through 3.7.x. The lone residual (in-quote PCK X.509 walk) is a separate roadmap Backlog item.
+> Issue cross-walk: 3.7.15 triage + `docs/audit/2026-06-15-3.7.15-windows-entropy-audit.md`.
+
 # Sigil: kavach SGX / SEV / TDX backends need attestation + sealing surface
 
 **Filed:** 2026-05-10

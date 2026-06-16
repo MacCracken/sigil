@@ -9,6 +9,29 @@ shipped").
 The only open items. The 3.6 cyrius-native-TLS arc and most of the v3.7
 perf cycle have shipped — see "Closed cycles" below + CHANGELOG.
 
+> **Issues triage (2026-06-16).** The full `docs/development/issues/` folder was
+> triaged: **8 of 9 were completed or not-sigil's-problem and archived** to
+> `issues/archive/` (NI asm-drift @3.7.8, kavach TEE modules @3.4, tlsh/phylax
+> [not sigil's], cyrius-TLS-arc @3.6.8, HKDF-SHA384 @3.5.6, off-diagonal ECDSA
+> @3.7.5, cyrius-6120 SIGILL @3.7.8, attestation cert-arrays @3.7.13). The folder
+> yielded **no open issue-derived repairs** to schedule. The one open issue is the
+> Windows-entropy verification below. Per the close-v3.7-first decision, **no
+> 3.8.x cycle is opened yet** — finish the open v3.7 items + closeout, then open
+> 3.8.0 against a real theme.
+
+**Verification follow-up — Windows entropy (3.7.15)**
+
+- [ ] **Windows `cass` acceptance for the 3.7.15 entropy fix.** All entropy now
+      routes through `_sigil_random_fill` / stdlib `random_bytes`
+      (getrandom/getentropy/ProcessPrng); **code-complete and Linux-verified, no
+      sigil source work remains.** The issue's acceptance gates on real Windows:
+      a sigil keypair-gen + a `tls_native` client nonce on **`cass`** producing
+      unique values, and re-folding the vendored `lib/sigil.cyr` in cyrius +
+      re-verifying the native-TLS handshake there (the `tls_native` half is
+      cyrius-owned). Issue
+      [`2026-06-15-sigil-windows-entropy-not-via-getrandom.md`](issues/2026-06-15-sigil-windows-entropy-not-via-getrandom.md)
+      stays **open** until `cass` confirms.
+
 **Tooling / process — committed for the next release**
 
 - [ ] **Buried-deferral gate.** A closeout/CI check that greps `src/`
@@ -155,7 +178,7 @@ audits in [`docs/audit/`](../audit/).
   Montgomery-on-verify (3.43×); `pem_decode_privkey`→RSAK; AES-128 seal
   keys. Closed out at 3.6.8 (Closeout Pass + the overdue 3.5.6 audit doc
   + un-burying three hidden deferrals). Issue cross-walk:
-  [`issues/2026-05-28-cyrius-tls-arc-full-audit.md`](issues/2026-05-28-cyrius-tls-arc-full-audit.md)
+  [`issues/archive/2026-05-28-cyrius-tls-arc-full-audit.md`](issues/archive/2026-05-28-cyrius-tls-arc-full-audit.md)
   (all five line items delivered).
 - **3.7 — perf + x509 (IN PROGRESS)** — Solinas reduction for P-256
   (3.7.0, verify 147→26 ms, 5.65×) and P-384 (3.7.1, 339→55 ms, 6.21×);
@@ -173,8 +196,14 @@ audits in [`docs/audit/`](../audit/).
   `param_load` structural fix + pin 6.0.87 → 6.1.20, **and the EC
   scalar-mult speedup** — fixed-base comb for `u1·G` + windowed `u2·Q`
   (verify-only), `ecdsa_p256_verify` 24.7 → 11.6 ms (2.13×) /
-  `ecdsa_p384_verify` 54.6 → 26.3 ms (2.08×) (3.7.8). Remaining: the ≤ 10 ms
+  `ecdsa_p384_verify` 54.6 → 26.3 ms (2.08×) (3.7.8); the **attestation
+  cert-pointer-array byte-vs-slot OOB fix** + pin → 6.2.1 + `json`/`bigint`→`bayan`
+  (3.7.13); a toolchain/dependency refresh, pin → 6.2.11 (3.7.14); and the
+  **Windows-entropy single-boundary fix** — all keygen/nonce/blinding (6 sites,
+  incl. AGNOS-only `tpm_random`) routed through `_sigil_random_fill` / stdlib
+  `random_bytes`, fail-closed, pin → 6.2.12 (3.7.15). Remaining: the ≤ 10 ms
   P-256 squeeze (inversion-chain / mixed-add / Karatsuba), the
-  buried-deferral *gate*, and the full bench re-run (see Outstanding above).
+  buried-deferral *gate*, and the full bench re-run (see Outstanding above);
+  plus the Windows `cass` acceptance for 3.7.15 (verification-only).
 
-**Cyrius pin:** `6.1.20` (synced across `cyrius.cyml` and CI).
+**Cyrius pin:** `6.2.12` (synced across `cyrius.cyml` and CI).

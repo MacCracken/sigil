@@ -369,29 +369,23 @@ var _rsa_blind_sb[512];     # blinded signature (m*r^e)^d mod n
 var _rsa_blind_prod[1024];  # 2*limbs multiply scratch
 
 # Generate a fresh blinding pair (r, r^-1 mod n) with r in [1, n) and
-# invertible. Reads /dev/urandom. Returns 0 on success, -1 if no
-# entropy or no invertible r within a few tries (effectively never).
+# invertible. Draws entropy via sigil's fail-closed CSPRNG boundary
+# (src/random.cyr → per-target getrandom/getentropy/ProcessPrng).
+# Returns 0 on success, -1 if no entropy or no invertible r within a few
+# tries (effectively never).
 fn _rsa_gen_blind(r_out, rinv_out, n_bn, nlen, limbs): i64 {
-    var fd = file_open("/dev/urandom", 0, 0);
-    if (fd < 0) { return 0 - 1; }
     var tries = 0;
     var ok = 0;
     while (ok == 0) {
-        if (tries >= 16) { file_close(fd); return 0 - 1; }
+        if (tries >= 16) { return 0 - 1; }
         tries = tries + 1;
-        var got = 0;
-        while (got < nlen) {
-            var nr = file_read(fd, (&_rsa_blind_rand) + got, nlen - got);
-            if (nr <= 0) { file_close(fd); return 0 - 1; }
-            got = got + nr;
-        }
+        if (_sigil_random_fill(&_rsa_blind_rand, nlen) != 0) { return 0 - 1; }
         bn_from_be(r_out, limbs, &_rsa_blind_rand, nlen);
         bn_mod(r_out, r_out, limbs, n_bn, limbs);          # r in [0, n)
         if (bn_is_zero(r_out, limbs) == 0) {
             if (bn_modinv(rinv_out, r_out, n_bn, limbs) == 0) { ok = 1; }
         }
     }
-    file_close(fd);
     return 0;
 }
 
@@ -619,19 +613,10 @@ fn _rsa_top_mask(nbits): i64 {
     return m;
 }
 
-# Read `n` random bytes from /dev/urandom into `out`. Returns 0 / -1.
+# Fill `out` with `n` fresh CSPRNG bytes (the PSS salt) via sigil's
+# fail-closed entropy boundary (src/random.cyr). Returns 0 / -1.
 fn _rsa_pss_rand(out, n): i64 {
-    if (n == 0) { return 0; }
-    var fd = file_open("/dev/urandom", 0, 0);
-    if (fd < 0) { return 0 - 1; }
-    var got = 0;
-    while (got < n) {
-        var r = file_read(fd, out + got, n - got);
-        if (r <= 0) { file_close(fd); return 0 - 1; }
-        got = got + r;
-    }
-    file_close(fd);
-    return 0;
+    return _sigil_random_fill(out, n);
 }
 
 # EMSA-PSS-VERIFY (RFC 8017 §9.1.2) on the `emlen`-byte encoded message
@@ -707,9 +692,9 @@ fn _rsa_pss_verify(hid, n_be, n_len, e_be, e_len, msg, msg_len, sig, sig_len): i
 }
 
 # Sign msg with RSASSA-PSS (RFC 8017 §8.1.1). `key` is an RSAK struct;
-# salt length = hLen (fresh /dev/urandom). Writes k bytes to sig_out;
-# returns k (>0), or -1 on failure (entropy, too-small modulus, or a
-# failed verify-after-sign).
+# salt length = hLen (fresh CSPRNG via src/random.cyr). Writes k bytes to
+# sig_out; returns k (>0), or -1 on failure (entropy, too-small modulus,
+# or a failed verify-after-sign).
 fn _rsa_pss_sign(hid, key, msg, msg_len, sig_out): i64 {
     var hlen = _rsa_pss_hlen(hid);
     var nlen = load64(key + RSAK_NLEN);

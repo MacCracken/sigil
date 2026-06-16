@@ -1,3 +1,6 @@
+> **ARCHIVED — RESOLVED (2026-06-15).** Sigil-owned crypto primitives. All five line items (AES-128-GCM, RSA PKCS#1 v1.5 + PSS, ECDSA sign, private-key parsers, TLS 1.2 PRF) shipped across **3.5.7–3.6.8**; arc CLOSED at 3.6.8.
+> Issue cross-walk: 3.7.15 triage + `docs/audit/2026-06-15-3.7.15-windows-entropy-audit.md`.
+
 # Sigil: comprehensive audit of gaps for the cyrius TLS 1.2 + 1.3 native arc
 
 **Filed:** 2026-05-28

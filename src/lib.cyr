@@ -12,6 +12,11 @@ include "lib/hashmap.cyr"
 include "lib/syscalls.cyr"
 include "lib/io.cyr"
 include "lib/fs.cyr"
+# Kernel CSPRNG — `random_bytes` over `sys_getrandom`, per-target-correct
+# (getrandom / getentropy / ProcessPrng). Backs sigil's single entropy
+# boundary in src/random.cyr. Opt-in stdlib (not auto-prepended) — a
+# bundle-only consumer must include it too (see README "Usage").
+include "lib/random.cyr"
 include "lib/fmt.cyr"
 # bayan replaces the standalone stdlib json + bigint modules carved into it
 # @cyrius 6.1.25 (6.2.x ships no lib/json.cyr / lib/bigint.cyr). It re-exports
@@ -46,6 +51,10 @@ include "lib/agnosys.cyr"
 # Sigil modules (dependency order)
 include "src/types.cyr"
 include "src/error.cyr"
+# Single entropy boundary (3.7.15) — `_sigil_random_fill` over the stdlib
+# kernel CSPRNG; every keygen/nonce/blinding draw funnels through it.
+# Must precede the first consumer (ed25519 / rsa / mldsa / trust).
+include "src/random.cyr"
 # Per-thread crypto scratch banks (3.6) — must precede every banked
 # crypto module (sha_ni onward) since they call `cbank()`.
 include "src/crypto_scratch.cyr"

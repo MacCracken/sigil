@@ -147,7 +147,7 @@ fn _mldsa_sv_squeeze(out, outlen): i64 {
 # Keypair generation — deterministic from a 32-byte seed
 # ================================================================
 # seed: caller-provided 32 bytes (use mldsa65_keypair for the
-# /dev/urandom-driven convenience wrapper below). Output: pk
+# CSPRNG-driven convenience wrapper below). Output: pk
 # (1952 B), sk (4032 B) buffers pre-allocated by caller.
 #
 # Steps (FIPS 204 Algorithm 1):
@@ -207,24 +207,16 @@ fn mldsa65_keypair_from_seed(seed, pk, sk): i64 {
     return 0;
 }
 
-# Convenience: generate keypair from /dev/urandom. Returns 1 on
-# success, 0 if entropy gather fails (partial reads, EOF, etc.)
-# — matches ed25519_keypair_from_random's ABI.
+# Convenience: generate a keypair from the kernel CSPRNG via sigil's
+# single fail-closed entropy boundary (src/random.cyr → stdlib
+# random_bytes; per-target getrandom/getentropy/ProcessPrng). Returns 1
+# on success, 0 if entropy gather fails — `_sigil_random_fill` fills all
+# MLDSA_SEEDBYTES or returns non-zero (no partial seed). `secret var`
+# zeroizes `seed` on every return path. Matches ed25519's keygen ABI.
 fn mldsa65_keypair(pk, sk): i64 {
     secret var seed[32];
     memset(&seed, 0, MLDSA_SEEDBYTES);
-    var fd = file_open("/dev/urandom", 0, 0);
-    if (fd < 0) { return 0; }
-    var got = 0;
-    while (got < MLDSA_SEEDBYTES) {
-        var n = file_read(fd, (&seed) + got, MLDSA_SEEDBYTES - got);
-        if (n <= 0) {
-            file_close(fd);
-            return 0;
-        }
-        got = got + n;
-    }
-    file_close(fd);
+    if (_sigil_random_fill(&seed, MLDSA_SEEDBYTES) != 0) { return 0; }
     mldsa65_keypair_from_seed(&seed, pk, sk);
     return 1;
 }

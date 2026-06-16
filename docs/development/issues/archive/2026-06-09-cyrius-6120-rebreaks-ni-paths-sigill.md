@@ -1,3 +1,6 @@
+> **ARCHIVED — RESOLVED (2026-06-15).** Sigil-owned. Real cause was the missing-opt-in-stdlib-include footgun (not asm drift); fixed in **3.7.8** via README opt-in-include docs + belt-and-suspenders param_load migration. Re-proven green through every pin bump to 6.2.12.
+> Issue cross-walk: 3.7.15 triage + `docs/audit/2026-06-15-3.7.15-windows-entropy-audit.md`.
+
 # sigil: NI-path inline-asm `[rbp-N]` parameter loads SIGILL again
 under cyrius 6.1.20 — the predicted re-break
 

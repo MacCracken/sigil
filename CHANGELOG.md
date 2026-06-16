@@ -7,6 +7,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.7.15] — 2026-06-15
+
+**Windows entropy fix — sigil keygen / nonce / blinding now route through the
+stdlib kernel CSPRNG instead of opening `/dev/urandom` directly + cyrius pin
+`6.2.11` → `6.2.12`.**
+
+### Security
+
+- **sigil gathered entropy by opening `/dev/urandom` directly, which is
+  non-functional on Windows even after the v6.2.12 ProcessPrng CSPRNG.** Every
+  keygen / nonce / blinding site (`generate_keypair`,
+  `ed25519_generate_keypair`, `mldsa65_keypair`, `_rsa_gen_blind`,
+  `_rsa_pss_rand`) called `file_open("/dev/urandom")` — on Windows (PE) there
+  is no `/dev/urandom` and no path translation for it, so the open failed and
+  these paths fell **closed** (fail-CLOSED, **not** fail-weak: the CVE-19
+  invariant held — no weak / partial entropy was ever emitted). But sigil
+  RSA / Ed25519 / ML-DSA keygen + RSA-PSS salt/blinding and (transitively)
+  `tls_native` nonces were **unusable** on Windows. **Severity: Medium**
+  (fail-closed, Windows-only; Linux / macOS / aarch64 / AGNOS were
+  unaffected — they have `/dev/urandom`). Fixed by routing **all** entropy
+  through a single boundary, `_sigil_random_fill` (`src/random.cyr`), over the
+  stdlib `random_bytes`, which dispatches per-target: getrandom(2) on
+  Linux/AGNOS, getentropy on macOS, **ProcessPrng on Windows** (cyrius 6.2.12,
+  `bcryptprimitives.dll` via the 0xF01A PE reroute). The fail-closed contract
+  is preserved verbatim — `random_bytes` must return exactly `n` or the draw
+  is a hard `-1` abort; **no weak fallback anywhere**, and `secret var` seed
+  buffers still zeroize on every failure path. Issue:
+  `docs/development/issues/2026-06-15-sigil-windows-entropy-not-via-getrandom.md`.
+
+  > Linux verified (full `.tcyr` suite + the new `random.tcyr`). The **Windows
+  > ProcessPrng path is verified separately on `cass` (real Windows)** — that
+  > acceptance step is pending and cannot run on the Linux dev host.
+
+### Added
+
+- **`src/random.cyr`** — sigil's single entropy boundary
+  (`_sigil_random_fill`); every keygen / nonce / blinding draw funnels through
+  it, so the CSPRNG source is per-target-correct and auditable in one place.
+- **`tests/tcyr/random.tcyr`** (+9 assertions) — entropy-boundary regression:
+  full-fill success, fresh entropy, two-draw uniqueness, the `n == 0` no-op
+  edge, and the > 256-byte internal-loop / no-truncation path.
+
+### Changed
+
+- **cyrius pin `6.2.11` → `6.2.12`** — the release whose
+  `lib/syscalls_windows.cyr` `sys_getrandom` composes
+  `bcryptprimitives.dll!ProcessPrng`; the per-target CSPRNG primitive sigil now
+  consumes (issue `2026-06-11-windows-entropy-primitive.md`, closed upstream).
+- **New required opt-in stdlib include: `lib/random.cyr`** (provides
+  `random_bytes`). Like the existing four (`ct` / `keccak` / `thread` /
+  `thread_local`), `dist/sigil.cyr` does **not** carry it — a bundle-only
+  consumer MUST `include "lib/random.cyr"` or hit the 3.7.8 `ud2` / SIGILL
+  footgun. Documented in README "Usage" (now **five** required includes).
+- The 18 per-module `.tcyr` tests that include a keygen-capable module
+  (ed25519 / rsa / mldsa / trust) gained the `lib/random.cyr` + `src/random.cyr`
+  includes so `_sigil_random_fill` resolves (no `undefined function` warnings).
+- Verified green on 6.2.12: smoke build OK, full `.tcyr` suite exit-checked
+  (0 failures, +9 new), bench healthy (P-256 verify 12.6 ms / P-384 26.4 ms —
+  unchanged; the entropy change is keygen-path only, off every verify bench),
+  `dist/sigil.cyr` regenerated self-contained (v3.7.15 header),
+  `cyrius doc --check dist/sigil.cyr` 0 undocumented.
+
+- **`src/tpm.cyr` `tpm_random` also converted** to `_sigil_random_fill` (a 6th
+  site, beyond the 5 dist-bundled ones). It is **AGNOS-only** (`tpm.cyr` is one
+  of the four agnosys-wrapping modules excluded from `dist/sigil.cyr`) so it was
+  outside the issue's named Windows scope, but routing it through the single
+  boundary keeps the "single entropy boundary" invariant whole and removes the
+  last raw `/dev/urandom` open — **zero remain in `src/`**. ABI preserved
+  (`count` on success / 0 on failure, fail-closed).
+
 ## [3.7.14] — 2026-06-15
 
 **cyrius pin `6.2.1` → `6.2.11` + dependency refresh (ecosystem-wide
@@ -239,7 +309,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     addition, optional Karatsuba `u256_mul_full`) is tracked as an open
     roadmap item, not dropped.
 
-See `docs/development/issues/2026-06-09-cyrius-6120-rebreaks-ni-paths-sigill.md`
+See `docs/development/issues/archive/2026-06-09-cyrius-6120-rebreaks-ni-paths-sigill.md`
 (resolution banner) and `2026-05-10-cyrius-510-asm-stack-frame-drift-breaks-ni-paths.md`.
 
 ## [3.7.7] — 2026-06-07
@@ -297,7 +367,7 @@ The off-diagonal ECDSA chain-link closer (P1), plus the 6.0.87 toolchain bump.
   combos verify — including the off-diagonal links (a P-384 issuer
   signing a SHA-256 child, or a P-256 issuer signing a SHA-384 child)
   that real-world chains use. Closes the P1 follow-up to 3.7.4's
-  parse-side fix (`docs/development/issues/2026-06-06-x509-off-diagonal-ecdsa-verify.md`).
+  parse-side fix (`docs/development/issues/archive/2026-06-06-x509-off-diagonal-ecdsa-verify.md`).
   New digest-taking cores `_ecdsa_p256_verify_digest` /
   `_ecdsa_p384_verify_digest` map the digest to the scalar via the
   FIPS 186-4 §6.4 leftmost-bits rule (P-256 + SHA-384 → leftmost 32 of
@@ -1042,7 +1112,7 @@ server/client cert. Pure additive surface.
 
 EC + Ed25519 private-key parsers (PEM + DER) — the first half of
 issue line item 4
-(`docs/development/issues/2026-05-28-cyrius-tls-arc-full-audit.md`),
+(`docs/development/issues/archive/2026-05-28-cyrius-tls-arc-full-audit.md`),
 needed before any TLS server key can come online. Pure additive
 surface; the RSA private-key parser is deferred to 3.5.10 (it needs
 the bignum/key type that lands with the RSA engine — `pem_decode_privkey`
@@ -1088,7 +1158,7 @@ until then).
 
 AES-128-GCM — first of the five scheduled additions for the cyrius
 native-TLS arc (issue
-`docs/development/issues/2026-05-28-cyrius-tls-arc-full-audit.md`,
+`docs/development/issues/archive/2026-05-28-cyrius-tls-arc-full-audit.md`,
 line item 1). `TLS_AES_128_GCM_SHA256` (0x1301) is the RFC 8446 §9.1
 **mandatory** TLS 1.3 ciphersuite; this also unblocks the four TLS
 1.2 `*_WITH_AES_128_GCM_SHA256` suites. Pure additive public surface
@@ -2455,7 +2525,7 @@ ship-when-touched item, not blocking the tag.
   AND a known-vector self-test pass before the cache pins to 1.
   On mismatch the cache pins to 0 and sigil silently falls
   through to the software path. Catches the class of bug
-  documented in [`docs/development/issues/2026-05-10-cyrius-510-asm-stack-frame-drift-breaks-ni-paths.md`](docs/development/issues/2026-05-10-cyrius-510-asm-stack-frame-drift-breaks-ni-paths.md)
+  documented in [`docs/development/issues/archive/2026-05-10-cyrius-510-asm-stack-frame-drift-breaks-ni-paths.md`](docs/development/issues/archive/2026-05-10-cyrius-510-asm-stack-frame-drift-breaks-ni-paths.md)
   — hardcoded `[rbp-N]` parameter loads in the NI asm blocks
   coupling to a cyrius prologue layout that drifts across
   toolchain versions. Production traffic never goes live on a

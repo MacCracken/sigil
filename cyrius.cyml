@@ -5,7 +5,7 @@ description = "Sigil — system-wide trust verification for AGNOS. Ed25519, SHA-
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/sigil"
 language = "cyrius"
-cyrius = "6.2.11"
+cyrius = "6.2.12"
 
 [build]
 entry = "programs/smoke.cyr"
@@ -55,6 +55,7 @@ defines = ["SIGIL_SMOKE"]
 modules = [
     "src/types.cyr",
     "src/error.cyr",
+    "src/random.cyr",
     "src/crypto_scratch.cyr",
     "src/sha_ni.cyr",
     "src/sha256.cyr",

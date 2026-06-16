@@ -7,7 +7,7 @@
 #   - `pcr_measurement_*`  — sigil's PCR baseline struct
 #   - `tpm_seal_data()`    — seal a secret to current PCR state
 #   - `tpm_unseal_data()`  — unseal (PCR-gated)
-#   - `tpm_random()`       — prefer TPM RNG, fall back to /dev/urandom
+#   - `tpm_random()`       — kernel CSPRNG via sigil's entropy boundary
 #
 # All entry points check `tpm_available()` first and return 0 / error
 # on absence, so this module is safe to call on hosts without a TPM
@@ -93,33 +93,27 @@ fn tpm_unseal_data(sealed, buf, buf_len): i64 {
 }
 
 # ================================================================
-# Random bytes via /dev/urandom.
+# Random bytes via the kernel CSPRNG (sigil's single entropy boundary).
 #
 # We deliberately do NOT route this through agnosys `tpm_get_random`
 # even when a TPM is present: that path shells out to
 # `/usr/bin/tpm2_getrandom`, which requires tpm2-tools installed and
-# adds a subprocess per key gen. /dev/urandom on modern Linux is
-# getrandom(2)-backed and cryptographically adequate for Ed25519
-# scalar generation. If a use case ever needs *hardware*-sourced
-# entropy specifically (audit, remote attestation), a dedicated
-# `tpm_hw_random` can be added later.
+# adds a subprocess per key gen. Instead this funnels through
+# `_sigil_random_fill` (src/random.cyr → stdlib `random_bytes`), the same
+# per-target CSPRNG every other sigil draw uses (getrandom on Linux/AGNOS,
+# getentropy on macOS, ProcessPrng on Windows) — getrandom(2)-backed and
+# cryptographically adequate for Ed25519 scalar generation. Routing here
+# too (3.7.15) keeps the "single entropy boundary" invariant whole and
+# removes the prior direct `/dev/urandom` open (non-functional on Windows).
+# If a use case ever needs *hardware*-sourced entropy specifically (audit,
+# remote attestation), a dedicated `tpm_hw_random` can be added later.
 #
-# Caller MUST treat any return value < count as entropy failure.
+# Caller MUST treat any return value < count as entropy failure (this
+# returns `count` on success / 0 on failure — fail-closed, no weak fallback).
 # ================================================================
 
 fn tpm_random(buf, count): i64 {
     if (count <= 0) { return 0; }
-    var fd = file_open("/dev/urandom", 0, 0);
-    if (fd < 0) { return 0; }
-    var got = 0;
-    while (got < count) {
-        var n = file_read(fd, buf + got, count - got);
-        if (n <= 0) {
-            file_close(fd);
-            return 0;
-        }
-        got = got + n;
-    }
-    file_close(fd);
+    if (_sigil_random_fill(buf, count) != 0) { return 0; }
     return count;
 }

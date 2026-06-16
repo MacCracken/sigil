@@ -1,3 +1,6 @@
+> **ARCHIVED — RESOLVED (2026-06-15).** Sigil-owned. HMAC-/HKDF-SHA384 shipped in **3.5.6** (src + dist + RFC 4231 KATs). Protocol/key-schedule wiring is cyrius-owned.
+> Issue cross-walk: 3.7.15 triage + `docs/audit/2026-06-15-3.7.15-windows-entropy-audit.md`.
+
 # Sigil: HMAC-SHA384 + HKDF-SHA384 needed for cyrius TLS 1.3 native stack
 
 **Filed:** 2026-05-28

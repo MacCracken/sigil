@@ -1,3 +1,6 @@
+> **ARCHIVED — RESOLVED (2026-06-15).** Sigil-owned. The requested NI param-load structural fix (`param_load(reg,idx)` replacing hardcoded `mov r__,[rbp-N]` byte literals in src/aes_ni.cyr + src/sha_ni.cyr) shipped in **3.7.8**; present in src + dist.
+> Issue cross-walk: 3.7.15 triage + `docs/audit/2026-06-15-3.7.15-windows-entropy-audit.md`.
+
 # sigil: inline-asm `[rbp-N]` parameter loads SIGILL under
 # cyrius 5.10.x stack frames
 

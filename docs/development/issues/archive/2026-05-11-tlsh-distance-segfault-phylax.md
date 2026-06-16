@@ -1,3 +1,6 @@
+> **ARCHIVED — RESOLVED (2026-06-15).** **Not sigil-owned** (phylax-side root cause; canonical filing is phylax). Sigil's only candidate (SHA-NI `[rbp-N]` asm drift) was structurally eliminated in **3.7.8** via `param_load`; toolchain is now 6.2.12, many generations past the 5.10.44 that triggered the symptom. No sigil-side action.
+> Issue cross-walk: 3.7.15 triage + `docs/audit/2026-06-15-3.7.15-windows-entropy-audit.md`.
+
 # sigil: potential 3.x interaction — `tlsh_distance(h, h)` SIGSEGVs in
 # phylax under cyrius 5.10.44 + sigil 3.1.1
 

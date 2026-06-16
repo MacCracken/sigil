@@ -14,7 +14,7 @@ Cyrius (ported from Rust v1.0.0; original Rust source removed in
 implemented in-house. The full (small) dependency set — cyrius stdlib +
 two AGNOS first-party crates — is listed under [Dependencies](#dependencies).
 
-**Cyrius pin:** `6.1.20` (synced across `cyrius.cyml` and CI).
+**Cyrius pin:** `6.2.12` (synced across `cyrius.cyml` and CI).
 
 ## Crypto stack
 
@@ -43,7 +43,8 @@ All cryptography implemented in Cyrius — no external crypto libraries:
   PKCS#8) and Ed25519 (PKCS#8); X.509 + PEM cert parsing
 - **Constant-time comparison** — bitwise-OR accumulation; no
   early-exit branches on secret data
-- **Cryptographic RNG** — `/dev/urandom` with short-read validation
+- **Cryptographic RNG** — kernel CSPRNG via the stdlib `random_bytes`
+  (getrandom / getentropy / ProcessPrng), fail-closed (no weak fallback)
 
 ## Modules
 
@@ -135,12 +136,14 @@ Sigil implements **all cryptography itself** — there are no external crypto
 libraries. The complete dependency set (declared in [`cyrius.cyml`](cyrius.cyml))
 is the Cyrius standard library plus two AGNOS first-party crates:
 
-### Cyrius stdlib — pinned `6.1.20`
+### Cyrius stdlib — pinned `6.2.12`
 
 - **Auto-included** (cyrius pulls these on symbol reference — nothing for a
   consumer to do): `syscalls`, `alloc`, `freelist`, `assert`, `str`,
-  `string`, `vec`, `hashmap`, `io`, `fs`, `fmt`, `json`, `chrono`, `bigint`,
-  `tagged`, `process`, `slice` (`bench` for the benchmark harness).
+  `string`, `vec`, `hashmap`, `io`, `fs`, `fmt`, `result`, `fnptr`, `bayan`,
+  `chrono`, `tagged`, `process`, `slice` (`bench` for the benchmark harness).
+  (`json` + `bigint` were carved into `bayan` at cyrius 6.1.25; 6.2.x ships
+  neither standalone.)
 - **Opt-in — the consumer MUST `include` these** (they are *not* in the
   cyrius auto-prepend union, and `dist/sigil.cyr` does not carry them):
   - `lib/ct.cyr` — constant-time compares (`ct_eq_bytes_lens` / `ct_select`),
@@ -149,6 +152,8 @@ is the Cyrius standard library plus two AGNOS first-party crates:
   - `lib/thread.cyr` — `thread_create` / `thread_join`, parallel batch verify
   - `lib/thread_local.cyr` — per-thread crypto banks (`cbank()`), every banked
     primitive
+  - `lib/random.cyr` — `random_bytes` (kernel CSPRNG: getrandom / getentropy /
+    ProcessPrng), every keygen / nonce / blinding draw (since 3.7.15)
 
   See [Usage](#usage--stdlib-include-order-36) below for the include order and
   why omitting these is a **runtime** crash under cyrius 6.1.x. Requires
@@ -173,10 +178,10 @@ the self-contained crypto + trust engine core.
 Sigil is consumed as a vendored distlib: `cyrius deps` resolves it into your
 `lib/sigil.cyr`, which you then `include`.
 
-**Four stdlib modules must be `include`d _before_ `lib/sigil.cyr`.** They are
+**Five stdlib modules must be `include`d _before_ `lib/sigil.cyr`.** They are
 *not* part of the cyrius auto-prepend union — cyrius stdlib is **opt-in**, not
 auto-associated. The base stdlib (`string`/`alloc`/`str`/`vec`/`io`/…) *is* in
-the auto union, so those stay automatic; these four are not, and sigil's bundle
+the auto union, so those stay automatic; these five are not, and sigil's bundle
 deliberately does **not** carry them (it bundles only sigil's own crypto/trust
 modules, leaving lib selection to you). This is the same opt-in pattern as
 [mabda](https://github.com/MacCracken/mabda)'s manual deps:
@@ -186,6 +191,7 @@ include "lib/ct.cyr"             # ct_eq_bytes / ct_eq_bytes_lens / ct_select �
 include "lib/keccak.cyr"         # shake256 / _keccak_* — ML-DSA-65 post-quantum signing (default-on since 3.7.6)
 include "lib/thread.cyr"         # thread_create / thread_join — parallel-batch verify
 include "lib/thread_local.cyr"   # thread_local_init/get/set — per-thread crypto banks
+include "lib/random.cyr"         # random_bytes — kernel CSPRNG for keygen/nonce/blinding (getrandom/getentropy/ProcessPrng)
 include "lib/sigil.cyr"          # sigil itself — MUST come last
 
 fn main(): i64 {
@@ -198,10 +204,17 @@ fn main(): i64 {
 }
 ```
 
-**Why these four are required:**
+**Why these five are required:**
 
 - **`lib/ct.cyr`** — `ct_eq_bytes_lens` / `ct_select` back **every** constant-time
   comparison: Ed25519/ECDSA verify, HMAC/AEAD tag checks, hash compares.
+- **`lib/random.cyr`** — `random_bytes` is sigil's only entropy source; every
+  keygen / nonce / blinding draw funnels through `_sigil_random_fill`
+  (`src/random.cyr`). It dispatches per-target — getrandom on Linux/AGNOS,
+  getentropy on macOS, ProcessPrng on Windows (cyrius 6.2.12) — and is
+  fail-closed (no weak fallback). Omitting it is the same runtime-crash footgun
+  as the others. (Replaced the prior direct `/dev/urandom` path in 3.7.15, which
+  was non-functional on Windows.)
 - **`lib/keccak.cyr`** — `shake256` drives ML-DSA-65, which is **default-on since
   3.7.6** (the `-D SIGIL_PQC` gate was dropped). Required even if you never call
   the PQC surface, unless you DCE it out (`CYRIUS_DCE=1`).
@@ -214,18 +227,18 @@ fn main(): i64 {
 
 > ⚠️ **Omitting any of these is a runtime crash, not a build failure.** Cyrius
 > only *warns* on an undefined function (`undefined function 'thread_local_init'`,
-> `'ct_eq_bytes_lens'`, `'shake256'`, …) and compiles the call site to a `ud2`
+> `'ct_eq_bytes_lens'`, `'shake256'`, `'random_bytes'`, …) and compiles the call site to a `ud2`
 > trap. Under **cyrius 6.1.x** that means the program builds, then **SIGILLs
 > (exit 132)** the moment a crypto path touches the missing symbol — e.g.
-> `sha256("abc")` dies while software `sha1` runs fine. Add the four includes
+> `sha256("abc")` dies while software `sha1` runs fine. Add the five includes
 > above and the crash disappears. (This was the 3.7.8 fix; see
-> `docs/development/issues/2026-06-09-cyrius-6120-rebreaks-ni-paths-sigill.md`.)
+> `docs/development/issues/archive/2026-06-09-cyrius-6120-rebreaks-ni-paths-sigill.md`.)
 
 Requires **cyrius ≥ 6.0.52** (the release that shipped `lib/thread_local.cyr`).
 
 ## Tests
 
-1469 assertions across 54 test files, 0 failures (3.7.9). Crypto
+1468 assertions across 54 test files, 0 failures (3.7.15). Crypto
 suites use published known-answer vectors (RFC / FIPS / NIST); the
 TEE attestation arc ships synthesised end-to-end fixtures.
 `tests/tcyr/batch_parallel.tcyr` doubles as the parallel-verify race

@@ -1,0 +1,90 @@
+# random.tcyr — sigil's single entropy boundary (src/random.cyr)
+#
+# `_sigil_random_fill` routes every keygen / nonce / blinding draw through
+# the cyrius stdlib kernel CSPRNG (`random_bytes` → getrandom / getentropy /
+# ProcessPrng), replacing the prior direct `/dev/urandom` open/read path
+# that was non-functional on Windows (no `/dev/urandom`). See
+# docs/development/issues/2026-06-15-sigil-windows-entropy-not-via-getrandom.md.
+#
+# These assertions run on the Linux dev host (getrandom). The Windows
+# ProcessPrng path is verified separately on `cass` — it cannot run here.
+# They check the fail-OPEN (success) contract: full fill, fresh entropy,
+# uniqueness, the n==0 no-op edge, and the >256-byte internal-loop path
+# (a guard against short-read truncation). The fail-CLOSED contract (a
+# non-zero return on CSPRNG failure, no weak fallback) is structural — the
+# function returns -1 whenever `random_bytes` does not return exactly `n`.
+
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fmt.cyr"
+include "lib/bayan.cyr"
+include "lib/sakshi.cyr"
+include "lib/chrono.cyr"
+include "lib/ct.cyr"
+include "lib/random.cyr"
+
+include "src/types.cyr"
+include "src/error.cyr"
+include "src/random.cyr"
+
+# OR-accumulate `n` bytes at `p`; returns non-zero iff any byte is non-zero
+# (i.e. the buffer is not entirely zero).
+fn _nonzero(p, n): i64 {
+    var acc = 0;
+    var i = 0;
+    while (i < n) { acc = acc | (load8(p + i) & 0xFF); i = i + 1; }
+    return acc;
+}
+
+fn main() {
+    alloc_init();
+
+    # ============================================================
+    # Full fill returns success and produces fresh entropy.
+    # ============================================================
+    test_group("entropy boundary — fill success");
+    var a[32];
+    memset(&a, 0, 32);
+    assert_eq(_sigil_random_fill(&a, 32), 0, "fill 32 returns success");
+    assert_eq(_nonzero(&a, 32) != 0, 1, "filled buffer is not all-zero");
+
+    # ============================================================
+    # Two independent draws must differ (collision ~ 2^-256).
+    # ============================================================
+    test_group("entropy boundary — uniqueness");
+    var b[32];
+    memset(&b, 0, 32);
+    assert_eq(_sigil_random_fill(&b, 32), 0, "second fill returns success");
+    assert_eq(ct_eq_bytes(&a, &b, 32), 0, "two independent draws differ");
+
+    # ============================================================
+    # n == 0 is a success no-op (leaves the buffer untouched).
+    # ============================================================
+    test_group("entropy boundary — zero-length edge");
+    var z[8];
+    memset(&z, 0, 8);
+    assert_eq(_sigil_random_fill(&z, 0), 0, "n==0 returns success");
+    assert_eq(_nonzero(&z, 8), 0, "n==0 leaves buffer untouched");
+
+    # ============================================================
+    # > 256 bytes exercises random_bytes' internal short-read loop;
+    # the whole buffer (incl. the upper half) must be filled.
+    # ============================================================
+    test_group("entropy boundary — large fill loops");
+    var big[512];
+    memset(&big, 0, 512);
+    assert_eq(_sigil_random_fill(&big, 512), 0, "fill 512 (>256) returns success");
+    assert_eq(_nonzero(&big, 512) != 0, 1, "512-byte fill is not all-zero");
+    assert_eq(_nonzero((&big) + 256, 256) != 0, 1, "upper half filled (not truncated)");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

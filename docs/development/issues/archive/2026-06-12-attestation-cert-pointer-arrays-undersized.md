@@ -1,3 +1,6 @@
+> **ARCHIVED — RESOLVED (2026-06-15).** Sigil-owned. The byte-vs-slot OOB-write at all 6 cert-pointer-array sites (sgx/tdx/sev_snp) fixed in **3.7.13** via the `var name: i64[4]` slot spelling; present in src + 3.7.15 dist.
+> Issue cross-walk: 3.7.15 triage + `docs/audit/2026-06-15-3.7.15-windows-entropy-audit.md`.
+
 # Attestation cert-pointer arrays `parsed[4]`/`inters[4]` are byte-undersized (×6 sites)
 
 **Filed:** 2026-06-12

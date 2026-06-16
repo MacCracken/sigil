@@ -1,3 +1,6 @@
+> **ARCHIVED — RESOLVED (2026-06-15).** Sigil-owned. The off-diagonal ECDSA chain-link verify (hash decoupled from issuer curve, all four {P-256,P-384}x{SHA-256,SHA-384} combos) shipped in **3.7.5** with a 4-lens audit + real-cert KATs.
+> Issue cross-walk: 3.7.15 triage + `docs/audit/2026-06-15-3.7.15-windows-entropy-audit.md`.
+
 # x509: off-diagonal ECDSA chain-link verification (hash ≠ curve)
 
 - **Filed**: 2026-06-06 (sigil 3.7.4)
