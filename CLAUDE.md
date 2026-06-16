@@ -19,7 +19,7 @@
 Sigil is the **single crypto / trust boundary** for AGNOS. It owns:
 
 - Ed25519 signing and verification (publisher keyring)
-- ECDSA P-256 / P-384 verification (TEE attestation chains)
+- ECDSA P-256 / P-384 verification (TEE attestation chains) **and** RFC 6979 deterministic signing (`src/ecdsa_sign.cyr`)
 - SHA-256 / SHA-384 / SHA-512 hashing (file integrity, signature schemes)
 - HMAC-SHA256 (RFC 2104) and HKDF-SHA256 (RFC 5869)
 - AES-256-GCM (FIPS 197 + NIST SP 800-38D) AEAD
@@ -55,7 +55,7 @@ CYRIUS_DCE=1 cyrius build ...                         # DCE release build
 - **Sigil IS the trust boundary** — every crypto decision lives here. Don't push crypto choices onto consumers.
 - **Own the crypto** — Ed25519 (RFC 8032), ECDSA P-256/P-384 (FIPS 186-4), SHA-2 family (FIPS 180-4), HMAC (RFC 2104), HKDF (RFC 5869), AES-256-GCM (FIPS 197 + NIST SP 800-38D), ML-DSA-65 (FIPS 204) implemented in Cyrius, no external deps. See [`docs/sources.md`](docs/sources.md) for the citation index.
 - **Constant-time on secret data** — bitwise-OR accumulation for hash/signature/MAC compares; no early-exit branches on key material.
-- **Key zeroization** — every private key, HMAC key, PRK, and intermediate secret buffer overwritten before free. Prefer `secret var` (cyrius 5.3.5) for compiler-guaranteed zeroization on scope exit.
+- **Key zeroization** — every private key, HMAC key, PRK, and intermediate secret buffer overwritten before free. Prefer `secret var` (cyrius 5.3.5) for compiler-guaranteed zeroization on scope exit. **Exception — per-worker banked scratch:** arrays banked across `cbank()` lanes (`src/crypto_scratch.cyr`) must be **plain `var` + an explicit per-lane `memset`**, *never* `secret var`. A `secret var` whole-array wipe on scope exit zeroizes *all* lanes, clobbering a concurrent worker's in-flight lane (the 3.8.0 ChaCha20/X25519 banking bug — caught by `banking_concurrent.tcyr`). See quirk #9 and ADR 0004.
 - **Zero external dependencies** — Cyrius stdlib only (plus `sakshi` for tracing, plus `agnosys` for kernel interfaces).
 - **`fl_alloc` for individually-freed scratch, `alloc` for init-once tables** — never `free()` a bump-allocated block (heaps don't cross).
 - **All types JSON-serializable** — `#derive(Serialize)` on every public type for cross-process logging.
@@ -164,6 +164,7 @@ Most cc3-era workarounds documented in earlier sigil versions are now resolved u
 6. **Array globals are 16-byte-aligned (since 5.5.21)** — any `var X[N]` with N > 8 lands on a 16-byte boundary. Removes the prior SSE-load #GP shape sensitivity for AES-NI round-key globals.
 7. **Stdlib thread-safety (5.5.31/32)** — atomics + race-free mutex are available; `string.cyr` is safe by construction. **But:** `alloc`, `hashmap`, and `vec` are NOT thread-safe. Multi-threaded sigil paths must pre-allocate per-worker scratch on the main thread before spawn.
 8. **Preprocessor output cap (was 1 MB, raised in cyrius 6.0.87)** — through 3.7.5 the sigil + stdlib + agnosys + mldsa expansion sat just over the 1 MB cap, so PQC was a `-D SIGIL_PQC` cmdline opt-in. **6.0.87 raised the cap**: the full unconditional build now compiles clean, so **3.7.6 made PQC default-on** (dropped the `#ifdef SIGIL_PQC` in `src/lib.cyr`; the flag is now a no-op). The `dist/sigil.cyr` bundle always included mldsa (via `[lib].modules`), so this only changed the `src/lib.cyr` build path. If a future stdlib growth re-approaches the cap, re-gate or split the bundle.
+9. **Banked per-worker secret scratch = plain `var` + per-lane `memset`, never `secret var` (since 3.8.0)** — function-scope `var X[N]` arrays are static globals (quirk #1); concurrent crypto paths therefore bank them across `cbank()` lanes (`var X[N*SIGIL_CRYPTO_BANKS]; var Xb = &X + cbank()*N;`, `src/crypto_scratch.cyr`). A banked array that holds secret state (x25519's clamped scalar `k`; chacha20's keystream `st`/`ws`/`ks`) **must not** be `secret var`: the compiler's whole-array zeroize-on-exit wipes every lane, clobbering a sibling worker's live lane (a real intermittent corruption — the `banking_concurrent.tcyr` race-detector flagged it at 1–2 mismatches/run). Use plain `var` and `memset` **only the calling worker's own lane** (`memset(Xb, 0, N);`) before return — that preserves per-call secret zeroization without touching another lane. The proven `fp_mul`/`fp_inv` banking is plain `var` for the same reason. See ADR 0004.
 
 ## CI / Release
 

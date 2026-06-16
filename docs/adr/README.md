@@ -40,4 +40,7 @@ the ADR. Commit messages don't survive the long arc; ADRs do.
 
 - [0001 — Retain `_sigil_batch_mutex` until caller-scratch lands](0001-retain-batch-mutex-until-caller-scratch.md) — why 3.3 shipped as a cleanup-only cycle and the parallel-verify mutex drop is queued for 3.5.
 - [0002 — ML-DSA-65 ships behind `-D SIGIL_PQC`](0002-mldsa-cmdline-gate.md) — why PQC is opt-in instead of default-on, and what triggers the flip.
-- [0003 — Per-call bump-alloc drift in `*_verify_full` orchestrators is acceptable until 3.6](0003-bump-alloc-drift-acceptable-until-3-6.md) — why the seven open LOW findings are batched into one closure rather than fixed incrementally.
+- [0003 — Per-call bump-alloc drift in `*_verify_full` orchestrators is acceptable until 3.6](0003-bump-alloc-drift-acceptable-until-3-6.md) — why the seven open LOW findings are batched into one closure rather than fixed incrementally. *(Closed: floor cleared 8→0 at 3.7.3.)*
+- [0004 — Per-lane zeroization for banked crypto arrays](0004-per-lane-zeroization-for-banked-crypto-arrays.md) — why banked scratch is plain `var` + per-lane `memset`, never `secret var` (the 3.8.0 cross-lane clobber).
+- [0005 — Keep Karatsuba `u256_mul_full`, retain schoolbook as the KAT oracle](0005-keep-karatsuba-u256-mul-full.md) — why a measured ~3–4% on the verify hot path is kept despite under-delivering vs. theory.
+- [0006 — Disposition of the EC scalar-mult ≤ 10 ms P-256 verify target](0006-park-ec-scalarmul-10ms-target.md) — **Accepted**: closed as not-reachable-with-current-approaches (~10.9 ms floor after all portable levers); exotic levers parked to the roadmap backlog, not a current priority.

@@ -183,6 +183,12 @@ their specs inline; this file is the cross-module overview.
   records"** (PKC 2006). The original X25519 design.
   - https://cr.yp.to/ecdh/curve25519-20060209.pdf
 - Constant-time Montgomery ladder with masked `cswap`.
+- Field arithmetic (`src/bigint_ext.cyr`) multiplies via a
+  Karatsuba 256×256→512 routine (`u256_mul_full`, 3.7.17); a
+  schoolbook variant (`_u256_mul_full_schoolbook`) is retained
+  as the differential KAT oracle. The same field backs Ed25519
+  and ECDSA P-256. `x25519` / `x25519_base` are per-worker banked
+  (`cbank()` lanes) since 3.8.0 — plain `var` + per-lane wipe.
 
 ### Ed25519 — `src/ed25519.cyr` (with `src/bigint_ext.cyr` for field arithmetic)
 
@@ -213,9 +219,22 @@ their specs inline; this file is the cross-module overview.
 - **FIPS 186-4** (as above).
 - **SEC 1 v2** — secp384r1 == NIST P-384.
 - **NIST SP 800-186** Appendix D — Solinas decomposition for
-  P-384 modular reduction (planned for v3.6 cycle).
+  P-384 modular reduction (`_p384_solinas_reduce`, shipped 3.7.1;
+  the P-256 mirror `_p256_solinas_reduce` shipped 3.7.0).
 
-### ML-DSA-65 — `src/mldsa*.cyr` (opt-in via `-D SIGIL_PQC`)
+### ECDSA P-256 / P-384 deterministic signing — `src/ecdsa_sign.cyr`
+
+- **RFC 6979** — Deterministic Usage of the Digital Signature
+  Algorithm (DSA) and ECDSA (2013-08). The per-message nonce `k`
+  is derived deterministically via HMAC-DRBG from the private key
+  and message hash — no RNG dependency in the signing path, which
+  removes the catastrophic nonce-reuse / biased-nonce key-recovery
+  class. Emits both raw `r‖s` and DER-encoded signatures.
+  - https://www.rfc-editor.org/rfc/rfc6979.txt
+- **FIPS 186-4** / **SEC 1 v2** — the ECDSA signing equations and
+  curve parameters (as in the verify sections above).
+
+### ML-DSA-65 — `src/mldsa*.cyr` (default-on since 3.7.6; `-D SIGIL_PQC` is a back-compat no-op)
 
 - **FIPS 204** — Module-Lattice-Based Digital Signature
   Standard (NIST, 2024-08).
@@ -300,9 +319,18 @@ their specs inline; this file is the cross-module overview.
 
 ## Cryptographic RNG
 
-- **`/dev/urandom`** with short-read validation, used in
-  `tpm_random` (`src/tpm.cyr`) and `generate_keypair`
-  (`src/trust.cyr`).
+- **Single entropy boundary** — `_sigil_random_fill`
+  (`src/random.cyr`, since 3.7.15) is the *only* entropy source.
+  Every keygen / nonce / blinding draw — `generate_keypair`
+  (`src/trust.cyr`), RSA base blinding, `tpm_random`
+  (`src/tpm.cyr`) — funnels through it. It delegates to the
+  stdlib `random_bytes` (`lib/random.cyr`), which dispatches
+  per-target: **getrandom(2)** on Linux/AGNOS, **getentropy(3)**
+  on macOS, **ProcessPrng** on Windows (cyrius 6.2.12). It is
+  **fail-closed** — a short read or syscall error aborts the
+  operation; there is no weak fallback (CVE-class invariant).
+  (Replaced the prior direct `/dev/urandom` open, which was
+  non-functional on Windows.)
 - **NIST SP 800-90A Rev. 1** — Recommendation for Random Number
   Generation Using Deterministic Random Bit Generators
   (2015-06). Reference standard; sigil delegates the actual

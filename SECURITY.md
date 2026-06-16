@@ -9,10 +9,10 @@ immediately preceding minor**.
 
 | Version | Supported |
 |---------|-----------|
-| 3.4.x | Yes (current minor) |
-| 3.3.x | Yes (prior minor) |
-| 3.2.x | Best-effort (TEE attestation arc release; closed) |
-| < 3.2.0 | No — upgrade within the 3.x line |
+| 3.8.x | Yes (current minor) |
+| 3.7.x | Yes (prior minor) |
+| 3.6.x | Best-effort (cyrius-native-TLS arc release; closed) |
+| < 3.6.0 | No — upgrade within the 3.x line |
 
 Older 2.x versions are no longer supported; the 3.0 cutover
 (2026-05-01) removed the Rust source after parity closeout and
@@ -81,11 +81,27 @@ implementation follows the referenced standard:
 - **SHA-512** (Ed25519 hash) — FIPS 180-4, `src/sha512.cyr`
 - **HMAC-SHA256** — RFC 2104, `src/hmac.cyr`
 - **HKDF-SHA256** — RFC 5869, `src/hkdf.cyr`
-- **AES-256-GCM** (AEAD) — FIPS 197 + NIST SP 800-38D,
+- **ECDSA P-256 / P-384 deterministic signing** — RFC 6979,
+  `src/ecdsa_sign.cyr`
+- **HMAC-SHA384 / HKDF-SHA384** — RFC 2104 / RFC 5869,
+  `src/hmac_sha384.cyr`, `src/hkdf_sha384.cyr`
+- **TLS 1.2 PRF** (P_SHA256 / P_SHA384) — RFC 5246 §5,
+  `src/tls12_prf.cyr`
+- **RSA PKCS#1 v1.5** (verify + sign) — RFC 8017, on a
+  constant-time Montgomery modexp engine with base blinding,
+  CRT, and a Bellcore verify-after-sign fault guard,
+  `src/rsa.cyr`, `src/bignum.cyr`
+- **AES-256-GCM / AES-128-GCM** (AEAD) — FIPS 197 + NIST
+  SP 800-38D (arbitrary-length IVs per §7.1 since 3.7.2),
   `src/aes_gcm.cyr` (+ AES-NI runtime dispatch in
   `src/aes_ni.cyr`)
+- **ChaCha20-Poly1305** (AEAD) — RFC 8439,
+  `src/chacha20.cyr`, `src/poly1305.cyr`,
+  `src/chacha20poly1305.cyr`
+- **X25519** (ECDH key agreement) — RFC 7748, `src/x25519.cyr`
 - **ML-DSA-65** (PQC signing) — FIPS 204, `src/mldsa*.cyr`,
-  gated behind `-D SIGIL_PQC`
+  **default-on since 3.7.6** (`-D SIGIL_PQC` is now a
+  back-compat no-op; needs `lib/keccak.cyr`)
 - **X.509 parser + chain walker** — minimal subset (P-256 /
   P-384 SPKIs, ECDSA-SHA256 chain links), `src/x509.cyr`
 - **PEM decoder** — RFC 4648 base64, `src/pem.cyr`
@@ -93,8 +109,14 @@ implementation follows the referenced standard:
   cyrius stdlib's `lib/ct.cyr`
   (`ct_eq_bytes` / `ct_eq_bytes_lens`; was sigil's
   `src/ct.cyr` pre-3.0.2)
-- **Cryptographic RNG** — `/dev/urandom` with short-read
-  validation; `tpm_random` in `src/tpm.cyr`
+- **Cryptographic RNG** — kernel CSPRNG via the single entropy
+  boundary `_sigil_random_fill` (`src/random.cyr`) → stdlib
+  `random_bytes`, which dispatches per-target (getrandom on
+  Linux/AGNOS, getentropy on macOS, ProcessPrng on Windows) and
+  is **fail-closed** (no weak fallback). Every keygen / nonce /
+  blinding draw — including `tpm_random` in `src/tpm.cyr` —
+  funnels through it (since 3.7.15; replaced the prior direct
+  `/dev/urandom` path, which was non-functional on Windows).
 
 ## Audit Trail
 
@@ -107,9 +129,11 @@ audit follows the 10-step Security Hardening checklist in
 The 3.2.x TEE attestation arc (six bites) and the 3.4.x TEE
 completion cycle (two bites) collectively introduced ~3700 lines
 of cryptographic and parsing code at **0 CRITICAL / 0 HIGH /
-0 MEDIUM** findings. Seven LOW findings of the same shape
-(bump-allocator lifetime in per-call init paths) carry forward
-to the v3.6 unified `_into` API cycle.
+0 MEDIUM** findings. The LOW findings of the bump-allocator
+per-call-lifetime shape were **resolved at 3.7.3** via the
+caller-scratch `_into` API — the **audit floor cleared 8 → 0**
+and has held empty through 3.8.0 (4 genuine drifts fixed, 4
+reclassified as correct init-once singletons).
 
 ## Threat model assumptions
 

@@ -15,13 +15,16 @@ cyrius build programs/smoke.cyr build/sigil
 
 ## Cyrius Toolchain
 
-Sigil pins **cyrius `6.0.3`** across `cyrius.cyml` and CI. Match
+Sigil pins **cyrius `6.2.12`** across `cyrius.cyml` and CI. Match
 that pin locally — installing a newer cyrius is fine, but builds
 should be run against the pinned version for reproducible
 diagnostics. The pinned cyrius release notes are in
 [`cyrius/CHANGELOG.md`](https://github.com/MacCracken/cyrius)
-upstream; if the pin needs to roll, update both
-`cyrius.cyml`'s `cyrius =` line AND the README/roadmap reference.
+upstream. The **single source of truth** for the pin is
+`cyrius.cyml`'s `[package].cyrius` line (CLAUDE.md hard rule: no
+hardcoded toolchain version anywhere else); when it rolls, the
+README/roadmap pin references are human-facing mirrors refreshed
+at release, not separate sources.
 
 ## Development Process
 
@@ -57,10 +60,10 @@ Sigil follows a structured work loop documented in
   The 3.4.0 PEM decoder shipped with a 39-assertion test file
   authored alongside the implementation; `snp_report_verify_full`
   (3.4.1) similarly. Match that pattern.
-- Benchmarks live in `benches/` and update
-  `benches/history.csv`. Regression vs the existing CSV row is a
-  release blocker; performance claims in CHANGELOG must include
-  the measured numbers.
+- Benchmark sources live in `tests/bcyr/` (run e.g. `cyrius bench
+  tests/bcyr/sigil.bcyr`) and update `benches/history.csv`.
+  Regression vs the existing CSV row is a release blocker;
+  performance claims in CHANGELOG must include the measured numbers.
 
 ## Before Submitting a PR
 
@@ -74,7 +77,7 @@ for t in tests/tcyr/*.tcyr; do cyrius test "$t"; done
 For performance-sensitive changes:
 
 ```bash
-cyrius bench benches/sigil.bcyr      # or the relevant bench file
+cyrius bench tests/bcyr/sigil.bcyr   # or the relevant bench file
 # Compare against benches/history.csv. If you're claiming a
 # speedup, append a new row with the measurement.
 ```
@@ -131,6 +134,11 @@ From `CLAUDE.md`:
 - Function-frame `var X[N]` arrays are **static, not stack
   locals** (CLAUDE.md quirk #1). Use scalar locals for
   per-call state.
+- **Banked per-worker scratch is plain `var` + per-lane
+  `memset`, never `secret var`** (CLAUDE.md quirk #9 / ADR 0004):
+  a `secret var` whole-array zeroize on exit wipes every
+  `cbank()` lane, clobbering a concurrent worker. Wipe only the
+  calling worker's own lane.
 - `fl_alloc` + `fl_free` for per-call scratch; bump `alloc()`
   for init-once tables. Never `free()` a bump-allocated block.
 

@@ -1,7 +1,17 @@
 # 0002 — ML-DSA-65 ships behind `-D SIGIL_PQC`
 
-**Status**: Accepted
+**Status**: Accepted — **resolved/superseded at 3.7.6 (PQC now default-on)**
 **Date**: 2026-04-20
+
+> **Resolution (2026-06-07, 3.7.6):** the trigger this ADR documented —
+> "flip to default-on once the toolchain can build the unconditional
+> expansion" — was met when **cyrius 6.0.87 raised the preprocessor
+> output cap** (CLAUDE.md quirk #8). 3.7.6 dropped the `#ifdef SIGIL_PQC`
+> gate in `src/lib.cyr`; **ML-DSA-65 is default-on and `-D SIGIL_PQC` is
+> a back-compat no-op.** (The `dist/sigil.cyr` bundle always carried
+> mldsa via `[lib].modules`, so only the `src/lib.cyr` build path
+> changed.) This ADR is retained for the rationale; the decision it made
+> is no longer in force.
 
 ## Context
 

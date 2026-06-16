@@ -57,7 +57,8 @@ All cryptography implemented in Cyrius — no external crypto libraries:
 - **`tls12_prf.cyr`** — TLS 1.2 PRF (RFC 5246 §5), P_SHA256/P_SHA384
 - **`bignum.cyr`** — general variable-width big integers + modexp
 - **`rsa.cyr`** — RSA PKCS#1 v1.5 verify + sign + key parsing (RFC 8017)
-- **`bigint_ext.cyr`** — 256-bit field arithmetic for Ed25519/X25519
+- **`bigint_ext.cyr`** — 256-bit field arithmetic (Karatsuba `u256_mul_full`)
+  backing Ed25519 / X25519 and ECDSA P-256
 - **`ed25519.cyr`** — Ed25519 signatures
 - **`x25519.cyr`** — X25519 ECDH key agreement
 - **`ecdsa_p256.cyr`**, **`ecdsa_p384.cyr`** — ECDSA verify
@@ -163,10 +164,10 @@ is the Cyrius standard library plus two AGNOS first-party crates:
 
 | Crate | Pin | Provides | Required by |
 |---|---|---|---|
-| [**sakshi**](https://github.com/MacCracken/sakshi) | `2.2.6` | structured tracing / spans (`dist/sakshi.cyr`) | `programs/smoke.cyr` and the full `src/lib.cyr` build — **not** referenced by the `dist/sigil.cyr` crypto bundle |
-| [**agnosys**](https://github.com/MacCracken/agnosys) | `1.3.2` | AGNOS kernel interfaces — TPM seal/unseal, IMA measurements, Secure Boot state (`dist/agnosys.cyr`) | **only** the kernel-integration modules (`tpm.cyr`, `ima.cyr`, `secureboot.cyr`, `certpin.cyr`) |
+| [**sakshi**](https://github.com/MacCracken/sakshi) | `2.3.0` | structured tracing / spans (`dist/sakshi.cyr`) | `programs/smoke.cyr` and the full `src/lib.cyr` build — **not** referenced by the `dist/sigil.cyr` crypto bundle |
+| [**agnosys**](https://github.com/MacCracken/agnosys) | `1.4.3` | AGNOS kernel interfaces — TPM seal/unseal, IMA measurements, Secure Boot state (`dist/agnosys.cyr`) | **only** the kernel-integration modules (`tpm.cyr`, `ima.cyr`, `secureboot.cyr`, `certpin.cyr`) |
 
-**`dist/sigil.cyr` is self-contained** beyond the four opt-in stdlib modules
+**`dist/sigil.cyr` is self-contained** beyond the five opt-in stdlib modules
 above: it references **no sakshi and no agnosys** symbols. The four
 agnosys-wrapping modules are deliberately excluded from the bundle —
 consumers who need the kernel layer include via `src/lib.cyr` against a
@@ -238,7 +239,7 @@ Requires **cyrius ≥ 6.0.52** (the release that shipped `lib/thread_local.cyr`)
 
 ## Tests
 
-1483 assertions across 55 test files, 0 failures (3.8.0). Crypto
+1483 assertions across 57 test files, 0 failures (3.8.0). Crypto
 suites use published known-answer vectors (RFC / FIPS / NIST); the
 TEE attestation arc ships synthesised end-to-end fixtures.
 `tests/tcyr/batch_parallel.tcyr` doubles as the parallel-verify race
@@ -251,18 +252,27 @@ for t in tests/tcyr/*.tcyr; do cyrius test "$t"; done
 
 ## Roadmap
 
-**Current cycle — v3.7 (perf + x509), in progress.** Shipped highlights:
-Solinas word-level field reduction for P-256/P-384 (3.7.0/.1), AES-GCM
-arbitrary-length IVs (3.7.2), the `_into` caller-scratch API + audit-floor
-clear (3.7.3), off-diagonal ECDSA x509 chain-link verify (3.7.4/.5),
-**ML-DSA-65 PQC default-on** (3.7.6), and the **ECDSA verify scalar-mult
-speedup** — fixed-base comb + windowed mul, ~2× both curves
-(`ecdsa_p256_verify` 24.7 → 11.6 ms, `ecdsa_p384_verify` 54.6 → 26.3 ms)
-(3.7.8). The 3.6 cyrius-native-TLS arc closed at 3.6.8 (parallel batch
-verify, full RSA PKCS#1 v1.5 + PSS, RSA/P-384 x509 chain-link).
+**v3.7 (perf + x509) — CLOSED at 3.7.17.** Shipped highlights: Solinas
+word-level field reduction for P-256/P-384 (3.7.0/.1), AES-GCM arbitrary-length
+IVs (3.7.2), the `_into` caller-scratch API + audit-floor clear 8→0 (3.7.3),
+off-diagonal ECDSA x509 chain-link verify (3.7.4/.5), **ML-DSA-65 PQC default-on**
+(3.7.6), the bundle-consumer opt-in-include fix (3.7.8), the **Windows-entropy
+single-boundary fix** routing all keygen/nonce/blinding through
+`_sigil_random_fill` (3.7.15), and the **EC verify scalar-mult squeeze** —
+fixed-base comb + windowed mul (~2×), then inversion addition-chains, affine-comb
+mixed-add, `u2·Q` batch-inversion mixed-add, and Karatsuba `u256_mul_full`,
+taking `ecdsa_p256_verify` 24.7 → ~10.9 ms. The 3.6 cyrius-native-TLS arc closed
+at 3.6.8 (parallel batch verify, full RSA PKCS#1 v1.5 + PSS, RSA/P-384 x509
+chain-link).
 
-Open: the ≤ 10 ms P-256 verify squeeze, a buried-deferral CI gate, and the
-cycle-close bench re-run.
+**v3.8.x — OPEN (housekeeping bookend).** 3.8.0 ships **ChaCha20 + X25519
+per-worker banking** (race-validated; plain `var` + per-lane wipe, not
+`secret var`) plus a backlog-accuracy sweep and the Windows-entropy issue
+archived after wine/ProcessPrng runtime verification (issues folder now clear).
+The ≤ 10 ms P-256 verify target is **closed as not-reachable with current
+approaches** (~10.9 ms floor after all portable levers; ADR 0006) — exotic
+levers (asm multiply, GLV) are parked to the backlog, not a current priority.
+The buried-deferral gate landed natively in `cyrlint`.
 
 See [`docs/development/roadmap.md`](docs/development/roadmap.md) for the full
 forward-looking work + backlog, and [`CHANGELOG.md`](CHANGELOG.md) for
