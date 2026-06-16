@@ -285,6 +285,108 @@ fn main() {
     pt_add_mixed(rmix, mP, mqx, negy);
     assert_eq(pt_is_infinity(rmix), 1, "pt_add_mixed(P, -P) == O");
 
+    # 2i: the windowed + batch-inversion variable-point mul (3.7.17 lever 2b)
+    # — p256_scalarmul_var(k, Qaff) must equal the trusted constant-time
+    # Montgomery ladder pt_scalarmul(k, Qjac) (both reduced to affine) over
+    # 16 (k, Q) pairs with random k ∈ [0, n) and Q = m·G. Validates the affine
+    # Q-table + Montgomery batch inversion end-to-end against the reference.
+    test_group("p256_scalarmul_var == pt_scalarmul (windowed + batch-inv)");
+    var smv_ref = pt_alloc();
+    var smv_new = pt_alloc();
+    var smv_qj = pt_alloc();
+    var smvx = alloc(32);  var smvy = alloc(32);
+    var refx = alloc(32);  var refy = alloc(32);
+    var newx = alloc(32);  var newy = alloc(32);
+    var smk = alloc(32);   var smm = alloc(32);
+    var smv_diffs = 0;
+    var si = 1;
+    while (si <= 16) {
+        memset(smm, 0, 32); store64(smm, si * 3 + 1);
+        pt_scalarmul(smv_qj, smm, mG);          # Q = m·G (Jacobian)
+        pt_to_affine(smvx, smvy, smv_qj);       # Q affine
+        pt_from_affine(smv_qj, smvx, smvy);     # Q as Jacobian (Z=1) for the ref
+        store64(ctr, si + 90000); sha256(ctr, 8, h); memcpy(val512, h, 32);
+        store64(ctr, si + 91000); sha256(ctr, 8, h); memcpy(val512 + 32, h, 32);
+        n_reduce(smk, val512);                  # k ∈ [0, n)
+        pt_scalarmul(smv_ref, smk, smv_qj);     # reference: CT ladder
+        p256_scalarmul_var(smv_new, smk, smvx, smvy);   # new: window + batch-inv
+        pt_to_affine(refx, refy, smv_ref);
+        pt_to_affine(newx, newy, smv_new);
+        var sok = 1;
+        if (u256_eq(refx, newx) == 0) { sok = 0; }
+        if (u256_eq(refy, newy) == 0) { sok = 0; }
+        if (sok == 0) { smv_diffs = smv_diffs + 1; }
+        si = si + 1;
+    }
+    assert_eq(smv_diffs, 0, "p256_scalarmul_var == pt_scalarmul over 16 (k,Q)");
+
+    # 2j: Karatsuba u256_mul_full (3.7.17 lever 3) — the crown-jewel
+    # 256×256→512 multiply under Ed25519 / X25519 / ECDSA. Must agree
+    # byte-for-byte with `_u256_mul_full_schoolbook` over 200 pseudo-random
+    # input pairs AND a battery of carry-boundary edges (all-ones halves
+    # → aL+aH overflow, half-max, single-bit-128, 0). A carry bug = a wrong
+    # product = signature mis-accept, so this gate is the security floor.
+    test_group("Karatsuba u256_mul_full == schoolbook");
+    var ka = alloc(32);  var kb = alloc(32);
+    var kok = alloc(64); var ksc = alloc(64);
+    var kdiffs = 0;
+    var kn = 0;
+    while (kn < 200) {
+        store64(ctr, kn + 200000); sha256(ctr, 8, h); memcpy(ka, h, 32);
+        store64(ctr, kn + 300000); sha256(ctr, 8, h); memcpy(kb, h, 32);
+        u256_mul_full(kok, ka, kb);
+        _u256_mul_full_schoolbook(ksc, ka, kb);
+        var ci = 0;
+        while (ci < 8) {
+            if (load64(kok + ci * 8) != load64(ksc + ci * 8)) { kdiffs = kdiffs + 1; }
+            ci = ci + 1;
+        }
+        kn = kn + 1;
+    }
+    assert_eq(kdiffs, 0, "Karatsuba == schoolbook over 200 random 256×256");
+
+    # Carry-boundary edges (9 hand-picked + 5 from the 3.7.17 adversarial
+    # carry-propagation review, each a maximal-stress case for a specific
+    # carry path that the 5-lens audit flagged and proved correct).
+    var kedge = 0;
+    var ee = 0;
+    while (ee < 14) {
+        memset(ka, 0, 32); memset(kb, 0, 32);
+        if (ee == 0) { memset(ka, 0xFF, 32); memset(kb, 0xFF, 32); }       # max × max (cs=ct=1)
+        if (ee == 1) { memset(ka, 0xFF, 32); store64(kb, 1); }            # max × 1
+        if (ee == 2) { memset(ka, 0xFF, 16); memset(kb, 0xFF, 16); }      # low-128 ones × low-128 ones
+        if (ee == 3) { memset(ka + 16, 0xFF, 16); memset(kb + 16, 0xFF, 16); } # high-128 ones × high-128 ones
+        if (ee == 4) { memset(ka, 0xFF, 16); memset(kb + 16, 0xFF, 16); } # aL ones × bH ones
+        if (ee == 5) { store64(ka + 16, 1); store64(kb + 16, 1); }        # 2^128 × 2^128
+        if (ee == 6) { memset(ka, 0xFF, 32); memset(kb, 0xFF, 16); }      # max × low-128 ones
+        if (ee == 7) { store64(ka, 0 - 1); store64(kb, 0 - 1); }          # 2^64-1 × 2^64-1
+        if (ee == 8) { memset(kb, 0xFF, 32); }                            # 0 × max
+        # --- adversarial-review regressions ---
+        if (ee == 9) {  # high128=max, low128=1: aL+aH = 2^128 exactly (cs=1 on the clean boundary)
+            store64(ka, 1); memset(ka + 16, 0xFF, 16);
+            store64(kb, 1); memset(kb + 16, 0xFF, 16);
+        }
+        if (ee == 10) { # every limb = 2^63: a1+a3 overflows to exactly 2^64 (cs/ct via the second-add carry)
+            store64(ka, 1 << 63); store64(ka + 8, 1 << 63); store64(ka + 16, 1 << 63); store64(ka + 24, 1 << 63);
+            store64(kb, 1 << 63); store64(kb + 8, 1 << 63); store64(kb + 16, 1 << 63); store64(kb + 24, 1 << 63);
+        }
+        if (ee == 11) { memset(ka, 0xAA, 32); memset(kb, 0x55, 32); }     # alternating 0xAA × 0x55 (dense mid-limb carries)
+        if (ee == 12) { memset(ka, 0xFF, 32); store64(kb + 24, 1 << 63); } # max × 2^255 (lone carry rippling out[2]→out[7])
+        if (ee == 13) { # each half = 2^128-2: maximal half-sums feeding the m4 corrections + out[7] ripple
+            store64(ka, 0 - 2); store64(ka + 8, 0 - 1); store64(ka + 16, 0 - 2); store64(ka + 24, 0 - 1);
+            store64(kb, 0 - 2); store64(kb + 8, 0 - 1); store64(kb + 16, 0 - 2); store64(kb + 24, 0 - 1);
+        }
+        u256_mul_full(kok, ka, kb);
+        _u256_mul_full_schoolbook(ksc, ka, kb);
+        var cj = 0;
+        while (cj < 8) {
+            if (load64(kok + cj * 8) != load64(ksc + cj * 8)) { kedge = kedge + 1; }
+            cj = cj + 1;
+        }
+        ee = ee + 1;
+    }
+    assert_eq(kedge, 0, "Karatsuba == schoolbook over 14 carry-boundary + adversarial edges");
+
     # ============================================================
     # Group 3 — field arithmetic
     # ============================================================

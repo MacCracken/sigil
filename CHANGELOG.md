@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.7.17] — 2026-06-16
+
+**EC-squeeze levers 2b + 3 — closes the perf cycle: Karatsuba `u256_mul_full`
+(+~3–4% across all 256-bit ECC) + the `u2·Q`-window mixed add.** The ≤ 10 ms
+P-256 target is **not** reached (~10.9 ms floor — at 256-bit, fast hardware
+multiply caps Karatsuba's gain); the known levers are now exhausted.
+
+### Performance
+
+- **Karatsuba `u256_mul_full` (EC-squeeze lever 3).** The 256×256→512 multiply
+  under **all of sigil's 256-bit ECC** (Ed25519, X25519, ECDSA P-256) moved from
+  schoolbook (16 × 64×64) to Karatsuba (12 × 64×64 via
+  `z1 = (aL+aH)(bL+bH) − z0 − z2`). **~3–4% across the board** — Ed25519 verify
+  6.90 → 6.63 ms, `ecdsa_p256_verify` ~11.58 → ~11.25 ms (clean A/B vs the retained
+  schoolbook), X25519 too. **THREAD-SAFE** (scalar locals + caller's `out` + the
+  stateless `_u256k_mul128` helper — no static scratch, safe on the Ed25519
+  parallel batch path). The schoolbook is retained as `_u256_mul_full_schoolbook`
+  (KAT oracle). **Verification is conclusive** (the crown-jewel multiply — a carry
+  bug = signature mis-accept): a differential KAT (200 random + 14 carry-boundary /
+  adversarial edges == schoolbook), the full real-vector suite (RFC 8032 / 7748 /
+  6979 + x509 + TEE), the concurrent batch path, AND a **5-lens adversarial
+  carry-propagation review** (each lens bit-exact-emulated and differentially
+  tested against arbitrary-precision multiply over millions of cases + exhaustive
+  corners + structural proofs — zero discrepancies). Constant-time posture
+  unchanged from the schoolbook (same operand-dependent carry branches; no new
+  side-channel class). +2 assertions. Audit:
+  `docs/audit/2026-06-16-3.7.17-karatsuba-multiply-audit.md`. `history.csv` row
+  `v3.7.17-karatsuba`.
+- **P-256 verify `u2·Q`-window mixed addition (EC-squeeze lever 2b).** The
+  variable-point `u2·Q` window now builds its 15-entry table with `pt_add_mixed`
+  (Q is affine), **Montgomery-batch-inverts** the 15 `Z`-coordinates (1 field
+  inversion + ~3·14 muls) so the whole table goes affine, runs the 64-window
+  double-and-add with `pt_add_mixed`, and skips the identity nibble.
+  `ecdsa_p256_verify` ~11.00 → **~10.89 ms** — a deliberately-kept **marginal**
+  (~0.1 ms) result: the single batch field-inversion (~267 Solinas ops) nearly
+  cancels the mixed-add savings (~316 ops), so most of the net is the free
+  identity-nibble skip. **Verify-only / non-CT** (the secret-nonce signing path
+  stays on the CT ladder `pt_scalarmul`, untouched). KAT-gated:
+  `p256_scalarmul_var == pt_scalarmul` (the trusted CT ladder) over 16 random
+  `(k, Q)` + the real RFC 6979 verify vectors. **≤ 10 ms still needs lever 3
+  (Karatsuba `u256_mul_full`)**, which speeds the dominant 256 doublings.
+  +1 assertion. `history.csv` row `v3.7.17-window-batchinv`.
+
 ## [3.7.16] — 2026-06-16
 
 **P-256 verify perf — EC-squeeze levers 1 + 2a (modular inversions + mixed

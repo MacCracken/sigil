@@ -57,7 +57,11 @@ fn u256_store_le(dst, src): i64 {
 # and returning two values via globals (`_m64_lo` / `_m64_hi`)
 # had no clean local equivalent.
 
-fn u256_mul_full(out, a, b): i64 {
+# Schoolbook 256×256→512 multiply. RETAINED AS THE KAT ORACLE / REFERENCE
+# for the Karatsuba `u256_mul_full` below (differential KAT in bigint.tcyr).
+# Thread-safe: scalar locals + caller's `out` only, no static scratch (it
+# runs on the Ed25519 parallel batch-verify path).
+fn _u256_mul_full_schoolbook(out, a, b): i64 {
     memset(out, 0, 64);
     var sbit = 1 << 63;
     var mask32 = 0xFFFFFFFF;
@@ -107,6 +111,170 @@ fn u256_mul_full(out, a, b): i64 {
         }
         i = i + 1;
     }
+    return 0;
+}
+
+# Thread-safe 128×128→256 schoolbook (2×2 limbs). `out` is 4 limbs (32 B);
+# `a`, `b` are 2 limbs (16 B) each. Scalar locals only — no static scratch.
+fn _u256k_mul128(out, a, b): i64 {
+    memset(out, 0, 32);
+    var sbit = 1 << 63;
+    var mask32 = 0xFFFFFFFF;
+    var i = 0;
+    while (i < 2) {
+        var carry = 0;
+        var j = 0;
+        while (j < 2) {
+            var av = load64(a + i * 8);
+            var bv = load64(b + j * 8);
+            var aL = av & mask32; var aH = (av >> 32) & mask32;
+            var bL = bv & mask32; var bH = (bv >> 32) & mask32;
+            var ll = aL * bL; var lh = aL * bH; var hl = aH * bL; var hh = aH * bH;
+            var mid = lh + hl;
+            var mid_carry = 0;
+            if ((mid ^ sbit) < (lh ^ sbit)) { mid_carry = 1; }
+            var m_lo = ll + (mid << 32);
+            var lo_carry = 0;
+            if ((m_lo ^ sbit) < (ll ^ sbit)) { lo_carry = 1; }
+            var m_hi = hh + (mid >> 32) + (mid_carry << 32) + lo_carry;
+            var k = i + j;
+            var prev = load64(out + k * 8);
+            var s1 = prev + m_lo;
+            var c1 = 0;
+            if ((s1 ^ sbit) < (prev ^ sbit)) { c1 = 1; }
+            var s2 = s1 + carry;
+            var c2 = 0;
+            if ((s2 ^ sbit) < (s1 ^ sbit)) { c2 = 1; }
+            store64(out + k * 8, s2);
+            carry = m_hi + c1 + c2;
+            j = j + 1;
+        }
+        store64(out + (i + 2) * 8, load64(out + (i + 2) * 8) + carry);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Karatsuba 256×256→512. a = aL + aH·2^128, b = bL + bH·2^128 (each half
+# 2 limbs). z0 = aL·bL, z2 = aH·bH, z1 = (aL+aH)(bL+bH) − z0 − z2 (= aL·bH
+# + aH·bL); out = z0 + z1·2^128 + z2·2^256. 12 × 64×64 muls vs the
+# schoolbook's 16. THREAD-SAFE (scalar locals + caller's `out` + the
+# stateless _u256k_mul128 helper — no static scratch, so it is safe on the
+# Ed25519 parallel batch-verify path). KAT-gated byte-for-byte against
+# `_u256_mul_full_schoolbook` (bigint.tcyr).
+fn u256_mul_full(out, a, b): i64 {
+    var sbit = 1 << 63;
+    var mask32 = 0xFFFFFFFF;
+
+    # z0 = aL·bL → out[0..3];  z2 = aH·bH → out[4..7].
+    # (out now holds z0 + z2·2^256 — the result minus the middle term.)
+    _u256k_mul128(out, a, b);
+    _u256k_mul128(out + 32, a + 16, b + 16);
+
+    var a0 = load64(a + 0);  var a1 = load64(a + 8);
+    var a2 = load64(a + 16); var a3 = load64(a + 24);
+    var b0 = load64(b + 0);  var b1 = load64(b + 8);
+    var b2 = load64(b + 16); var b3 = load64(b + 24);
+
+    # sL = aL + aH = (sl0, sl1) + cs·2^128   (cs ∈ {0,1})
+    var sl0 = a0 + a2;
+    var sc = 0; if ((sl0 ^ sbit) < (a0 ^ sbit)) { sc = 1; }
+    var sl1 = a1 + a3;
+    var cs = 0; if ((sl1 ^ sbit) < (a1 ^ sbit)) { cs = 1; }
+    var sl1c = sl1 + sc; if ((sl1c ^ sbit) < (sl1 ^ sbit)) { cs = cs + 1; }
+    sl1 = sl1c;
+
+    # tL = bL + bH = (tl0, tl1) + ct·2^128
+    var tl0 = b0 + b2;
+    var tc = 0; if ((tl0 ^ sbit) < (b0 ^ sbit)) { tc = 1; }
+    var tl1 = b1 + b3;
+    var ct = 0; if ((tl1 ^ sbit) < (b1 ^ sbit)) { ct = 1; }
+    var tl1c = tl1 + tc; if ((tl1c ^ sbit) < (tl1 ^ sbit)) { ct = ct + 1; }
+    tl1 = tl1c;
+
+    # m = (sl0,sl1) × (tl0,tl1) → m0..m3 (2×2 schoolbook, inline).
+    var vL = sl0 & mask32; var vH = (sl0 >> 32) & mask32;
+    var wL = tl0 & mask32; var wH = (tl0 >> 32) & mask32;
+    var ll = vL * wL; var lh = vL * wH; var hl = vH * wL; var hh = vH * wH;
+    var md = lh + hl; var mc = 0; if ((md ^ sbit) < (lh ^ sbit)) { mc = 1; }
+    var p00lo = ll + (md << 32); var lc = 0; if ((p00lo ^ sbit) < (ll ^ sbit)) { lc = 1; }
+    var p00hi = hh + (md >> 32) + (mc << 32) + lc;
+
+    vL = sl0 & mask32; vH = (sl0 >> 32) & mask32; wL = tl1 & mask32; wH = (tl1 >> 32) & mask32;
+    ll = vL * wL; lh = vL * wH; hl = vH * wL; hh = vH * wH;
+    md = lh + hl; mc = 0; if ((md ^ sbit) < (lh ^ sbit)) { mc = 1; }
+    var p01lo = ll + (md << 32); lc = 0; if ((p01lo ^ sbit) < (ll ^ sbit)) { lc = 1; }
+    var p01hi = hh + (md >> 32) + (mc << 32) + lc;
+
+    vL = sl1 & mask32; vH = (sl1 >> 32) & mask32; wL = tl0 & mask32; wH = (tl0 >> 32) & mask32;
+    ll = vL * wL; lh = vL * wH; hl = vH * wL; hh = vH * wH;
+    md = lh + hl; mc = 0; if ((md ^ sbit) < (lh ^ sbit)) { mc = 1; }
+    var p10lo = ll + (md << 32); lc = 0; if ((p10lo ^ sbit) < (ll ^ sbit)) { lc = 1; }
+    var p10hi = hh + (md >> 32) + (mc << 32) + lc;
+
+    vL = sl1 & mask32; vH = (sl1 >> 32) & mask32; wL = tl1 & mask32; wH = (tl1 >> 32) & mask32;
+    ll = vL * wL; lh = vL * wH; hl = vH * wL; hh = vH * wH;
+    md = lh + hl; mc = 0; if ((md ^ sbit) < (lh ^ sbit)) { mc = 1; }
+    var p11lo = ll + (md << 32); lc = 0; if ((p11lo ^ sbit) < (ll ^ sbit)) { lc = 1; }
+    var p11hi = hh + (md >> 32) + (mc << 32) + lc;
+
+    var m0 = p00lo;
+    var t = p00hi + p01lo; var cm = 0; if ((t ^ sbit) < (p00hi ^ sbit)) { cm = 1; }
+    var m1 = t + p10lo; if ((m1 ^ sbit) < (t ^ sbit)) { cm = cm + 1; }
+    var u = p01hi + p10hi; var cm2 = 0; if ((u ^ sbit) < (p01hi ^ sbit)) { cm2 = 1; }
+    var u2 = u + p11lo; if ((u2 ^ sbit) < (u ^ sbit)) { cm2 = cm2 + 1; }
+    var m2 = u2 + cm; if ((m2 ^ sbit) < (u2 ^ sbit)) { cm2 = cm2 + 1; }
+    var m3 = p11hi + cm2;
+    var m4 = 0; if ((m3 ^ sbit) < (p11hi ^ sbit)) { m4 = 1; }
+
+    # corrections: m += cs·(tl0,tl1)·2^128 + ct·(sl0,sl1)·2^128 + (cs·ct)·2^256
+    if (cs == 1) {
+        var n0 = m2 + tl0; var nc = 0; if ((n0 ^ sbit) < (m2 ^ sbit)) { nc = 1; } m2 = n0;
+        var n1 = m3 + tl1; if ((n1 ^ sbit) < (m3 ^ sbit)) { m4 = m4 + 1; }
+        m3 = n1 + nc; if ((m3 ^ sbit) < (n1 ^ sbit)) { m4 = m4 + 1; }
+    }
+    if (ct == 1) {
+        var o0 = m2 + sl0; var oc = 0; if ((o0 ^ sbit) < (m2 ^ sbit)) { oc = 1; } m2 = o0;
+        var o1 = m3 + sl1; if ((o1 ^ sbit) < (m3 ^ sbit)) { m4 = m4 + 1; }
+        m3 = o1 + oc; if ((m3 ^ sbit) < (o1 ^ sbit)) { m4 = m4 + 1; }
+    }
+    if (cs == 1) { if (ct == 1) { m4 = m4 + 1; } }
+
+    # z1 = m − z0 − z2  (z0 = out[0..3], z2 = out[4..7]; result ≥ 0).
+    var z00 = load64(out + 0);  var z01 = load64(out + 8);
+    var z02 = load64(out + 16); var z03 = load64(out + 24);
+    var z20 = load64(out + 32); var z21 = load64(out + 40);
+    var z22 = load64(out + 48); var z23 = load64(out + 56);
+    var br = 0; var dq = 0; var dq2 = 0; var nb = 0;
+    dq = m0 - z00; br = 0; if ((m0 ^ sbit) < (z00 ^ sbit)) { br = 1; } m0 = dq;
+    dq = m1 - z01; nb = 0; if ((m1 ^ sbit) < (z01 ^ sbit)) { nb = 1; }
+    dq2 = dq - br; if ((dq ^ sbit) < (br ^ sbit)) { nb = nb + 1; } m1 = dq2; br = nb;
+    dq = m2 - z02; nb = 0; if ((m2 ^ sbit) < (z02 ^ sbit)) { nb = 1; }
+    dq2 = dq - br; if ((dq ^ sbit) < (br ^ sbit)) { nb = nb + 1; } m2 = dq2; br = nb;
+    dq = m3 - z03; nb = 0; if ((m3 ^ sbit) < (z03 ^ sbit)) { nb = 1; }
+    dq2 = dq - br; if ((dq ^ sbit) < (br ^ sbit)) { nb = nb + 1; } m3 = dq2; br = nb;
+    m4 = m4 - br;
+    dq = m0 - z20; br = 0; if ((m0 ^ sbit) < (z20 ^ sbit)) { br = 1; } m0 = dq;
+    dq = m1 - z21; nb = 0; if ((m1 ^ sbit) < (z21 ^ sbit)) { nb = 1; }
+    dq2 = dq - br; if ((dq ^ sbit) < (br ^ sbit)) { nb = nb + 1; } m1 = dq2; br = nb;
+    dq = m2 - z22; nb = 0; if ((m2 ^ sbit) < (z22 ^ sbit)) { nb = 1; }
+    dq2 = dq - br; if ((dq ^ sbit) < (br ^ sbit)) { nb = nb + 1; } m2 = dq2; br = nb;
+    dq = m3 - z23; nb = 0; if ((m3 ^ sbit) < (z23 ^ sbit)) { nb = 1; }
+    dq2 = dq - br; if ((dq ^ sbit) < (br ^ sbit)) { nb = nb + 1; } m3 = dq2; br = nb;
+    m4 = m4 - br;
+
+    # out += z1·2^128  (add m0..m4 into out[2..6], carry to out[7]).
+    var oc2 = 0; var p = 0; var p2 = 0; var nc2 = 0;
+    p = load64(out + 16) + m0; if ((p ^ sbit) < (m0 ^ sbit)) { oc2 = 1; } store64(out + 16, p);
+    p = load64(out + 24) + m1; nc2 = 0; if ((p ^ sbit) < (m1 ^ sbit)) { nc2 = 1; }
+    p2 = p + oc2; if ((p2 ^ sbit) < (p ^ sbit)) { nc2 = nc2 + 1; } store64(out + 24, p2); oc2 = nc2;
+    p = load64(out + 32) + m2; nc2 = 0; if ((p ^ sbit) < (m2 ^ sbit)) { nc2 = 1; }
+    p2 = p + oc2; if ((p2 ^ sbit) < (p ^ sbit)) { nc2 = nc2 + 1; } store64(out + 32, p2); oc2 = nc2;
+    p = load64(out + 40) + m3; nc2 = 0; if ((p ^ sbit) < (m3 ^ sbit)) { nc2 = 1; }
+    p2 = p + oc2; if ((p2 ^ sbit) < (p ^ sbit)) { nc2 = nc2 + 1; } store64(out + 40, p2); oc2 = nc2;
+    p = load64(out + 48) + m4; nc2 = 0; if ((p ^ sbit) < (m4 ^ sbit)) { nc2 = 1; }
+    p2 = p + oc2; if ((p2 ^ sbit) < (p ^ sbit)) { nc2 = nc2 + 1; } store64(out + 48, p2); oc2 = nc2;
+    store64(out + 56, load64(out + 56) + oc2);
     return 0;
 }
 

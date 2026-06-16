@@ -70,21 +70,39 @@ perf cycle have shipped — see "Closed cycles" below + CHANGELOG.
          11.32 → 11.00 ms (~2.8%). KAT-gated (`pt_add_mixed == pt_add` over 24
          pairs + double / −Q edges). **Bounded by design** — verify is dominated
          by the `u2·Q` window's 256 doublings + the inversions, which mixed-add
-         doesn't touch. **Remaining for this lever:** the `u2·Q`-window adds
-         (79 of the ~143) would need a per-verify **batch inversion** (Montgomery,
-         1 inv + ~3(n−1) muls) to convert the 15-entry Q-table to affine — a
-         separate slice worth ~0.3–0.5 ms. Neither sub-slice crosses 10 ms alone;
+         doesn't touch. **`u2·Q`-window part DONE (3.7.17):** the
+         15-entry Q-table build uses `pt_add_mixed` (Q affine), a **Montgomery
+         batch inversion** (1 field inv + ~3·14 muls) takes the table affine, and
+         the 64-window loop uses `pt_add_mixed` + skips the identity nibble.
+         **Net ~0.1 ms only** (~11.00 → ~10.89): the single batch field-inversion
+         (~267 ops) nearly cancels the mixed-add savings (~316 ops) — the roadmap's
+         earlier ~0.3–0.5 ms estimate was optimistic (it ignored that inversion
+         overhead). Kept anyway (maintainer's call). KAT: `p256_scalarmul_var ==
+         pt_scalarmul` over 16 random (k,Q). Neither sub-slice crosses 10 ms alone;
          lever 3 (Karatsuba) is what gets there.
-      3. **Karatsuba `u256_mul_full`** — biggest single lever (~15–25% on
-         every field mul) but touches the **audited shared 256-bit
-         multiply** used by all P-256 field + scalar ops; a carry bug =
-         signature-verify mis-accept, so it needs a full security
-         re-review before landing.
+      3. ~~**Karatsuba `u256_mul_full`**~~ **DONE (3.7.17).** The 256×256→512
+         multiply under all 256-bit ECC (Ed25519/X25519/ECDSA) moved schoolbook →
+         Karatsuba (12 × 64×64 via `z1=(aL+aH)(bL+bH)−z0−z2`). **But only ~3–4%**,
+         not the hoped ~15–25%: at 256-bit, fast hardware 64×64 multiply means the
+         carry/addition overhead caps Karatsuba's gain (it only pays off at much
+         larger bignum sizes). Ed25519 verify 6.90 → 6.63 ms, P-256 verify ~11.58 →
+         ~11.25 ms. Thread-safe (scalar-local, batch-path safe); schoolbook retained
+         as the KAT oracle. Conclusively verified (KAT + full sig suite + 5-lens
+         adversarial carry review, millions of differential cases). Audit:
+         `docs/audit/2026-06-16-3.7.17-karatsuba-multiply-audit.md`.
       The shipped comb + inversion paths are **verify-only / non-CT** (public
       exponents/scalars); keep them off any secret path (pairs with the
       "scatter-store comb" backlog item if that ever changes).
-      **Slated for 3.7.17 (Robert):** lever 2b (`u2·Q`-window batch-inversion
-      mixed-add) + lever 3 (Karatsuba — with the security re-review).
+
+      **STATUS (3.7.17): all known levers (1, 2a, 2b, 3) SHIPPED; ≤ 10 ms NOT
+      reached.** `ecdsa_p256_verify` floored at **~10.9 ms** (12.50 → ~10.9, ~13%
+      cumulative). The verify is doubling/inversion-bound and Karatsuba caps at
+      ~3–4% at this size, so the known approaches are **exhausted**. Crossing 10 ms
+      would need an exotic lever (hand-written asm multiply, an alternative point
+      representation / batched-affine GLV-style scheme, or a redesigned doubling) —
+      none scoped. **Decision for Robert: close the ≤ 10 ms item as "not reachable
+      with current approaches" or open an exotic-lever investigation.** Not closed
+      unilaterally.
 
 - [ ] **Re-run the full crypto bench suite** at the cycle close —
       before/after rows for every verify-path bench; cross-check the

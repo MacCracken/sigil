@@ -158,3 +158,8 @@ timestamp,label,benchmark,estimate,unit
 2026-06-16T00:00:00Z,v3.7.16-inv-chain,ecdsa_p256_verify_generic_inv_baseline,12.500,ms
 2026-06-16T00:00:00Z,v3.7.16-mixed-comb,ecdsa_p256_verify,11.000,ms
 2026-06-16T00:00:00Z,v3.7.16-mixed-comb,ecdsa_p256_verify_general_add_baseline,11.320,ms
+2026-06-16T00:00:00Z,v3.7.17-window-batchinv,ecdsa_p256_verify,10.890,ms
+2026-06-16T00:00:00Z,v3.7.17-karatsuba,ecdsa_p256_verify,11.250,ms
+2026-06-16T00:00:00Z,v3.7.17-karatsuba,ecdsa_p256_verify_schoolbook_baseline,11.580,ms
+2026-06-16T00:00:00Z,v3.7.17-karatsuba,ed25519_verify,6.627,ms
+2026-06-16T00:00:00Z,v3.7.17-karatsuba,ed25519_verify_schoolbook_baseline,6.900,ms
