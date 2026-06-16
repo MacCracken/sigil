@@ -156,6 +156,80 @@ fn main() {
     _p256_reduce_longdiv(ld, val512);
     assert_eq(u256_eq(reduced, ld), 1, "Solinas == long-div for high-half all-ones");
 
+    # 2f: field-inverse fixed addition chain (3.7.x) — the new
+    # `fp_p256_inv` (a^(p-2) via 2^k-1 blocks) must agree byte-for-byte
+    # with the generic Fermat reference `_fp_p256_inv_generic` over 64
+    # pseudo-random field elements, AND satisfy a*inv ≡ 1 mod p directly
+    # (the gold-standard check, independent of the reference).
+    test_group("fp_p256_inv chain == generic + a*inv==1");
+    var inv_chain = alloc(32);
+    var inv_gen = alloc(32);
+    var fa = alloc(32);
+    var prod = alloc(32);
+    var one_p = alloc(32);
+    store64(one_p, 1); store64(one_p + 8, 0); store64(one_p + 16, 0); store64(one_p + 24, 0);
+    var idiffs = 0;
+    var inv_bad = 0;
+    var kj = 0;
+    while (kj < 64) {
+        store64(ctr, kj + 50000);
+        sha256(ctr, 8, h);
+        memcpy(val512, h, 32);
+        store64(ctr, kj + 60000);
+        sha256(ctr, 8, h);
+        memcpy(val512 + 32, h, 32);
+        p256_reduce(fa, val512);            # fa = random field element in [0, p)
+        fp_p256_inv(inv_chain, fa);
+        _fp_p256_inv_generic(inv_gen, fa);
+        if (u256_eq(inv_chain, inv_gen) == 0) { idiffs = idiffs + 1; }
+        fp_p256_mul(prod, fa, inv_chain);   # fa * fa^-1 must be 1 (fa != 0 w.h.p.)
+        if (u256_eq(prod, one_p) == 0) { inv_bad = inv_bad + 1; }
+        kj = kj + 1;
+    }
+    assert_eq(idiffs, 0, "fp_p256_inv chain == generic over 64 random field elems");
+    assert_eq(inv_bad, 0, "fp_p256_inv: a*inv ≡ 1 mod p over 64 random elems");
+
+    # Edges: a = 1 (inv = 1) and a = p-1 (self-inverse, (p-1)^2 ≡ 1).
+    fp_p256_inv(inv_chain, one_p);
+    assert_eq(u256_eq(inv_chain, one_p), 1, "fp_p256_inv(1) == 1");
+    var iv_pm1 = u256_clone(_p256_p);
+    store64(iv_pm1, load64(iv_pm1) - 1);     # p - 1
+    fp_p256_inv(inv_chain, iv_pm1);
+    _fp_p256_inv_generic(inv_gen, iv_pm1);
+    assert_eq(u256_eq(inv_chain, inv_gen), 1, "fp_p256_inv(p-1) chain == generic");
+    fp_p256_mul(prod, iv_pm1, inv_chain);
+    assert_eq(u256_eq(prod, one_p), 1, "fp_p256_inv(p-1): a*inv ≡ 1");
+
+    # 2g: scalar-inverse 4-bit window (3.7.x) — the new `fn_p256_inv`
+    # (a^(n-2) windowed) must agree byte-for-byte with the generic
+    # reference `_fn_p256_inv_generic` over 64 pseudo-random scalars in
+    # [0, n), AND satisfy a*inv ≡ 1 mod n directly.
+    test_group("fn_p256_inv window == generic + a*inv==1 mod n");
+    var sinv_chain = alloc(32);
+    var sinv_gen = alloc(32);
+    var sa = alloc(32);
+    var sprod = alloc(32);
+    var sdiffs = 0;
+    var sbad = 0;
+    var ks = 0;
+    while (ks < 64) {
+        store64(ctr, ks + 70000);
+        sha256(ctr, 8, h);
+        memcpy(val512, h, 32);
+        store64(ctr, ks + 80000);
+        sha256(ctr, 8, h);
+        memcpy(val512 + 32, h, 32);
+        n_reduce(sa, val512);               # sa = random scalar in [0, n)
+        fn_p256_inv(sinv_chain, sa);
+        _fn_p256_inv_generic(sinv_gen, sa);
+        if (u256_eq(sinv_chain, sinv_gen) == 0) { sdiffs = sdiffs + 1; }
+        fn_p256_mul(sprod, sa, sinv_chain); # sa * sa^-1 must be 1
+        if (u256_eq(sprod, one_p) == 0) { sbad = sbad + 1; }
+        ks = ks + 1;
+    }
+    assert_eq(sdiffs, 0, "fn_p256_inv window == generic over 64 random scalars");
+    assert_eq(sbad, 0, "fn_p256_inv: a*inv ≡ 1 mod n over 64 random scalars");
+
     # ============================================================
     # Group 3 — field arithmetic
     # ============================================================

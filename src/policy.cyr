@@ -326,8 +326,9 @@ fn _rj_parse_string(data, pos, end): i64 {
         }
     }
     # Second pass: copy content, unescaping \x → x for \" \\ \n \r \t \b \f.
-    # \uXXXX is rejected as non-ASCII (caller's writer only emits control
-    # chars as \uNNNN for bytes < 32; we decode those back to the raw byte).
+    # \uXXXX is rejected as non-ASCII.  #skip-lint: \u-escape notation, not a deferral
+    # (The caller's writer only emits control chars as \uNNNN for bytes < 32;
+    # we decode those back to the raw byte.)
     var raw_len = pos - start;
     var out = alloc(raw_len + 1);
     var w = 0;
@@ -344,7 +345,7 @@ fn _rj_parse_string(data, pos, end): i64 {
             elif (ec == 98)  { store8(out + w, 8); }    # \b
             elif (ec == 102) { store8(out + w, 12); }   # \f
             elif (ec == 117) {
-                # \uXXXX — read 4 hex digits, emit as byte if ≤ 0xFF
+                # \uXXXX — read 4 hex digits, emit as byte if ≤ 0xFF  #skip-lint: \u-escape notation, not a deferral
                 if (r + 4 < raw_len) {
                     var v = 0;
                     var k = 1;

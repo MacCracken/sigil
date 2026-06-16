@@ -191,8 +191,8 @@ reserved for the first cycle of a day.
 
 | File | Last touched | Status | Notes |
 |---|---|---|---|
-| `roadmap.md` | 2026-06-07 | ✅ Fresh | Through 3.7.7: the P1 off-diagonal ECDSA, PQC-default, and buried-deferral-sweep items are **closed**; Backlog grew (ChaCha20/X25519 parallel, TDX chain walk, scalar-inversion addition-chain, `bn_modexp` dead-code). Open: buried-deferral gate, EC scalar-mult speedup, bench re-run, cyrius-gated backlog. |
-| `state.md` | 2026-06-07 | ✅ Fresh | Live state snapshot — bumped every release. **Through 3.7.7**; audit floor EMPTY; in-flight = buried-deferral gate + EC scalar-mult + bench re-run. |
+| `roadmap.md` | 2026-06-07 | ✅ Fresh | Through 3.7.7: the P1 off-diagonal ECDSA, PQC-default, and buried-deferral-sweep items are **closed**; Backlog grew (ChaCha20/X25519 parallel, TDX chain walk, scalar-inversion addition-chain, `bn_modexp` dead-code). Open: EC scalar-mult speedup, bench re-run, cyrius-gated backlog (the buried-deferral gate is done — superseded by `cyrlint`'s native untracked-deferral check). |
+| `state.md` | 2026-06-07 | ✅ Fresh | Live state snapshot — bumped every release. **Through 3.7.7**; audit floor EMPTY; in-flight = EC scalar-mult + bench re-run (buried-deferral gate done via `cyrlint`). |
 | `3.0-handoff-2026-04-22.md` | 2026-04-22 | 📦 Archive | Frozen by design — closed-cycle handoff doc. |
 | `3.0-scope.md` | (closed) | 📦 Archive | Frozen by design — closed-cycle scope doc. |
 | `3.2-scope.md` | (closed) | 📦 Archive | Frozen by design — closed-cycle scope doc. |

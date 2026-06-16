@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Process: the buried-deferral gate is now enforced natively by `cyrlint`**
+  (the cyrius linter), not a sigil-local script — it flags any untracked deferral
+  (`TODO` / `FIXME` / `XXX` / `deferred` / …) as `untracked '<token>'
+  (cross-reference a CHANGELOG/issue/roadmap entry, or #skip-lint)`, covering every
+  AGNOS repo. The two `\uXXXX` JSON-notation false positives in `src/policy.cyr`
+  are now `#skip-lint`-suppressed; `cyrlint src/*.cyr` reports 0 untracked
+  deferrals. (The roadmap's "buried-deferral gate" item is closed by this.)
+
+### Performance
+
+- **P-256 verify inversion speedup — `ecdsa_p256_verify` 12.50 → 11.37 ms (~9%,
+  clean A/B on cyrius 6.2.12).** Both modular inversions on the verify path moved
+  off generic binary square-and-multiply (Fermat). The **field** inverse
+  `fp_p256_inv` (`a^(p-2) mod p`) now uses a fixed `2^k-1`-block addition chain
+  (~255 sq + 12 mul vs 256 sq + ~128 mul); the **scalar** inverse `fn_p256_inv`
+  (`a^(n-2) mod n`) uses a 4-bit fixed window (`n-2`'s low half is irregular, so no
+  clean optimal chain — ~14 + 256 + ~55 vs 256 + ~128 `fn_p256_mul` calls, and
+  every saved mul avoids a 256-iteration long-division `n_reduce`, where this
+  path's cost lives). **Verify-path only**; the exponents (`p-2`, `n-2`) are public
+  constants → no constant-time concern. The generic implementations are retained as
+  `_fp_p256_inv_generic` / `_fn_p256_inv_generic` KAT oracles. **The ≤ 10 ms target
+  is still open** — remaining levers: mixed Jacobian+affine addition and Karatsuba
+  `u256_mul_full` (the latter touches the audited shared 256-bit multiply → security
+  re-review). +7 assertions (`ecdsa_p256.tcyr`: chain/window == generic + `a*inv ≡ 1`
+  over 64 random field elems / scalars + edges). `history.csv` rows
+  `unreleased-p256-inv-chain`.
+
 ## [3.7.15] — 2026-06-15
 
 **Windows entropy fix — sigil keygen / nonce / blinding now route through the

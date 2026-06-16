@@ -6740,9 +6740,11 @@ fn _p256_inv_init(): i64 {
     return 0;
 }
 
-# r = a^(-1) mod p. If a == 0 the result is 0 (caller's responsibility
-# to check; ECDSA verify already gates on s != 0).
-fn fp_p256_inv(r, a): i64 {
+# r = a^(-1) mod p, generic binary square-and-multiply (Fermat a^(p-2)).
+# RETAINED AS THE KAT ORACLE / REFERENCE for the fixed addition-chain
+# `fp_p256_inv` below (differential KAT in ecdsa_p256.tcyr). Not on the
+# hot path anymore. If a == 0 the result is 0 (caller gates on s != 0).
+fn _fp_p256_inv_generic(r, a): i64 {
     _p256_inv_init();
     # res = 1
     store64(_p256_inv_res + 0, 1);
@@ -6765,6 +6767,86 @@ fn fp_p256_inv(r, a): i64 {
         i = i + 1;
     }
     u256_copy(r, _p256_inv_res);
+    return 0;
+}
+
+# ----------------------------------------------------------------
+# Fixed addition-chain field inverse a^(p-2) mod p  (3.7.x perf)
+#
+# p = 2^256 - 2^224 + 2^192 + 2^96 - 1, so p-2 has bit-runs (MSB->LSB):
+#   [255:224]=1^32, [223:193]=0^31, [192]=1, [191:96]=0^96,
+#   [95:32]=1^64, [31:2]=1^30, [1]=0, [0]=1.
+# Built from 2^k-1 blocks (à la `fp_inv` in bigint_ext.cyr) in
+# ~255 squarings + 12 multiplications, vs the generic loop's 256 sq +
+# ~128 mul. The exponent (p-2) is a PUBLIC constant, so this is not a
+# secret-dependent path — no CT concern. KAT-gated against
+# `_fp_p256_inv_generic` (ecdsa_p256.tcyr differential test).
+# ----------------------------------------------------------------
+var _p256fi_t1 = 0;  var _p256fi_t2 = 0;  var _p256fi_t3 = 0;
+var _p256fi_t6 = 0;  var _p256fi_t12 = 0; var _p256fi_t15 = 0;
+var _p256fi_t30 = 0; var _p256fi_t32 = 0; var _p256fi_acc = 0;
+var _p256fi_inited = 0;
+
+fn _p256fi_init(): i64 {
+    if (_p256fi_inited == 1) { return 0; }
+    _p256_init();
+    _p256fi_t1  = alloc(32);  _p256fi_t2  = alloc(32);  _p256fi_t3  = alloc(32);
+    _p256fi_t6  = alloc(32);  _p256fi_t12 = alloc(32);  _p256fi_t15 = alloc(32);
+    _p256fi_t30 = alloc(32);  _p256fi_t32 = alloc(32);  _p256fi_acc = alloc(32);
+    _p256fi_inited = 1;
+    return 0;
+}
+
+# In-place square `buf` n times (field, mod p). fp_p256_mul reads both
+# operands into _p256_prod before writing r, so r==a is alias-safe.
+fn _fp_p256_sq_n(buf, n): i64 {
+    var i = 0;
+    while (i < n) {
+        fp_p256_sq(buf, buf);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# r = a^(-1) mod p via the fixed addition chain. a == 0 → 0.
+fn fp_p256_inv(r, a): i64 {
+    _p256fi_init();
+    # --- 2^k-1 blocks ---
+    u256_copy(_p256fi_t1, a);                            # t1  = a^(2^1-1)
+    fp_p256_sq(_p256fi_t2, _p256fi_t1);                  #       a^2
+    fp_p256_mul(_p256fi_t2, _p256fi_t2, _p256fi_t1);     # t2  = a^(2^2-1)
+    fp_p256_sq(_p256fi_t3, _p256fi_t2);                  #       a^6
+    fp_p256_mul(_p256fi_t3, _p256fi_t3, _p256fi_t1);     # t3  = a^(2^3-1)
+    u256_copy(_p256fi_t6, _p256fi_t3);
+    _fp_p256_sq_n(_p256fi_t6, 3);
+    fp_p256_mul(_p256fi_t6, _p256fi_t6, _p256fi_t3);     # t6  = a^(2^6-1)
+    u256_copy(_p256fi_t12, _p256fi_t6);
+    _fp_p256_sq_n(_p256fi_t12, 6);
+    fp_p256_mul(_p256fi_t12, _p256fi_t12, _p256fi_t6);   # t12 = a^(2^12-1)
+    u256_copy(_p256fi_t15, _p256fi_t12);
+    _fp_p256_sq_n(_p256fi_t15, 3);
+    fp_p256_mul(_p256fi_t15, _p256fi_t15, _p256fi_t3);   # t15 = a^(2^15-1)
+    u256_copy(_p256fi_t30, _p256fi_t15);
+    _fp_p256_sq_n(_p256fi_t30, 15);
+    fp_p256_mul(_p256fi_t30, _p256fi_t30, _p256fi_t15);  # t30 = a^(2^30-1)
+    u256_copy(_p256fi_t32, _p256fi_t30);
+    _fp_p256_sq_n(_p256fi_t32, 2);
+    fp_p256_mul(_p256fi_t32, _p256fi_t32, _p256fi_t2);   # t32 = a^(2^32-1)
+    # --- assemble a^(p-2) ---
+    u256_copy(_p256fi_acc, _p256fi_t32);                 # [255:224] 1^32
+    _fp_p256_sq_n(_p256fi_acc, 31);                      # [223:193] 0^31
+    fp_p256_sq(_p256fi_acc, _p256fi_acc);                # [192] 1
+    fp_p256_mul(_p256fi_acc, _p256fi_acc, _p256fi_t1);
+    _fp_p256_sq_n(_p256fi_acc, 96);                      # [191:96] 0^96
+    _fp_p256_sq_n(_p256fi_acc, 32);                      # [95:64] 1^32
+    fp_p256_mul(_p256fi_acc, _p256fi_acc, _p256fi_t32);
+    _fp_p256_sq_n(_p256fi_acc, 32);                      # [63:32] 1^32
+    fp_p256_mul(_p256fi_acc, _p256fi_acc, _p256fi_t32);
+    _fp_p256_sq_n(_p256fi_acc, 30);                      # [31:2] 1^30
+    fp_p256_mul(_p256fi_acc, _p256fi_acc, _p256fi_t30);
+    fp_p256_sq(_p256fi_acc, _p256fi_acc);                # [1] 0
+    fp_p256_sq(_p256fi_acc, _p256fi_acc);                # [0] 1
+    fp_p256_mul(r, _p256fi_acc, _p256fi_t1);
     return 0;
 }
 
@@ -6853,7 +6935,12 @@ fn _p256_ninv_init(): i64 {
     return 0;
 }
 
-fn fn_p256_inv(r, a): i64 {
+# Generic binary square-and-multiply scalar inverse (Fermat a^(n-2)).
+# RETAINED AS THE KAT ORACLE / REFERENCE for the windowed `fn_p256_inv`
+# below. Each fn_p256_mul here is expensive (u256_mul_full + 256-iter
+# long-division n_reduce), so the window's mul-count reduction is the
+# real win on this path.
+fn _fn_p256_inv_generic(r, a): i64 {
     _p256_ninv_init();
     store64(_p256_ninv_res + 0, 1);
     store64(_p256_ninv_res + 8, 0);
@@ -6875,6 +6962,65 @@ fn fn_p256_inv(r, a): i64 {
         i = i + 1;
     }
     u256_copy(r, _p256_ninv_res);
+    return 0;
+}
+
+# ----------------------------------------------------------------
+# Windowed scalar inverse a^(n-2) mod n  (3.7.x perf)
+#
+# n-2's low 128 bits are irregular (no clean 2^k-1 decomposition like
+# the field prime), so instead of a hand-derived optimal addition chain
+# this uses a fixed 4-bit window: precompute a^1..a^15, then process the
+# 64 nibbles of n-2 MSB->LSB (4 squarings + one table-mul per non-zero
+# nibble). ~14 + 256 + ~55 = ~325 `fn_p256_mul` calls vs the generic
+# 256 + ~128 = ~384 — and every saved mul avoids a 256-iteration
+# long-division n_reduce, which is where this path's cost lives. The
+# exponent (n-2) is a PUBLIC constant → no CT concern. `fn_p256_mul`
+# writes r only after consuming a,b into _p256_n_prod, so r==a==b
+# (in-place squaring) is alias-safe. KAT-gated vs the generic above.
+# ----------------------------------------------------------------
+var _p256si_tbl = 0;     # 16 × 32 B table; table[i] = a^i at +i*32
+var _p256si_acc = 0;
+var _p256si_inited = 0;
+
+fn _p256si_init(): i64 {
+    if (_p256si_inited == 1) { return 0; }
+    _p256_ninv_init();           # ensures _p256_ninv_exp = n - 2
+    _p256si_tbl = alloc(512);
+    _p256si_acc = alloc(32);
+    _p256si_inited = 1;
+    return 0;
+}
+
+fn fn_p256_inv(r, a): i64 {
+    _p256si_init();
+    # table[1] = a; table[i] = table[i-1] * a  (i = 2..15)
+    u256_copy(_p256si_tbl + 32, a);
+    var ti = 2;
+    while (ti < 16) {
+        fn_p256_mul(_p256si_tbl + ti * 32, _p256si_tbl + (ti - 1) * 32, a);
+        ti = ti + 1;
+    }
+    # acc = 1
+    store64(_p256si_acc + 0, 1);
+    store64(_p256si_acc + 8, 0);
+    store64(_p256si_acc + 16, 0);
+    store64(_p256si_acc + 24, 0);
+    # process nibbles of (n-2) from MSB (nibble 63) to LSB (nibble 0)
+    var ni = 63;
+    while (ni >= 0) {
+        fn_p256_mul(_p256si_acc, _p256si_acc, _p256si_acc);   # ^2
+        fn_p256_mul(_p256si_acc, _p256si_acc, _p256si_acc);   # ^4
+        fn_p256_mul(_p256si_acc, _p256si_acc, _p256si_acc);   # ^8
+        fn_p256_mul(_p256si_acc, _p256si_acc, _p256si_acc);   # ^16
+        var limb = load64(_p256_ninv_exp + (ni / 16) * 8);
+        var nib = (limb >> ((ni & 15) * 4)) & 15;
+        if (nib != 0) {
+            fn_p256_mul(_p256si_acc, _p256si_acc, _p256si_tbl + nib * 32);
+        }
+        ni = ni - 1;
+    }
+    u256_copy(r, _p256si_acc);
     return 0;
 }
 
@@ -17056,8 +17202,9 @@ fn _rj_parse_string(data, pos, end): i64 {
         }
     }
     # Second pass: copy content, unescaping \x → x for \" \\ \n \r \t \b \f.
-    # \uXXXX is rejected as non-ASCII (caller's writer only emits control
-    # chars as \uNNNN for bytes < 32; we decode those back to the raw byte).
+    # \uXXXX is rejected as non-ASCII.  #skip-lint: \u-escape notation, not a deferral
+    # (The caller's writer only emits control chars as \uNNNN for bytes < 32;
+    # we decode those back to the raw byte.)
     var raw_len = pos - start;
     var out = alloc(raw_len + 1);
     var w = 0;
@@ -17074,7 +17221,7 @@ fn _rj_parse_string(data, pos, end): i64 {
             elif (ec == 98)  { store8(out + w, 8); }    # \b
             elif (ec == 102) { store8(out + w, 12); }   # \f
             elif (ec == 117) {
-                # \uXXXX — read 4 hex digits, emit as byte if ≤ 0xFF
+                # \uXXXX — read 4 hex digits, emit as byte if ≤ 0xFF  #skip-lint: \u-escape notation, not a deferral
                 if (r + 4 < raw_len) {
                     var v = 0;
                     var k = 1;

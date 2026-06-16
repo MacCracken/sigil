@@ -32,57 +32,50 @@ perf cycle have shipped — see "Closed cycles" below + CHANGELOG.
       [`2026-06-15-sigil-windows-entropy-not-via-getrandom.md`](issues/2026-06-15-sigil-windows-entropy-not-via-getrandom.md)
       stays **open** until `cass` confirms.
 
-**Tooling / process — committed for the next release**
+**Tooling / process**
 
-- [ ] **Buried-deferral gate.** A closeout/CI check that greps `src/`
-      for deferral language in comments — `deferred`, `TODO`, `FIXME`,
-      `XXX`, `HACK`, `follow-up`, `for now`, `not yet`, `later bite`,
-      `a future bite`, `out of scope`, `defer-to-` — and **fails (or
-      reports) any hit not cross-referenced by a roadmap entry**. This
-      converts the recurring "scope cut buried in a source comment"
-      failure mode (the hard rule's exact target — every deferral is
-      Robert's call, never a silent comment) from a human-caught
-      regression into a mechanical gate the next cycle can't ship past
-      without either doing the work or surfacing it. Wire it into the
-      CLAUDE.md Closeout Pass (and/or sigil's pre-release verification,
-      e.g. `programs/check.cyr` if that's where it lands). Start in
-      *report* mode, flip to *fail* once the vocabulary is tuned and the
-      tree is clean. The grep vocabulary is the only repo-specific part —
-      the check itself generalizes across the AGNOS first-party repos
-      (worth lifting into the shared tooling once proven here). Extends
-      the `docs/doc-health.md` "Programmatic gates (future)" family.
-      **Tree status (3.7.7 sweep):** the genuine deferrals were surfaced
-      to the Backlog above and the stale comments updated to mark shipped
-      work, so the tree is clean except a **known allowlist of false
-      positives**: `src/policy.cyr:329,347` (the literal `\uXXXX` JSON
-      unicode-escape notation, where `XXX` is a substring — not a
-      deferral). The gate must allowlist these (and re-scan as new
-      false-positive shapes appear) before flipping to *fail*.
+- [x] **Buried-deferral gate — DONE, superseded by `cyrlint`.** Instead of a
+      sigil-local grep gate, the deferral-vocabulary check was built natively into
+      **`cyrlint`** (the cyrius linter) — so it covers **every** AGNOS first-party
+      repo, not just sigil, which is strictly better than a per-repo script.
+      `cyrlint` flags any untracked deferral (`deferred` / `TODO` / `FIXME` / `XXX`
+      / `HACK` / …) as `untracked '<token>' (cross-reference a
+      CHANGELOG/issue/roadmap entry, or #skip-lint)` — exactly the "do the work,
+      surface it, or skip it explicitly" behavior this gate intended, now enforced
+      by the standard lint step (CLAUDE.md P(-1) §1 cleanliness). The two known
+      `\uXXXX` false positives (`src/policy.cyr`, JSON unicode-escape notation, not
+      a deferral) are suppressed at source with `#skip-lint`; `cyrlint src/*.cyr`
+      reports **0 untracked deferrals**.
 
 **v3.7 — perf (OPEN)**
 
 - [ ] **EC scalar-mult — ≤ 10 ms P-256 squeeze.** The comb-G + windowed-Q
-      speedup shipped in 3.7.8 (verify now 11.6 ms P-256 / 26.3 ms P-384,
-      ~2× — see CHANGELOG/state), but the **≤ 10 ms `ecdsa_p256_verify`
-      target is not yet met (11.6 ms).** Remaining levers, in rising risk
-      order:
-      1. **Inversion addition-chain** for `fn_p256_inv` (s⁻¹) and the
-         `pt_to_affine` field inverse — generic square-and-multiply is
-         ~256 sq + ~128 mul each; a fixed chain drops to ~265 muls (same as
-         the standalone "Scalar-inversion addition-chain" Backlog item —
-         do them together). Isolated, ~5% × 2.
+      speedup shipped in 3.7.8 (~2×); the **inversion lever (1, below) is now
+      DONE** (unreleased), bringing `ecdsa_p256_verify` to **11.37 ms** (clean
+      A/B: generic-inverse 12.50 → 11.37, ~9%, cyrius 6.2.12). The **≤ 10 ms
+      target is still open (11.37 ms)** — levers 2–3 remain, in rising risk:
+      1. ~~**Inversion addition-chain** for `fn_p256_inv` (s⁻¹) and the
+         `pt_to_affine` field inverse.~~ **DONE (unreleased).** Field inverse
+         `fp_p256_inv` → fixed `2^k-1`-block chain (~255 sq + 12 mul); scalar
+         inverse `fn_p256_inv` → 4-bit fixed window (`n-2` is irregular, no clean
+         optimal chain — but each saved mul avoids an expensive long-division
+         `n_reduce`, the real cost). Generics retained as `_*_generic` KAT
+         oracles; +7 differential/`a*inv≡1` assertions. (Closes the standalone
+         "Scalar-inversion addition-chain" Backlog item too.) An optimal
+         hand-derived `a^(n-2)` chain could squeeze a bit more than the window
+         but was deemed too derivation-risky for this bite.
       2. **Mixed Jacobian+affine addition** with an affine comb table —
          saves ~4 muls on each of the ~143 verify-path adds. Isolated to
          the verify path; needs a new add formula (point-add correctness
-         risk, KAT-gated).
+         risk, KAT-gated). **← next lever.**
       3. **Karatsuba `u256_mul_full`** — biggest single lever (~15–25% on
          every field mul) but touches the **audited shared 256-bit
          multiply** used by all P-256 field + scalar ops; a carry bug =
          signature-verify mis-accept, so it needs a full security
          re-review before landing.
-      The shipped comb is **verify-only / non-CT**; keep it off any secret
-      path (pairs with the "scatter-store comb" backlog item if that ever
-      changes).
+      The shipped comb + inversion paths are **verify-only / non-CT** (public
+      exponents/scalars); keep them off any secret path (pairs with the
+      "scatter-store comb" backlog item if that ever changes).
 
 - [ ] **Re-run the full crypto bench suite** at the cycle close —
       before/after rows for every verify-path bench; cross-check the
@@ -109,11 +102,12 @@ promoted here so they are visible, not buried):
       walk). Owning the walk inside sigil would make the orchestrators
       self-contained — consider when a consumer needs it.
 
-- [ ] **Scalar-inversion addition-chain.** `fn_p256_inv` / the field/scalar
-      inversions (`src/ecdsa_p256.cyr`) use generic square-and-multiply
-      (~256 sq + ~128 mul). A fixed addition chain (à la `fp_inv` in
-      `bigint_ext.cyr`) drops this to ~265 muls. Small verify-path win;
-      pairs with the EC scalar-mult speedup bite.
+- [x] **Scalar-inversion addition-chain — DONE (unreleased).** Both
+      `src/ecdsa_p256.cyr` inversions moved off generic square-and-multiply:
+      field `fp_p256_inv` → fixed `2^k-1`-block chain; scalar `fn_p256_inv` →
+      4-bit window. Shipped together with EC-squeeze lever 1 above
+      (`ecdsa_p256_verify` 12.50 → 11.37 ms). An optimal `a^(n-2)` chain could
+      do marginally better than the window but was deemed too derivation-risky.
 
 - [ ] **`bn_modexp` dead-code decision.** `bn_modexp` (`src/bignum.cyr`,
       schoolbook non-CT public-data modexp) has no call sites since 3.6.6
@@ -203,7 +197,8 @@ audits in [`docs/audit/`](../audit/).
   incl. AGNOS-only `tpm_random`) routed through `_sigil_random_fill` / stdlib
   `random_bytes`, fail-closed, pin → 6.2.12 (3.7.15). Remaining: the ≤ 10 ms
   P-256 squeeze (inversion-chain / mixed-add / Karatsuba), the
-  buried-deferral *gate*, and the full bench re-run (see Outstanding above);
-  plus the Windows `cass` acceptance for 3.7.15 (verification-only).
+  and the full bench re-run (see Outstanding above); plus the Windows `cass`
+  acceptance for 3.7.15 (verification-only). *(The buried-deferral gate is
+  done — superseded by `cyrlint`'s native untracked-deferral check.)*
 
 **Cyrius pin:** `6.2.12` (synced across `cyrius.cyml` and CI).
