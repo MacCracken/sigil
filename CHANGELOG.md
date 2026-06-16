@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.7.16] — 2026-06-16
+
+**P-256 verify perf — EC-squeeze levers 1 + 2a (modular inversions + mixed
+addition on the affine comb): `ecdsa_p256_verify` 12.50 → ~11.00 ms (~12%).**
+Plus the buried-deferral gate folded into `cyrlint`. All verify-path / non-CT
+(public data); the secret-nonce signing path is untouched.
+
 ### Changed
 
 - **Process: the buried-deferral gate is now enforced natively by `cyrlint`**
@@ -34,7 +41,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `u256_mul_full` (the latter touches the audited shared 256-bit multiply → security
   re-review). +7 assertions (`ecdsa_p256.tcyr`: chain/window == generic + `a*inv ≡ 1`
   over 64 random field elems / scalars + edges). `history.csv` rows
-  `unreleased-p256-inv-chain`.
+  `v3.7.16-inv-chain`.
+
+- **P-256 verify mixed Jacobian+affine addition — `ecdsa_p256_verify` ~11.37 →
+  ~11.00 ms** (isolated A/B on the affine comb: general add 11.32 → mixed 11.00,
+  ~2.8%). The fixed-base comb-G table for the `u1·G` term is now stored **affine**
+  (`x‖y`, 64 B/entry) and its 64 hot-path adds use a new `pt_add_mixed` (Jacobian +
+  affine, formula "madd-2007-bl", ~7M+4S vs the general add's ~11M+5S — the `Z2=1`
+  multiplies vanish); the identity (nibble 0) entry is now skipped outright. The
+  one-time affine table build does ~960 `pt_to_affine` inversions, amortized over
+  the process. **Verify-path only / non-CT** (public comb, same caveat as the
+  fixed-base table). The win is bounded — `ecdsa_p256_verify` is dominated by the
+  variable-point `u2·Q` window's 256 doublings + the inversions, which mixed-add
+  does not touch — so **≤ 10 ms is still open**: the remaining `u2·Q`-window adds
+  (79 of the ~143) would need a per-verify batch-inversion to go affine, and
+  Karatsuba `u256_mul_full` (lever 3, touches the audited multiply → security
+  re-review) is what actually crosses 10 ms. +3 assertions (`ecdsa_p256.tcyr`:
+  `pt_add_mixed == pt_add` over 24 (P,Q) pairs + the `P==Q` double and `P==-Q`
+  infinity branches). `history.csv` rows `v3.7.16-mixed-comb`.
 
 ## [3.7.15] — 2026-06-15
 

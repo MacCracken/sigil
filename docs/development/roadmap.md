@@ -51,11 +51,11 @@ perf cycle have shipped — see "Closed cycles" below + CHANGELOG.
 
 - [ ] **EC scalar-mult — ≤ 10 ms P-256 squeeze.** The comb-G + windowed-Q
       speedup shipped in 3.7.8 (~2×); the **inversion lever (1, below) is now
-      DONE** (unreleased), bringing `ecdsa_p256_verify` to **11.37 ms** (clean
+      DONE** (3.7.16), bringing `ecdsa_p256_verify` to **11.37 ms** (clean
       A/B: generic-inverse 12.50 → 11.37, ~9%, cyrius 6.2.12). The **≤ 10 ms
       target is still open (11.37 ms)** — levers 2–3 remain, in rising risk:
       1. ~~**Inversion addition-chain** for `fn_p256_inv` (s⁻¹) and the
-         `pt_to_affine` field inverse.~~ **DONE (unreleased).** Field inverse
+         `pt_to_affine` field inverse.~~ **DONE (3.7.16).** Field inverse
          `fp_p256_inv` → fixed `2^k-1`-block chain (~255 sq + 12 mul); scalar
          inverse `fn_p256_inv` → 4-bit fixed window (`n-2` is irregular, no clean
          optimal chain — but each saved mul avoids an expensive long-division
@@ -64,10 +64,17 @@ perf cycle have shipped — see "Closed cycles" below + CHANGELOG.
          "Scalar-inversion addition-chain" Backlog item too.) An optimal
          hand-derived `a^(n-2)` chain could squeeze a bit more than the window
          but was deemed too derivation-risky for this bite.
-      2. **Mixed Jacobian+affine addition** with an affine comb table —
-         saves ~4 muls on each of the ~143 verify-path adds. Isolated to
-         the verify path; needs a new add formula (point-add correctness
-         risk, KAT-gated). **← next lever.**
+      2. **Mixed Jacobian+affine addition.** **Comb-G part DONE (3.7.16):**
+         the fixed-base `u1·G` comb table is now affine and its 64 hot-path adds
+         use `pt_add_mixed` (madd-2007-bl, ~7M+4S vs ~11M+5S); isolated A/B
+         11.32 → 11.00 ms (~2.8%). KAT-gated (`pt_add_mixed == pt_add` over 24
+         pairs + double / −Q edges). **Bounded by design** — verify is dominated
+         by the `u2·Q` window's 256 doublings + the inversions, which mixed-add
+         doesn't touch. **Remaining for this lever:** the `u2·Q`-window adds
+         (79 of the ~143) would need a per-verify **batch inversion** (Montgomery,
+         1 inv + ~3(n−1) muls) to convert the 15-entry Q-table to affine — a
+         separate slice worth ~0.3–0.5 ms. Neither sub-slice crosses 10 ms alone;
+         lever 3 (Karatsuba) is what gets there.
       3. **Karatsuba `u256_mul_full`** — biggest single lever (~15–25% on
          every field mul) but touches the **audited shared 256-bit
          multiply** used by all P-256 field + scalar ops; a carry bug =
@@ -76,6 +83,8 @@ perf cycle have shipped — see "Closed cycles" below + CHANGELOG.
       The shipped comb + inversion paths are **verify-only / non-CT** (public
       exponents/scalars); keep them off any secret path (pairs with the
       "scatter-store comb" backlog item if that ever changes).
+      **Slated for 3.7.17 (Robert):** lever 2b (`u2·Q`-window batch-inversion
+      mixed-add) + lever 3 (Karatsuba — with the security re-review).
 
 - [ ] **Re-run the full crypto bench suite** at the cycle close —
       before/after rows for every verify-path bench; cross-check the
@@ -102,7 +111,7 @@ promoted here so they are visible, not buried):
       walk). Owning the walk inside sigil would make the orchestrators
       self-contained — consider when a consumer needs it.
 
-- [x] **Scalar-inversion addition-chain — DONE (unreleased).** Both
+- [x] **Scalar-inversion addition-chain — DONE (3.7.16).** Both
       `src/ecdsa_p256.cyr` inversions moved off generic square-and-multiply:
       field `fp_p256_inv` → fixed `2^k-1`-block chain; scalar `fn_p256_inv` →
       4-bit window. Shipped together with EC-squeeze lever 1 above

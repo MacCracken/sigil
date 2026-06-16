@@ -230,6 +230,61 @@ fn main() {
     assert_eq(sdiffs, 0, "fn_p256_inv window == generic over 64 random scalars");
     assert_eq(sbad, 0, "fn_p256_inv: a*inv ≡ 1 mod n over 64 random scalars");
 
+    # 2h: mixed Jacobian+affine addition (3.7.x) — pt_add_mixed(P, Qaff)
+    # must equal the general pt_add(P, Qjac) (both reduced to affine) over
+    # 24 (P, Q) = (k1·G, k2·G) pairs with non-trivial Jacobian Z on P, plus
+    # the two H==0 branches (P==Q → double; P==-Q → infinity).
+    test_group("pt_add_mixed == pt_add (+ double / -Q edges)");
+    var mG = pt_alloc();
+    pt_from_affine(mG, _p256_gx, _p256_gy);
+    var mP = pt_alloc();
+    var mQ = pt_alloc();
+    var mQj = pt_alloc();
+    var mqx = alloc(32);  var mqy = alloc(32);
+    var rgen = pt_alloc();  var rmix = pt_alloc();
+    var rgx = alloc(32);  var rgy = alloc(32);
+    var rmx = alloc(32);  var rmy = alloc(32);
+    var mk1 = alloc(32);  var mk2 = alloc(32);
+    var madd_diffs = 0;
+    var mi = 1;
+    while (mi <= 24) {
+        memset(mk1, 0, 32); store64(mk1, mi);
+        memset(mk2, 0, 32); store64(mk2, mi * 7 + 3);
+        pt_scalarmul(mP, mk1, mG);          # P = k1·G (Jacobian, Z != 1)
+        pt_scalarmul(mQ, mk2, mG);          # Q = k2·G
+        pt_to_affine(mqx, mqy, mQ);         # Q in affine
+        pt_from_affine(mQj, mqx, mqy);      # Q as Jacobian (Z = 1)
+        pt_add(rgen, mP, mQj);
+        pt_add_mixed(rmix, mP, mqx, mqy);
+        pt_to_affine(rgx, rgy, rgen);
+        pt_to_affine(rmx, rmy, rmix);
+        var same = 1;
+        if (u256_eq(rgx, rmx) == 0) { same = 0; }
+        if (u256_eq(rgy, rmy) == 0) { same = 0; }
+        if (same == 0) { madd_diffs = madd_diffs + 1; }
+        mi = mi + 1;
+    }
+    assert_eq(madd_diffs, 0, "pt_add_mixed == pt_add over 24 (P,Q) pairs");
+
+    # Edge: P == Q  →  pt_add_mixed must equal pt_double(P).
+    memset(mk1, 0, 32); store64(mk1, 5);
+    pt_scalarmul(mP, mk1, mG);              # P = 5·G
+    pt_to_affine(mqx, mqy, mP);             # Q = affine(P)
+    pt_add_mixed(rmix, mP, mqx, mqy);
+    pt_double(rgen, mP);
+    pt_to_affine(rgx, rgy, rgen);
+    pt_to_affine(rmx, rmy, rmix);
+    var dbl_ok = 1;
+    if (u256_eq(rgx, rmx) == 0) { dbl_ok = 0; }
+    if (u256_eq(rgy, rmy) == 0) { dbl_ok = 0; }
+    assert_eq(dbl_ok, 1, "pt_add_mixed(P, affine(P)) == 2P");
+
+    # Edge: P == -Q  (Q = (Px, p - Py))  →  result is the point at infinity.
+    var negy = alloc(32);
+    u256_sub(negy, _p256_p, mqy);           # p - Py
+    pt_add_mixed(rmix, mP, mqx, negy);
+    assert_eq(pt_is_infinity(rmix), 1, "pt_add_mixed(P, -P) == O");
+
     # ============================================================
     # Group 3 — field arithmetic
     # ============================================================

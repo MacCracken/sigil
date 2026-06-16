@@ -238,7 +238,7 @@ Requires **cyrius ≥ 6.0.52** (the release that shipped `lib/thread_local.cyr`)
 
 ## Tests
 
-1468 assertions across 54 test files, 0 failures (3.7.15). Crypto
+1478 assertions across 54 test files, 0 failures (3.7.16). Crypto
 suites use published known-answer vectors (RFC / FIPS / NIST); the
 TEE attestation arc ships synthesised end-to-end fixtures.
 `tests/tcyr/batch_parallel.tcyr` doubles as the parallel-verify race
