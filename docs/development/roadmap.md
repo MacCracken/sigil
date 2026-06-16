@@ -21,16 +21,20 @@ perf cycle have shipped — see "Closed cycles" below + CHANGELOG.
 
 **Verification follow-up — Windows entropy (3.7.15)**
 
-- [ ] **Windows `cass` acceptance for the 3.7.15 entropy fix.** All entropy now
-      routes through `_sigil_random_fill` / stdlib `random_bytes`
-      (getrandom/getentropy/ProcessPrng); **code-complete and Linux-verified, no
-      sigil source work remains.** The issue's acceptance gates on real Windows:
-      a sigil keypair-gen + a `tls_native` client nonce on **`cass`** producing
-      unique values, and re-folding the vendored `lib/sigil.cyr` in cyrius +
-      re-verifying the native-TLS handshake there (the `tls_native` half is
-      cyrius-owned). Issue
+- [~] **Windows entropy fix (3.7.15) — runtime-VERIFIED via Windows-PE + wine
+      (2026-06-16); only the `cass` formality + the cyrius-owned `tls_native`
+      re-fold remain.** All entropy routes through `_sigil_random_fill` / stdlib
+      `random_bytes` → ProcessPrng on Windows. **Proven by cross-compiling to
+      Windows PE (`cyrius build --win`) and RUNNING under wine** (which implements
+      bcryptprimitives.dll!ProcessPrng): `random.tcyr`, `ed25519.tcyr`, and the
+      consumer-shape `programs/win_entropy_probe.cyr` (dist + opt-in libs) all
+      exit 0 — fresh, unique entropy + working ed25519 keygen on the Windows
+      binary; the same probe is green on Linux. **sigil-side is done & verified.**
+      Residual (NOT sigil source work): a confirmation run on real Windows
+      (**`cass`**) vs wine, and the `tls_native` client-nonce half (cyrius-owned —
+      re-fold `lib/sigil.cyr` + re-verify the native-TLS handshake). Issue
       [`2026-06-15-sigil-windows-entropy-not-via-getrandom.md`](issues/2026-06-15-sigil-windows-entropy-not-via-getrandom.md)
-      stays **open** until `cass` confirms.
+      stays **open** until `cass` + the downstream re-fold confirm.
 
 **Tooling / process**
 

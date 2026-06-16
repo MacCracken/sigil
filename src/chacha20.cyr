@@ -12,13 +12,13 @@
 # §2.8) — TLS 1.3's `TLS_CHACHA20_POLY1305_SHA256` suite — and the
 # source of the Poly1305 one-time key (block at counter 0).
 #
-# THREAD-SAFETY: the `chacha20_block` working state lives in
-# function-scope `var` arrays (Cyrius static globals, quirk #1);
-# each call fully writes them before reading, so serial use is
-# correct. ChaCha20 is not on the parallel batch path; if a consumer
-# puts it there, give it the v3.6 per-worker bank treatment — tracked
-# as a roadmap backlog item ("ChaCha20 + X25519 on the parallel batch
-# path").
+# THREAD-SAFETY: the `chacha20_block` / `chacha20_xor` working state
+# lives in function-scope `var` arrays (Cyrius static globals, quirk #1).
+# As of 3.8.0 these are **per-worker banked** (`cbank()` lane slices, the
+# v3.6 `src/crypto_scratch.cyr` mechanism), so concurrent callers operate
+# on disjoint lanes and cannot race — `st` / `ws` / `ks` are each widened
+# to `SIGIL_CRYPTO_BANKS` lanes and indexed by `cbank()`. Serial callers
+# use bank 0. (Defensive: no in-tree concurrent caller exists yet.)
 #
 # Citation: RFC 8439 §2.1 (quarter round), §2.3 (block function),
 # §2.3.2 / §2.4.2 (test vectors). See docs/sources.md.
@@ -79,53 +79,59 @@ fn _chacha_qr(ws, a, b, c, d): i64 {
 # Returns 0.
 # ================================================================
 fn chacha20_block(key, nonce, counter, out): i64 {
-    secret var st[128];   # 16 words: constants | key | counter | nonce
+    # Per-worker bank (3.8.0): st/ws are static function-scope globals
+    # (quirk #1), so concurrent callers would race; each operates on its
+    # own `cbank()` lane. Bank 0 on the serial path.
+    var bk = cbank();
+    secret var st[1024];   # 16 words × SIGIL_CRYPTO_BANKS lanes
+    var stb = &st + bk * 128;
+    secret var ws[1024];
+    var wsb = &ws + bk * 128;
 
     # Constants — little-endian words of "expand 32-byte k".
-    store64(&st + 0,  0x61707865);
-    store64(&st + 8,  0x3320646e);
-    store64(&st + 16, 0x79622d32);
-    store64(&st + 24, 0x6b206574);
+    store64(stb + 0,  0x61707865);
+    store64(stb + 8,  0x3320646e);
+    store64(stb + 16, 0x79622d32);
+    store64(stb + 24, 0x6b206574);
 
     # Key words 4..11.
     var i = 0;
     while (i < 8) {
-        store64(&st + (4 + i) * 8, _chacha_u8to32le(key + i * 4));
+        store64(stb + (4 + i) * 8, _chacha_u8to32le(key + i * 4));
         i = i + 1;
     }
 
     # Block counter — word 12.
-    store64(&st + 12 * 8, counter & 0xffffffff);
+    store64(stb + 12 * 8, counter & 0xffffffff);
 
     # Nonce words 13..15.
     i = 0;
     while (i < 3) {
-        store64(&st + (13 + i) * 8, _chacha_u8to32le(nonce + i * 4));
+        store64(stb + (13 + i) * 8, _chacha_u8to32le(nonce + i * 4));
         i = i + 1;
     }
 
     # Working copy.
-    secret var ws[128];
-    memcpy(&ws, &st, 128);
+    memcpy(wsb, stb, 128);
 
     # 20 rounds = 10 column+diagonal double-rounds.
     var r = 0;
     while (r < 10) {
-        _chacha_qr(&ws, 0, 4, 8, 12);
-        _chacha_qr(&ws, 1, 5, 9, 13);
-        _chacha_qr(&ws, 2, 6, 10, 14);
-        _chacha_qr(&ws, 3, 7, 11, 15);
-        _chacha_qr(&ws, 0, 5, 10, 15);
-        _chacha_qr(&ws, 1, 6, 11, 12);
-        _chacha_qr(&ws, 2, 7, 8, 13);
-        _chacha_qr(&ws, 3, 4, 9, 14);
+        _chacha_qr(wsb, 0, 4, 8, 12);
+        _chacha_qr(wsb, 1, 5, 9, 13);
+        _chacha_qr(wsb, 2, 6, 10, 14);
+        _chacha_qr(wsb, 3, 7, 11, 15);
+        _chacha_qr(wsb, 0, 5, 10, 15);
+        _chacha_qr(wsb, 1, 6, 11, 12);
+        _chacha_qr(wsb, 2, 7, 8, 13);
+        _chacha_qr(wsb, 3, 4, 9, 14);
         r = r + 1;
     }
 
     # Add the original state and serialize little-endian.
     i = 0;
     while (i < 16) {
-        var v = (load64(&ws + i * 8) + load64(&st + i * 8)) & 0xffffffff;
+        var v = (load64(wsb + i * 8) + load64(stb + i * 8)) & 0xffffffff;
         _chacha_u32to8le(out + i * 4, v);
         i = i + 1;
     }
@@ -148,17 +154,19 @@ fn chacha20_block(key, nonce, counter, out): i64 {
 # reuse a (key, nonce) across messages totalling more than that.
 # ================================================================
 fn chacha20_xor(key, nonce, counter, input, in_len, out): i64 {
-    secret var ks[64];
+    var bk = cbank();
+    secret var ks[512];   # 64-byte keystream block × SIGIL_CRYPTO_BANKS lanes
+    var ksb = &ks + bk * 64;
     var done = 0;
     var ctr = counter & 0xffffffff;
     while (done < in_len) {
-        chacha20_block(key, nonce, ctr, &ks);
+        chacha20_block(key, nonce, ctr, ksb);
         var n = in_len - done;
         if (n > 64) { n = 64; }
         var j = 0;
         while (j < n) {
             store8(out + done + j,
-                   (load8(input + done + j) ^ load8(&ks + j)) & 0xFF);
+                   (load8(input + done + j) ^ load8(ksb + j)) & 0xFF);
             j = j + 1;
         }
         ctr = (ctr + 1) & 0xffffffff;

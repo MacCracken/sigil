@@ -1,0 +1,71 @@
+# win_entropy_probe.cyr — Windows entropy verification probe (3.7.15 issue
+# `2026-06-15-sigil-windows-entropy-not-via-getrandom.md`).
+#
+# Exercises sigil's entropy path AS A WINDOWS CONSUMER DOES: the
+# self-contained `dist/sigil.cyr` crypto core + the five required opt-in
+# stdlib includes (NO agnosys — that AGNOS kernel layer is excluded from the
+# Windows surface). On a Windows target, `_sigil_random_fill` →
+# `random_bytes` → `sys_getrandom` resolves to bcryptprimitives.dll!ProcessPrng
+# via the cyrius 6.2.12 0xF01A PE reroute.
+#
+# Cross-compile + run (no real Windows needed for a strong signal):
+#   cyrius build --win --no-deps programs/win_entropy_probe.cyr build/win_probe.exe
+#   wine build/win_probe.exe ; echo $?    # 0 = all checks passed via ProcessPrng
+#
+# Exit codes: 0 ok; 1 _sigil_random_fill failed; 2 entropy all-zero;
+# 3 ed25519 keygen failed; 4 pubkey all-zero; 5 two keypairs identical.
+
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/string.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fs.cyr"
+include "lib/fmt.cyr"
+include "lib/result.cyr"
+include "lib/fnptr.cyr"
+include "lib/bayan.cyr"
+include "lib/chrono.cyr"
+include "lib/tagged.cyr"
+include "lib/process.cyr"
+include "lib/slice.cyr"
+include "lib/ct.cyr"
+include "lib/keccak.cyr"
+include "lib/thread.cyr"
+include "lib/thread_local.cyr"
+include "lib/random.cyr"
+include "dist/sigil.cyr"
+
+fn _nz(p, n): i64 {
+    var acc = 0;
+    var i = 0;
+    while (i < n) { acc = acc | (load8(p + i) & 0xFF); i = i + 1; }
+    return acc;
+}
+
+fn main(): i64 {
+    alloc_init();
+
+    # 1. Raw entropy boundary.
+    var buf[64];
+    if (_sigil_random_fill(&buf, 32) != 0) { return 1; }
+    if (_nz(&buf, 32) == 0) { return 2; }
+
+    # 2. Full keygen path (uses _sigil_random_fill internally).
+    var sk1[64]; var pk1[32];
+    var sk2[64]; var pk2[32];
+    if (ed25519_generate_keypair(&sk1, &pk1) != 1) { return 3; }
+    if (ed25519_generate_keypair(&sk2, &pk2) != 1) { return 3; }
+    if (_nz(&pk1, 32) == 0) { return 4; }
+    # Two independent keypairs must differ (entropy is live, not static).
+    if (ct_eq_bytes(&pk1, &pk2, 32) == 1) { return 5; }
+
+    return 0;
+}
+
+var _ec = main();
+syscall(60, _ec);
