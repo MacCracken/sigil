@@ -1,0 +1,117 @@
+# banking_concurrent.tcyr — race-detector for the 3.8.0 ChaCha20 + X25519
+# per-worker banking (src/crypto_scratch.cyr cbank() lanes).
+#
+# The banked working arrays (chacha20 st/ws/ks, x25519 W/ub/base) are
+# Cyrius static function-scope globals (quirk #1). The banking widens each
+# to SIGIL_CRYPTO_BANKS lanes and indexes by cbank(); distinct concurrent
+# banks => disjoint lanes => no race. This test PROVES that: N worker
+# threads (banks 1..N) each recompute a deterministic x25519 + chacha20
+# result in a tight loop; if any two lanes overlapped (a banking bug) the
+# concurrent results would be corrupted and differ from the serial (bank-0)
+# reference. A serial KAT at bank 0 alone can't catch a wrong lane stride
+# (offset 0 hides it) — only this non-zero-bank concurrent run does.
+
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fmt.cyr"
+include "lib/bayan.cyr"
+include "lib/sakshi.cyr"
+include "lib/chrono.cyr"
+include "lib/ct.cyr"
+include "lib/thread.cyr"
+include "lib/thread_local.cyr"
+include "src/types.cyr"
+include "src/error.cyr"
+include "src/crypto_scratch.cyr"
+include "src/hex.cyr"
+include "src/bigint_ext.cyr"
+include "src/x25519.cyr"
+include "src/chacha20.cyr"
+
+var _bc_scalars   = 0;   # N × 32  x25519 scalars
+var _bc_keys      = 0;   # N × 32  chacha keys
+var _bc_nonce     = 0;   # 12 B    shared (read-only) nonce
+var _bc_x_results = 0;   # N × 32  x25519 results (worker-written)
+var _bc_c_results = 0;   # N × 64  chacha block results (worker-written)
+
+# One worker: set its bank, then recompute its slot's x25519 + chacha20
+# many times (widening the race window). No `var X[N]` locals here — those
+# would themselves be shared statics; only the banked primitives + distinct
+# result slots are touched.
+fn _bc_worker(arg): i64 {
+    var bank = load64(arg + 0);
+    var idx  = load64(arg + 8);
+    crypto_bank_set(bank);
+    var rep = 0;
+    while (rep < 40) {
+        x25519_base(_bc_scalars + idx * 32, _bc_x_results + idx * 32);
+        chacha20_block(_bc_keys + idx * 32, _bc_nonce, idx + 1, _bc_c_results + idx * 64);
+        rep = rep + 1;
+    }
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    crypto_tls_main_init();
+
+    var N = 4;                       # workers on banks 1..4 (SIGIL_CRYPTO_BANKS=8)
+    _bc_scalars   = alloc(N * 32);
+    _bc_keys      = alloc(N * 32);
+    _bc_nonce     = alloc(12);
+    _bc_x_results = alloc(N * 32);
+    _bc_c_results = alloc(N * 64);
+    memset(_bc_nonce, 0, 12);
+    var exp_x = alloc(N * 32);
+    var exp_c = alloc(N * 64);
+
+    # Distinct per-slot scalars/keys; serial (bank-0) reference results.
+    var i = 0;
+    while (i < N) {
+        memset(_bc_scalars + i * 32, 0, 32);
+        store8(_bc_scalars + i * 32, (i + 1) * 9 + 1);
+        store8(_bc_scalars + i * 32 + 31, 0x40);
+        memset(_bc_keys + i * 32, 0, 32);
+        store8(_bc_keys + i * 32, (i + 1) * 13 + 7);
+        x25519_base(_bc_scalars + i * 32, exp_x + i * 32);
+        chacha20_block(_bc_keys + i * 32, _bc_nonce, i + 1, exp_c + i * 64);
+        i = i + 1;
+    }
+
+    # Fan out: each worker on a distinct bank 1..N, computing its own slot.
+    var args = alloc(N * 16);
+    var ths  = alloc(N * 8);
+    i = 0;
+    while (i < N) {
+        store64(args + i * 16 + 0, i + 1);   # bank
+        store64(args + i * 16 + 8, i);       # slot index
+        store64(ths + i * 8, thread_create(&_bc_worker, args + i * 16));
+        i = i + 1;
+    }
+    i = 0;
+    while (i < N) { thread_join(load64(ths + i * 8)); i = i + 1; }
+
+    # Concurrent results must equal the serial reference, byte-for-byte.
+    test_group("ChaCha20 + X25519 banking — concurrent == serial");
+    var x_bad = 0;
+    var c_bad = 0;
+    i = 0;
+    while (i < N) {
+        if (ct_eq_bytes(_bc_x_results + i * 32, exp_x + i * 32, 32) == 0) { x_bad = x_bad + 1; }
+        if (ct_eq_bytes(_bc_c_results + i * 64, exp_c + i * 64, 64) == 0) { c_bad = c_bad + 1; }
+        i = i + 1;
+    }
+    assert_eq(x_bad, 0, "4 concurrent x25519 workers (banks 1-4) match serial");
+    assert_eq(c_bad, 0, "4 concurrent chacha20 workers (banks 1-4) match serial");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

@@ -1,6 +1,10 @@
 # sigil (and tls_native) gather entropy via `/dev/urandom` directly — non-functional on Windows even after the v6.2.12 CSPRNG
 
-> **STATUS — FIXED @3.7.15, Windows runtime-VERIFIED (2026-06-16).** sigil's
+> **ARCHIVED (3.8.0) — sigil-side RESOLVED @3.7.15 + Windows runtime-VERIFIED (2026-06-16).**
+> The sigil entropy fix is complete and proven; the only residual is downstream
+> (a `cass` real-hardware confirmation + the cyrius-owned `tls_native` re-fold),
+> tracked in `docs/development/roadmap.md` (Windows-entropy verification item).
+> sigil's
 > entropy now routes through `_sigil_random_fill` (`src/random.cyr`) → stdlib
 > `random_bytes` → `sys_getrandom`, which on Windows is
 > bcryptprimitives.dll!ProcessPrng (cyrius 6.2.12 0xF01A reroute). **Verified by

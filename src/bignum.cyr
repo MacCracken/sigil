@@ -29,9 +29,14 @@
 #
 # Correctness is the bar for this schoolbook engine; the Montgomery pass
 # shipped in 3.6.6 (`bn_mont_modexp`) and carries the live RSA verify +
-# sign paths. This bit-by-bit `bn_modexp` now has no call sites — retained
-# as the schoolbook reference (see the `bn_modexp` dead-code backlog item
-# in docs/development/roadmap.md).
+# sign paths. This bit-by-bit `bn_modexp` has no PRODUCTION call sites, but
+# is deliberately RETAINED (decided 3.8.0) as the independent, differently-
+# structured oracle that cross-checks `bn_mont_modexp` in
+# tests/tcyr/bignum.tcyr (the `mont == schoolbook` differential test + 5
+# direct modexp KATs) and the schoolbook baseline in tests/bcyr/rsa.bcyr —
+# a two-implementation cross-check for the trust-boundary modexp. It is
+# public-data / non-CT (the "do not use for secret exponents" warnings
+# below stand). Roadmap "bn_modexp dead-code" item: resolved → keep.
 
 # Max width: 64 limbs = 4096 bits (RSA-4096). Products are 2x = 128
 # limbs. The reduction's running remainder needs 1 extra limb.

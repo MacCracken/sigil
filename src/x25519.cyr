@@ -25,10 +25,14 @@
 # raise filed upstream:
 # https://github.com/MacCracken/cyrius/blob/main/docs/development/issues/2026-05-27-secret-defer-block-per-fn-cap.md
 #
-# THREAD-SAFETY: `W` is a function-scope `var` array (Cyrius static
-# global, quirk #1); each x25519 call reinitializes it up front, so
-# serial use is correct. Not on the parallel batch path; banking it is
-# a roadmap backlog item ("ChaCha20 + X25519 on the parallel batch path").
+# THREAD-SAFETY: `W` (and the public `ub`/`base` scratch) are
+# function-scope `var` arrays (Cyrius static globals, quirk #1). As of
+# 3.8.0 they are **per-worker banked** (`cbank()` lane slices, the v3.6
+# `src/crypto_scratch.cyr` mechanism): each is widened to
+# `SIGIL_CRYPTO_BANKS` lanes and a concurrent caller operates on its own
+# lane, so the ladder is race-free on a parallel path. Serial callers use
+# bank 0. (Defensive: no in-tree concurrent caller exists yet. The field
+# ops `fp_*` it calls were already banked.)
 #
 # Citation: RFC 7748 §5 (the ladder + clamp), §5.2 / §6.1 (test
 # vectors). a24 = (486662 - 2) / 4 = 121665. See docs/sources.md.
@@ -56,27 +60,30 @@ fn _x25519_cswap(swap, a, b): i64 {
 # Returns 0.
 # ================================================================
 fn x25519(scalar, u_in, out): i64 {
-    # Single zeroized scratch block; 18 field-element slots.
-    secret var W[576];
-    memset(&W, 0, 576);
-    var x_1 = &W + 0;
-    var x_2 = &W + 32;
-    var z_2 = &W + 64;
-    var x_3 = &W + 96;
-    var z_3 = &W + 128;
-    var A   = &W + 160;
-    var AA  = &W + 192;
-    var B   = &W + 224;
-    var BB  = &W + 256;
-    var E   = &W + 288;
-    var C   = &W + 320;
-    var D   = &W + 352;
-    var DA  = &W + 384;
-    var CB  = &W + 416;
-    var t0  = &W + 448;
-    var t1  = &W + 480;
-    var a24 = &W + 512;
-    var k   = &W + 544;
+    # Single zeroized scratch block; 18 field-element slots, per-worker
+    # banked (3.8.0): each call operates on its own `cbank()` lane.
+    var bk = cbank();
+    var W[4608];   # 18 field slots × SIGIL_CRYPTO_BANKS lanes (per-lane wiped below)
+    var Wb = &W + bk * 576;
+    memset(Wb, 0, 576);
+    var x_1 = Wb + 0;
+    var x_2 = Wb + 32;
+    var z_2 = Wb + 64;
+    var x_3 = Wb + 96;
+    var z_3 = Wb + 128;
+    var A   = Wb + 160;
+    var AA  = Wb + 192;
+    var B   = Wb + 224;
+    var BB  = Wb + 256;
+    var E   = Wb + 288;
+    var C   = Wb + 320;
+    var D   = Wb + 352;
+    var DA  = Wb + 384;
+    var CB  = Wb + 416;
+    var t0  = Wb + 448;
+    var t1  = Wb + 480;
+    var a24 = Wb + 512;
+    var k   = Wb + 544;
 
     # Clamp the scalar (RFC 7748 §5): clear the low 3 bits, clear
     # the top bit, set the second-highest bit.
@@ -88,10 +95,11 @@ fn x25519(scalar, u_in, out): i64 {
     # then load little-endian into limb form. (Plain `var` — public
     # peer data, and arrays that aren't `secret`/`defer` don't count
     # against the 8-block cap.)
-    var ub[32];
-    memcpy(&ub, u_in, 32);
-    store8(&ub + 31, load8(&ub + 31) & 127);
-    u256_load_le(x_1, &ub);
+    var ub[256];   # 32 B × SIGIL_CRYPTO_BANKS lanes
+    var ubb = &ub + bk * 32;
+    memcpy(ubb, u_in, 32);
+    store8(ubb + 31, load8(ubb + 31) & 127);
+    u256_load_le(x_1, ubb);
 
     # Ladder state: (x_2,z_2) = (1,0), (x_3,z_3) = (u,1).
     store64(x_2, 1);
@@ -140,6 +148,10 @@ fn x25519(scalar, u_in, out): i64 {
     fp_inv(t0, z_2);
     fp_mul(t1, x_2, t0);
     u256_store_le(out, t1);
+    # Wipe only this worker's lane (holds the clamped secret scalar k + the
+    # full ladder state). Per-lane, not a `secret var` whole-array wipe —
+    # the latter would zero all banks and clobber a concurrent lane.
+    memset(Wb, 0, 576);
     return 0;
 }
 
@@ -148,8 +160,10 @@ fn x25519(scalar, u_in, out): i64 {
 #   The Curve25519 base point has u-coordinate 9.
 # ================================================================
 fn x25519_base(scalar, out): i64 {
-    var base[32];
-    memset(&base, 0, 32);
-    store8(&base, 9);
-    return x25519(scalar, &base, out);
+    var bk = cbank();
+    var base[256];   # 32 B × SIGIL_CRYPTO_BANKS lanes
+    var baseb = &base + bk * 32;
+    memset(baseb, 0, 32);
+    store8(baseb, 9);
+    return x25519(scalar, baseb, out);
 }

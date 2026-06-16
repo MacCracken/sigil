@@ -9,15 +9,17 @@ shipped").
 The only open items. The 3.6 cyrius-native-TLS arc and most of the v3.7
 perf cycle have shipped — see "Closed cycles" below + CHANGELOG.
 
-> **Issues triage (2026-06-16).** The full `docs/development/issues/` folder was
-> triaged: **8 of 9 were completed or not-sigil's-problem and archived** to
-> `issues/archive/` (NI asm-drift @3.7.8, kavach TEE modules @3.4, tlsh/phylax
-> [not sigil's], cyrius-TLS-arc @3.6.8, HKDF-SHA384 @3.5.6, off-diagonal ECDSA
-> @3.7.5, cyrius-6120 SIGILL @3.7.8, attestation cert-arrays @3.7.13). The folder
-> yielded **no open issue-derived repairs** to schedule. The one open issue is the
-> Windows-entropy verification below. Per the close-v3.7-first decision, **no
-> 3.8.x cycle is opened yet** — finish the open v3.7 items + closeout, then open
-> 3.8.0 against a real theme.
+> **3.8.0 — opened 2026-06-16 (housekeeping bookend to 3.7.x).** The
+> `docs/development/issues/` folder is now **CLEAR** (all 12 archived): the
+> Windows-entropy issue was archived after **wine/ProcessPrng runtime
+> verification** (sigil-side done; `cass` + cyrius `tls_native` residual tracked
+> below). 3.8.0 ships the **ChaCha20 + X25519 parallel-path banking** (the one
+> real buildable Backlog item, now done + race-tested) and a **backlog-accuracy
+> sweep**: the TDX/SGX in-quote PCK walk was found already-shipped (stale note →
+> marked DONE), `bn_modexp` resolved (KEEP as the modexp test-oracle), and the
+> scatter-store comb re-scoped as MOOT/parked (it guards a public value). The
+> **3.7.x EC-squeeze perf cycle is closed** — all levers shipped, ≤ 10 ms not
+> reached (~10.9 ms floor, parked; see below).
 
 **Verification follow-up — Windows entropy (3.7.15)**
 
@@ -33,7 +35,7 @@ perf cycle have shipped — see "Closed cycles" below + CHANGELOG.
       Residual (NOT sigil source work): a confirmation run on real Windows
       (**`cass`**) vs wine, and the `tls_native` client-nonce half (cyrius-owned —
       re-fold `lib/sigil.cyr` + re-verify the native-TLS handshake). Issue
-      [`2026-06-15-sigil-windows-entropy-not-via-getrandom.md`](issues/2026-06-15-sigil-windows-entropy-not-via-getrandom.md)
+      [`2026-06-15-sigil-windows-entropy-not-via-getrandom.md`](issues/archive/2026-06-15-sigil-windows-entropy-not-via-getrandom.md)
       stays **open** until `cass` + the downstream re-fold confirm.
 
 **Tooling / process**
@@ -108,9 +110,11 @@ perf cycle have shipped — see "Closed cycles" below + CHANGELOG.
       with current approaches" or open an exotic-lever investigation.** Not closed
       unilaterally.
 
-- [ ] **Re-run the full crypto bench suite** at the cycle close —
-      before/after rows for every verify-path bench; cross-check the
-      transitive SEV-SNP / TDX deltas.
+- [x] **Re-run the full crypto bench suite — DONE (3.8.0 cycle close).** Full
+      `tests/bcyr/*.bcyr` sweep captured, no regressions: `ecdsa_p256_verify`
+      ~11.6 ms, `ecdsa_p384_verify` ~26.7 ms, `ed25519_verify` ~7.2 ms /
+      sign ~1.2 ms, sha256-NI 545 ns, aes-gcm-1kb ~790 µs, fp_mul 970 ns,
+      mldsa_ntt 11 µs. Healthy across primitives + verify paths.
 
 **Backlog — unscheduled** (open; gated as noted)
 
@@ -118,20 +122,28 @@ The following were surfaced from in-source deferral comments in the 3.7.7
 buried-deferral sweep (previously tracked only in code comments — now
 promoted here so they are visible, not buried):
 
-- [ ] **ChaCha20 + X25519 on the parallel batch path.** Both
-      (`src/chacha20.cyr`, `src/x25519.cyr`) use function-scope `var`
-      working state (quirk #1) and are correct for serial use only — they
-      are NOT banked for the parallel batch-verify path. If a consumer
-      puts either on a concurrent path, give them the 3.6 per-worker bank
-      treatment (`src/crypto_scratch.cyr`). Not needed today (only Ed25519
-      verify is batched).
+- [x] **ChaCha20 + X25519 parallel-path banking — DONE (3.8.0).** Both
+      (`src/chacha20.cyr` st/ws/ks, `src/x25519.cyr` W/ub/base) are now
+      per-worker banked via the 3.6 `cbank()` lane mechanism
+      (`src/crypto_scratch.cyr`) — concurrent callers use disjoint lanes.
+      Plain `var` + an explicit **per-lane** zeroize on exit (a `secret var`
+      whole-array wipe would clobber a concurrent lane — that exact bug was
+      caught by the new `tests/tcyr/banking_concurrent.tcyr` race-detector,
+      which now confirms 4 concurrent workers (banks 1-4) match serial,
+      5/5 runs). Defensive: still no in-tree concurrent caller, but the
+      latent race is closed and validated.
 
-- [ ] **TDX / SGX in-quote PCK X.509 chain walk.** The TEE orchestrators
-      (`src/tdx.cyr`, `src/sgx.cyr`) take a *pre-validated* PCK pubkey; the
-      X.509 walk from the in-quote PCK leaf up to the Intel SGX Root CA is
-      currently the caller's responsibility (kavach reuses its external
-      walk). Owning the walk inside sigil would make the orchestrators
-      self-contained — consider when a consumer needs it.
+- [x] **TDX / SGX in-quote PCK X.509 chain walk — DONE (already shipped 3.5,
+      hardened 3.7.3; the backlog text was stale, carried forward unchecked by
+      the 3.7.7 sweep).** `sgx_quote_verify_full` / `tdx_quote_verify_full`
+      (+ the `_into` variants) do the COMPLETE in-quote walk internally:
+      `pem_decode_certs_into` the embedded PCK chain → `x509_parse_into` →
+      `x509_verify_chain` (in-window + CA + pathLen + per-link
+      `_x509_verify_link`) → extract leaf PCK pubkey → `*_verify_with_pck`.
+      End-to-end tested incl. a wrong-root rejection (`sgx_verify_full.tcyr`).
+      The root CA stays **caller-supplied by design** (consumers own trust
+      roots; kavach anchors on its keyring) — not a gap. The narrower
+      `*_verify_with_pck` entry (pre-validated pubkey) also remains.
 
 - [x] **Scalar-inversion addition-chain — DONE (3.7.16).** Both
       `src/ecdsa_p256.cyr` inversions moved off generic square-and-multiply:
@@ -140,12 +152,15 @@ promoted here so they are visible, not buried):
       (`ecdsa_p256_verify` 12.50 → 11.37 ms). An optimal `a^(n-2)` chain could
       do marginally better than the window but was deemed too derivation-risky.
 
-- [ ] **`bn_modexp` dead-code decision.** `bn_modexp` (`src/bignum.cyr`,
-      schoolbook non-CT public-data modexp) has no call sites since 3.6.6
-      moved RSA verify+sign to `bn_mont_modexp`. Either remove it or keep
-      it explicitly as the schoolbook reference — maintainer's call at the
-      next dead-code closeout. (Its "do not use for secret exponents"
-      warnings stay valid while it exists.)
+- [x] **`bn_modexp` dead-code decision — RESOLVED: KEEP (3.8.0).** `bn_modexp`
+      (`src/bignum.cyr`) has no PRODUCTION call sites since 3.6.6, but is
+      **retained as the independent differential oracle** that cross-checks the
+      constant-time `bn_mont_modexp` (carrying live RSA) in
+      `tests/tcyr/bignum.tcyr` (mont == schoolbook + 5 modexp KATs) and the
+      schoolbook baseline in `tests/bcyr/rsa.bcyr`. Removing it would collapse a
+      two-implementation cross-check into a self-check — a real loss for a
+      trust-boundary lib. Comment reworded to "no production call sites — test
+      oracle".
 
 - [ ] **Retire the per-thread bank-indexing workaround** if cyrius gains
       a native thread-local *array* qualifier (`threadlocal var X[N]`).
@@ -156,12 +171,15 @@ promoted here so they are visible, not buried):
       each toolchain bump. *(6.0.62 added real per-thread TLS slots — not
       arrays — so this stays gated.)*
 
-- [ ] **Scatter-store for the fixed-base comb** (cache-timing).
-      Distribute the 128-byte point entries across cache lines so a
-      same-host cache-timing attacker cannot recover which nibble was
-      selected per window. Not needed for AGNOS's single-tenant
-      deployment; queue if the threat model shifts to multi-tenant.
-      Pairs with the 3.7.8 EC scalar-mult comb (now shipped, verify-only).
+- [ ] **Scatter-store for the fixed-base comb** (cache-timing) — **parked;
+      currently MOOT.** Would distribute the comb's affine entries (64 B since
+      3.7.16, not the old 128) across cache lines so a same-host attacker can't
+      recover the selected nibble. But `p256_scalarmul_base` only ever processes
+      the **public** scalar `u1 = e·s⁻¹` (verify data); the secret signing nonce
+      stays on the CT ladder `pt_scalarmul` and never touches the comb — so this
+      protects an already-public value. Becomes relevant only if a secret scalar
+      ever reaches the comb AND the deployment goes multi-tenant (neither holds
+      for AGNOS). Kept parked, not dropped.
 
 - [ ] **CLMUL-assisted GHASH** — gated on the cyrius `asm`-block
       global-symbol pseudo (filed upstream:

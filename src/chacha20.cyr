@@ -83,9 +83,9 @@ fn chacha20_block(key, nonce, counter, out): i64 {
     # (quirk #1), so concurrent callers would race; each operates on its
     # own `cbank()` lane. Bank 0 on the serial path.
     var bk = cbank();
-    secret var st[1024];   # 16 words × SIGIL_CRYPTO_BANKS lanes
+    var st[1024];   # 16 words × SIGIL_CRYPTO_BANKS lanes (per-lane zeroized below)
     var stb = &st + bk * 128;
-    secret var ws[1024];
+    var ws[1024];
     var wsb = &ws + bk * 128;
 
     # Constants — little-endian words of "expand 32-byte k".
@@ -135,6 +135,11 @@ fn chacha20_block(key, nonce, counter, out): i64 {
         _chacha_u32to8le(out + i * 4, v);
         i = i + 1;
     }
+    # Zeroize only THIS worker's lane. A `secret var` would zero the whole
+    # array (all banks) on scope exit and clobber a concurrent worker's
+    # in-flight lane — so we use plain `var` + this explicit per-lane wipe.
+    memset(stb, 0, 128);
+    memset(wsb, 0, 128);
     return 0;
 }
 
@@ -155,7 +160,7 @@ fn chacha20_block(key, nonce, counter, out): i64 {
 # ================================================================
 fn chacha20_xor(key, nonce, counter, input, in_len, out): i64 {
     var bk = cbank();
-    secret var ks[512];   # 64-byte keystream block × SIGIL_CRYPTO_BANKS lanes
+    var ks[512];   # 64-byte keystream block × SIGIL_CRYPTO_BANKS lanes
     var ksb = &ks + bk * 64;
     var done = 0;
     var ctr = counter & 0xffffffff;
@@ -172,5 +177,6 @@ fn chacha20_xor(key, nonce, counter, input, in_len, out): i64 {
         ctr = (ctr + 1) & 0xffffffff;
         done = done + 64;
     }
+    memset(ksb, 0, 64);   # wipe only this worker's keystream lane
     return 0;
 }

@@ -7,6 +7,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.8.0] — 2026-06-16
+
+**Opens the 3.8.x cycle as a housekeeping bookend to 3.7.x:** ChaCha20 + X25519
+parallel-path banking (the one buildable Backlog item), a backlog-accuracy sweep,
+the Windows-entropy issue archived after wine/ProcessPrng runtime verification,
+and the issues folder cleared. No new crypto surface; no behavior change for
+serial callers.
+
+### Added
+
+- **ChaCha20 + X25519 per-worker banking** (`src/chacha20.cyr`, `src/x25519.cyr`).
+  Their function-scope `var` working state (chacha20 `st`/`ws`/`ks`; x25519
+  `W`/`ub`/`base` — Cyrius static globals, quirk #1) is now widened to
+  `SIGIL_CRYPTO_BANKS` lanes and indexed by `cbank()` (the 3.6
+  `src/crypto_scratch.cyr` mechanism), so concurrent callers operate on disjoint
+  lanes and can't race. **Plain `var` + an explicit per-lane zeroize on exit** —
+  a `secret var` whole-array wipe would zero *all* lanes and clobber a concurrent
+  worker's in-flight lane (that exact bug was caught and fixed during development).
+  Verified by a new **`tests/tcyr/banking_concurrent.tcyr` race-detector** (4
+  concurrent workers on banks 1–4 vs serial reference, 5/5 clean runs) + the
+  existing RFC 8439 / RFC 7748 serial KATs. **Defensive**: no in-tree concurrent
+  caller exists yet (neither is on `sv_verify_batch`), but the latent race is now
+  closed. +2 assertions.
+
+### Changed
+
+- **Backlog-accuracy sweep** (decisions recorded in `docs/development/roadmap.md`):
+  - **TDX/SGX in-quote PCK X.509 chain walk — found already shipped** (3.5,
+    hardened 3.7.3): `sgx_quote_verify_full` / `tdx_quote_verify_full` do the
+    complete in-quote walk internally (`pem_decode_certs_into` → `x509_parse_into`
+    → `x509_verify_chain` → leaf PCK pubkey → `*_verify_with_pck`), end-to-end
+    tested incl. wrong-root rejection. The backlog text was stale; marked DONE.
+    (Root CA stays caller-supplied by design — consumers own trust roots.)
+  - **`bn_modexp` dead-code decision — RESOLVED: KEEP.** It has no production
+    call sites, but is retained as the independent differential oracle that
+    cross-checks the CT `bn_mont_modexp` (carrying live RSA) in `bignum.tcyr` +
+    the schoolbook baseline in `rsa.bcyr`. Comment reworded to "no production
+    call sites — test oracle".
+  - **Scatter-store comb (cache-timing) — re-scoped MOOT/parked.** The comb only
+    processes the public scalar `u1`; the secret signing nonce stays on the CT
+    ladder and never touches it. Only relevant under multi-tenant + a secret-on-comb
+    (neither holds). Note corrected (64-byte affine, not 128).
+
+### Housekeeping
+
+- **Windows-entropy issue (3.7.15) archived** after **wine/ProcessPrng runtime
+  verification**: the entropy path was cross-compiled to Windows PE
+  (`cyrius build --win`) and run under wine — `random.tcyr`, `ed25519.tcyr`, and
+  the new consumer-shape `programs/win_entropy_probe.cyr` (dist + opt-in libs) all
+  exit 0 (fresh, unique entropy + working ed25519 keygen on the Windows binary;
+  same probe green on Linux). sigil-side is done & verified; the `cass`
+  real-hardware confirmation + the cyrius-owned `tls_native` re-fold are the
+  downstream residual, roadmap-tracked. The `docs/development/issues/` folder is
+  now **clear** (all 12 archived).
+- **3.7.x EC-squeeze perf cycle closed.** Full bench re-run captured (no
+  regressions). The ≤ 10 ms P-256 target was not reached (~10.9 ms floor after all
+  four levers; parked — see roadmap).
+
 ## [3.7.17] — 2026-06-16
 
 **EC-squeeze levers 2b + 3 — closes the perf cycle: Karatsuba `u256_mul_full`
@@ -130,7 +188,7 @@ stdlib kernel CSPRNG instead of opening `/dev/urandom` directly + cyrius pin
   is preserved verbatim — `random_bytes` must return exactly `n` or the draw
   is a hard `-1` abort; **no weak fallback anywhere**, and `secret var` seed
   buffers still zeroize on every failure path. Issue:
-  `docs/development/issues/2026-06-15-sigil-windows-entropy-not-via-getrandom.md`.
+  `docs/development/issues/archive/2026-06-15-sigil-windows-entropy-not-via-getrandom.md`.
 
   > Linux verified (full `.tcyr` suite + the new `random.tcyr`). The **Windows
   > ProcessPrng path is verified separately on `cass` (real Windows)** — that
