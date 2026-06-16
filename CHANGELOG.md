@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.7.14] — 2026-06-15
+
+**cyrius pin `6.2.1` → `6.2.11` + dependency refresh (ecosystem-wide
+6.2.x maintenance-line sweep).**
+
+### Changed
+
+- **cyrius pin `6.2.1` → `6.2.11`**, tracking the 6.2.x maintenance line
+  (bug-fix / optimization patches, no API surface change). The installed
+  `cycc` was already 6.2.11; this aligns the manifest pin with the toolchain
+  and clears the drift warning. Pure toolchain refresh — no `src/*.cyr` edits.
+- **Dependencies bumped to current tags:**
+  - **agnosys `1.3.2` → `1.4.3`** — absorbs the 1.4.x line (AGNOS build
+    target, the v6.0.64 thread-safe allocator, and agnosys's own
+    `6.2.1` → `6.2.11` pin at 1.4.3). Bundle form (`dist/agnosys.cyr`)
+    consumed via `src/lib.cyr`; the dist excludes it (self-contained
+    contract unchanged).
+  - **sakshi `2.2.6` → `2.3.0`.**
+- Verified green on 6.2.11: clean `rm -rf lib build && cyrius deps` resolves
+  (35 deps locked), smoke build OK, full `.tcyr` suite **55/55**
+  (exit-code-checked), bench suite healthy (no regression vs prior run),
+  `dist/sigil.cyr` regenerated self-contained via `scripts/regen-dist.sh`
+  (v3.7.14 header), `cyrius doc --check dist/sigil.cyr` 0 undocumented
+  (75/75).
+
 ## [3.7.13] — 2026-06-12
 
 **cyrius pin `6.1.20` → `6.2.1` + attestation cert-array daimon-class fix
