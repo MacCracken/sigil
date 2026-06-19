@@ -112,22 +112,27 @@ fn syserr_message(e): i64 {
 # Error constructors — packed (fast, no alloc)
 # ================================================================
 
+# Packed Err: a failed syscall carrying its errno (no message, zero alloc).
 fn err_syscall_failed_nr(errno): i64 {
     return Err(syserr_pack(ERR_SYSCALL_FAILED, errno));
 }
 
+# Packed Err: permission denied for the given errno (zero alloc).
 fn err_permission_denied_nr(errno): i64 {
     return Err(syserr_pack(ERR_PERMISSION_DENIED, errno));
 }
 
+# Packed Err: operation would block (EAGAIN); zero alloc.
 fn err_would_block(): i64 {
     return Err(syserr_pack(ERR_WOULD_BLOCK, EAGAIN));
 }
 
+# Packed Err: invalid argument (EINVAL); zero alloc.
 fn err_invalid_argument_nr(): i64 {
     return Err(syserr_pack(ERR_INVALID_ARGUMENT, EINVAL));
 }
 
+# Packed Err: feature not supported (ENOSYS); zero alloc.
 fn err_not_supported_nr(): i64 {
     return Err(syserr_pack(ERR_NOT_SUPPORTED, ENOSYS));
 }
@@ -136,30 +141,37 @@ fn err_not_supported_nr(): i64 {
 # Error constructors — with message (heap, cold path)
 # ================================================================
 
+# Heap Err: failed syscall with errno + a descriptive message.
 fn err_syscall_failed(errno, message): i64 {
     return Err(syserr_new(ERR_SYSCALL_FAILED, errno, message));
 }
 
+# Heap Err: invalid argument with a descriptive message (EINVAL).
 fn err_invalid_argument(message): i64 {
     return Err(syserr_new(ERR_INVALID_ARGUMENT, EINVAL, message));
 }
 
+# Heap Err: permission denied for the named operation (EPERM).
 fn err_permission_denied(operation): i64 {
     return Err(syserr_new(ERR_PERMISSION_DENIED, EPERM, operation));
 }
 
+# Heap Err: required kernel module not loaded (ENODEV).
 fn err_module_not_loaded(module): i64 {
     return Err(syserr_new(ERR_MODULE_NOT_LOADED, ENODEV, module));
 }
 
+# Heap Err: feature not supported, naming the feature (ENOSYS).
 fn err_not_supported(feature): i64 {
     return Err(syserr_new(ERR_NOT_SUPPORTED, ENOSYS, feature));
 }
 
+# Heap Err: unspecified failure with a message (errno 0).
 fn err_unknown(message): i64 {
     return Err(syserr_new(SYSE_UNKNOWN, 0, message));
 }
 
+# Heap Err: I/O failure with errno + a descriptive message.
 fn err_io(errno, message): i64 {
     return Err(syserr_new(SYSE_IO, errno, message));
 }
@@ -168,6 +180,7 @@ fn err_io(errno, message): i64 {
 # Errno-based error creation — packed (zero alloc, hot path)
 # ================================================================
 
+# Map a Linux errno to the closest packed SysError constructor.
 fn err_from_errno(errno): i64 {
     if (errno == EPERM) { return err_permission_denied_nr(EPERM); }
     if (errno == EACCES) { return err_permission_denied_nr(EACCES); }
@@ -177,6 +190,7 @@ fn err_from_errno(errno): i64 {
     return err_syscall_failed_nr(errno);
 }
 
+# Convert a negative syscall return (-errno) into a packed Err.
 fn err_from_syscall_ret(ret): i64 {
     var errno = 0 - ret;
     return err_from_errno(errno);
@@ -186,6 +200,7 @@ fn err_from_syscall_ret(ret): i64 {
 # Error printing
 # ================================================================
 
+# Write a human-readable description of a SysError to stderr (fd 2).
 fn syserr_print(e): i64 {
     var kind = syserr_kind(e);
     var msg = syserr_message(e);

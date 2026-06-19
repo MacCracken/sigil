@@ -120,22 +120,27 @@ fn syserr_message(e): i64 {
 # Error constructors — packed (fast, no alloc)
 # ================================================================
 
+# Packed Err: a failed syscall carrying its errno (no message, zero alloc).
 fn err_syscall_failed_nr(errno): i64 {
     return Err(syserr_pack(ERR_SYSCALL_FAILED, errno));
 }
 
+# Packed Err: permission denied for the given errno (zero alloc).
 fn err_permission_denied_nr(errno): i64 {
     return Err(syserr_pack(ERR_PERMISSION_DENIED, errno));
 }
 
+# Packed Err: operation would block (EAGAIN); zero alloc.
 fn err_would_block(): i64 {
     return Err(syserr_pack(ERR_WOULD_BLOCK, EAGAIN));
 }
 
+# Packed Err: invalid argument (EINVAL); zero alloc.
 fn err_invalid_argument_nr(): i64 {
     return Err(syserr_pack(ERR_INVALID_ARGUMENT, EINVAL));
 }
 
+# Packed Err: feature not supported (ENOSYS); zero alloc.
 fn err_not_supported_nr(): i64 {
     return Err(syserr_pack(ERR_NOT_SUPPORTED, ENOSYS));
 }
@@ -144,30 +149,37 @@ fn err_not_supported_nr(): i64 {
 # Error constructors — with message (heap, cold path)
 # ================================================================
 
+# Heap Err: failed syscall with errno + a descriptive message.
 fn err_syscall_failed(errno, message): i64 {
     return Err(syserr_new(ERR_SYSCALL_FAILED, errno, message));
 }
 
+# Heap Err: invalid argument with a descriptive message (EINVAL).
 fn err_invalid_argument(message): i64 {
     return Err(syserr_new(ERR_INVALID_ARGUMENT, EINVAL, message));
 }
 
+# Heap Err: permission denied for the named operation (EPERM).
 fn err_permission_denied(operation): i64 {
     return Err(syserr_new(ERR_PERMISSION_DENIED, EPERM, operation));
 }
 
+# Heap Err: required kernel module not loaded (ENODEV).
 fn err_module_not_loaded(module): i64 {
     return Err(syserr_new(ERR_MODULE_NOT_LOADED, ENODEV, module));
 }
 
+# Heap Err: feature not supported, naming the feature (ENOSYS).
 fn err_not_supported(feature): i64 {
     return Err(syserr_new(ERR_NOT_SUPPORTED, ENOSYS, feature));
 }
 
+# Heap Err: unspecified failure with a message (errno 0).
 fn err_unknown(message): i64 {
     return Err(syserr_new(SYSE_UNKNOWN, 0, message));
 }
 
+# Heap Err: I/O failure with errno + a descriptive message.
 fn err_io(errno, message): i64 {
     return Err(syserr_new(SYSE_IO, errno, message));
 }
@@ -176,6 +188,7 @@ fn err_io(errno, message): i64 {
 # Errno-based error creation — packed (zero alloc, hot path)
 # ================================================================
 
+# Map a Linux errno to the closest packed SysError constructor.
 fn err_from_errno(errno): i64 {
     if (errno == EPERM) { return err_permission_denied_nr(EPERM); }
     if (errno == EACCES) { return err_permission_denied_nr(EACCES); }
@@ -185,6 +198,7 @@ fn err_from_errno(errno): i64 {
     return err_syscall_failed_nr(errno);
 }
 
+# Convert a negative syscall return (-errno) into a packed Err.
 fn err_from_syscall_ret(ret): i64 {
     var errno = 0 - ret;
     return err_from_errno(errno);
@@ -194,6 +208,7 @@ fn err_from_syscall_ret(ret): i64 {
 # Error printing
 # ================================================================
 
+# Write a human-readable description of a SysError to stderr (fd 2).
 fn syserr_print(e): i64 {
     var kind = syserr_kind(e);
     var msg = syserr_message(e);
@@ -472,6 +487,7 @@ enum CertPinResult {
 #derive(accessors)
 struct certpin_entry { host; pins_arr; pin_count; backups_arr; backup_count; expires; }
 
+# New cert-pin entry for a host, with an expiry timestamp.
 fn certpin_entry_new(host, expires): i64 {
     var e = alloc(48);
     certpin_entry_set_host(e, host);
@@ -486,12 +502,15 @@ fn certpin_entry_new(host, expires): i64 {
 # 1.0 API preservation — `pins`/`backups` getters + 3-arg
 # `set_pins`/`set_backups` setters delegate through derive accessors.
 fn certpin_entry_pins(e): i64 { return certpin_entry_pins_arr(e); }
+# Accessor: the backup-pin array of a cert-pin entry.
 fn certpin_entry_backups(e): i64 { return certpin_entry_backups_arr(e); }
+# Set the primary pin set (SPKI hashes) on a cert-pin entry.
 fn certpin_entry_set_pins(e, pins_ptr, count): i64 {
     certpin_entry_set_pins_arr(e, pins_ptr);
     certpin_entry_set_pin_count(e, count);
     return 0;
 }
+# Set the backup pin set on a cert-pin entry.
 fn certpin_entry_set_backups(e, backups_ptr, count): i64 {
     certpin_entry_set_backups_arr(e, backups_ptr);
     certpin_entry_set_backup_count(e, count);
@@ -505,6 +524,7 @@ fn certpin_entry_set_backups(e, backups_ptr, count): i64 {
 #derive(accessors)
 struct certpin_set { entries_arr; count; enforce; }
 
+# New cert-pin set; enforce=1 fails closed on a pin mismatch.
 fn certpin_set_new(enforce): i64 {
     var s = alloc(24);
     certpin_set_set_entries_arr(s, 0);
@@ -515,6 +535,7 @@ fn certpin_set_new(enforce): i64 {
 
 # 1.0 API preservation
 fn certpin_set_entries(s): i64 { return certpin_set_entries_arr(s); }
+# Populate a cert-pin set with its per-host entries.
 fn certpin_set_set_entries(s, entries_ptr, count): i64 {
     certpin_set_set_entries_arr(s, entries_ptr);
     certpin_set_set_count(s, count);
@@ -741,6 +762,7 @@ fn certpin_compute_spki_pin(cert_path): i64 {
 #derive(accessors)
 struct certpin_info { subject; issuer; serial; not_before; not_after; sha256_fp; spki_sha256; }
 
+# New empty cert-pin info record (parsed-certificate metadata).
 fn certpin_info_new(): i64 {
     var c = alloc(56);
     memset(c, 0, 56);
@@ -823,6 +845,7 @@ enum TpmConst {
 # PCR bank helpers
 # ================================================================
 
+# Render a PCR-bank constant as its tpm2-tool name (e.g. "sha256").
 fn tpm_bank_str(bank): i64 {
     if (bank == TPM_SHA1) { return "sha1"; }
     if (bank == TPM_SHA256) { return "sha256"; }
@@ -831,6 +854,7 @@ fn tpm_bank_str(bank): i64 {
     return "sha256";
 }
 
+# Hex-digest length (bytes) for a PCR bank's hash algorithm.
 fn tpm_bank_hex_len(bank): i64 {
     if (bank == TPM_SHA1) { return TPM_SHA1_HEX_LEN; }
     if (bank == TPM_SHA256) { return TPM_SHA256_HEX_LEN; }
@@ -847,6 +871,7 @@ fn tpm_bank_hex_len(bank): i64 {
 #derive(accessors)
 struct tpm_pcr_value { index; bank; value; }
 
+# New PCR-value record (index + bank + digest).
 fn tpm_pcr_value_new(index, bank, value): i64 {
     var v = alloc(24);
     tpm_pcr_value_set_index(v, index);
@@ -864,6 +889,7 @@ fn tpm_pcr_value_new(index, bank, value): i64 {
 #derive(accessors)
 struct tpm_sealed { context; pcr_sel; }
 
+# New sealed-object handle (context path + PCR selection).
 fn tpm_sealed_new(context_path, pcr_selection): i64 {
     var s = alloc(16);
     tpm_sealed_set_context(s, context_path);
@@ -875,10 +901,12 @@ fn tpm_sealed_new(context_path, pcr_selection): i64 {
 # Helper: run tpm2-tools command
 # ================================================================
 
+# Run a tpm2 tool, capturing stdout into buf. Returns Result(len).
 fn tpm_run_capture(args, buf, buflen): i64 {
     return agnosys_run_capture(args, buf, buflen, "tpm2 tool execution failed");
 }
 
+# Run a tpm2 tool, checking exit status only. Returns Result.
 fn tpm_run_checked(args): i64 {
     return agnosys_run_checked(args, "tpm2 tool command failed");
 }
@@ -890,6 +918,7 @@ fn tpm_run_checked(args): i64 {
 # Returns heap-allocated null-terminated string.
 # ================================================================
 
+# Build a tpm2 PCR-selection string for a bank + index list.
 fn tpm_pcr_selection(bank, indices): i64 {
     var bank_str = tpm_bank_str(bank);
     var blen = strlen(bank_str);
@@ -940,6 +969,7 @@ fn tpm_detect(): i64 {
 # Returns Ok(vec_of_tpm_pcr_value_ptrs) or Err.
 # ================================================================
 
+# Read the named PCRs from the given bank. Returns Result.
 fn tpm_read_pcr(bank, indices): i64 {
     var count = vec_len(indices);
     if (count == 0) {
@@ -1059,6 +1089,7 @@ fn tpm_read_pcr(bank, indices): i64 {
 # Returns Ok(0) or Err.
 # ================================================================
 
+# Extend a PCR in the given bank with a hash. Returns Result.
 fn tpm_extend_pcr(bank, index, hash): i64 {
     if (index > TPM_PCR_MAX) {
         return err_invalid_argument("PCR index out of range (0-23)");
@@ -1110,6 +1141,7 @@ fn tpm_extend_pcr(bank, index, hash): i64 {
 # Returns Ok(sealed_secret_ptr) or Err.
 # ================================================================
 
+# Seal data to the current PCR state; writes the sealed object. Returns Result.
 fn tpm_seal(bank, pcr_indices, data_ptr, data_len, output_dir): i64 {
     if (data_len == 0) {
         return err_invalid_argument("Cannot seal empty data");
@@ -1206,6 +1238,7 @@ fn tpm_seal(bank, pcr_indices, data_ptr, data_len, output_dir): i64 {
 # Returns Ok(bytes_read) or Err.
 # ================================================================
 
+# Unseal a sealed object into buf if PCRs still match. Returns Result(len).
 fn tpm_unseal(sealed, buf, buflen): i64 {
     var ctx = tpm_sealed_context(sealed);
     var pcr_sel = tpm_sealed_pcr_sel(sealed);
@@ -1240,6 +1273,7 @@ fn tpm_unseal(sealed, buf, buflen): i64 {
 # Returns Ok(bytes_written) or Err.
 # ================================================================
 
+# Draw count random bytes from the TPM RNG into buf. Returns Result.
 fn tpm_get_random(buf, count): i64 {
     if (count == 0) {
         return err_invalid_argument("Cannot request 0 random bytes");
@@ -1302,6 +1336,7 @@ fn tpm_get_random(buf, count): i64 {
 # Returns Ok(1) if all match, Ok(0) if mismatch.
 # ================================================================
 
+# Compare current PCRs against an expected measured-boot baseline. Returns Result.
 fn tpm_verify_measured_boot(expected): i64 {
     var count = vec_len(expected);
     if (count == 0) {
@@ -1410,6 +1445,7 @@ enum ImaTarget {
 # String representations
 # ================================================================
 
+# Render an IMA action code as its policy keyword string.
 fn ima_action_str(action): i64 {
     if (action == IMA_MEASURE) { return "measure"; }
     if (action == IMA_APPRAISE) { return "appraise"; }
@@ -1420,6 +1456,7 @@ fn ima_action_str(action): i64 {
     return "measure";
 }
 
+# Render an IMA target code as its policy keyword string.
 fn ima_target_str(target): i64 {
     if (target == IMA_FILE_CHECK) { return "FILE_CHECK"; }
     if (target == IMA_BPRM_CHECK) { return "BPRM_CHECK"; }
@@ -1446,6 +1483,7 @@ struct ima_rule {
     mask;
 }
 
+# New IMA policy rule pairing an action with a target.
 fn ima_rule_new(action, target): i64 {
     var r = alloc(56);
     ima_rule_set_action(r, action);
@@ -1509,6 +1547,7 @@ fn ima_rule_validate(rule): i64 {
 # Returns Ok(policy_line_ptr) or Err.
 # ================================================================
 
+# Format an IMA rule as a kernel policy-file line.
 fn ima_rule_to_policy_line(rule): i64 {
     var res = ima_rule_validate(rule);
     if (is_err_result(res) == 1) { return res; }
@@ -1598,6 +1637,7 @@ fn ima_rule_to_policy_line(rule): i64 {
 #derive(Serialize)
 struct ima_status { active; measurement_count; policy_loaded; }
 
+# New IMA status snapshot (subsystem active / measurement count / policy state).
 fn ima_status_new(active, measurement_count, policy_loaded): i64 {
     var s = alloc(24);
     ima_status_set_active(s, active);
@@ -1619,6 +1659,7 @@ struct ima_measurement {
     filename;
 }
 
+# New IMA measurement-log entry record.
 fn ima_measurement_new(pcr, template_hash, template_name, filedata_hash, filename): i64 {
     var m = alloc(40);
     ima_measurement_set_pcr(m, pcr);
@@ -1634,6 +1675,7 @@ fn ima_measurement_new(pcr, template_hash, template_name, filedata_hash, filenam
 # Returns Ok(ima_status_ptr) or Err.
 # ================================================================
 
+# Probe the running IMA subsystem and return its status. Returns Result.
 fn ima_get_status(): i64 {
     var ima_dir = "/sys/kernel/security/ima";
     var acc = sys_access(ima_dir, 0);
@@ -1685,6 +1727,7 @@ fn ima_get_status(): i64 {
 # Returns Ok(vec_of_measurement_ptrs) or Err.
 # ================================================================
 
+# Parse IMA measurement-log text into measurement records. Returns Result.
 fn ima_parse_measurements(content): i64 {
     var measurements = vec_new();
     var clen = strlen(content);
@@ -1789,6 +1832,7 @@ fn ima_parse_measurements(content): i64 {
 # Returns Ok(vec_of_measurement_ptrs) or Err.
 # ================================================================
 
+# Read + parse the kernel IMA measurement log. Returns Result.
 fn ima_read_measurements(): i64 {
     var path = "/sys/kernel/security/ima/ascii_runtime_measurements";
     var fd = sys_open(path, O_RDONLY, 0);
@@ -1837,6 +1881,7 @@ fn ima_read_measurements(): i64 {
 # Returns Ok(0) or Err.
 # ================================================================
 
+# Write IMA policy rules to the kernel policy interface. Returns Result.
 fn ima_write_policy(rules): i64 {
     var count = vec_len(rules);
     if (count == 0) {
@@ -1905,6 +1950,7 @@ fn ima_write_policy(rules): i64 {
 # Returns Ok(1) if matches, Ok(0) if not.
 # ================================================================
 
+# Verify a file's integrity against its IMA measurement. Returns Result.
 fn ima_verify_file_integrity(path): i64 {
     var acc = sys_access(path, 0);
     if (acc < 0) {

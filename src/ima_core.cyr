@@ -48,6 +48,7 @@ enum ImaTarget {
 # String representations
 # ================================================================
 
+# Render an IMA action code as its policy keyword string.
 fn ima_action_str(action): i64 {
     if (action == IMA_MEASURE) { return "measure"; }
     if (action == IMA_APPRAISE) { return "appraise"; }
@@ -58,6 +59,7 @@ fn ima_action_str(action): i64 {
     return "measure";
 }
 
+# Render an IMA target code as its policy keyword string.
 fn ima_target_str(target): i64 {
     if (target == IMA_FILE_CHECK) { return "FILE_CHECK"; }
     if (target == IMA_BPRM_CHECK) { return "BPRM_CHECK"; }
@@ -84,6 +86,7 @@ struct ima_rule {
     mask;
 }
 
+# New IMA policy rule pairing an action with a target.
 fn ima_rule_new(action, target): i64 {
     var r = alloc(56);
     ima_rule_set_action(r, action);
@@ -147,6 +150,7 @@ fn ima_rule_validate(rule): i64 {
 # Returns Ok(policy_line_ptr) or Err.
 # ================================================================
 
+# Format an IMA rule as a kernel policy-file line.
 fn ima_rule_to_policy_line(rule): i64 {
     var res = ima_rule_validate(rule);
     if (is_err_result(res) == 1) { return res; }
@@ -236,6 +240,7 @@ fn ima_rule_to_policy_line(rule): i64 {
 #derive(Serialize)
 struct ima_status { active; measurement_count; policy_loaded; }
 
+# New IMA status snapshot (subsystem active / measurement count / policy state).
 fn ima_status_new(active, measurement_count, policy_loaded): i64 {
     var s = alloc(24);
     ima_status_set_active(s, active);
@@ -257,6 +262,7 @@ struct ima_measurement {
     filename;
 }
 
+# New IMA measurement-log entry record.
 fn ima_measurement_new(pcr, template_hash, template_name, filedata_hash, filename): i64 {
     var m = alloc(40);
     ima_measurement_set_pcr(m, pcr);
@@ -272,6 +278,7 @@ fn ima_measurement_new(pcr, template_hash, template_name, filedata_hash, filenam
 # Returns Ok(ima_status_ptr) or Err.
 # ================================================================
 
+# Probe the running IMA subsystem and return its status. Returns Result.
 fn ima_get_status(): i64 {
     var ima_dir = "/sys/kernel/security/ima";
     var acc = sys_access(ima_dir, 0);
@@ -323,6 +330,7 @@ fn ima_get_status(): i64 {
 # Returns Ok(vec_of_measurement_ptrs) or Err.
 # ================================================================
 
+# Parse IMA measurement-log text into measurement records. Returns Result.
 fn ima_parse_measurements(content): i64 {
     var measurements = vec_new();
     var clen = strlen(content);
@@ -427,6 +435,7 @@ fn ima_parse_measurements(content): i64 {
 # Returns Ok(vec_of_measurement_ptrs) or Err.
 # ================================================================
 
+# Read + parse the kernel IMA measurement log. Returns Result.
 fn ima_read_measurements(): i64 {
     var path = "/sys/kernel/security/ima/ascii_runtime_measurements";
     var fd = sys_open(path, O_RDONLY, 0);
@@ -475,6 +484,7 @@ fn ima_read_measurements(): i64 {
 # Returns Ok(0) or Err.
 # ================================================================
 
+# Write IMA policy rules to the kernel policy interface. Returns Result.
 fn ima_write_policy(rules): i64 {
     var count = vec_len(rules);
     if (count == 0) {
@@ -543,6 +553,7 @@ fn ima_write_policy(rules): i64 {
 # Returns Ok(1) if matches, Ok(0) if not.
 # ================================================================
 
+# Verify a file's integrity against its IMA measurement. Returns Result.
 fn ima_verify_file_integrity(path): i64 {
     var acc = sys_access(path, 0);
     if (acc < 0) {

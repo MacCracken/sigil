@@ -33,6 +33,7 @@ enum CertPinResult {
 #derive(accessors)
 struct certpin_entry { host; pins_arr; pin_count; backups_arr; backup_count; expires; }
 
+# New cert-pin entry for a host, with an expiry timestamp.
 fn certpin_entry_new(host, expires): i64 {
     var e = alloc(48);
     certpin_entry_set_host(e, host);
@@ -47,12 +48,15 @@ fn certpin_entry_new(host, expires): i64 {
 # 1.0 API preservation — `pins`/`backups` getters + 3-arg
 # `set_pins`/`set_backups` setters delegate through derive accessors.
 fn certpin_entry_pins(e): i64 { return certpin_entry_pins_arr(e); }
+# Accessor: the backup-pin array of a cert-pin entry.
 fn certpin_entry_backups(e): i64 { return certpin_entry_backups_arr(e); }
+# Set the primary pin set (SPKI hashes) on a cert-pin entry.
 fn certpin_entry_set_pins(e, pins_ptr, count): i64 {
     certpin_entry_set_pins_arr(e, pins_ptr);
     certpin_entry_set_pin_count(e, count);
     return 0;
 }
+# Set the backup pin set on a cert-pin entry.
 fn certpin_entry_set_backups(e, backups_ptr, count): i64 {
     certpin_entry_set_backups_arr(e, backups_ptr);
     certpin_entry_set_backup_count(e, count);
@@ -66,6 +70,7 @@ fn certpin_entry_set_backups(e, backups_ptr, count): i64 {
 #derive(accessors)
 struct certpin_set { entries_arr; count; enforce; }
 
+# New cert-pin set; enforce=1 fails closed on a pin mismatch.
 fn certpin_set_new(enforce): i64 {
     var s = alloc(24);
     certpin_set_set_entries_arr(s, 0);
@@ -76,6 +81,7 @@ fn certpin_set_new(enforce): i64 {
 
 # 1.0 API preservation
 fn certpin_set_entries(s): i64 { return certpin_set_entries_arr(s); }
+# Populate a cert-pin set with its per-host entries.
 fn certpin_set_set_entries(s, entries_ptr, count): i64 {
     certpin_set_set_entries_arr(s, entries_ptr);
     certpin_set_set_count(s, count);
@@ -302,6 +308,7 @@ fn certpin_compute_spki_pin(cert_path): i64 {
 #derive(accessors)
 struct certpin_info { subject; issuer; serial; not_before; not_after; sha256_fp; spki_sha256; }
 
+# New empty cert-pin info record (parsed-certificate metadata).
 fn certpin_info_new(): i64 {
     var c = alloc(56);
     memset(c, 0, 56);

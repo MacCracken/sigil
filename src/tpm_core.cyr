@@ -44,6 +44,7 @@ enum TpmConst {
 # PCR bank helpers
 # ================================================================
 
+# Render a PCR-bank constant as its tpm2-tool name (e.g. "sha256").
 fn tpm_bank_str(bank): i64 {
     if (bank == TPM_SHA1) { return "sha1"; }
     if (bank == TPM_SHA256) { return "sha256"; }
@@ -52,6 +53,7 @@ fn tpm_bank_str(bank): i64 {
     return "sha256";
 }
 
+# Hex-digest length (bytes) for a PCR bank's hash algorithm.
 fn tpm_bank_hex_len(bank): i64 {
     if (bank == TPM_SHA1) { return TPM_SHA1_HEX_LEN; }
     if (bank == TPM_SHA256) { return TPM_SHA256_HEX_LEN; }
@@ -68,6 +70,7 @@ fn tpm_bank_hex_len(bank): i64 {
 #derive(accessors)
 struct tpm_pcr_value { index; bank; value; }
 
+# New PCR-value record (index + bank + digest).
 fn tpm_pcr_value_new(index, bank, value): i64 {
     var v = alloc(24);
     tpm_pcr_value_set_index(v, index);
@@ -85,6 +88,7 @@ fn tpm_pcr_value_new(index, bank, value): i64 {
 #derive(accessors)
 struct tpm_sealed { context; pcr_sel; }
 
+# New sealed-object handle (context path + PCR selection).
 fn tpm_sealed_new(context_path, pcr_selection): i64 {
     var s = alloc(16);
     tpm_sealed_set_context(s, context_path);
@@ -96,10 +100,12 @@ fn tpm_sealed_new(context_path, pcr_selection): i64 {
 # Helper: run tpm2-tools command
 # ================================================================
 
+# Run a tpm2 tool, capturing stdout into buf. Returns Result(len).
 fn tpm_run_capture(args, buf, buflen): i64 {
     return agnosys_run_capture(args, buf, buflen, "tpm2 tool execution failed");
 }
 
+# Run a tpm2 tool, checking exit status only. Returns Result.
 fn tpm_run_checked(args): i64 {
     return agnosys_run_checked(args, "tpm2 tool command failed");
 }
@@ -111,6 +117,7 @@ fn tpm_run_checked(args): i64 {
 # Returns heap-allocated null-terminated string.
 # ================================================================
 
+# Build a tpm2 PCR-selection string for a bank + index list.
 fn tpm_pcr_selection(bank, indices): i64 {
     var bank_str = tpm_bank_str(bank);
     var blen = strlen(bank_str);
@@ -161,6 +168,7 @@ fn tpm_detect(): i64 {
 # Returns Ok(vec_of_tpm_pcr_value_ptrs) or Err.
 # ================================================================
 
+# Read the named PCRs from the given bank. Returns Result.
 fn tpm_read_pcr(bank, indices): i64 {
     var count = vec_len(indices);
     if (count == 0) {
@@ -280,6 +288,7 @@ fn tpm_read_pcr(bank, indices): i64 {
 # Returns Ok(0) or Err.
 # ================================================================
 
+# Extend a PCR in the given bank with a hash. Returns Result.
 fn tpm_extend_pcr(bank, index, hash): i64 {
     if (index > TPM_PCR_MAX) {
         return err_invalid_argument("PCR index out of range (0-23)");
@@ -331,6 +340,7 @@ fn tpm_extend_pcr(bank, index, hash): i64 {
 # Returns Ok(sealed_secret_ptr) or Err.
 # ================================================================
 
+# Seal data to the current PCR state; writes the sealed object. Returns Result.
 fn tpm_seal(bank, pcr_indices, data_ptr, data_len, output_dir): i64 {
     if (data_len == 0) {
         return err_invalid_argument("Cannot seal empty data");
@@ -427,6 +437,7 @@ fn tpm_seal(bank, pcr_indices, data_ptr, data_len, output_dir): i64 {
 # Returns Ok(bytes_read) or Err.
 # ================================================================
 
+# Unseal a sealed object into buf if PCRs still match. Returns Result(len).
 fn tpm_unseal(sealed, buf, buflen): i64 {
     var ctx = tpm_sealed_context(sealed);
     var pcr_sel = tpm_sealed_pcr_sel(sealed);
@@ -461,6 +472,7 @@ fn tpm_unseal(sealed, buf, buflen): i64 {
 # Returns Ok(bytes_written) or Err.
 # ================================================================
 
+# Draw count random bytes from the TPM RNG into buf. Returns Result.
 fn tpm_get_random(buf, count): i64 {
     if (count == 0) {
         return err_invalid_argument("Cannot request 0 random bytes");
@@ -523,6 +535,7 @@ fn tpm_get_random(buf, count): i64 {
 # Returns Ok(1) if all match, Ok(0) if mismatch.
 # ================================================================
 
+# Compare current PCRs against an expected measured-boot baseline. Returns Result.
 fn tpm_verify_measured_boot(expected): i64 {
     var count = vec_len(expected);
     if (count == 0) {
