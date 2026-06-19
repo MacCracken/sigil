@@ -1562,11 +1562,15 @@ fn ecdsa_p256_verify_der(pk, msg, msg_len, sig_der, sig_der_len): i64 {
     if (seq_len >= 0x80) { return 0; }   # short-form length only (always under 71 bytes for P-256)
     if (2 + seq_len > sig_der_len) { return 0; }
 
-    var raw_sig = alloc(64);
-    var off = _ecdsa_der_int(sig_der, 2, sig_der_len, raw_sig);
+    # Stack-local raw (r||s) scratch — consumed by ecdsa_p256_verify before
+    # return — instead of a per-call alloc(64) on the global bump (which leaks
+    # per mTLS client-CertificateVerify on a long-running TLS server). Mirrors
+    # the secret var sig[N] sign-side pattern. See cyrius v6.2.25 arena fix.
+    secret var raw_sig[64];
+    var off = _ecdsa_der_int(sig_der, 2, sig_der_len, &raw_sig);
     if (off < 0) { return 0; }
-    off = _ecdsa_der_int(sig_der, off, sig_der_len, raw_sig + 32);
+    off = _ecdsa_der_int(sig_der, off, sig_der_len, &raw_sig + 32);
     if (off < 0) { return 0; }
 
-    return ecdsa_p256_verify(pk, msg, msg_len, raw_sig);
+    return ecdsa_p256_verify(pk, msg, msg_len, &raw_sig);
 }

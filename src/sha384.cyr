@@ -17,9 +17,13 @@
 # pattern is preserved.
 
 # SHA-384 initial hash (FIPS 180-4 §5.3.4)
-fn sha384_init(): i64 {
+# Initialize a SHA-384 hash context into a CALLER-PROVIDED 208-byte buffer (no
+# allocation) — the arena-aware sibling of sha384_init, mirroring
+# sha256_init_into. Lets a consumer (e.g. cyrius tls_native's per-connection TLS
+# arena) draw the transcript hash context from its own arena instead of the
+# freelist, so a long-running server stays flat-RSS. Returns 0.
+fn sha384_init_into(ctx): i64 {
     sha512_global_init();
-    var ctx = fl_alloc(208);
     store64(ctx +  0, 0xcbbb9d5dc1059ed8);
     store64(ctx +  8, 0x629a292a367cd507);
     store64(ctx + 16, 0x9159015a3070dd17);
@@ -31,6 +35,12 @@ fn sha384_init(): i64 {
     memset(ctx + 64, 0, 128);
     store64(ctx + 192, 0);
     store64(ctx + 200, 0);
+    return 0;
+}
+
+fn sha384_init(): i64 {
+    var ctx = fl_alloc(208);
+    sha384_init_into(ctx);
     return ctx;
 }
 

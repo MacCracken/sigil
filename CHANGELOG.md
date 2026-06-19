@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.9.1] — 2026-06-19
+
+**Arena/flat-RSS fixes for cyrius's v6.2.25 native-TLS server-ctx leak work.** Two
+small, behavior-preserving allocation fixes so a long-running TLS server that
+draws its per-connection state from a caller arena stays flat-RSS:
+
+- **`sha384_init_into(ctx)` (new).** The alloc-free sibling of `sha384_init`,
+  mirroring `sha256_init_into`: initializes a SHA-384 context into a
+  caller-provided 208-byte buffer instead of `fl_alloc(208)` (the freelist). Lets
+  a consumer draw the SHA-384 transcript-hash context from its own arena.
+  `sha384_init` now wraps it (`fl_alloc` + `sha384_init_into`) — behavior
+  byte-identical.
+- **`ecdsa_p256_verify_der`: `raw_sig` → stack.** The per-call `alloc(64)` for the
+  decoded `r‖s` scratch (hit per mTLS client-CertificateVerify) becomes a
+  `secret var raw_sig[64]` stack local — consumed by `ecdsa_p256_verify` before
+  return, matching the `secret var sig[N]` sign-side pattern. No global-bump
+  allocation, no signature change. (No `ecdsa_p384_verify_der` exists; P-384
+  verify takes a raw signature, so no sibling site.)
+
+Both are additive / internal — the public surface is unchanged. All tests green.
+
 ## [3.9.0] — 2026-06-19
 
 **Promotes the trust API to first-class in `dist/sigil.cyr`** (decomposition
