@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.9.0] — 2026-06-19
+
+**Promotes the trust API to first-class in `dist/sigil.cyr`** (decomposition
+follow-up P2). 3.8.1 internalized the trust primitives and dropped the agnosys
+dep, but the trust modules stayed **out** of the dist bundle — so bundle
+consumers (anyone pulling `dist/sigil.cyr`) got only the crypto core, not TPM /
+IMA / SecureBoot / cert-pin / dm-verity / LUKS. This cut bundles them.
+
+### Added
+
+- **The full trust engine is now in `dist/sigil.cyr`** — **105 trust functions**
+  (`tpm_seal` / `tpm_unseal` / `tpm_detect` / `tpm_verify_measured_boot`, IMA
+  measurement, SecureBoot state, cert-pinning, `dmverity_verify`, `luks_format`,
+  …). Bundle consumers get the same trust surface as sibling-checkout
+  (`src/lib.cyr`) consumers. 13 modules added to the `[lib]` list and the
+  `scripts/regen-dist.sh` `MODULES` list, both in `src/lib.cyr` src-include order:
+  the 3 support modules (`sys_error` / `sys_util` / `sysinfo`) + 6 cores
+  (`certpin_core` / `tpm_core` / `ima_core` / `secureboot_core` / `dmverity` /
+  `luks`) **before** `types`, and the 4 wrappers (`tpm` / `ima` / `secureboot` /
+  `certpin`) **after** `audit`, before `verify`.
+
+### Notes
+
+- **Verified:** no duplicate-fn definitions in the bundle; `dist/sigil.cyr`
+  compiles clean and `tpm_detect()` resolves from it; self-containment intact
+  (no un-inlined `src/` includes, no external agnosys reference); full suite
+  green (**1475 passed, 0 failed**).
+- **Unblocks the downstream tpm rewire.** libro (`tpm_seal`/`tpm_unseal`/
+  `tpm_detect`) and kybernet (the `agnosys-trust` profile) can now re-source the
+  TPM primitives from sigil's dist instead of agnosys — the blocker their
+  roadmaps named (sigil P2) is cleared. The rewire itself is triggered by the
+  `agnosys → agnodrm` rename.
+- The interim `src/sysinfo.cyr` (uname) stays — its retirement is still gated on
+  cyrius adopting the sysinfo value-add (filed
+  `cyrius/docs/development/issues/2026-06-19-stdlib-sysinfo-uname-process-identity-cross-target.md`).
+
 ## [3.8.1] — 2026-06-18
 
 **Internalizes the trust primitives — sigil drops its agnosys dependency.** Part

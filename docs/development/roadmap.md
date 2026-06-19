@@ -38,14 +38,19 @@ perf cycle have shipped — see "Closed cycles" below + CHANGELOG.
 
 **Decomposition follow-up (post-3.8.1)**
 
-- [ ] **(P2) Promote the trust API to first-class in `dist/sigil.cyr`.** 3.8.1
-      internalized the trust primitives (`certpin`/`tpm`/`ima`/`secureboot` `*_core`
+- [x] **(P2) Promote the trust API to first-class in `dist/sigil.cyr`.** ✅ **DONE (3.9.0).**
+      3.8.1 internalized the trust primitives (`certpin`/`tpm`/`ima`/`secureboot` `*_core`
       + `dmverity`/`luks` + `sys_error`/`sys_util`/`sysinfo`) and dropped
-      `[deps.agnosys]`, so the blocker that kept the `sigil_cert_pin_*` / tpm / ima
-      / secureboot wrappers **out** of the `[lib]` dist bundle (they pulled the
-      agnosys dep → 374 duplicate-fn warnings) is gone. Add those modules to the
-      `[lib]` modules list so **bundle** consumers get the trust surface, not just
-      standalone builds. Verify no duplicate-fn regression in `dist/sigil.cyr`.
+      `[deps.agnosys]`, clearing the blocker that kept the wrappers out of the dist
+      bundle. 3.9.0 adds all 13 modules (3 support + 6 cores + 4 wrappers) to the
+      `[lib]` list and the `scripts/regen-dist.sh` `MODULES` list (both in
+      `src/lib.cyr` src-include order: support+cores before `types`, wrappers after
+      `audit` before `verify`). Result: **105 trust fns** now in `dist/sigil.cyr`
+      (`tpm_seal`/`tpm_unseal`/`tpm_detect`/`tpm_verify_measured_boot`, IMA,
+      SecureBoot, cert-pin, `dmverity_verify`, `luks_format`). Verified: **no
+      duplicate-fn definitions**, bundle compiles clean (`tpm_detect` resolves from
+      the dist), self-containment intact, full suite green (1475/0). **Unblocks the
+      downstream tpm rewire** (libro/kybernet) — see the decomposition plan.
 - [ ] **Retire the interim `src/sysinfo.cyr` (uname)** when the sysinfo value-add
       lands in cyrius's syscall layer (decomposition decision 1) — switch
       `secureboot_core` to cyrius's portable uname. Part of the `agnosys → agnodrm`

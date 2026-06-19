@@ -13,11 +13,12 @@
 #     callers that use `src/lib.cyr` directly), running this script
 #     isn't required — they'll see the updated source automatically.
 #
-# Dist contract: the bundle MUST be self-contained. The four
-# agnosys-wrapping modules are deliberately excluded from the
-# `[lib].modules` list (per cyrius.cyml header comment) — consumers
-# that need them include via `src/lib.cyr` against a sibling
-# agnosys checkout.
+# Dist contract: the bundle MUST be self-contained. As of 3.8.1 the
+# trust stack is internalized and as of 3.9.0 fully bundled (P2 — trust
+# API first-class in dist): the support modules (sys_error/sys_util/
+# sysinfo) + cores (*_core, dmverity, luks) + wrappers (tpm/ima/
+# secureboot/certpin) are all in the list below. No external agnosys
+# dep remains. (Per cyrius.cyml header comment.)
 
 set -e
 cd "$(dirname "$0")/.."
@@ -26,6 +27,15 @@ cd "$(dirname "$0")/.."
 # Order matches src/lib.cyr's include order so dependent modules
 # follow their dependencies.
 MODULES="
+src/sys_error.cyr
+src/sys_util.cyr
+src/sysinfo.cyr
+src/certpin_core.cyr
+src/tpm_core.cyr
+src/ima_core.cyr
+src/secureboot_core.cyr
+src/dmverity.cyr
+src/luks.cyr
 src/types.cyr
 src/error.cyr
 src/random.cyr
@@ -72,6 +82,10 @@ src/trust.cyr
 src/integrity.cyr
 src/policy.cyr
 src/audit.cyr
+src/tpm.cyr
+src/ima.cyr
+src/secureboot.cyr
+src/certpin.cyr
 src/verify.cyr
 "
 

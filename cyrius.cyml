@@ -33,17 +33,20 @@ defines = ["SIGIL_SMOKE"]
 # each module may reference symbols defined earlier.
 #
 # The bundle must be self-contained (Cyrius 5.2.1's distlib
-# compile-checks the result). That means the four agnosys-wrapping
-# modules are DELIBERATELY EXCLUDED from the dist:
-#
-#   src/tpm.cyr, src/ima.cyr, src/secureboot.cyr, src/certpin.cyr
-#
-# Those four reference agnosys enums (`TPM_SHA256`, `SB_ENABLED`,
-# `CERTPIN_VALID`, …) and agnosys functions that are NOT bundled
-# here. Consumers who want the AGNOS kernel-interface layer should
-# include via `src/lib.cyr` against a sibling checkout, which pulls
-# agnosys as a proper dep. `dist/sigil.cyr` is the self-contained
-# crypto + trust engine core.
+# compile-checks the result). As of 3.8.1 the trust stack is fully
+# INTERNALIZED (the agnosys → agnodrm decomposition) and is now fully
+# BUNDLED (P2 — trust API first-class in dist):
+#   - support: src/sys_error.cyr / src/sys_util.cyr / src/sysinfo.cyr
+#     define the SYSE_* errors + the internalized `agnosys_*` helpers
+#     (json-emit / uname / run_capture / hex-char) the cores call;
+#   - cores:   src/{certpin,tpm,ima,secureboot}_core.cyr +
+#     src/dmverity.cyr + src/luks.cyr build on the support layer;
+#   - wrappers: src/{tpm,ima,secureboot,certpin}.cyr sit on the cores.
+# All are bundled below, so `dist/sigil.cyr` now exposes the FULL
+# crypto + trust engine (TPM seal/unseal, IMA, SecureBoot, cert-pin,
+# dm-verity, LUKS), not just the crypto core — no external agnosys dep
+# remains. Order mirrors src/lib.cyr's src-include order: support +
+# cores BEFORE types; wrappers AFTER audit, before verify.
 #
 # IMPORTANT: keep `modules` under `[lib]`, NOT `[build]`. 5.7.x
 # treats `[build].modules` as an auto-prepend list and inlines
@@ -53,6 +56,18 @@ defines = ["SIGIL_SMOKE"]
 # learned at 1.0.1 ("76% binary size reduction").
 [lib]
 modules = [
+    # Internalized trust support + cores (3.8.1 fold; bundled at 3.9.0 — P2).
+    # Must precede types/crypto: the cores call the agnosys_* helpers these
+    # support modules define. Mirrors src/lib.cyr lines 52-60.
+    "src/sys_error.cyr",
+    "src/sys_util.cyr",
+    "src/sysinfo.cyr",
+    "src/certpin_core.cyr",
+    "src/tpm_core.cyr",
+    "src/ima_core.cyr",
+    "src/secureboot_core.cyr",
+    "src/dmverity.cyr",
+    "src/luks.cyr",
     "src/types.cyr",
     "src/error.cyr",
     "src/random.cyr",
@@ -99,6 +114,12 @@ modules = [
     "src/integrity.cyr",
     "src/policy.cyr",
     "src/audit.cyr",
+    # Trust wrappers over the cores (bundled at 3.9.0 — P2). Mirrors
+    # src/lib.cyr lines 149-152: after audit, before verify.
+    "src/tpm.cyr",
+    "src/ima.cyr",
+    "src/secureboot.cyr",
+    "src/certpin.cyr",
     "src/verify.cyr",
 ]
 
