@@ -116,11 +116,8 @@ git = "https://github.com/MacCracken/sakshi.git"
 tag = "2.3.0"
 modules = ["dist/sakshi.cyr"]
 
-# Agnosys provides the AGNOS kernel interfaces sigil needs for trust
-# enforcement: TPM seal/unseal, IMA measurements, Secure Boot state.
-# Bundle form (dist/agnosys.cyr) has all stdlib includes stripped, so
-# the consumer (sigil) is responsible for the stdlib surface above.
-[deps.agnosys]
-git = "https://github.com/MacCracken/agnosys.git"
-tag = "1.4.3"
-modules = ["dist/agnosys.cyr"]
+# (agnosys dep dropped — sigil internalized the trust primitives it needs
+# (certpin/tpm/ima/secureboot/dmverity/luks + their sys_error/sys_util support)
+# as src/*_core.cyr + sys_error.cyr/sys_util.cyr. Part of the agnosys→agnodrm
+# decomposition; killed the whole-bundle pull-in + the ERR_IO duplicate-symbol
+# conflict. See agnosys/docs/development/2026-06-18-agnosys-to-agnodrm-decomposition-plan.md.)

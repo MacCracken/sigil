@@ -45,8 +45,19 @@ include "lib/thread.cyr"
 # verify path drop `_sigil_batch_mutex` (sigil 3.6).
 include "lib/thread_local.cyr"
 
-# AGNOS kernel interfaces (agnosys 0.98.0, bundled)
-include "lib/agnosys.cyr"
+# Internalized agnosys trust primitives + their error/util support (the
+# agnosys → agnodrm decomposition: sigil owns the full trust stack; the whole-
+# agnosys dep bundle is dropped). Order: error/util before the *_core primitives,
+# before the wrappers (tpm/ima/secureboot/certpin) further down.
+include "src/sys_error.cyr"
+include "src/sys_util.cyr"
+include "src/sysinfo.cyr"
+include "src/certpin_core.cyr"
+include "src/tpm_core.cyr"
+include "src/ima_core.cyr"
+include "src/secureboot_core.cyr"
+include "src/dmverity.cyr"
+include "src/luks.cyr"
 
 # Sigil modules (dependency order)
 include "src/types.cyr"

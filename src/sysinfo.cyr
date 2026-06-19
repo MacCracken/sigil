@@ -1,0 +1,45 @@
+# sysinfo.cyr — minimal uname surface for secureboot_core's kernel-version read.
+#
+# INTERIM: brought in with the agnosys→agnodrm decomposition so sigil is
+# self-contained after dropping the agnosys dep. This is the sysinfo value-add
+# (uname/getpid/sysinfo) slated to land in cyrius's syscall layer (decomposition
+# decision 1) — when it does, this file deletes and secureboot_core uses cyrius's
+# portable uname. Targets x86_64 Linux + agnos (sigil's targets); aarch64 is out
+# of scope here. Requires sys_error.cyr (err_from_syscall_ret / Ok).
+
+# AGNOS uname#34: 64-byte struct, four 16-byte NUL-padded fields. Linux utsname:
+# six 65-byte fields (390 B).
+#ifdef CYRIUS_TARGET_AGNOS
+enum UtsOffset {
+    UTS_SYSNAME = 0;
+    UTS_NODENAME = 16;
+    UTS_RELEASE = 32;
+    UTS_MACHINE = 48;
+}
+enum UtsConst { UTS_SIZE = 64; }
+#endif
+#ifndef CYRIUS_TARGET_AGNOS
+enum UtsOffset {
+    UTS_SYSNAME = 0;
+    UTS_NODENAME = 65;
+    UTS_RELEASE = 130;
+    UTS_VERSION = 195;
+    UTS_MACHINE = 260;
+}
+enum UtsConst { UTS_SIZE = 390; }
+#endif
+
+# Query uname into a caller buffer (>= UTS_SIZE bytes). Returns Result Ok(out)/Err.
+fn agnosys_uname(out): i64 {
+#ifdef CYRIUS_TARGET_AGNOS
+    var ret = syscall(34, out, 64);          # agnos sovereign uname#34 (buf, len)
+#endif
+#ifndef CYRIUS_TARGET_AGNOS
+    var ret = syscall(63, out);              # x86_64 Linux SYS_UNAME
+#endif
+    if (ret < 0) { return err_from_syscall_ret(ret); }
+    return Ok(out);
+}
+
+# Pointer to the release field within a uts buffer.
+fn uname_release(uts): i64 { return uts + UTS_RELEASE; }
