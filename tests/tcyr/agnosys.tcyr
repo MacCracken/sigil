@@ -1,11 +1,17 @@
-# agnosys.tcyr — sanity tests for the 2.5.0 agnosys-backed wrappers
-# (src/tpm.cyr, src/ima.cyr, src/secureboot.cyr).
+# agnosys.tcyr — sanity tests for the trust wrappers
+# (src/tpm.cyr, src/ima.cyr, src/secureboot.cyr, src/certpin.cyr).
+#
+# As of 3.8.1 (the agnosys → agnodrm decomposition) sigil INTERNALIZED
+# the trust stack: the wrappers now build on src/{certpin,tpm,ima,
+# secureboot}_core.cyr + src/sys_error/sys_util/sysinfo.cyr instead of
+# the old `lib/agnosys.cyr` dep. This test was updated to include those
+# internalized modules directly (was: include "lib/agnosys.cyr", which
+# no longer resolves — sigil dropped [deps.agnosys]).
 #
 # Runs on hosts without a real TPM / IMA / EFI — so every assertion
 # targets the "unavailable" path. A host WITH these facilities will
 # still satisfy every assertion (values are bounded, not pinned) but
-# will additionally exercise the agnosys shell-out paths as a side
-# effect.
+# will additionally exercise the shell-out paths as a side effect.
 
 include "lib/assert.cyr"
 include "lib/alloc.cyr"
@@ -23,7 +29,7 @@ include "lib/sakshi.cyr"
 include "lib/chrono.cyr"
 include "lib/tagged.cyr"
 include "lib/process.cyr"
-include "lib/agnosys.cyr"
+include "lib/slice.cyr"
 
 include "lib/thread_local.cyr"
 include "src/crypto_scratch.cyr"
@@ -38,6 +44,17 @@ include "src/hmac.cyr"
 include "src/sha512.cyr"
 include "src/bigint_ext.cyr"
 include "src/ed25519.cyr"
+# Internalized trust support + cores (3.8.1 agnosys→agnodrm fold;
+# replaced the old lib/agnosys.cyr dep). Order mirrors src/lib.cyr:
+# support (sys_error/util/sysinfo) before the cores, cores before the
+# wrappers below.
+include "src/sys_error.cyr"
+include "src/sys_util.cyr"
+include "src/sysinfo.cyr"
+include "src/certpin_core.cyr"
+include "src/tpm_core.cyr"
+include "src/ima_core.cyr"
+include "src/secureboot_core.cyr"
 include "src/tpm.cyr"
 include "src/ima.cyr"
 include "src/secureboot.cyr"

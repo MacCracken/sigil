@@ -3,7 +3,10 @@
 set -e
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-CC="${CC:-cc3}"
+# The self-hosting compiler is `cycc` (was `cc5` → renamed at cyrius
+# v6.0.0; the older `cc3`/`cc5` names no longer exist — the v6.0.x
+# compat symlinks were dropped at v6.1.0). Override with CC=... if needed.
+CC="${CC:-cycc}"
 
 pass=0
 fail=0

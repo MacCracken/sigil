@@ -37,6 +37,7 @@ fn probe(marker): i64 {
 
 fn main() {
     alloc_init();
+    test_group("var X[N] function-scope persistence");
 
     # First call: buf might be 0-init or garbage. Write 0xAA.
     var b1 = probe(0xAA);
@@ -55,12 +56,23 @@ fn main() {
     syscall(1, 1, "Third call observed:  ", 22);
     fmt_int(b3); syscall(1, 1, "\n", 1);
 
+    # var X[N] inside a function is a function-scope static in cyrius:
+    # buf retains the prior call's bytes, so b2 sees 0xAA and b3 sees
+    # 0xBB. This is the invariant the 3.3 "locals" refactor relies on.
+    var is_static = 0;
     if (b2 == 0xAA) {
-        if (b3 == 0xBB) {
-            syscall(1, 1, "VERDICT: var X[N] inside a function is STATIC (persists across calls)\n", 70);
-            return 0;
-        }
+        if (b3 == 0xBB) { is_static = 1; }
     }
-    syscall(1, 1, "VERDICT: var X[N] inside a function appears to be per-call\n", 60);
-    return 1;
+    if (is_static == 1) {
+        syscall(1, 1, "VERDICT: var X[N] inside a function is STATIC (persists across calls)\n", 70);
+    } else {
+        syscall(1, 1, "VERDICT: var X[N] inside a function appears to be per-call\n", 60);
+    }
+    # Emit the suite's standard pass/fail summary. Previously this probe
+    # printed only the VERDICT + returned an exit code, which
+    # scripts/check.sh's "N passed, M failed" grep can't classify — so a
+    # passing probe showed as a false FAIL. The assertion matches the
+    # old return-0 (STATIC) success condition exactly: no semantic change.
+    assert_eq(is_static, 1, "var X[N] inside a function persists across calls (static)");
+    return assert_summary();
 }
