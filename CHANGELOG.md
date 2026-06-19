@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.8.1] — 2026-06-18
+
+**Internalizes the trust primitives — sigil drops its agnosys dependency.** Part
+of the `agnosys → agnodrm` ecosystem decomposition (agnosys narrows to the device
+model; its trust/firmware subsystems fold to their proper homes). sigil owned the
+*policy* surface (thin `sigil_*` wrappers) over agnosys's *primitives*; it now owns
+both, self-contained. No public crypto/trust API change for callers.
+
+### Changed
+
+- **Internalized the trust primitives** previously pulled from `agnosys`:
+`certpin`/`tpm`/`ima`/`secureboot` (as `src/*_core.cyr`) plus `dmverity`/`luks`,
+and their support — `src/sys_error.cyr` (Result/error), `src/sys_util.cyr`,
+`src/sysinfo.cyr` (interim uname surface). `src/lib.cyr` now includes these
+directly instead of the agnosys bundle.
+- **Dropped `[deps.agnosys]`.** sigil was pulling the *entire* agnosys
+distribution (Landlock/journald/LUKS/DRM and all) just to reach four trust
+primitives. Removing it shrinks the build surface and the resolved dep graph.
+
+### Fixed
+
+- **`ERR_IO` / `ERR_UNKNOWN` duplicate-symbol conflicts.** The agnosys bundle's
+system-error taxonomy collided with sigil's crypto-domain `SigilError` (`ERR_IO`
+was redefined with a conflicting value at every build). The internalized
+system-error constants are namespaced (`SYSE_IO`, `SYSE_UNKNOWN`); the helper
+functions (`err_io()` etc.) are unchanged.
+
+### Notes
+
+- `src/sysinfo.cyr` (uname) is an **interim** home; it relocates to cyrius's
+syscall layer when the sysinfo value-add lands there (decomposition decision 1).
+- Verified: `cyrius build programs/smoke.cyr` clean (no duplicate/undefined
+warnings) + smoke green.
+
 ## [3.8.0] — 2026-06-16
 
 **Opens the 3.8.x cycle as a housekeeping bookend to 3.7.x:** ChaCha20 + X25519
