@@ -36,6 +36,21 @@ perf cycle have shipped — see "Closed cycles" below + CHANGELOG.
       re-verify the native-TLS handshake). Archived issue:
       [`…windows-entropy…`](issues/archive/2026-06-15-sigil-windows-entropy-not-via-getrandom.md).
 
+**Decomposition follow-up (post-3.8.1)**
+
+- [ ] **(P2) Promote the trust API to first-class in `dist/sigil.cyr`.** 3.8.1
+      internalized the trust primitives (`certpin`/`tpm`/`ima`/`secureboot` `*_core`
+      + `dmverity`/`luks` + `sys_error`/`sys_util`/`sysinfo`) and dropped
+      `[deps.agnosys]`, so the blocker that kept the `sigil_cert_pin_*` / tpm / ima
+      / secureboot wrappers **out** of the `[lib]` dist bundle (they pulled the
+      agnosys dep → 374 duplicate-fn warnings) is gone. Add those modules to the
+      `[lib]` modules list so **bundle** consumers get the trust surface, not just
+      standalone builds. Verify no duplicate-fn regression in `dist/sigil.cyr`.
+- [ ] **Retire the interim `src/sysinfo.cyr` (uname)** when the sysinfo value-add
+      lands in cyrius's syscall layer (decomposition decision 1) — switch
+      `secureboot_core` to cyrius's portable uname. Part of the `agnosys → agnodrm`
+      decomposition (plan: `agnosys/docs/development/2026-06-18-agnosys-to-agnodrm-decomposition-plan.md`).
+
 **Backlog — gated / parked** (open, but not actionable until the gate lifts)
 
 - [ ] **EC scalar-mult sub-10 ms via an exotic lever** — *possible future,
