@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.9.2] — 2026-06-20
+
+**PE (Windows) cross-compile fix — route the last raw-getrandom sites through the
+portable entropy boundary.** `src/luks.cyr` filled keyfile/key bytes via raw
+`syscall(SYS_GETRANDOM, …)` (Linux-only); the constant is undefined on the PE
+target, so **any PE consumer of sigil failed to compile** (surfaced by cyrius's
+`cyrsign` Ed25519 release signer, the first Windows consumer of sigil's crypto).
+Both sites now call `_sigil_random_fill` — sigil's existing single CSPRNG boundary
+over the stdlib `random_bytes` (per-target getrandom / getentropy / **ProcessPrng**),
+which already backed ed25519/mldsa/trust. Behavior-preserving on Linux/macOS;
+unblocks Windows. `dist/sigil.cyr` regenerated.
+
 ## [3.9.1] — 2026-06-19
 
 **Arena/flat-RSS fixes for cyrius's v6.2.25 native-TLS server-ctx leak work.** Two
