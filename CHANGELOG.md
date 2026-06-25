@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.9.3] — 2026-06-25
+
+**Fix `certpin_compute_spki_pin` — it called an obsolete `run_capture` API and
+never worked.** `certpin_core.cyr` built an `argv` array and called
+`run_capture(cmd, argv)`, but the current stdlib contract is
+`run_capture(cmd, arg1, arg2, buf, buflen): Result` — it execs `cmd arg1 arg2`,
+writes stdout into `buf` (raw, not NUL-terminated), and returns
+`Ok(bytes_read)`. The old call mis-bound the args (only 2 of 5) and treated the
+`Ok(bytes_read)` Result as an output pointer, so the openssl-pipeline SPKI pin
+computation produced garbage / empty output against any current toolchain. Now
+calls `run_capture("sh", "-c", <pipeline>, outbuf, outcap)`, reads the captured
+bytes from `outbuf` using the returned count, NUL-terminates, strips the
+trailing newline, and returns `Ok(outbuf)`. Surfaced by the cyrius v6.2.41
+call-site arity check (`warning: 'run_capture' expects 5 arguments, got 2`);
+tracked as cyrius issue `2026-06-24-sigil-certpin-run-capture-signature-mismatch`.
+
+### Fixed
+- `certpin_compute_spki_pin`: obsolete 2-arg `run_capture(cmd, argv)` call →
+  current 5-arg positional `run_capture(cmd, arg1, arg2, buf, buflen)` with a
+  dedicated output buffer (was: silently broken cert-pin-via-openssl).
+
 ## [3.9.2] — 2026-06-20
 
 **PE (Windows) cross-compile fix — route the last raw-getrandom sites through the
