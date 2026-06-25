@@ -85,7 +85,7 @@ fn main() {
 
     # Invalid entry (no key_id or hash)
     var bad = revocation_entry_new(0, 0, "bad", "admin");
-    assert_eq(rl_add(rl, bad), ERR_INVALID_INPUT, "reject invalid");
+    assert_eq(rl_add(rl, bad), SIGIL_ERR_INVALID_INPUT, "reject invalid");
 
     return assert_summary();
 }
