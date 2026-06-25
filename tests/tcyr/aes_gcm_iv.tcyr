@@ -49,12 +49,12 @@ fn main() {
         "5a8def2f0c9e53f1f75d7853659e2a20eeb2b22aafde6419a058ab4f6f746bf40fc0c3b780f244452da3ebf1c5d82cdea2418997200ef82e44ae7e3f",
         "ciphertext matches OpenSSL/TC18");
     assert_streq(hex_encode(tag, 16), "a44a8266ee1c8eb0c8b5d4cf5ae9f19a", "tag matches OpenSSL/TC18");
-    assert_eq(aes_gcm_decrypt_iv(key256, iv60, 60, aad, 20, ct, 60, tag, ptout), ERR_NONE, "decrypt_iv ok");
+    assert_eq(aes_gcm_decrypt_iv(key256, iv60, 60, aad, 20, ct, 60, tag, ptout), SIGIL_ERR_NONE, "decrypt_iv ok");
     assert_streq(hex_encode(ptout, 60), hex_encode(pt60, 60), "decrypt recovers plaintext");
 
     # Tamper the tag → reject.
     store8(tag, (load8(tag) ^ 0x01) & 0xFF);
-    assert_eq(aes_gcm_decrypt_iv(key256, iv60, 60, aad, 20, ct, 60, tag, ptout), ERR_INTEGRITY_MISMATCH,
+    assert_eq(aes_gcm_decrypt_iv(key256, iv60, 60, aad, 20, ct, 60, tag, ptout), SIGIL_ERR_INTEGRITY_MISMATCH,
         "tampered tag rejected");
     store8(tag, (load8(tag) ^ 0x01) & 0xFF);   # restore
 
@@ -65,7 +65,7 @@ fn main() {
         "8ce24998625615b603a033aca13fb894be9112a5c3a211a8ba262a3cca7e2ca701e4a9a4fba43c90ccdcb281d48c7c6fd62875d2aca417034c34aee5",
         "ciphertext matches OpenSSL/TC6");
     assert_streq(hex_encode(tag, 16), "619cc5aefffe0bfa462af43c1699d050", "tag matches OpenSSL/TC6");
-    assert_eq(aes_128_gcm_decrypt_iv(key128, iv60, 60, aad, 20, ct, 60, tag, ptout), ERR_NONE, "decrypt_iv ok");
+    assert_eq(aes_128_gcm_decrypt_iv(key128, iv60, 60, aad, 20, ct, 60, tag, ptout), SIGIL_ERR_NONE, "decrypt_iv ok");
     assert_streq(hex_encode(ptout, 60), hex_encode(pt60, 60), "decrypt recovers plaintext");
 
     # ============================================================
@@ -75,7 +75,7 @@ fn main() {
     assert_eq(aes_gcm_encrypt_iv(key256, iv8, 8, 0, 0, pt16, 16, ct, tag), 0, "encrypt_iv ok");
     assert_streq(hex_encode(ct, 16), "c3762df1ca787d32ae47c13bf19844cb", "8-byte-IV ciphertext matches OpenSSL");
     assert_streq(hex_encode(tag, 16), "fdb3d60032bf73fb62385867c3ab953f", "8-byte-IV tag matches OpenSSL");
-    assert_eq(aes_gcm_decrypt_iv(key256, iv8, 8, 0, 0, ct, 16, tag, ptout), ERR_NONE, "8-byte-IV decrypt ok");
+    assert_eq(aes_gcm_decrypt_iv(key256, iv8, 8, 0, 0, ct, 16, tag, ptout), SIGIL_ERR_NONE, "8-byte-IV decrypt ok");
     assert_streq(hex_encode(ptout, 16), hex_encode(pt16, 16), "8-byte-IV plaintext recovered");
 
     # ============================================================
@@ -85,7 +85,7 @@ fn main() {
     assert_eq(aes_gcm_encrypt_iv(key256, iv1, 1, 0, 0, pt16b, 16, ct, tag), 0, "encrypt_iv ok");
     assert_streq(hex_encode(ct, 16), "dc472360766f6a9aeb05a1e3fd2b2b88", "1-byte-IV ciphertext matches OpenSSL");
     assert_streq(hex_encode(tag, 16), "b0f8d097b5c8baf4e6c30d8d05096023", "1-byte-IV tag matches OpenSSL");
-    assert_eq(aes_gcm_decrypt_iv(key256, iv1, 1, 0, 0, ct, 16, tag, ptout), ERR_NONE, "1-byte-IV decrypt ok");
+    assert_eq(aes_gcm_decrypt_iv(key256, iv1, 1, 0, 0, ct, 16, tag, ptout), SIGIL_ERR_NONE, "1-byte-IV decrypt ok");
 
     # ============================================================
     test_group("12-byte IV consistency + validation");
@@ -101,7 +101,7 @@ fn main() {
 
     # iv_len <= 0 rejected.
     assert_eq(aes_gcm_encrypt_iv(key256, iv8, 0, 0, 0, pt16, 16, ct, tag), 0 - 1, "iv_len=0 rejected (encrypt)");
-    assert_eq(aes_gcm_decrypt_iv(key256, iv8, 0 - 1, 0, 0, ct, 16, tag, ptout), ERR_INVALID_INPUT,
+    assert_eq(aes_gcm_decrypt_iv(key256, iv8, 0 - 1, 0, 0, ct, 16, tag, ptout), SIGIL_ERR_INVALID_INPUT,
         "iv_len<0 rejected (decrypt)");
 
     return assert_summary();

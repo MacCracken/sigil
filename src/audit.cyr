@@ -145,7 +145,7 @@ fn alog_clear(log): i64 {
 # not the write mode.
 fn alog_save(log, path): i64 {
     var fd = file_open(path, 1089, 420);  # O_WRONLY|O_CREAT|O_APPEND, 0644
-    if (fd < 0) { return ERR_IO; }
+    if (fd < 0) { return SIGIL_ERR_IO; }
     var events = load64(log);
     var elen = vec_len(events);
     var i = 0;
@@ -184,7 +184,7 @@ fn alog_save(log, path): i64 {
         i = i + 1;
     }
     file_close(fd);
-    return ERR_NONE;
+    return SIGIL_ERR_NONE;
 }
 
 fn _alog_write_str(dst, src): i64 {

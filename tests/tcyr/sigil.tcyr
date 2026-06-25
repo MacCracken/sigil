@@ -217,7 +217,7 @@ fn main() {
 
     var re = revocation_entry_new("bad_key_001", 0, "compromised", "admin");
     var add_result = rl_add(rl, re);
-    assert_eq(add_result, ERR_NONE, "add ok");
+    assert_eq(add_result, SIGIL_ERR_NONE, "add ok");
     assert_eq(rl_len(rl), 1, "len = 1");
     assert_eq(rl_is_key_revoked(rl, "bad_key_001"), 1, "key revoked");
     assert_eq(rl_is_key_revoked(rl, "good_key"), 0, "good key not revoked");
@@ -239,7 +239,7 @@ fn main() {
     test_group("invalid revocation");
     var bad_re = revocation_entry_new(0, 0, "no target", "admin");
     var bad_result = rl_add(rl, bad_re);
-    assert_eq(bad_result, ERR_INVALID_INPUT, "reject no target");
+    assert_eq(bad_result, SIGIL_ERR_INVALID_INPUT, "reject no target");
 
     # ============================================================
     # Policy: CRL
@@ -279,7 +279,7 @@ fn main() {
 
     # File round-trip
     var rl_path = "/tmp/sigil_rl_test.jsonl";
-    assert_eq(rl_save(rl_src, rl_path), ERR_NONE, "rl_save ok");
+    assert_eq(rl_save(rl_src, rl_path), SIGIL_ERR_NONE, "rl_save ok");
     var rl_via_file = rl_load(rl_path);
     assert_eq(rl_len(rl_via_file), 3, "file round-trip: 3 entries");
     syscall(87, rl_path);   # unlink
@@ -321,7 +321,7 @@ fn main() {
     assert_eq(vec_len(crl_entries(crl_loaded)), 2, "2 entries preserved");
 
     var crl_path = "/tmp/sigil_crl_test.jsonl";
-    assert_eq(crl_save(crl_src, crl_path), ERR_NONE, "crl_save ok");
+    assert_eq(crl_save(crl_src, crl_path), SIGIL_ERR_NONE, "crl_save ok");
     var crl_via_file = crl_load(crl_path);
     assert_eq(crl_version(crl_via_file), 7, "crl version via file");
     assert_eq(vec_len(crl_entries(crl_via_file)), 2, "crl entries via file");
@@ -374,7 +374,7 @@ fn main() {
     alog_record(alog2, audit_artifact_verified("/test", ARTIFACT_CONFIG, TRUST_VERIFIED, 1, "hash1"));
     var apath = "/tmp/sigil_test_audit.jsonl";
     var aresult = alog_save(alog2, apath);
-    assert_eq(aresult, ERR_NONE, "append ok");
+    assert_eq(aresult, SIGIL_ERR_NONE, "append ok");
 
     # Verify file was written
     var afd = file_open(apath, 0, 0);

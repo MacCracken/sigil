@@ -271,7 +271,7 @@ fn main() {
 
     var ts_path = "/tmp/sigil_trust_store_test.json";
     syscall(87, ts_path);
-    assert_eq(sv_save_trust_store(sv, ts_path), ERR_NONE, "save ok");
+    assert_eq(sv_save_trust_store(sv, ts_path), SIGIL_ERR_NONE, "save ok");
 
     var sv2 = sigil_verifier_new(keyring_new("/tmp/sigil_ts_keys2"), trust_policy_new());
     var loaded_ct = sv_load_trust_store(sv2, ts_path);

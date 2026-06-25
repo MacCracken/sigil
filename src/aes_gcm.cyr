@@ -754,18 +754,18 @@ fn aes_128_gcm_encrypt_iv(key, iv, iv_len, aad, aad_len, pt, pt_len, ct_out, tag
 # Output:
 #   pt_out   — plaintext, ct_len bytes (caller-allocated)
 # Returns:
-#   ERR_NONE on success
-#   ERR_INTEGRITY_MISMATCH on tag mismatch (pt_out NOT populated
+#   SIGIL_ERR_NONE on success
+#   SIGIL_ERR_INTEGRITY_MISMATCH on tag mismatch (pt_out NOT populated
 #       with real plaintext — it is zeroed on failure).
-#   ERR_INVALID_INPUT on length validation failure.
+#   SIGIL_ERR_INVALID_INPUT on length validation failure.
 #
 # AEAD contract: plaintext MUST NOT be released until the tag is
 # verified. We compute & verify the tag first, then derive pt.
 
 fn _aes_gcm_decrypt_impl(key, iv, iv_len, aad, aad_len, ct, ct_len, tag, pt_out, nr): i64 {
-    if (iv_len <= 0) { return ERR_INVALID_INPUT; }
-    if (aad_len < 0) { return ERR_INVALID_INPUT; }
-    if (ct_len < 0) { return ERR_INVALID_INPUT; }
+    if (iv_len <= 0) { return SIGIL_ERR_INVALID_INPUT; }
+    if (aad_len < 0) { return SIGIL_ERR_INVALID_INPUT; }
+    if (ct_len < 0) { return SIGIL_ERR_INVALID_INPUT; }
 
     aes_gcm_global_init();
 
@@ -831,14 +831,14 @@ fn _aes_gcm_decrypt_impl(key, iv, iv_len, aad, aad_len, ct, ct_len, tag, pt_out,
         _aes_gcm_ctr_xor(round_keys, &counter, ct, pt_out, ct_len, nr);
     }
 
-    var rc = ERR_NONE;
+    var rc = SIGIL_ERR_NONE;
     if (ok != 1) {
         # Overwrite the computed plaintext so the caller never
         # observes pre-auth bytes. AEAD no-plaintext-leak contract.
         if (ct_len > 0) {
             memset(pt_out, 0, ct_len);
         }
-        rc = ERR_INTEGRITY_MISMATCH;
+        rc = SIGIL_ERR_INTEGRITY_MISMATCH;
     }
 
     # round_keys is heap (fl_alloc); zero explicitly before free.
@@ -855,16 +855,16 @@ fn _aes_gcm_decrypt_impl(key, iv, iv_len, aad, aad_len, ct, ct_len, tag, pt_out,
 }
 
 # aes_gcm_decrypt — AES-256-GCM AEAD decrypt with tag verification.
-# key is 32 bytes; iv is 12 bytes. Returns ERR_NONE on success,
-# ERR_INTEGRITY_MISMATCH on tag mismatch (pt_out zeroed), or
-# ERR_INVALID_INPUT on length-validation failure.
+# key is 32 bytes; iv is 12 bytes. Returns SIGIL_ERR_NONE on success,
+# SIGIL_ERR_INTEGRITY_MISMATCH on tag mismatch (pt_out zeroed), or
+# SIGIL_ERR_INVALID_INPUT on length-validation failure.
 fn aes_gcm_decrypt(key, iv, aad, aad_len, ct, ct_len, tag, pt_out): i64 {
     return _aes_gcm_decrypt_impl(key, iv, 12, aad, aad_len, ct, ct_len, tag, pt_out, 14);
 }
 
 # aes_gcm_decrypt_iv — AES-256-GCM decrypt+verify with an arbitrary-length
 # IV (SP 800-38D §7.1; iv_len in bytes, > 0). Same return contract as
-# aes_gcm_decrypt (ERR_NONE / ERR_INTEGRITY_MISMATCH / ERR_INVALID_INPUT).
+# aes_gcm_decrypt (SIGIL_ERR_NONE / SIGIL_ERR_INTEGRITY_MISMATCH / SIGIL_ERR_INVALID_INPUT).
 fn aes_gcm_decrypt_iv(key, iv, iv_len, aad, aad_len, ct, ct_len, tag, pt_out): i64 {
     return _aes_gcm_decrypt_impl(key, iv, iv_len, aad, aad_len, ct, ct_len, tag, pt_out, 14);
 }

@@ -589,7 +589,7 @@ fn sv_verify_package(sv, path, expected_hash): i64 {
 fn sv_add_revocation(sv, entry): i64 {
     var rl = load64(sv + 16);
     var result = rl_add(rl, entry);
-    if (result == ERR_NONE) {
+    if (result == SIGIL_ERR_NONE) {
         var ae = audit_revocation_added(rev_key_id(entry), rev_content_hash(entry), rev_reason(entry));
         alog_record(load64(sv + 48), ae);
     }
@@ -965,7 +965,7 @@ fn sv_save_trust_store(sv, path): i64 {
     var keys = map_keys(store);
     var klen = vec_len(keys);
     var fd = file_open(path, 577, 420);
-    if (fd < 0) { return ERR_IO; }
+    if (fd < 0) { return SIGIL_ERR_IO; }
     file_write(fd, "[", 1);
     var i = 0;
     var nbuf[24];
@@ -992,7 +992,7 @@ fn sv_save_trust_store(sv, path): i64 {
     }
     file_write(fd, "]", 1);
     file_close(fd);
-    return ERR_NONE;
+    return SIGIL_ERR_NONE;
 }
 
 # ================================================================

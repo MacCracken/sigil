@@ -85,18 +85,18 @@ fn _cp_tag(otk, aad, aad_len, ct, ct_len, tag_out): i64 {
 #   pt       — plaintext, pt_len bytes
 #   ct_out   — ciphertext, pt_len bytes (caller-allocated)
 #   tag_out  — 16-byte tag (caller-allocated)
-# Returns ERR_NONE, or ERR_INVALID_INPUT on a negative length.
+# Returns SIGIL_ERR_NONE, or SIGIL_ERR_INVALID_INPUT on a negative length.
 # ================================================================
 fn chacha20poly1305_encrypt(key, nonce, aad, aad_len, pt, pt_len, ct_out, tag_out): i64 {
-    if (aad_len < 0) { return ERR_INVALID_INPUT; }
-    if (pt_len < 0) { return ERR_INVALID_INPUT; }
+    if (aad_len < 0) { return SIGIL_ERR_INVALID_INPUT; }
+    if (pt_len < 0) { return SIGIL_ERR_INVALID_INPUT; }
 
     secret var otk[32];
     _cp_keygen(key, nonce, &otk);
 
     chacha20_xor(key, nonce, 1, pt, pt_len, ct_out);
     _cp_tag(&otk, aad, aad_len, ct_out, pt_len, tag_out);
-    return ERR_NONE;
+    return SIGIL_ERR_NONE;
 }
 
 # ================================================================
@@ -105,14 +105,14 @@ fn chacha20poly1305_encrypt(key, nonce, aad, aad_len, pt, pt_len, ct_out, tag_ou
 #   tag the received 16-byte tag; pt_out the recovered plaintext
 #   (caller-allocated, ct_len bytes).
 # Returns:
-#   ERR_NONE on success (pt_out populated).
-#   ERR_INTEGRITY_MISMATCH on tag mismatch (pt_out zeroed, plaintext
+#   SIGIL_ERR_NONE on success (pt_out populated).
+#   SIGIL_ERR_INTEGRITY_MISMATCH on tag mismatch (pt_out zeroed, plaintext
 #       NOT released — AEAD contract).
-#   ERR_INVALID_INPUT on a negative length.
+#   SIGIL_ERR_INVALID_INPUT on a negative length.
 # ================================================================
 fn chacha20poly1305_decrypt(key, nonce, aad, aad_len, ct, ct_len, tag, pt_out): i64 {
-    if (aad_len < 0) { return ERR_INVALID_INPUT; }
-    if (ct_len < 0) { return ERR_INVALID_INPUT; }
+    if (aad_len < 0) { return SIGIL_ERR_INVALID_INPUT; }
+    if (ct_len < 0) { return SIGIL_ERR_INVALID_INPUT; }
 
     secret var otk[32];
     _cp_keygen(key, nonce, &otk);
@@ -123,9 +123,9 @@ fn chacha20poly1305_decrypt(key, nonce, aad, aad_len, ct, ct_len, tag, pt_out): 
     _cp_tag(&otk, aad, aad_len, ct, ct_len, &expected);
     if (ct_eq_bytes(&expected, tag, 16) == 0) {
         memset(pt_out, 0, ct_len);
-        return ERR_INTEGRITY_MISMATCH;
+        return SIGIL_ERR_INTEGRITY_MISMATCH;
     }
 
     chacha20_xor(key, nonce, 1, ct, ct_len, pt_out);
-    return ERR_NONE;
+    return SIGIL_ERR_NONE;
 }

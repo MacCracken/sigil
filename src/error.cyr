@@ -6,30 +6,30 @@
 # ================================================================
 
 enum SigilError {
-    ERR_NONE = 0;
-    ERR_KEY_NOT_FOUND = 1;
-    ERR_SIGNATURE_INVALID = 2;
-    ERR_REVOCATION = 3;
-    ERR_INTEGRITY_MISMATCH = 4;
-    ERR_INVALID_INPUT = 5;
-    ERR_IO = 6;
-    ERR_SERIALIZATION = 7;
-    ERR_CRYPTO = 8;
+    SIGIL_ERR_NONE = 0;
+    SIGIL_ERR_KEY_NOT_FOUND = 1;
+    SIGIL_ERR_SIGNATURE_INVALID = 2;
+    SIGIL_ERR_REVOCATION = 3;
+    SIGIL_ERR_INTEGRITY_MISMATCH = 4;
+    SIGIL_ERR_INVALID_INPUT = 5;
+    SIGIL_ERR_IO = 6;
+    SIGIL_ERR_SERIALIZATION = 7;
+    SIGIL_ERR_CRYPTO = 8;
 }
 
 # ================================================================
 # Error predicates
 # ================================================================
 
-# Returns 1 if `code` is ERR_NONE (success), 0 otherwise.
+# Returns 1 if `code` is SIGIL_ERR_NONE (success), 0 otherwise.
 fn sigil_is_ok(code): i64 {
-    if (code == ERR_NONE) { return 1; }
+    if (code == SIGIL_ERR_NONE) { return 1; }
     return 0;
 }
 
-# Returns 1 if `code` is any non-ERR_NONE error code, 0 otherwise.
+# Returns 1 if `code` is any non-SIGIL_ERR_NONE error code, 0 otherwise.
 fn sigil_is_err(code): i64 {
-    if (code != ERR_NONE) { return 1; }
+    if (code != SIGIL_ERR_NONE) { return 1; }
     return 0;
 }
 

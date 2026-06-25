@@ -32,10 +32,10 @@ fn main() {
     if (ed25519_verify(pk, "sigil", 5, sig) != 1) { sakshi_span_exit(); return 3; }
 
     # 4. Error plumbing.
-    var err = sigil_err(ERR_NONE, "ok");
+    var err = sigil_err(SIGIL_ERR_NONE, "ok");
     var rc = sigil_err_code(err);
     sigil_err_free(err);
-    if (rc != ERR_NONE) { sakshi_span_exit(); return 4; }
+    if (rc != SIGIL_ERR_NONE) { sakshi_span_exit(); return 4; }
 
     # 5. ML-DSA-65 (FIPS 204) post-quantum round-trip. Default-on since
     # 3.7.6 — this exercises the PQC surface in the DEFAULT build path

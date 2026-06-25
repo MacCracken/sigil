@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.9.4] — 2026-06-25
+
+**Namespace all sigil error codes `ERR_*` → `SIGIL_ERR_*` (BREAKING).** sigil's
+`SigilError` (`src/error.cyr`) and system-error (`src/sys_error.cyr`) enums
+defined bare `ERR_*` names — notably `ERR_IO = 6` — that collide with other
+stdlibs' error enums under cyrius's flat symbol namespace (e.g. yukti
+`ERR_IO = 14`; the cyrius `CHKDUPVAL` guardrail warns on the conflicting-value
+duplicate). All 15 sigil-defined error constants are renamed to the
+`SIGIL_ERR_*` prefix so sigil owns its namespace and never collides again. No
+compat aliases — the bare names are *dropped* (an alias would re-introduce the
+colliding name). Enum **values are unchanged**; only the identifiers move.
+Resolves cyrius issue `2026-06-14-stdlib-constant-value-collisions` (sigil
+half). All sigil tests pass (sigil 96/96, verify 48/48, x509, types, …).
+
+### Changed (BREAKING)
+- `SigilError`: `ERR_NONE`/`ERR_KEY_NOT_FOUND`/`ERR_SIGNATURE_INVALID`/
+  `ERR_REVOCATION`/`ERR_INTEGRITY_MISMATCH`/`ERR_INVALID_INPUT`/`ERR_IO`/
+  `ERR_SERIALIZATION`/`ERR_CRYPTO` → `SIGIL_ERR_*`.
+- `sys_error` (`SysErrorKind` codes): `ERR_SYSCALL_FAILED`/`ERR_INVALID_ARGUMENT`/
+  `ERR_PERMISSION_DENIED`/`ERR_WOULD_BLOCK`/`ERR_MODULE_NOT_LOADED`/
+  `ERR_NOT_SUPPORTED` → `SIGIL_ERR_*`.
+- Consumers referencing sigil's bare `ERR_*` must update to `SIGIL_ERR_*`.
+
 ## [3.9.3] — 2026-06-25
 
 **Fix `certpin_compute_spki_pin` — it called an obsolete `run_capture` API and

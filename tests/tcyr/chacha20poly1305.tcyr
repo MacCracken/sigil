@@ -7,10 +7,10 @@
 #      Anchors the whole composition: Poly1305 key-gen from the
 #      ChaCha20 counter-0 block, encryption from counter 1, and the
 #      aad||pad||ct||pad||le64||le64 mac-data layout.
-#   2. Round-trip — decrypt returns ERR_NONE and recovers the
+#   2. Round-trip — decrypt returns SIGIL_ERR_NONE and recovers the
 #      plaintext.
 #   3. Tamper — a single flipped ciphertext byte must fail tag
-#      verification (ERR_INTEGRITY_MISMATCH) and withhold plaintext.
+#      verification (SIGIL_ERR_INTEGRITY_MISMATCH) and withhold plaintext.
 
 include "lib/assert.cyr"
 include "lib/alloc.cyr"
@@ -64,7 +64,7 @@ fn main() {
     test_group("ChaCha20-Poly1305 decrypt round-trip");
     var back[114];
     var r = chacha20poly1305_decrypt(&key, &nonce, &aad, 12, &ct, 114, &tag, &back);
-    assert_eq(r, ERR_NONE, "decrypt returns ERR_NONE");
+    assert_eq(r, SIGIL_ERR_NONE, "decrypt returns SIGIL_ERR_NONE");
     assert_streq(hex_encode(&back, 114), hex_encode(pt, 114), "decrypt recovers plaintext");
 
     # ============================================================
@@ -74,7 +74,7 @@ fn main() {
     store8(&ct, load8(&ct) ^ 0x01);
     var back2[114];
     var r2 = chacha20poly1305_decrypt(&key, &nonce, &aad, 12, &ct, 114, &tag, &back2);
-    assert_eq(r2, ERR_INTEGRITY_MISMATCH, "tampered ciphertext rejected");
+    assert_eq(r2, SIGIL_ERR_INTEGRITY_MISMATCH, "tampered ciphertext rejected");
 
     return assert_summary();
 }

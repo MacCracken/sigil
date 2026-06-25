@@ -146,26 +146,26 @@ fn main() {
     # SigilError codes
     # ============================================================
     test_group("SigilError");
-    assert_eq(ERR_NONE, 0, "err none = 0");
-    assert_eq(ERR_KEY_NOT_FOUND, 1, "key not found = 1");
-    assert_eq(ERR_SIGNATURE_INVALID, 2, "sig invalid = 2");
-    assert_eq(ERR_REVOCATION, 3, "revocation = 3");
-    assert_eq(ERR_INTEGRITY_MISMATCH, 4, "integrity = 4");
-    assert_eq(ERR_INVALID_INPUT, 5, "invalid input = 5");
-    assert_eq(ERR_IO, 6, "io = 6");
-    assert_eq(ERR_SERIALIZATION, 7, "serialization = 7");
-    assert_eq(ERR_CRYPTO, 8, "crypto = 8");
+    assert_eq(SIGIL_ERR_NONE, 0, "err none = 0");
+    assert_eq(SIGIL_ERR_KEY_NOT_FOUND, 1, "key not found = 1");
+    assert_eq(SIGIL_ERR_SIGNATURE_INVALID, 2, "sig invalid = 2");
+    assert_eq(SIGIL_ERR_REVOCATION, 3, "revocation = 3");
+    assert_eq(SIGIL_ERR_INTEGRITY_MISMATCH, 4, "integrity = 4");
+    assert_eq(SIGIL_ERR_INVALID_INPUT, 5, "invalid input = 5");
+    assert_eq(SIGIL_ERR_IO, 6, "io = 6");
+    assert_eq(SIGIL_ERR_SERIALIZATION, 7, "serialization = 7");
+    assert_eq(SIGIL_ERR_CRYPTO, 8, "crypto = 8");
 
     # Error construction + accessors
-    var e1 = sigil_err(ERR_KEY_NOT_FOUND, "key abc123 missing");
-    assert_eq(sigil_err_code(e1), ERR_KEY_NOT_FOUND, "err code");
+    var e1 = sigil_err(SIGIL_ERR_KEY_NOT_FOUND, "key abc123 missing");
+    assert_eq(sigil_err_code(e1), SIGIL_ERR_KEY_NOT_FOUND, "err code");
     assert_streq(sigil_err_msg(e1), "key abc123 missing", "err msg");
 
     # is_ok / is_err
-    assert_eq(sigil_is_ok(ERR_NONE), 1, "0 is ok");
-    assert_eq(sigil_is_ok(ERR_CRYPTO), 0, "crypto is not ok");
-    assert_eq(sigil_is_err(ERR_NONE), 0, "0 is not err");
-    assert_eq(sigil_is_err(ERR_IO), 1, "io is err");
+    assert_eq(sigil_is_ok(SIGIL_ERR_NONE), 1, "0 is ok");
+    assert_eq(sigil_is_ok(SIGIL_ERR_CRYPTO), 0, "crypto is not ok");
+    assert_eq(sigil_is_err(SIGIL_ERR_NONE), 0, "0 is not err");
+    assert_eq(sigil_is_err(SIGIL_ERR_IO), 1, "io is err");
 
     return assert_summary();
 }
