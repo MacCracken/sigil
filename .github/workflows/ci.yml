@@ -156,10 +156,10 @@ jobs:
         # stale committed bundle, then require 0 undocumented fns
         # (`cyrius doc --check` exits non-zero when any remain).
         run: |
-          sh scripts/regen-dist.sh
-          if ! git diff --quiet dist/sigil.cyr; then
-            echo "dist/sigil.cyr is stale — run scripts/regen-dist.sh and commit"
-            git --no-pager diff --stat dist/sigil.cyr
+          cyrius distlib
+          if ! git diff --quiet dist/sigil.cyr dist/sigil.deps; then
+            echo "dist/sigil.cyr or dist/sigil.deps is stale — run \`cyrius distlib\` and commit"
+            git --no-pager diff --stat dist/sigil.cyr dist/sigil.deps
             exit 1
           fi
           cyrius doc --check dist/sigil.cyr

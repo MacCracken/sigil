@@ -12,23 +12,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 **Re-fold via `cyrius distlib` + ship the `dist/sigil.deps` dependency sidecar.**
 sigil's dist is now produced by the sovereign `cyrius distlib` (≥6.2.48) instead of
 the hand-rolled `scripts/regen-dist.sh` (deleted). distlib emits `dist/sigil.deps` —
-a sidecar listing the 24 stdlib `lib/` leaves the fold needs in scope (captured from
-the folded modules + the `src/lib.cyr` umbrella via cyrius 6.2.48's umbrella scan) —
-so a consumer can declare just `[deps.sigil]` and `cyrius deps` auto-pulls
+a sidecar listing the 23 stdlib `lib/` leaves the fold needs in scope (captured from
+the folded modules + the `src/lib.cyr` umbrella via cyrius 6.2.48's umbrella scan;
+sigil's own `[deps.sakshi]` named dep is excluded — it resolves transitively) — so a
+consumer can declare just `[deps.sigil]` and `cyrius deps` auto-pulls
 ct/keccak/random/thread/thread_local/… in topological order, with **no hand-ordered
-stdlib list and no omit-one→SIGILL landmine**. The bundle is now fully self-contained
-(all `include "lib/…"` stripped; the sidecar carries the requirements). Toolchain pin
-6.2.30 → **6.2.48**.
+stdlib list and no omit-one→SIGILL landmine**. The bundle keeps its `lib/` includes
+(staying self-contained for raw `include "dist/sigil.cyr"` consumers — sigil's own tcyr
+suite) and strips only `src/` self-refs; the sidecar additionally declares the leaves
+for `cyrius deps` consumers. Toolchain pin 6.2.30 → **6.2.48**.
 
 ### Changed
-- **`dist/sigil.cyr` regenerated via `cyrius distlib`** — all `include "lib/…"` lines
-  stripped (the sidecar declares them); the bash `scripts/regen-dist.sh` retired —
-  `cyrius distlib` is the fold tool again (it was never actually retired).
+- **`dist/sigil.cyr` regenerated via `cyrius distlib`** (≥6.2.48) — strips `src/`
+  self-refs but KEEPS `lib/` includes (the bundle stays self-contained for raw-include
+  consumers; cyrius distlib is now a superset of `regen-dist.sh`, hence sigil can return
+  to it). The bash `scripts/regen-dist.sh` retired; CI's doc-coverage stale-check now
+  runs `cyrius distlib` (was the deleted script).
 
 ### Added
-- **`dist/sigil.deps`** — the dependency sidecar (24 stdlib leaves). Consumed
-  automatically by `cyrius deps` ≥6.2.47; lets consumers drop hand-ordered
-  sigil-prereq lists (ct/keccak/random/thread/thread_local + the rest).
+- **`dist/sigil.deps`** — the dependency sidecar (23 stdlib leaves; the `sakshi` named
+  dep excluded). Consumed automatically by `cyrius deps` ≥6.2.47; lets consumers drop
+  hand-ordered sigil-prereq lists (ct/keccak/random/thread/thread_local + the rest).
 
 ## [3.9.4] — 2026-06-25
 
