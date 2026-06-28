@@ -138,7 +138,7 @@ citation index for every crypto primitive.
 | `LICENSE` | (per upstream) | 🔵 Evergreen | GPL-3.0-only. |
 | `VERSION` | 2026-06-16 | ✅ Fresh | **`3.8.0`**. Bumped every release. |
 | `cyrius.cyml` | 2026-06-16 | ✅ Fresh | `[lib].modules` extended across 3.6/3.7/3.8 (bignum, tls12_prf, hmac/hkdf_sha384, random, …); toolchain pin **`6.2.12`** (6.0.87 → 6.1.20 @3.7.8 → 6.2.1 @3.7.13 → 6.2.11 @3.7.14 → 6.2.12 @3.7.15). Deps agnosys 1.4.3 / sakshi 2.3.0; `json` / `bigint` dropped at the 6.2.1 pin (bigint → bayan). |
-| `scripts/regen-dist.sh` | 2026-06-16 | ✅ Fresh | Replaces the retired `cyrius distlib`. `MODULES` kept in sync with `cyrius.cyml [lib].modules`. Re-run after every VERSION bump (embeds the header). |
+| `dist/sigil.deps` + `cyrius distlib` | 2026-06-27 | ✅ Fresh | **@3.9.5**: the bash `scripts/regen-dist.sh` retired — the sovereign `cyrius distlib` (≥6.2.48) folds `dist/sigil.cyr` AND emits the `dist/sigil.deps` sidecar (24 stdlib leaves, captured from the modules + the `src/lib.cyr` umbrella). Re-run `cyrius distlib` after a `[lib].modules` or VERSION change. |
 | `dist/sigil.cyr` | 2026-06-16 | ✅ Fresh | Regenerated every release (last, after the VERSION bump). Header reads `# Version: 3.8.0`; carries the 3.7.8 NI `param_load` migration, the 3.7.15 `src/random.cyr` entropy boundary, and the 3.8.0 ChaCha20/X25519 banking. |
 | `benchmarks-rust-v-cyrius.md` | (closed) | 🔵 Evergreen | Frozen cross-implementation perf baseline; not rebuilt per release. |
 
