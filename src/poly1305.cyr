@@ -216,3 +216,224 @@ fn poly1305_verify(key, msg, msg_len, tag): i64 {
     memset(computedb, 0, 16);
     return ok;
 }
+
+# ================================================================
+# Streaming Poly1305 — init / update* / finalize (3.9.7)
+# ================================================================
+# The AEAD tag (RFC 8439 §2.8) is computed over
+#   AAD || pad16(AAD) || ct || pad16(ct) || le64(aad_len) || le64(ct_len)
+# which `_cp_tag` (src/chacha20poly1305.cyr) previously assembled into a
+# per-call `fl_alloc`'d concat buffer — the last concurrent-path heap
+# allocation on the AEAD record path. This streaming API absorbs those
+# segments in place (init → update per segment → finalize) so the tag is
+# produced WITHOUT materializing the concat, removing the fl_alloc.
+#
+# The one-shot `poly1305_mac` above is UNCHANGED (registers-resident,
+# benched hot path); streaming uses a per-lane banked state buffer so the
+# limb accumulator persists across update() calls. The arithmetic is the
+# SAME poly1305-donna 26-bit-limb form — `_p1305_absorb` mirrors the
+# one-shot's per-block body exactly (the streaming-equivalence test in
+# poly1305.tcyr pins them together across arbitrary chunk splits).
+#
+# THREAD-SAFETY / quirk #9: the state holds key-derived secret scalars
+# (r/s/h) plus buffered message bytes, so it is a PLAIN banked `var` +
+# per-lane `memset` in finalize — NEVER `secret var` (a whole-array wipe
+# would clobber a concurrent worker's lane — the 3.8.0 banking bug; see
+# ADR 0004). `cbank()` auto-assigns the lane.
+#
+# State layout (per lane, 168 bytes): h0..h4 (i64 @0,8,16,24,32),
+# r0..r4 (@40,48,56,64,72), s1..s4=5·r (@80,88,96,104),
+# pad0..pad3 (@112,120,128,136), buf_len (@144), partial buf[16] (@152).
+var _p1305_state[10752];   # 168 * SIGIL_CRYPTO_BANKS (64)
+
+# Base of the calling thread's 168-byte state lane.
+fn _p1305_lane(): i64 { return &_p1305_state + cbank() * 168; }
+
+# Absorb one full 16-byte block at `mp` into the lane's accumulator.
+# `hibit` is 1<<24 for a real 16-byte block, 0 for the padded final
+# block (caller supplies the explicit 0x01). Loads h/r/s from `st`,
+# runs the schoolbook multiply with 2^130≡5 wrap, stores h back —
+# byte-identical to the one-shot loop body above.
+fn _p1305_absorb(st, mp, hibit): i64 {
+    var h0 = load64(st + 0);
+    var h1 = load64(st + 8);
+    var h2 = load64(st + 16);
+    var h3 = load64(st + 24);
+    var h4 = load64(st + 32);
+    var r0 = load64(st + 40);
+    var r1 = load64(st + 48);
+    var r2 = load64(st + 56);
+    var r3 = load64(st + 64);
+    var r4 = load64(st + 72);
+    var s1 = load64(st + 80);
+    var s2 = load64(st + 88);
+    var s3 = load64(st + 96);
+    var s4 = load64(st + 104);
+
+    h0 = h0 + (_p1305_u8to32(mp) & 0x3ffffff);
+    h1 = h1 + ((_p1305_u8to32(mp + 3) >> 2) & 0x3ffffff);
+    h2 = h2 + ((_p1305_u8to32(mp + 6) >> 4) & 0x3ffffff);
+    h3 = h3 + ((_p1305_u8to32(mp + 9) >> 6) & 0x3ffffff);
+    h4 = h4 + ((_p1305_u8to32(mp + 12) >> 8) | hibit);
+
+    var d0 = h0 * r0 + h1 * s4 + h2 * s3 + h3 * s2 + h4 * s1;
+    var d1 = h0 * r1 + h1 * r0 + h2 * s4 + h3 * s3 + h4 * s2;
+    var d2 = h0 * r2 + h1 * r1 + h2 * r0 + h3 * s4 + h4 * s3;
+    var d3 = h0 * r3 + h1 * r2 + h2 * r1 + h3 * r0 + h4 * s4;
+    var d4 = h0 * r4 + h1 * r3 + h2 * r2 + h3 * r1 + h4 * r0;
+
+    var c = d0 >> 26; h0 = d0 & 0x3ffffff;
+    d1 = d1 + c; c = d1 >> 26; h1 = d1 & 0x3ffffff;
+    d2 = d2 + c; c = d2 >> 26; h2 = d2 & 0x3ffffff;
+    d3 = d3 + c; c = d3 >> 26; h3 = d3 & 0x3ffffff;
+    d4 = d4 + c; c = d4 >> 26; h4 = d4 & 0x3ffffff;
+    h0 = h0 + c * 5; c = h0 >> 26; h0 = h0 & 0x3ffffff;
+    h1 = h1 + c;
+
+    store64(st + 0, h0);
+    store64(st + 8, h1);
+    store64(st + 16, h2);
+    store64(st + 24, h3);
+    store64(st + 32, h4);
+    return 0;
+}
+
+# poly1305_init — load+clamp r, precompute 5·r, split s (pad), zero the
+# accumulator and partial buffer. `key` is the 32-byte one-time key.
+fn poly1305_init(key): i64 {
+    var st = _p1305_lane();
+    var t0 = _p1305_u8to32(key);
+    var t1 = _p1305_u8to32(key + 4);
+    var t2 = _p1305_u8to32(key + 8);
+    var t3 = _p1305_u8to32(key + 12);
+
+    var r0 = t0 & 0x3ffffff;
+    var r1 = ((t0 >> 26) | (t1 << 6)) & 0x3ffff03;
+    var r2 = ((t1 >> 20) | (t2 << 12)) & 0x3ffc0ff;
+    var r3 = ((t2 >> 14) | (t3 << 18)) & 0x3f03fff;
+    var r4 = (t3 >> 8) & 0x00fffff;
+    store64(st + 40, r0); store64(st + 48, r1); store64(st + 56, r2);
+    store64(st + 64, r3); store64(st + 72, r4);
+    store64(st + 80, r1 * 5); store64(st + 88, r2 * 5);
+    store64(st + 96, r3 * 5); store64(st + 104, r4 * 5);
+
+    store64(st + 112, _p1305_u8to32(key + 16));
+    store64(st + 120, _p1305_u8to32(key + 20));
+    store64(st + 128, _p1305_u8to32(key + 24));
+    store64(st + 136, _p1305_u8to32(key + 28));
+
+    store64(st + 0, 0); store64(st + 8, 0); store64(st + 16, 0);
+    store64(st + 24, 0); store64(st + 32, 0);
+    store64(st + 144, 0);   # buf_len
+    return 0;
+}
+
+# poly1305_update — absorb `len` bytes at `ptr`. Buffers any sub-16-byte
+# remainder across calls (so segment boundaries need not be 16-aligned);
+# the 0x01 partial-pad is applied only at finalize, never at a boundary.
+fn poly1305_update(ptr, len): i64 {
+    if (len <= 0) { return 0; }
+    var st = _p1305_lane();
+    var buf_len = load64(st + 144);
+    var buf = st + 152;
+    var pos = 0;
+
+    # Top up a pending partial block first; absorb it once full.
+    if (buf_len > 0) {
+        while (buf_len < 16 && pos < len) {
+            store8(buf + buf_len, load8(ptr + pos) & 0xFF);
+            buf_len = buf_len + 1;
+            pos = pos + 1;
+        }
+        if (buf_len == 16) {
+            _p1305_absorb(st, buf, 1 << 24);
+            buf_len = 0;
+        }
+    }
+
+    # Absorb full blocks straight from the caller's buffer.
+    while (len - pos >= 16) {
+        _p1305_absorb(st, ptr + pos, 1 << 24);
+        pos = pos + 16;
+    }
+
+    # Stash the trailing remainder for the next update / finalize.
+    while (pos < len) {
+        store8(buf + buf_len, load8(ptr + pos) & 0xFF);
+        buf_len = buf_len + 1;
+        pos = pos + 1;
+    }
+
+    store64(st + 144, buf_len);
+    return 0;
+}
+
+# poly1305_finalize — pad+absorb any buffered remainder, then freeze the
+# accumulator (constant-time, no branch on the secret h) and add s,
+# writing the 16-byte tag to `out`. Scrubs the calling lane (secret r/s/h
+# + buffered bytes) before return — per-lane only (quirk #9).
+fn poly1305_finalize(out): i64 {
+    var st = _p1305_lane();
+    var buf_len = load64(st + 144);
+    var buf = st + 152;
+    if (buf_len > 0) {
+        store8(buf + buf_len, 1);            # explicit high bit for partial
+        var i = buf_len + 1;
+        while (i < 16) { store8(buf + i, 0); i = i + 1; }
+        _p1305_absorb(st, buf, 0);
+    }
+
+    var h0 = load64(st + 0);
+    var h1 = load64(st + 8);
+    var h2 = load64(st + 16);
+    var h3 = load64(st + 24);
+    var h4 = load64(st + 32);
+
+    # ---- Fully carry h.
+    var c = h1 >> 26; h1 = h1 & 0x3ffffff;
+    h2 = h2 + c; c = h2 >> 26; h2 = h2 & 0x3ffffff;
+    h3 = h3 + c; c = h3 >> 26; h3 = h3 & 0x3ffffff;
+    h4 = h4 + c; c = h4 >> 26; h4 = h4 & 0x3ffffff;
+    h0 = h0 + c * 5; c = h0 >> 26; h0 = h0 & 0x3ffffff;
+    h1 = h1 + c;
+
+    # ---- g = h + 5 (minus 2^130 in the top limb); CT-select h vs g.
+    var g0 = h0 + 5; c = g0 >> 26; g0 = g0 & 0x3ffffff;
+    var g1 = h1 + c; c = g1 >> 26; g1 = g1 & 0x3ffffff;
+    var g2 = h2 + c; c = g2 >> 26; g2 = g2 & 0x3ffffff;
+    var g3 = h3 + c; c = g3 >> 26; g3 = g3 & 0x3ffffff;
+    var g4 = h4 + c - (1 << 26);
+
+    var sign = (g4 >> 63) & 1;
+    var mask_g = sign - 1;
+    var mask_h = 0 - sign;
+    h0 = (h0 & mask_h) | (g0 & mask_g);
+    h1 = (h1 & mask_h) | (g1 & mask_g);
+    h2 = (h2 & mask_h) | (g2 & mask_g);
+    h3 = (h3 & mask_h) | (g3 & mask_g);
+    h4 = (h4 & mask_h) | (g4 & mask_g);
+
+    # ---- Collapse 5×26-bit limbs into 4×32-bit words.
+    h0 = (h0 | (h1 << 26)) & 0xffffffff;
+    h1 = ((h1 >> 6) | (h2 << 20)) & 0xffffffff;
+    h2 = ((h2 >> 12) | (h3 << 14)) & 0xffffffff;
+    h3 = ((h3 >> 18) | (h4 << 8)) & 0xffffffff;
+
+    # ---- tag = (h + s) mod 2^128, little-endian.
+    var pad0 = load64(st + 112);
+    var pad1 = load64(st + 120);
+    var pad2 = load64(st + 128);
+    var pad3 = load64(st + 136);
+    var f = h0 + pad0;             h0 = f & 0xffffffff;
+    f = h1 + pad1 + (f >> 32);     h1 = f & 0xffffffff;
+    f = h2 + pad2 + (f >> 32);     h2 = f & 0xffffffff;
+    f = h3 + pad3 + (f >> 32);     h3 = f & 0xffffffff;
+
+    _p1305_u32to8(out,      h0);
+    _p1305_u32to8(out + 4,  h1);
+    _p1305_u32to8(out + 8,  h2);
+    _p1305_u32to8(out + 12, h3);
+
+    memset(st, 0, 168);   # scrub THIS lane's secret state (quirk #9)
+    return 0;
+}

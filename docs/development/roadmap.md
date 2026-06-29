@@ -40,25 +40,30 @@ perf cycle have shipped — see "Closed cycles" below + CHANGELOG.
       Issue:
       [`…concurrent-tls-handshake-global-scratch-race`](issues/2026-06-28-concurrent-tls-handshake-global-scratch-race.md).
 
-**Thread-safety follow-up → 3.9.7 (deferred from 3.9.6, NOT dropped)**
+**Thread-safety follow-up → 3.9.7 ✅ DONE (3.9.7)**
 
-The 3.9.6 fix covers the reproduced crash path (Ed25519-cert + both AEAD suites'
-handshake/record crypto). These remaining unbanked sites are tracked for 3.9.7:
+The 3.9.6 fix covered the reproduced crash path (Ed25519-cert + both AEAD suites'
+handshake/record crypto). 3.9.7 banked every remaining unbanked concurrent site,
+so **every reachable concurrent crypto path is now race-free**:
 
-- [ ] **ChaCha20-Poly1305 `_cp_tag` `fl_alloc` mac_data buffer**
-      (`src/chacha20poly1305.cyr`). The only remaining concurrent-path `fl_alloc`.
-      Needs a streaming Poly1305 (init/update/finalize) so the tag is computed
-      without the concat buffer. AES-GCM (the issue's `TLS_AES_256_GCM_SHA384`
-      repro suite) is fully fixed; this is the ChaCha-suite AEAD tag only.
-- [ ] **ECDSA P-256/P-384 sign+verify banking** (`src/ecdsa_p256.cyr`,
-      `src/ecdsa_p384.cyr`). ~100 process-global pointer-scratch buffers per curve
-      (different shape from `var X[N]` banking — lane-slice the `alloc`'d buffers).
-      Latent: not reproduced (probe cert is Ed25519; `tls_native` rejects RSA), but
-      an ECDSA-cert server under `max_conns > 1` would hit the same class.
-- [ ] **`bignum` + `tls12_prf` statics** (`src/bignum.cyr` modexp/Montgomery,
-      `src/tls12_prf.cyr`). Off the TLS 1.3 server path (RSA rejected by
-      `tls_native`; TLS 1.3 doesn't use the 1.2 PRF) — lowest priority, banked for
-      completeness when ECDSA lands.
+- [x] **ChaCha20-Poly1305 `_cp_tag` `fl_alloc` mac_data buffer**
+      (`src/chacha20poly1305.cyr`). ✅ **DONE (3.9.7).** Added a streaming
+      Poly1305 (`poly1305_init`/`update`/`finalize`); `_cp_tag` streams the
+      RFC 8439 §2.8 segments in place — the last concurrent-path `fl_alloc` is
+      gone. AEAD encrypt marginally faster.
+- [x] **ECDSA P-256/P-384 sign+verify banking** (`src/ecdsa_p256.cyr`,
+      `src/ecdsa_p384.cyr`, `src/ecdsa_sign.cyr`). ✅ **DONE (3.9.7).** ~150
+      scratch buffers lane-sliced + the RFC 6979 DRBG + the per-sign `k·G` + the
+      sign secret scratch banked; P-384's `_p384_mul64` return slots restructured;
+      `ecdsa_p256_warm()`/`ecdsa_p384_warm()` main-thread prewarm added.
+      **Also fixed a latent race in the DER wrappers** (`*_sign_der`/`verify_der`):
+      `secret var` ARRAYS are shared statics (proven by probe), so the TLS
+      CertificateVerify path was racing — now banked.
+- [x] **`bignum` + `tls12_prf` (+ `rsa`) statics** (`src/bignum.cyr`,
+      `src/tls12_prf.cyr`, `src/rsa.cyr`). ✅ **DONE (3.9.7).** Banked the
+      Montgomery modexp scratch, the `_mul64` output locals, the RSA verify/sign/
+      blind/CRT workspaces, and the P_hash PRF buffers; **closed a pre-existing
+      RSA-sign secret-residue gap**. Off the TLS 1.3 path — done for completeness.
 
 **Verification follow-up**
 

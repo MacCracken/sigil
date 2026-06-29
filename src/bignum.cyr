@@ -21,11 +21,14 @@
 #     shipped in 3.6.4 — it uses blinding + a constant-time ladder
 #     (`bn_mont_modexp`); do NOT reuse this non-CT `bn_modexp` for
 #     secret exponents.
-#   * not on the parallel batch-verify path (that is Ed25519); like
-#     sigil's HMAC/HKDF/PRF surface the working buffers are plain
-#     static function-scope scratch, single-threaded by construction.
-#     If RSA ever joins a parallel path, these need the 3.6 bank
-#     treatment (see src/crypto_scratch.cyr).
+#   * not on the parallel batch-verify path (that is Ed25519). The
+#     working buffers WERE plain static function-scope scratch, single-
+#     threaded by construction. 3.9.7 banked them across `cbank()` lanes
+#     (the 3.6 bank treatment, src/crypto_scratch.cyr) for race-freedom
+#     against concurrent RSA / TLS 1.2 PRF callers — even though RSA is
+#     off the TLS 1.3 server path, the bignum engine is shared, so the
+#     completeness fix matches sha256/hmac/ecdsa. The secret-exponent
+#     mont/inv banks get a per-lane wipe on the sign return (quirk #9).
 #
 # Correctness is the bar for this schoolbook engine; the Montgomery pass
 # shipped in 3.6.6 (`bn_mont_modexp`) and carries the live RSA verify +
@@ -42,12 +45,31 @@
 # limbs. The reduction's running remainder needs 1 extra limb.
 var BN_MAX_LIMBS = 64;
 
-# Static scratch (single-threaded; see header). Sizes are BYTES.
-var _bn_modrem[520];        # (BN_MAX_LIMBS+1) limbs -- bn_mod remainder
-var _bn_modn1[520];         # (BN_MAX_LIMBS+1) limbs -- zero-extended modulus
-var _bn_exp_result[512];    # BN_MAX_LIMBS limbs -- modexp accumulator
-var _bn_exp_prod[1024];     # 2*BN_MAX_LIMBS limbs -- modexp product
-var _bn_exp_base[512];      # BN_MAX_LIMBS limbs -- modexp base copy
+# Static scratch. Each `var X[N]` here is a function-scope STATIC global
+# (CLAUDE.md quirk #1), so concurrent callers (e.g. parallel RSA / TLS 1.2
+# PRF workers) would race the same buffer. Each is therefore widened to
+# `[N*SIGIL_CRYPTO_BANKS]` and each consuming fn operates on its own lane
+# `&X + cbank()*N` (3.9.7 banking — same mechanism as sha256/hmac/ecdsa;
+# see src/crypto_scratch.cyr). `cbank()` is per-thread-stable, so a callee
+# that re-derives the same lane base sees the caller's lane. Sizes are
+# BYTES. The bn_mod/modexp scratch below is PUBLIC (no per-lane wipe); the
+# `_bn_mont_*` and `_bn_inv_*` banks carry the SECRET exponent residue and
+# get a per-lane memset on the sign/mont return paths (quirk #9 / ADR 0004
+# — banked secret state is plain `var`, NEVER `secret var`).
+var _bn_modrem[33280];      # 520 * SIGIL_CRYPTO_BANKS  (PUBLIC)
+var _bn_modn1[33280];       # 520 * SIGIL_CRYPTO_BANKS  (PUBLIC)
+var _bn_exp_result[32768];  # 512 * SIGIL_CRYPTO_BANKS  (PUBLIC)
+var _bn_exp_prod[65536];    # 1024 * SIGIL_CRYPTO_BANKS (PUBLIC)
+var _bn_exp_base[32768];    # 512 * SIGIL_CRYPTO_BANKS  (PUBLIC)
+
+# Per-lane 16-byte slot for the `_mul64` lo||hi product used inside
+# `bn_mul` / `_bn_mont_mul`. The original `var lo[8]; var hi[8];` locals
+# were ALSO function-scope statics (quirk #1) — written then immediately
+# read, so single-threaded reuse was fine, but concurrent multipliers
+# raced them (the missed use site behind the bignum_tls12_concurrent
+# modexp failures). Banked across `cbank()` lanes like the ecdsa
+# `_p384_m64` slot: each lane is `lo` at +0, `hi` at +8.
+var _bn_m64[1024];          # 16 * SIGIL_CRYPTO_BANKS
 
 # ----------------------------------------------------------------
 # Basic limb ops (all take a `limbs` count; buffers are byte ptrs)
@@ -242,6 +264,7 @@ fn bn_to_be(bytes, blen, a, limbs): i64 {
 
 # out (2*limbs) = a * b (each `limbs` limbs). Schoolbook; out is zeroed.
 fn bn_mul(out, a, b, limbs): i64 {
+    var m64 = &_bn_m64 + cbank() * 16;       # this thread's lo||hi slot
     bn_zero(out, 2 * limbs);
     var sbit = 1 << 63;
     var i = 0;
@@ -251,11 +274,9 @@ fn bn_mul(out, a, b, limbs): i64 {
         var j = 0;
         while (j < limbs) {
             var bv = load64(b + j * 8);
-            var lo[8];
-            var hi[8];
-            _mul64(av, bv, &lo, &hi);
-            var lov = load64(&lo);
-            var hiv = load64(&hi);
+            _mul64(av, bv, m64, m64 + 8);
+            var lov = load64(m64);
+            var hiv = load64(m64 + 8);
             var prev = load64(out + (i + j) * 8);
             # s1 = prev + lov
             var s1 = prev + lov;
@@ -290,23 +311,26 @@ fn bn_mul(out, a, b, limbs): i64 {
 # verify). Running remainder uses m_limbs+1 limbs internally so the
 # pre-subtract shift can't overflow.
 fn bn_mod(rem, x, x_limbs, modulus, m_limbs): i64 {
+    var bk = cbank();
+    var modrem = &_bn_modrem + bk * 520;   # this thread's lane (PUBLIC)
+    var modn1  = &_bn_modn1  + bk * 520;
     var rl = m_limbs + 1;
-    bn_zero(&_bn_modrem, rl);
+    bn_zero(modrem, rl);
     # zero-extended modulus (top limb 0) so cmp/sub run over rl limbs
-    bn_copy(&_bn_modn1, modulus, m_limbs);
-    store64(&_bn_modn1 + m_limbs * 8, 0);
+    bn_copy(modn1, modulus, m_limbs);
+    store64(modn1 + m_limbs * 8, 0);
 
     var i = bn_bitlen(x, x_limbs) - 1;
     while (i >= 0) {
-        bn_shl1(&_bn_modrem, rl);
+        bn_shl1(modrem, rl);
         # bring down bit i of x into the LSB
-        store64(&_bn_modrem, load64(&_bn_modrem) | bn_test_bit(x, i));
-        if (bn_cmp(&_bn_modrem, &_bn_modn1, rl) >= 0) {
-            bn_sub_assign(&_bn_modrem, &_bn_modn1, rl);
+        store64(modrem, load64(modrem) | bn_test_bit(x, i));
+        if (bn_cmp(modrem, modn1, rl) >= 0) {
+            bn_sub_assign(modrem, modn1, rl);
         }
         i = i - 1;
     }
-    bn_copy(rem, &_bn_modrem, m_limbs);
+    bn_copy(rem, modrem, m_limbs);
     return 0;
 }
 
@@ -321,9 +345,13 @@ fn _bn_exp_bit(exp, blen, idx): i64 {
 # big-endian bytes. Left-to-right square-and-multiply. PUBLIC exponent
 # only (see header) -- NOT for secret-exponent (sign) use.
 fn bn_modexp(out, base, exp, exp_blen, modulus, limbs): i64 {
-    bn_zero(&_bn_exp_result, limbs);
-    store64(&_bn_exp_result, 1);            # result = 1
-    bn_copy(&_bn_exp_base, base, limbs);
+    var bk = cbank();
+    var result = &_bn_exp_result + bk * 512;    # this thread's lane (PUBLIC)
+    var prod   = &_bn_exp_prod   + bk * 1024;
+    var basec  = &_bn_exp_base   + bk * 512;
+    bn_zero(result, limbs);
+    store64(result, 1);                     # result = 1
+    bn_copy(basec, base, limbs);
 
     # Locate the highest set bit of exp (hb = -1 when exp == 0, leaving
     # result = 1 = base^0). cyrius has no break/continue, so guard the
@@ -340,16 +368,16 @@ fn bn_modexp(out, base, exp, exp_blen, modulus, limbs): i64 {
     i = hb;
     while (i >= 0) {
         # result = result^2 mod modulus
-        bn_mul(&_bn_exp_prod, &_bn_exp_result, &_bn_exp_result, limbs);
-        bn_mod(&_bn_exp_result, &_bn_exp_prod, 2 * limbs, modulus, limbs);
+        bn_mul(prod, result, result, limbs);
+        bn_mod(result, prod, 2 * limbs, modulus, limbs);
         # if bit i set: result = result * base mod modulus
         if (_bn_exp_bit(exp, exp_blen, i) == 1) {
-            bn_mul(&_bn_exp_prod, &_bn_exp_result, &_bn_exp_base, limbs);
-            bn_mod(&_bn_exp_result, &_bn_exp_prod, 2 * limbs, modulus, limbs);
+            bn_mul(prod, result, basec, limbs);
+            bn_mod(result, prod, 2 * limbs, modulus, limbs);
         }
         i = i - 1;
     }
-    bn_copy(out, &_bn_exp_result, limbs);
+    bn_copy(out, result, limbs);
     return 0;
 }
 
@@ -367,24 +395,34 @@ fn bn_modexp(out, base, exp, exp_blen, modulus, limbs): i64 {
 # CIOS Montgomery multiplication (Koc et al.). Modulus must be ODD
 # (true for RSA n and primes p, q). R = 2^(64*limbs).
 
-var _bn_mont_t[528];        # CIOS accumulator (BN_MAX_LIMBS+2 limbs)
-var _bn_mont_r2[512];       # R^2 mod n
-var _bn_mont_r2src[1040];   # 2^(128*limbs) source (2*BN_MAX_LIMBS+1 limbs)
-var _bn_mont_base[512];     # base in Montgomery form
-var _bn_mont_res[512];      # running result (Montgomery form)
-var _bn_mont_tmp[512];      # multiply temp
-var _bn_mont_one[512];      # the integer 1
+# SECRET mont scratch (carries the secret-exponent residue m^d / mp^dp /
+# mq^dq on the RSA sign path). Banked across `cbank()` lanes (quirk #1)
+# and per-lane wiped on the mont-modexp return (quirk #9 / ADR 0004 —
+# plain `var`, NEVER `secret var`, whose whole-array wipe would clobber a
+# sibling worker's live lane). `_bn_mont_mul` re-derives the `_bn_mont_t`
+# lane from `cbank()` (per-thread-stable, so it lands on the caller's lane).
+var _bn_mont_t[33792];      # 528  * SIGIL_CRYPTO_BANKS  (CIOS accumulator)
+var _bn_mont_r2[32768];     # 512  * SIGIL_CRYPTO_BANKS  (R^2 mod n)
+var _bn_mont_r2src[66560];  # 1040 * SIGIL_CRYPTO_BANKS  (2^(128*limbs) src)
+var _bn_mont_base[32768];   # 512  * SIGIL_CRYPTO_BANKS  (base in Mont form)
+var _bn_mont_res[32768];    # 512  * SIGIL_CRYPTO_BANKS  (running result)
+var _bn_mont_tmp[32768];    # 512  * SIGIL_CRYPTO_BANKS  (multiply temp)
+var _bn_mont_one[32768];    # 512  * SIGIL_CRYPTO_BANKS  (the integer 1)
 
 # ================================================================
 # Modular inverse (binary inversion, odd modulus)
 # ================================================================
 # Used only for the ephemeral per-signature RSA blinding factor (r is
 # random, not the key), so this is NOT constant-time. GECC Alg. 2.22
-# shape, kept fully reduced in [0, n) throughout.
-var _bn_inv_u[512];
-var _bn_inv_v[512];
-var _bn_inv_x1[512];
-var _bn_inv_x2[512];
+# shape, kept fully reduced in [0, n) throughout. Banked across `cbank()`
+# lanes (quirk #1) for concurrent-signer race-freedom; the residue
+# (r / r^-1 / gcd intermediates) is wiped per-lane on the RSA sign return
+# path (rsa.cyr `_rsa_scrub_sign_lanes`, quirk #9) — closing the prior
+# RSA-sign residue gap. Plain `var`, NEVER `secret var`.
+var _bn_inv_u[32768];       # 512 * SIGIL_CRYPTO_BANKS
+var _bn_inv_v[32768];
+var _bn_inv_x1[32768];
+var _bn_inv_x2[32768];
 
 # x = x/2 mod n (n odd): if x even, plain halve; else (x+n)/2 — x+n is
 # even and < 2n, so capture the add-carry into the top bit after the
@@ -413,44 +451,49 @@ fn _bn_submod(a, b, n, limbs): i64 {
 # is 0 or not invertible (iteration cap). NOT constant-time.
 fn bn_modinv(rinv, r, n, limbs): i64 {
     if (bn_is_zero(r, limbs) == 1) { return 0 - 1; }
-    bn_copy(&_bn_inv_u, r, limbs);
-    bn_copy(&_bn_inv_v, n, limbs);
-    bn_zero(&_bn_inv_x1, limbs);
-    store64(&_bn_inv_x1, 1);
-    bn_zero(&_bn_inv_x2, limbs);
+    var bk = cbank();
+    var u  = &_bn_inv_u  + bk * 512;        # this thread's lane
+    var v  = &_bn_inv_v  + bk * 512;
+    var x1 = &_bn_inv_x1 + bk * 512;
+    var x2 = &_bn_inv_x2 + bk * 512;
+    bn_copy(u, r, limbs);
+    bn_copy(v, n, limbs);
+    bn_zero(x1, limbs);
+    store64(x1, 1);
+    bn_zero(x2, limbs);
 
     var cap = 64 * limbs * 4;
     var it = 0;
     var done = 0;
     while (done == 0) {
-        if (bn_is_one(&_bn_inv_u, limbs) == 1) { done = 1; }
-        else { if (bn_is_one(&_bn_inv_v, limbs) == 1) { done = 2; }
-        else { if (bn_is_zero(&_bn_inv_u, limbs) == 1) { done = 3; }   # gcd>1: not invertible
-        else { if (bn_is_zero(&_bn_inv_v, limbs) == 1) { done = 3; }
+        if (bn_is_one(u, limbs) == 1) { done = 1; }
+        else { if (bn_is_one(v, limbs) == 1) { done = 2; }
+        else { if (bn_is_zero(u, limbs) == 1) { done = 3; }   # gcd>1: not invertible
+        else { if (bn_is_zero(v, limbs) == 1) { done = 3; }
         else { if (it >= cap) { done = 3; }
         else {
-            while ((load64(&_bn_inv_u) & 1) == 0) {
-                bn_shr1(&_bn_inv_u, limbs);
-                _bn_halve_mod(&_bn_inv_x1, n, limbs);
+            while ((load64(u) & 1) == 0) {
+                bn_shr1(u, limbs);
+                _bn_halve_mod(x1, n, limbs);
             }
-            while ((load64(&_bn_inv_v) & 1) == 0) {
-                bn_shr1(&_bn_inv_v, limbs);
-                _bn_halve_mod(&_bn_inv_x2, n, limbs);
+            while ((load64(v) & 1) == 0) {
+                bn_shr1(v, limbs);
+                _bn_halve_mod(x2, n, limbs);
             }
-            if (bn_cmp(&_bn_inv_u, &_bn_inv_v, limbs) >= 0) {
-                bn_sub_assign(&_bn_inv_u, &_bn_inv_v, limbs);
-                _bn_submod(&_bn_inv_x1, &_bn_inv_x2, n, limbs);
+            if (bn_cmp(u, v, limbs) >= 0) {
+                bn_sub_assign(u, v, limbs);
+                _bn_submod(x1, x2, n, limbs);
             } else {
-                bn_sub_assign(&_bn_inv_v, &_bn_inv_u, limbs);
-                _bn_submod(&_bn_inv_x2, &_bn_inv_x1, n, limbs);
+                bn_sub_assign(v, u, limbs);
+                _bn_submod(x2, x1, n, limbs);
             }
             it = it + 1;
         } } } } }
     }
 
     if (done == 3) { return 0 - 1; }
-    if (done == 1) { bn_copy(rinv, &_bn_inv_x1, limbs); }
-    else { bn_copy(rinv, &_bn_inv_x2, limbs); }
+    if (done == 1) { bn_copy(rinv, x1, limbs); }
+    else { bn_copy(rinv, x2, limbs); }
     return 0;
 }
 
@@ -468,9 +511,15 @@ fn _bn_mont_n0inv(n0): i64 {
 
 # out = a * b * R^-1 mod n   (CIOS). a, b, n, out are `limbs` limbs.
 fn _bn_mont_mul(out, a, b, n, n0inv, limbs): i64 {
+    # Re-derive the CIOS accumulator's lane. `cbank()` is per-thread-stable,
+    # so this lands on the same lane the caller (bn_mont_modexp) uses for
+    # its other mont buffers — keeping the whole modexp on one lane.
+    var bk = cbank();
+    var t = &_bn_mont_t + bk * 528;
+    var m64 = &_bn_m64 + bk * 16;            # this thread's _mul64 lo||hi slot
     var s = limbs;
     var sbit = 1 << 63;
-    bn_zero(&_bn_mont_t, s + 2);
+    bn_zero(t, s + 2);
 
     var i = 0;
     while (i < s) {
@@ -479,65 +528,59 @@ fn _bn_mont_mul(out, a, b, n, n0inv, limbs): i64 {
         var C = 0;
         var j = 0;
         while (j < s) {
-            var lo[8];
-            var hi[8];
-            _mul64(load64(a + j * 8), bi, &lo, &hi);
-            var tj = load64(&_bn_mont_t + j * 8);
-            var s1 = tj + load64(&lo);
+            _mul64(load64(a + j * 8), bi, m64, m64 + 8);
+            var tj = load64(t + j * 8);
+            var s1 = tj + load64(m64);
             var c1 = 0;
             if ((s1 ^ sbit) < (tj ^ sbit)) { c1 = 1; }
             var s2 = s1 + C;
             var c2 = 0;
             if ((s2 ^ sbit) < (s1 ^ sbit)) { c2 = 1; }
-            store64(&_bn_mont_t + j * 8, s2);
-            C = load64(&hi) + c1 + c2;
+            store64(t + j * 8, s2);
+            C = load64(m64 + 8) + c1 + c2;
             j = j + 1;
         }
-        var ts = load64(&_bn_mont_t + s * 8);
+        var ts = load64(t + s * 8);
         var s3 = ts + C;
         var c3 = 0;
         if ((s3 ^ sbit) < (ts ^ sbit)) { c3 = 1; }
-        store64(&_bn_mont_t + s * 8, s3);
-        store64(&_bn_mont_t + (s + 1) * 8, c3);
+        store64(t + s * 8, s3);
+        store64(t + (s + 1) * 8, c3);
 
         # m = t[0] * n0inv mod 2^64; t += m * n; shift down one limb
-        var m = load64(&_bn_mont_t) * n0inv;
-        var lo0[8];
-        var hi0[8];
-        _mul64(m, load64(n), &lo0, &hi0);
-        var t0 = load64(&_bn_mont_t);
-        var u0 = t0 + load64(&lo0);
+        var m = load64(t) * n0inv;
+        _mul64(m, load64(n), m64, m64 + 8);
+        var t0 = load64(t);
+        var u0 = t0 + load64(m64);
         var d0 = 0;
         if ((u0 ^ sbit) < (t0 ^ sbit)) { d0 = 1; }
-        C = load64(&hi0) + d0;          # t[0]+m*n[0] is == 0 mod 2^64 by construction
+        C = load64(m64 + 8) + d0;       # t[0]+m*n[0] is == 0 mod 2^64 by construction
         j = 1;
         while (j < s) {
-            var loj[8];
-            var hij[8];
-            _mul64(m, load64(n + j * 8), &loj, &hij);
-            var tj = load64(&_bn_mont_t + j * 8);
-            var x1 = tj + load64(&loj);
+            _mul64(m, load64(n + j * 8), m64, m64 + 8);
+            var tj = load64(t + j * 8);
+            var x1 = tj + load64(m64);
             var e1 = 0;
             if ((x1 ^ sbit) < (tj ^ sbit)) { e1 = 1; }
             var x2 = x1 + C;
             var e2 = 0;
             if ((x2 ^ sbit) < (x1 ^ sbit)) { e2 = 1; }
-            store64(&_bn_mont_t + (j - 1) * 8, x2);
-            C = load64(&hij) + e1 + e2;
+            store64(t + (j - 1) * 8, x2);
+            C = load64(m64 + 8) + e1 + e2;
             j = j + 1;
         }
-        var ts2 = load64(&_bn_mont_t + s * 8);
+        var ts2 = load64(t + s * 8);
         var y = ts2 + C;
         var f = 0;
         if ((y ^ sbit) < (ts2 ^ sbit)) { f = 1; }
-        store64(&_bn_mont_t + (s - 1) * 8, y);
-        store64(&_bn_mont_t + s * 8, load64(&_bn_mont_t + (s + 1) * 8) + f);
+        store64(t + (s - 1) * 8, y);
+        store64(t + s * 8, load64(t + (s + 1) * 8) + f);
         i = i + 1;
     }
 
     # t (low s limbs + carry t[s]) is < 2n; reduce to [0, n).
-    bn_copy(out, &_bn_mont_t, s);
-    var extra = load64(&_bn_mont_t + s * 8);
+    bn_copy(out, t, s);
+    var extra = load64(t + s * 8);
     # subtract n iff extra != 0 OR out >= n
     var dosub = 0;
     if (extra != 0) { dosub = 1; }
@@ -559,34 +602,63 @@ fn _bn_ct_select(out, a_buf, b_buf, bit, limbs): i64 {
     return 0;
 }
 
+# Per-lane secret zeroization of the banked mont scratch (quirk #9 / ADR
+# 0004). The accumulator/base/res/tmp buffers carry the secret-exponent
+# residue (m^d / mp^dp / mq^dq) on the RSA sign path. They are plain `var`
+# banked across `cbank()` lanes, so this wipes ONLY the calling worker's
+# lane (a `secret var` whole-array wipe would clobber a sibling lane). The
+# R^2 / R^2-src / one buffers are derived from public n (R^2 mod n) or the
+# constant 1, but are wiped too for a single hygiene surface. Called on the
+# mont-modexp return regardless of public/secret use (cheap, ≤ 528 B/lane).
+fn _bn_mont_scrub_lanes(): i64 {
+    var bk = cbank();
+    memset(&_bn_mont_t     + bk * 528,  0, 528);
+    memset(&_bn_mont_r2    + bk * 512,  0, 512);
+    memset(&_bn_mont_r2src + bk * 1040, 0, 1040);
+    memset(&_bn_mont_base  + bk * 512,  0, 512);
+    memset(&_bn_mont_res   + bk * 512,  0, 512);
+    memset(&_bn_mont_tmp   + bk * 512,  0, 512);
+    memset(&_bn_mont_one   + bk * 512,  0, 512);
+    memset(&_bn_m64        + bk * 16,   0, 16);   # _mul64 lo||hi residue
+    return 0;
+}
+
 # out (limbs) = base^exp mod modulus, `exp` = `exp_blen` big-endian
 # bytes. Constant-time in the exponent (square+multiply every bit over
 # the full width). Modulus MUST be odd. Safe for the secret exponent.
 fn bn_mont_modexp(out, base, exp, exp_blen, modulus, limbs): i64 {
+    var bk = cbank();
+    var r2src = &_bn_mont_r2src + bk * 1040;   # this thread's lane (SECRET)
+    var r2    = &_bn_mont_r2    + bk * 512;
+    var one   = &_bn_mont_one   + bk * 512;
+    var basem = &_bn_mont_base  + bk * 512;
+    var res   = &_bn_mont_res   + bk * 512;
+    var tmp   = &_bn_mont_tmp   + bk * 512;
     var n0inv = _bn_mont_n0inv(load64(modulus));
 
     # R^2 mod n  =  2^(128*limbs) mod n
     var r2limbs = 2 * limbs + 1;
-    bn_zero(&_bn_mont_r2src, r2limbs);
-    store64(&_bn_mont_r2src + (2 * limbs) * 8, 1);
-    bn_mod(&_bn_mont_r2, &_bn_mont_r2src, r2limbs, modulus, limbs);
+    bn_zero(r2src, r2limbs);
+    store64(r2src + (2 * limbs) * 8, 1);
+    bn_mod(r2, r2src, r2limbs, modulus, limbs);
 
-    bn_zero(&_bn_mont_one, limbs);
-    store64(&_bn_mont_one, 1);
+    bn_zero(one, limbs);
+    store64(one, 1);
 
     # base_m = base*R mod n ; res = 1*R mod n (Montgomery 1)
-    _bn_mont_mul(&_bn_mont_base, base, &_bn_mont_r2, modulus, n0inv, limbs);
-    _bn_mont_mul(&_bn_mont_res, &_bn_mont_one, &_bn_mont_r2, modulus, n0inv, limbs);
+    _bn_mont_mul(basem, base, r2, modulus, n0inv, limbs);
+    _bn_mont_mul(res, one, r2, modulus, n0inv, limbs);
 
     var i = exp_blen * 8 - 1;
     while (i >= 0) {
-        _bn_mont_mul(&_bn_mont_res, &_bn_mont_res, &_bn_mont_res, modulus, n0inv, limbs);
-        _bn_mont_mul(&_bn_mont_tmp, &_bn_mont_res, &_bn_mont_base, modulus, n0inv, limbs);
-        _bn_ct_select(&_bn_mont_res, &_bn_mont_tmp, &_bn_mont_res, _bn_exp_bit(exp, exp_blen, i), limbs);
+        _bn_mont_mul(res, res, res, modulus, n0inv, limbs);
+        _bn_mont_mul(tmp, res, basem, modulus, n0inv, limbs);
+        _bn_ct_select(res, tmp, res, _bn_exp_bit(exp, exp_blen, i), limbs);
         i = i - 1;
     }
 
     # convert out of Montgomery form: out = res * 1 * R^-1 mod n
-    _bn_mont_mul(out, &_bn_mont_res, &_bn_mont_one, modulus, n0inv, limbs);
+    _bn_mont_mul(out, res, one, modulus, n0inv, limbs);
+    _bn_mont_scrub_lanes();         # wipe this lane's secret residue (quirk #9)
     return 0;
 }

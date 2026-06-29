@@ -7,6 +7,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.9.7] — 2026-06-29
+
+**Thread-safety banking, completed.** Finishes the 3.9.6 concurrent-TLS
+follow-up ([ADR 0007](docs/adr/0007-auto-banking-for-concurrent-tls.md)): every
+remaining per-call crypto scratch buffer that was a shared function-scope static
+(quirk #1) or `fl_alloc` is now lane-banked across `cbank()`, so **every
+reachable concurrent crypto path is race-free**. The 3.9.6 fix covered the
+reproduced Ed25519-cert + AEAD crash path; this closes the latent sites.
+
+### Changed
+- **ChaCha20-Poly1305 — last concurrent `fl_alloc` removed.** Added a streaming
+  Poly1305 API (`poly1305_init`/`poly1305_update`/`poly1305_finalize`,
+  `src/poly1305.cyr`); `_cp_tag` now streams the RFC 8439 §2.8 mac_data segments
+  in place instead of assembling them in a per-record `fl_alloc`'d concat buffer.
+  The benched one-shot `poly1305_mac` is unchanged; AEAD encrypt is marginally
+  faster (56.4 vs 57.5 µs/1 KB — the dropped heap alloc + AAD/ct copies).
+- **ECDSA P-256 / P-384 sign + verify — fully banked** (`src/ecdsa_p256.cyr`,
+  `src/ecdsa_p384.cyr`, `src/ecdsa_sign.cyr`). ~150 process-global field/scalar/
+  point scratch buffers lane-sliced; the RFC 6979 HMAC-DRBG state, the per-sign
+  `k·G` output, and the sign function's secret scratch banked (plain `var` +
+  per-lane `memset`, never `secret var` — quirk #9 / ADR 0004). P-384's
+  `_p384_mul64` 128-bit return slots (module-global scalars, unbankable as
+  scalars) were restructured to a caller-provided banked out-buffer. Added
+  `ecdsa_p256_warm()` / `ecdsa_p384_warm()` — a one-time **main-thread prewarm**
+  (same contract as `crypto_tls_main_init`) so the lazy `_init` allocations run
+  before worker fan-out (the bump allocator is not thread-safe — quirk #7).
+- **bignum / RSA / TLS 1.2 PRF — banked** (`src/bignum.cyr`, `src/rsa.cyr`,
+  `src/tls12_prf.cyr`). Lowest priority — off the TLS 1.3 server path (RSA is
+  rejected by `tls_native`; TLS 1.3 does not use the 1.2 PRF) — banked for
+  completeness. Covers the Montgomery modexp scratch (shared by RSA sign/verify),
+  the `_mul64` lo/hi output locals, the RSA verify/sign/blind/CRT workspaces, and
+  the P_hash PRF buffers.
+
+### Security
+- **Latent race fixed in the ECDSA DER wrappers** (`ecdsa_p256_sign_der`,
+  `ecdsa_p384_sign_der`, `ecdsa_p256_verify_der`). Their `secret var sig`/
+  `raw_sig` scratch was assumed per-call ("arena/stack-local"), but a 2-thread
+  probe proved `secret var X[N]` **arrays are function-scope statics that race**
+  (the v6.2.25 arena fix only removed a heap leak — it did not make them
+  thread-safe). These wrappers are exactly the TLS CertificateVerify path, so
+  concurrent callers could corrupt a signature / verify input. Now banked.
+- **RSA-sign secret-residue gap closed.** The sign path previously left
+  secret-exponent intermediates (`_bn_mont_*`, `_rsa_blind_*`, `_rsa_crt_*`) in
+  process-global scratch after returning. Banking forces a per-lane `memset` of
+  exactly those buffers on every sign return path, zeroizing the residue.
+
+### Tests
+- New `tests/tcyr/ecdsa_concurrent.tcyr` (P-256 + P-384 concurrent sign / verify /
+  DER round-trip across 8 lanes) and `tests/tcyr/bignum_tls12_concurrent.tcyr`
+  (concurrent Montgomery modexp + PRF) — both red on the unbanked code, green
+  after. Extended `poly1305.tcyr` (streaming-equivalence across arbitrary chunk
+  splits) and `banking_concurrent.tcyr` (concurrent AEAD). Full suite **60/60**.
+
+### Notes
+- 64-lane banking of the large RSA/bignum scratch grows static `.bss` (~14 MB
+  total; lazily faulted zero-pages). Informational — the same accepted tradeoff
+  as the prior SHA/HMAC/ECDSA banking. A future optimization could use fewer
+  lanes for the off-path RSA/bignum scratch.
+
 ## [3.9.6] — 2026-06-29
 
 **Concurrent TLS handshakes no longer race sigil's crypto scratch.** A TLS 1.3

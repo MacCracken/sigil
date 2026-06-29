@@ -6,8 +6,12 @@
 # encoding. Every operand is public, so:
 #   * no constant-time requirement (no secret to leak; the bignum
 #     engine's data-dependent reduction is fine here);
-#   * not on the parallel batch-verify path, so the static scratch
-#     below is plain single-threaded (see src/bignum.cyr header).
+#   * not on the parallel batch-verify path. The static scratch below
+#     was plain single-threaded; 3.9.7 banked it across `cbank()` lanes
+#     (see src/bignum.cyr header / src/crypto_scratch.cyr) so concurrent
+#     RSA callers can't race it — verify banks are PUBLIC (no wipe); the
+#     sign / blind / CRT banks carry the secret-exponent residue and are
+#     per-lane wiped on the sign return (`_rsa_scrub_sign_lanes`, quirk #9).
 # RSA *signing* (private exponent) shipped in 3.6.4 — it adds blinding +
 # a constant-time ladder (`bn_mont_modexp` + CRT); it does NOT reuse the
 # non-CT `bn_modexp`.
@@ -19,13 +23,25 @@
 
 # DigestInfo working scratch + the RSA bignum buffers. n_len <= 512
 # bytes (RSA-4096); limbs = ceil(n_len/8) <= 64.
-var _rsa_n[512];
-var _rsa_s[512];
-var _rsa_m[512];
-var _rsa_em[512];           # recovered encoded message (k bytes)
-var _rsa_expected[512];     # reconstructed expected EM
-var _rsa_hash[64];          # message digest (32 or 48)
-var _rsa_di[24];            # DigestInfo AlgorithmIdentifier prefix (19)
+#
+# Banking (3.9.7): each `var X[N]` here is a function-scope STATIC global
+# (CLAUDE.md quirk #1), shared across threads, so concurrent RSA callers
+# would race them. Each is widened to `[N*SIGIL_CRYPTO_BANKS]` and every
+# consuming fn operates on its own lane `&X + cbank()*N` (see
+# src/crypto_scratch.cyr). The VERIFY workspace below operates on public
+# data (signature, public n/e, message digest) — banked for race-freedom,
+# NO per-lane wipe. The SIGN workspace (`_rsa_sign_*`, `_rsa_blind_*`,
+# `_rsa_crt_*`, further down) carries the secret residue and IS per-lane
+# wiped on the sign return (quirk #9 / ADR 0004 — plain `var`, never
+# `secret var`). `_rsa_hash` / `_rsa_di` are shared by verify and sign but
+# hold only the (public) message digest / DigestInfo prefix — public bank.
+var _rsa_n[32768];          # 512 * SIGIL_CRYPTO_BANKS  (PUBLIC)
+var _rsa_s[32768];          # 512 * SIGIL_CRYPTO_BANKS  (PUBLIC)
+var _rsa_m[32768];          # 512 * SIGIL_CRYPTO_BANKS  (PUBLIC)
+var _rsa_em[32768];         # recovered encoded message (PUBLIC)
+var _rsa_expected[32768];   # reconstructed expected EM   (PUBLIC)
+var _rsa_hash[4096];        # 64 * SIGIL_CRYPTO_BANKS  message digest (PUBLIC)
+var _rsa_di[1536];          # 24 * SIGIL_CRYPTO_BANKS  DigestInfo prefix (PUBLIC)
 
 # PKCS#1 v1.5 DigestInfo prefixes (RFC 8017 §9.2 note 1): the DER
 # `SEQUENCE { SEQUENCE { OID, NULL }, OCTET STRING <hash> }` header that
@@ -81,8 +97,12 @@ fn _rsa_recover_em(n_be, n_len, e_be, e_len, sig, sig_len, em_out): i64 {
     if (sig_len != n_len) { return 0 - 1; }
     if (n_len > 512) { return 0 - 1; }
     var limbs = (n_len + 7) / 8;
+    var bk = cbank();
+    var rn = &_rsa_n + bk * 512;       # this thread's lane (PUBLIC)
+    var rs = &_rsa_s + bk * 512;
+    var rm = &_rsa_m + bk * 512;
 
-    bn_from_be(&_rsa_n, limbs, n_be, n_len);
+    bn_from_be(rn, limbs, n_be, n_len);
 
     # bn_mont_modexp (3.6.6) requires an ODD modulus — a real RSA n always
     # is (p·q of two odd primes). The modulus here is attacker-controlled
@@ -91,20 +111,20 @@ fn _rsa_recover_em(n_be, n_len, e_be, e_len, sig, sig_len, em_out): i64 {
     # trust boundary: reject an even (or zero) n rather than feeding the
     # Montgomery ladder an input outside its domain. (Even n is malformed;
     # this is defense-in-depth — the EM compare would also reject.)
-    if ((load64(&_rsa_n) & 1) == 0) { return 0 - 1; }
+    if ((load64(rn) & 1) == 0) { return 0 - 1; }
 
-    bn_from_be(&_rsa_s, limbs, sig, sig_len);
+    bn_from_be(rs, limbs, sig, sig_len);
 
     # RFC 8017 §8.2.2 / §5.2.1: reject s >= n (out of range).
-    if (bn_cmp(&_rsa_s, &_rsa_n, limbs) >= 0) { return 0 - 1; }
+    if (bn_cmp(rs, rn, limbs) >= 0) { return 0 - 1; }
 
     # m = s^e mod n  (RSAVP1), then I2OSP to k octets. The modulus is
     # odd (RSA n), so the constant-time Montgomery ladder applies; it is
     # ~Nx faster than the schoolbook `bn_modexp` here (3.6.6). The
     # operands are public — Montgomery is used purely for speed, not for
     # the side-channel posture (no secret to protect on the verify path).
-    bn_mont_modexp(&_rsa_m, &_rsa_s, e_be, e_len, &_rsa_n, limbs);
-    bn_to_be(em_out, n_len, &_rsa_m, limbs);
+    bn_mont_modexp(rm, rs, e_be, e_len, rn, limbs);
+    bn_to_be(em_out, n_len, rm, limbs);
     return 0;
 }
 
@@ -112,28 +132,37 @@ fn _rsa_recover_em(n_be, n_len, e_be, e_len, sig, sig_len, em_out): i64 {
 # prefix/prefix_len: the DigestInfo prefix. hash/hash_len: the message
 # digest. sig/sig_len: the signature. Returns 1 iff valid, else 0.
 fn _rsa_pkcs1v15_check(n_be, n_len, e_be, e_len, prefix, prefix_len, hash, hash_len, sig, sig_len): i64 {
-    if (_rsa_recover_em(n_be, n_len, e_be, e_len, sig, sig_len, &_rsa_em) < 0) { return 0; }
+    var bk = cbank();
+    var rem = &_rsa_em + bk * 512;          # this thread's lane (PUBLIC)
+    var rexp = &_rsa_expected + bk * 512;
+    if (_rsa_recover_em(n_be, n_len, e_be, e_len, sig, sig_len, rem) < 0) { return 0; }
 
     # Reconstruct the expected EM and compare all k octets (RFC 8017
     # §9.2). Operands are public, but reuse the OR-accumulating
     # constant-time compare for a single audit surface.
-    if (_rsa_emsa_encode(&_rsa_expected, n_len, prefix, prefix_len, hash, hash_len) < 0) { return 0; }
-    return ct_eq_bytes(&_rsa_em, &_rsa_expected, n_len);
+    if (_rsa_emsa_encode(rexp, n_len, prefix, prefix_len, hash, hash_len) < 0) { return 0; }
+    return ct_eq_bytes(rem, rexp, n_len);
 }
 
 # Verify an RSASSA-PKCS1-v1.5 signature over SHA-256(msg) with public
 # key (n_be, e_be). Returns 1 iff valid, else 0.
 fn rsa_pkcs1v15_verify_sha256(n_be, n_len, e_be, e_len, msg, msg_len, sig, sig_len): i64 {
-    sha256(msg, msg_len, &_rsa_hash);
-    var pl = _rsa_di_sha256(&_rsa_di);
-    return _rsa_pkcs1v15_check(n_be, n_len, e_be, e_len, &_rsa_di, pl, &_rsa_hash, 32, sig, sig_len);
+    var bk = cbank();
+    var rh = &_rsa_hash + bk * 64;      # this thread's lane (PUBLIC)
+    var rd = &_rsa_di + bk * 24;
+    sha256(msg, msg_len, rh);
+    var pl = _rsa_di_sha256(rd);
+    return _rsa_pkcs1v15_check(n_be, n_len, e_be, e_len, rd, pl, rh, 32, sig, sig_len);
 }
 
 # Verify an RSASSA-PKCS1-v1.5 signature over SHA-384(msg).
 fn rsa_pkcs1v15_verify_sha384(n_be, n_len, e_be, e_len, msg, msg_len, sig, sig_len): i64 {
-    sha384(msg, msg_len, &_rsa_hash);
-    var pl = _rsa_di_sha384(&_rsa_di);
-    return _rsa_pkcs1v15_check(n_be, n_len, e_be, e_len, &_rsa_di, pl, &_rsa_hash, 48, sig, sig_len);
+    var bk = cbank();
+    var rh = &_rsa_hash + bk * 64;      # this thread's lane (PUBLIC)
+    var rd = &_rsa_di + bk * 24;
+    sha384(msg, msg_len, rh);
+    var pl = _rsa_di_sha384(rd);
+    return _rsa_pkcs1v15_check(n_be, n_len, e_be, e_len, rd, pl, rh, 48, sig, sig_len);
 }
 
 # ================================================================
@@ -350,23 +379,33 @@ fn rsa_privkey_from_der(der, der_len, key): i64 {
 # guards the CRT fault surface). `_rsa_sign_*` / `_rsa_blind_*` /
 # `_rsa_crt_*` hold message/signature-derived values; the secret is `d`
 # (and p, q, dp, dq) inside `key` (caller zeroizes).
-var _rsa_sign_em[512];
-var _rsa_sign_m[512];
-var _rsa_sign_s[512];
-var _rsa_sign_chk[512];
-var _rsa_sign_n[512];       # modulus as a bignum (little-endian limbs)
+# SIGN workspace, banked across `cbank()` lanes (quirk #1). `_rsa_sign_m`
+# carries m^d (the secret-exponent residue) and `_rsa_sign_s` the raw
+# signature pre-serialization; banked SECRET, per-lane wiped on the sign
+# return (`_rsa_scrub_sign_lanes`, quirk #9 / ADR 0004 — plain `var`,
+# never `secret var`). `_rsa_sign_em` (the public encoded message) and
+# `_rsa_sign_n` (public modulus) / `_rsa_sign_chk` (s^e, public) are
+# banked for race-freedom and wiped with the rest as a single surface.
+var _rsa_sign_em[32768];    # 512 * SIGIL_CRYPTO_BANKS
+var _rsa_sign_m[32768];     # 512 * SIGIL_CRYPTO_BANKS  (m^d — secret residue)
+var _rsa_sign_s[32768];     # 512 * SIGIL_CRYPTO_BANKS  (raw signature)
+var _rsa_sign_chk[32768];   # 512 * SIGIL_CRYPTO_BANKS
+var _rsa_sign_n[32768];     # 512 * SIGIL_CRYPTO_BANKS  (modulus, little-endian limbs)
 
 # Base-blinding scratch (3.6.4). The blinding factor r is a fresh
 # per-signature random; blinding decorrelates the secret-exponent
 # modexp's timing/power from the key (DPA / timing-correlation
 # defense). The final signature is unchanged (deterministic v1.5).
-var _rsa_blind_rand[512];   # raw CSPRNG bytes
-var _rsa_blind_r[512];      # r in [1, n)
-var _rsa_blind_rinv[512];   # r^-1 mod n
-var _rsa_blind_re[512];     # r^e mod n
-var _rsa_blind_mb[512];     # blinded message m * r^e mod n
-var _rsa_blind_sb[512];     # blinded signature (m*r^e)^d mod n
-var _rsa_blind_prod[1024];  # 2*limbs multiply scratch
+# Banked across `cbank()` lanes (quirk #1). r / r^-1 / the blinded
+# signature (m*r^e)^d carry secret-correlated material; banked SECRET,
+# per-lane wiped on the sign return (`_rsa_scrub_sign_lanes`, quirk #9).
+var _rsa_blind_rand[32768]; # 512  * SIGIL_CRYPTO_BANKS  raw CSPRNG bytes
+var _rsa_blind_r[32768];    # 512  * SIGIL_CRYPTO_BANKS  r in [1, n)
+var _rsa_blind_rinv[32768]; # 512  * SIGIL_CRYPTO_BANKS  r^-1 mod n
+var _rsa_blind_re[32768];   # 512  * SIGIL_CRYPTO_BANKS  r^e mod n
+var _rsa_blind_mb[32768];   # 512  * SIGIL_CRYPTO_BANKS  blinded m * r^e mod n
+var _rsa_blind_sb[32768];   # 512  * SIGIL_CRYPTO_BANKS  blinded (m*r^e)^d mod n
+var _rsa_blind_prod[65536]; # 1024 * SIGIL_CRYPTO_BANKS  2*limbs multiply scratch
 
 # Generate a fresh blinding pair (r, r^-1 mod n) with r in [1, n) and
 # invertible. Draws entropy via sigil's fail-closed CSPRNG boundary
@@ -374,13 +413,14 @@ var _rsa_blind_prod[1024];  # 2*limbs multiply scratch
 # Returns 0 on success, -1 if no entropy or no invertible r within a few
 # tries (effectively never).
 fn _rsa_gen_blind(r_out, rinv_out, n_bn, nlen, limbs): i64 {
+    var rand = &_rsa_blind_rand + cbank() * 512;   # this thread's lane (SECRET)
     var tries = 0;
     var ok = 0;
     while (ok == 0) {
         if (tries >= 16) { return 0 - 1; }
         tries = tries + 1;
-        if (_sigil_random_fill(&_rsa_blind_rand, nlen) != 0) { return 0 - 1; }
-        bn_from_be(r_out, limbs, &_rsa_blind_rand, nlen);
+        if (_sigil_random_fill(rand, nlen) != 0) { return 0 - 1; }
+        bn_from_be(r_out, limbs, rand, nlen);
         bn_mod(r_out, r_out, limbs, n_bn, limbs);          # r in [0, n)
         if (bn_is_zero(r_out, limbs) == 0) {
             if (bn_modinv(rinv_out, r_out, n_bn, limbs) == 0) { ok = 1; }
@@ -390,17 +430,21 @@ fn _rsa_gen_blind(r_out, rinv_out, n_bn, nlen, limbs): i64 {
 }
 
 # CRT exponentiation scratch (3.6.4). Half-width (RSA-4096 prime side).
-var _rsa_crt_p[256];
-var _rsa_crt_q[256];
-var _rsa_crt_qinv[256];
-var _rsa_crt_mp[256];
-var _rsa_crt_mq[256];
-var _rsa_crt_s1[256];
-var _rsa_crt_s2[256];
-var _rsa_crt_s2full[512];
-var _rsa_crt_h[256];
-var _rsa_crt_prod[512];
-var _rsa_crt_qh[512];
+# Banked across `cbank()` lanes (quirk #1). p / q / qinv (secret key
+# components) and s1 / s2 / mp / mq / h (the mod-p,q residues mp^dp /
+# mq^dq) are SECRET; banked plain `var`, per-lane wiped on the sign
+# return (`_rsa_scrub_sign_lanes`, quirk #9 / ADR 0004).
+var _rsa_crt_p[16384];      # 256 * SIGIL_CRYPTO_BANKS
+var _rsa_crt_q[16384];      # 256 * SIGIL_CRYPTO_BANKS
+var _rsa_crt_qinv[16384];   # 256 * SIGIL_CRYPTO_BANKS
+var _rsa_crt_mp[16384];     # 256 * SIGIL_CRYPTO_BANKS
+var _rsa_crt_mq[16384];     # 256 * SIGIL_CRYPTO_BANKS
+var _rsa_crt_s1[16384];     # 256 * SIGIL_CRYPTO_BANKS  (mp^dp mod p)
+var _rsa_crt_s2[16384];     # 256 * SIGIL_CRYPTO_BANKS  (mq^dq mod q)
+var _rsa_crt_s2full[32768]; # 512 * SIGIL_CRYPTO_BANKS
+var _rsa_crt_h[16384];      # 256 * SIGIL_CRYPTO_BANKS
+var _rsa_crt_prod[32768];   # 512 * SIGIL_CRYPTO_BANKS
+var _rsa_crt_qh[32768];     # 512 * SIGIL_CRYPTO_BANKS
 
 # sb_out = mb^d mod n via the CRT (Garner): sign mod p and mod q with
 # the constant-time Montgomery ladder, then recombine — ~4× faster
@@ -414,28 +458,89 @@ fn _rsa_crt_modexp(key, mb, sb_out, limbs): i64 {
     if (qlen == 0) { return 0 - 1; }
     var hl = limbs / 2;                 # half-width limbs (n_limbs is even)
 
-    bn_from_be(&_rsa_crt_p, hl, key + RSAK_P, plen);
-    bn_from_be(&_rsa_crt_q, hl, key + RSAK_Q, qlen);
-    bn_from_be(&_rsa_crt_qinv, hl, key + RSAK_QINV, load64(key + RSAK_QINVLEN));
+    var bk = cbank();                   # this thread's lane (SECRET)
+    var cp     = &_rsa_crt_p      + bk * 256;
+    var cq     = &_rsa_crt_q      + bk * 256;
+    var cqinv  = &_rsa_crt_qinv   + bk * 256;
+    var cmp    = &_rsa_crt_mp     + bk * 256;
+    var cmq    = &_rsa_crt_mq     + bk * 256;
+    var cs1    = &_rsa_crt_s1     + bk * 256;
+    var cs2    = &_rsa_crt_s2     + bk * 256;
+    var cs2f   = &_rsa_crt_s2full + bk * 512;
+    var ch     = &_rsa_crt_h      + bk * 256;
+    var cprod  = &_rsa_crt_prod   + bk * 512;
+    var cqh    = &_rsa_crt_qh     + bk * 512;
+
+    bn_from_be(cp, hl, key + RSAK_P, plen);
+    bn_from_be(cq, hl, key + RSAK_Q, qlen);
+    bn_from_be(cqinv, hl, key + RSAK_QINV, load64(key + RSAK_QINVLEN));
 
     # s1 = (mb mod p)^dp mod p ; s2 = (mb mod q)^dq mod q
-    bn_mod(&_rsa_crt_mp, mb, limbs, &_rsa_crt_p, hl);
-    bn_mod(&_rsa_crt_mq, mb, limbs, &_rsa_crt_q, hl);
-    bn_mont_modexp(&_rsa_crt_s1, &_rsa_crt_mp, key + RSAK_DP, load64(key + RSAK_DPLEN), &_rsa_crt_p, hl);
-    bn_mont_modexp(&_rsa_crt_s2, &_rsa_crt_mq, key + RSAK_DQ, load64(key + RSAK_DQLEN), &_rsa_crt_q, hl);
+    bn_mod(cmp, mb, limbs, cp, hl);
+    bn_mod(cmq, mb, limbs, cq, hl);
+    bn_mont_modexp(cs1, cmp, key + RSAK_DP, load64(key + RSAK_DPLEN), cp, hl);
+    bn_mont_modexp(cs2, cmq, key + RSAK_DQ, load64(key + RSAK_DQLEN), cq, hl);
 
     # h = (s1 - s2) * qinv mod p
-    bn_copy(&_rsa_crt_h, &_rsa_crt_s1, hl);
-    _bn_submod(&_rsa_crt_h, &_rsa_crt_s2, &_rsa_crt_p, hl);
-    bn_mul(&_rsa_crt_prod, &_rsa_crt_h, &_rsa_crt_qinv, hl);
-    bn_mod(&_rsa_crt_h, &_rsa_crt_prod, 2 * hl, &_rsa_crt_p, hl);
+    bn_copy(ch, cs1, hl);
+    _bn_submod(ch, cs2, cp, hl);
+    bn_mul(cprod, ch, cqinv, hl);
+    bn_mod(ch, cprod, 2 * hl, cp, hl);
 
     # sb = s2 + q*h   (< n by construction; no final reduction needed)
-    bn_mul(&_rsa_crt_qh, &_rsa_crt_q, &_rsa_crt_h, hl);   # 2*hl == limbs
-    bn_zero(&_rsa_crt_s2full, limbs);
-    bn_copy(&_rsa_crt_s2full, &_rsa_crt_s2, hl);
-    bn_copy(sb_out, &_rsa_crt_qh, limbs);
-    bn_add_assign(sb_out, &_rsa_crt_s2full, limbs);
+    bn_mul(cqh, cq, ch, hl);   # 2*hl == limbs
+    bn_zero(cs2f, limbs);
+    bn_copy(cs2f, cs2, hl);
+    bn_copy(sb_out, cqh, limbs);
+    bn_add_assign(sb_out, cs2f, limbs);
+    return 0;
+}
+
+# Per-lane secret zeroization of every banked RSA-sign scratch buffer
+# (CLAUDE.md quirk #9 / ADR 0004). The sign / blind / CRT banks are plain
+# `var` banked across `cbank()` lanes (never `secret var`, whose whole-
+# array wipe would clobber a sibling worker's live lane), so this scrubs
+# ONLY the calling worker's lane. Also wipes the bignum engine's SECRET
+# `_bn_inv_*` (modinv residue from the blinding factor) and its public
+# `_bn_modrem` / `_bn_modn1` reduction lanes — CLOSING the pre-3.9.7 gap
+# where the RSA sign path left secret-exponent residue in process-global
+# scratch (the `_bn_mont_*` lanes are self-wiped by bn_mont_modexp). Called
+# on EVERY return of `_rsa_raw_sign`.
+fn _rsa_scrub_sign_lanes(): i64 {
+    var bk = cbank();
+    # rsa.cyr sign workspace
+    memset(&_rsa_sign_em  + bk * 512, 0, 512);
+    memset(&_rsa_sign_m   + bk * 512, 0, 512);
+    memset(&_rsa_sign_s   + bk * 512, 0, 512);
+    memset(&_rsa_sign_chk + bk * 512, 0, 512);
+    memset(&_rsa_sign_n   + bk * 512, 0, 512);
+    # base-blinding workspace
+    memset(&_rsa_blind_rand + bk * 512,  0, 512);
+    memset(&_rsa_blind_r    + bk * 512,  0, 512);
+    memset(&_rsa_blind_rinv + bk * 512,  0, 512);
+    memset(&_rsa_blind_re   + bk * 512,  0, 512);
+    memset(&_rsa_blind_mb   + bk * 512,  0, 512);
+    memset(&_rsa_blind_sb   + bk * 512,  0, 512);
+    memset(&_rsa_blind_prod + bk * 1024, 0, 1024);
+    # CRT workspace
+    memset(&_rsa_crt_p      + bk * 256, 0, 256);
+    memset(&_rsa_crt_q      + bk * 256, 0, 256);
+    memset(&_rsa_crt_qinv   + bk * 256, 0, 256);
+    memset(&_rsa_crt_mp     + bk * 256, 0, 256);
+    memset(&_rsa_crt_mq     + bk * 256, 0, 256);
+    memset(&_rsa_crt_s1     + bk * 256, 0, 256);
+    memset(&_rsa_crt_s2     + bk * 256, 0, 256);
+    memset(&_rsa_crt_s2full + bk * 512, 0, 512);
+    memset(&_rsa_crt_h      + bk * 256, 0, 256);
+    memset(&_rsa_crt_prod   + bk * 512, 0, 512);
+    memset(&_rsa_crt_qh     + bk * 512, 0, 512);
+    # bignum engine lanes touched by the sign path (residue-gap close)
+    memset(&_bn_inv_u  + bk * 512, 0, 512);
+    memset(&_bn_inv_v  + bk * 512, 0, 512);
+    memset(&_bn_inv_x1 + bk * 512, 0, 512);
+    memset(&_bn_inv_x2 + bk * 512, 0, 512);
+    memset(&_bn_modrem + bk * 520, 0, 520);
+    memset(&_bn_modn1  + bk * 520, 0, 520);
     return 0;
 }
 
@@ -454,40 +559,54 @@ fn _rsa_raw_sign(key, em, sig_out): i64 {
     var dlen = load64(key + RSAK_DLEN);
     var elen = load64(key + RSAK_ELEN);
 
+    var bk = cbank();                       # this thread's lane (SECRET)
+    var sm   = &_rsa_sign_m   + bk * 512;
+    var sn   = &_rsa_sign_n   + bk * 512;
+    var ss   = &_rsa_sign_s   + bk * 512;
+    var schk = &_rsa_sign_chk + bk * 512;
+    var br   = &_rsa_blind_r    + bk * 512;
+    var brinv = &_rsa_blind_rinv + bk * 512;
+    var bre  = &_rsa_blind_re   + bk * 512;
+    var bmb  = &_rsa_blind_mb   + bk * 512;
+    var bsb  = &_rsa_blind_sb   + bk * 512;
+    var bprod = &_rsa_blind_prod + bk * 1024;
+
     # m = OS2IP(EM); n as a bignum.
-    bn_from_be(&_rsa_sign_m, limbs, em, nlen);
-    bn_from_be(&_rsa_sign_n, limbs, key + RSAK_N, nlen);
+    bn_from_be(sm, limbs, em, nlen);
+    bn_from_be(sn, limbs, key + RSAK_N, nlen);
 
     # Base blinding: fresh random r, mb = m * r^e mod n  (r^e via the
     # public-exponent modexp). Decorrelates the secret modexp from the
     # key; the final s is unchanged.
-    if (_rsa_gen_blind(&_rsa_blind_r, &_rsa_blind_rinv, &_rsa_sign_n, nlen, limbs) < 0) { return 0 - 1; }
+    if (_rsa_gen_blind(br, brinv, sn, nlen, limbs) < 0) { _rsa_scrub_sign_lanes(); return 0 - 1; }
     # r^e mod n: public exponent over the random (public) blinding base —
     # Montgomery ladder for speed (modulus n is odd). 3.6.6.
-    bn_mont_modexp(&_rsa_blind_re, &_rsa_blind_r, key + RSAK_E, elen, &_rsa_sign_n, limbs);
-    bn_mul(&_rsa_blind_prod, &_rsa_sign_m, &_rsa_blind_re, limbs);
-    bn_mod(&_rsa_blind_mb, &_rsa_blind_prod, 2 * limbs, &_rsa_sign_n, limbs);
+    bn_mont_modexp(bre, br, key + RSAK_E, elen, sn, limbs);
+    bn_mul(bprod, sm, bre, limbs);
+    bn_mod(bmb, bprod, 2 * limbs, sn, limbs);
 
     # sb = mb^d mod n  (constant-time). CRT when the key has p/q/dp/dq/
     # qinv (~4×); else the full-width Montgomery ladder.
-    if (_rsa_crt_modexp(key, &_rsa_blind_mb, &_rsa_blind_sb, limbs) < 0) {
-        bn_mont_modexp(&_rsa_blind_sb, &_rsa_blind_mb, key + RSAK_D, dlen, &_rsa_sign_n, limbs);
+    if (_rsa_crt_modexp(key, bmb, bsb, limbs) < 0) {
+        bn_mont_modexp(bsb, bmb, key + RSAK_D, dlen, sn, limbs);
     }
 
     # Unblind: s = sb * r^-1 mod n.
-    bn_mul(&_rsa_blind_prod, &_rsa_blind_sb, &_rsa_blind_rinv, limbs);
-    bn_mod(&_rsa_sign_s, &_rsa_blind_prod, 2 * limbs, &_rsa_sign_n, limbs);
+    bn_mul(bprod, bsb, brinv, limbs);
+    bn_mod(ss, bprod, 2 * limbs, sn, limbs);
 
     # Verify-after-sign (Bellcore guard): s^e mod n must equal m. Public
     # exponent over the (public) signature — Montgomery ladder for speed
     # (modulus n is odd). 3.6.6.
-    bn_mont_modexp(&_rsa_sign_chk, &_rsa_sign_s, key + RSAK_E, elen, &_rsa_sign_n, limbs);
-    if (bn_cmp(&_rsa_sign_chk, &_rsa_sign_m, limbs) != 0) {
-        bn_zero(&_rsa_sign_s, limbs);   # discard a faulty signature
+    bn_mont_modexp(schk, ss, key + RSAK_E, elen, sn, limbs);
+    if (bn_cmp(schk, sm, limbs) != 0) {
+        bn_zero(ss, limbs);   # discard a faulty signature
+        _rsa_scrub_sign_lanes();
         return 0 - 1;
     }
 
-    bn_to_be(sig_out, nlen, &_rsa_sign_s, limbs);
+    bn_to_be(sig_out, nlen, ss, limbs);
+    _rsa_scrub_sign_lanes();        # wipe this lane's secret residue (quirk #9)
     return nlen;
 }
 
@@ -498,24 +617,33 @@ fn _rsa_pkcs1v15_sign(key, prefix, prefix_len, hash, hash_len, sig_out): i64 {
     var nlen = load64(key + RSAK_NLEN);
     if (nlen > 512) { return 0 - 1; }
 
-    # EM = EMSA-PKCS1-v1.5(hash); sign via the shared RSASP1 core.
-    if (_rsa_emsa_encode(&_rsa_sign_em, nlen, prefix, prefix_len, hash, hash_len) < 0) { return 0 - 1; }
-    return _rsa_raw_sign(key, &_rsa_sign_em, sig_out);
+    # EM = EMSA-PKCS1-v1.5(hash); sign via the shared RSASP1 core. `em` is
+    # public (the encoded message), banked for race-freedom; `_rsa_raw_sign`
+    # wipes this lane along with the rest of the sign scratch on return.
+    var sem = &_rsa_sign_em + cbank() * 512;
+    if (_rsa_emsa_encode(sem, nlen, prefix, prefix_len, hash, hash_len) < 0) { return 0 - 1; }
+    return _rsa_raw_sign(key, sem, sig_out);
 }
 
 # Sign SHA-256(msg) with RSASSA-PKCS1-v1.5. `key` is an RSAK struct
 # (from rsa_privkey_from_der). Writes k bytes to sig_out; returns k.
 fn rsa_pkcs1v15_sign_sha256(key, msg, msg_len, sig_out): i64 {
-    sha256(msg, msg_len, &_rsa_hash);
-    var pl = _rsa_di_sha256(&_rsa_di);
-    return _rsa_pkcs1v15_sign(key, &_rsa_di, pl, &_rsa_hash, 32, sig_out);
+    var bk = cbank();
+    var rh = &_rsa_hash + bk * 64;      # this thread's lane (PUBLIC digest)
+    var rd = &_rsa_di + bk * 24;
+    sha256(msg, msg_len, rh);
+    var pl = _rsa_di_sha256(rd);
+    return _rsa_pkcs1v15_sign(key, rd, pl, rh, 32, sig_out);
 }
 
 # Sign SHA-384(msg) with RSASSA-PKCS1-v1.5.
 fn rsa_pkcs1v15_sign_sha384(key, msg, msg_len, sig_out): i64 {
-    sha384(msg, msg_len, &_rsa_hash);
-    var pl = _rsa_di_sha384(&_rsa_di);
-    return _rsa_pkcs1v15_sign(key, &_rsa_di, pl, &_rsa_hash, 48, sig_out);
+    var bk = cbank();
+    var rh = &_rsa_hash + bk * 64;      # this thread's lane (PUBLIC digest)
+    var rd = &_rsa_di + bk * 24;
+    sha384(msg, msg_len, rh);
+    var pl = _rsa_di_sha384(rd);
+    return _rsa_pkcs1v15_sign(key, rd, pl, rh, 48, sig_out);
 }
 
 # ================================================================
@@ -554,33 +682,41 @@ fn _rsa_pss_hash(hid, msg, msg_len, out): i64 {
 # _pss_mprime holds M' = (8 zero octets) || mHash || salt: for verify the
 # recovered salt can be as large as dbLen, so size for the worst case
 # (8 + 48 + ~479).
-var _pss_mhash[64];         # Hash(M)
-var _pss_db[512];           # DB / maskedDB
-var _pss_dbmask[512];       # MGF1 output
-var _pss_h[64];             # H = Hash(M') on verify (read from EM on sign)
-var _pss_em[512];           # encoded message (right-aligned in nlen bytes)
-var _pss_salt[64];          # random salt (sign only; len = hLen <= 48)
-var _pss_mprime[600];       # M' = 8 || mHash || salt
-var _mgf_seedc[72];         # MGF1 input: seed (hLen) || C (4)
-var _mgf_block[64];         # one MGF1 hash block
+# Banked across `cbank()` lanes (quirk #1) for concurrent-PSS-caller
+# race-freedom. PSS verify is entirely public; PSS sign's salt/DB are
+# per-signature random (not key material), and the secret residue lives
+# in the raw signer's banks (wiped there) — so these are PUBLIC banks,
+# NO per-lane wipe (matching the PSS scope note above).
+var _pss_mhash[4096];       # 64  * SIGIL_CRYPTO_BANKS  Hash(M)
+var _pss_db[32768];         # 512 * SIGIL_CRYPTO_BANKS  DB / maskedDB
+var _pss_dbmask[32768];     # 512 * SIGIL_CRYPTO_BANKS  MGF1 output
+var _pss_h[4096];           # 64  * SIGIL_CRYPTO_BANKS  H = Hash(M') (verify)
+var _pss_em[32768];         # 512 * SIGIL_CRYPTO_BANKS  encoded message
+var _pss_salt[4096];        # 64  * SIGIL_CRYPTO_BANKS  random salt (sign)
+var _pss_mprime[38400];     # 600 * SIGIL_CRYPTO_BANKS  M' = 8 || mHash || salt
+var _mgf_seedc[4608];       # 72  * SIGIL_CRYPTO_BANKS  MGF1 input: seed || C
+var _mgf_block[4096];       # 64  * SIGIL_CRYPTO_BANKS  one MGF1 hash block
 
 # MGF1 (RFC 8017 §B.2.1) with the id-`hid` hash. Writes `mask_len` bytes
 # of mask to `mask_out`. seed is `seed_len` bytes.
 fn _rsa_mgf1(hid, seed, seed_len, mask_out, mask_len): i64 {
     var hlen = _rsa_pss_hlen(hid);
-    memcpy(&_mgf_seedc, seed, seed_len);
+    var bk = cbank();
+    var seedc = &_mgf_seedc + bk * 72;      # this thread's lane (PUBLIC)
+    var blk   = &_mgf_block + bk * 64;
+    memcpy(seedc, seed, seed_len);
     var counter = 0;
     var off = 0;
     while (off < mask_len) {
         # C = I2OSP(counter, 4), big-endian.
-        store8(&_mgf_seedc + seed_len + 0, (counter >> 24) & 0xFF);
-        store8(&_mgf_seedc + seed_len + 1, (counter >> 16) & 0xFF);
-        store8(&_mgf_seedc + seed_len + 2, (counter >> 8) & 0xFF);
-        store8(&_mgf_seedc + seed_len + 3, counter & 0xFF);
-        _rsa_pss_hash(hid, &_mgf_seedc, seed_len + 4, &_mgf_block);
+        store8(seedc + seed_len + 0, (counter >> 24) & 0xFF);
+        store8(seedc + seed_len + 1, (counter >> 16) & 0xFF);
+        store8(seedc + seed_len + 2, (counter >> 8) & 0xFF);
+        store8(seedc + seed_len + 3, counter & 0xFF);
+        _rsa_pss_hash(hid, seedc, seed_len + 4, blk);
         var n = hlen;
         if (off + n > mask_len) { n = mask_len - off; }
-        memcpy(mask_out + off, &_mgf_block, n);
+        memcpy(mask_out + off, blk, n);
         off = off + n;
         counter = counter + 1;
     }
@@ -630,19 +766,25 @@ fn _rsa_emsa_pss_verify(hid, em, emlen, embits, mhash, hlen): i64 {
     if (dblen < 1) { return 0; }
     var hptr = em + dblen;                  # H = next hLen octets
 
+    var bk = cbank();                       # this thread's lane (PUBLIC)
+    var dbmask = &_pss_dbmask + bk * 512;
+    var db     = &_pss_db     + bk * 512;
+    var mprime = &_pss_mprime + bk * 600;
+    var ph     = &_pss_h      + bk * 64;
+
     # Step 6: the top (8*emlen - embits) bits of maskedDB[0] must be 0.
     var topbits = 8 * emlen - embits;
     var tmask = _rsa_top_mask(topbits);
     if (((load8(em) & 0xFF) & tmask) != 0) { return 0; }
 
     # Step 7-8: DB = maskedDB XOR MGF1(H, dbLen); clear the same top bits.
-    _rsa_mgf1(hid, hptr, hlen, &_pss_dbmask, dblen);
+    _rsa_mgf1(hid, hptr, hlen, dbmask, dblen);
     var i = 0;
     while (i < dblen) {
-        store8(&_pss_db + i, (load8(em + i) & 0xFF) ^ (load8(&_pss_dbmask + i) & 0xFF));
+        store8(db + i, (load8(em + i) & 0xFF) ^ (load8(dbmask + i) & 0xFF));
         i = i + 1;
     }
-    store8(&_pss_db, (load8(&_pss_db) & 0xFF) & (tmask ^ 0xFF));
+    store8(db, (load8(db) & 0xFF) & (tmask ^ 0xFF));
 
     # Step 10 (salt-agnostic): DB = (zero octets) || 0x01 || salt. Scan
     # left; every octet before the first 0x01 must be zero.
@@ -650,7 +792,7 @@ fn _rsa_emsa_pss_verify(hid, em, emlen, embits, mhash, hlen): i64 {
     i = 0;
     while (i < dblen) {
         if (sep < 0) {
-            var v = load8(&_pss_db + i) & 0xFF;
+            var v = load8(db + i) & 0xFF;
             if (v == 0x01) { sep = i; }
             else { if (v != 0x00) { return 0; } }
         }
@@ -662,20 +804,23 @@ fn _rsa_emsa_pss_verify(hid, em, emlen, embits, mhash, hlen): i64 {
 
     # Step 12-14: M' = (0x)00*8 || mHash || salt ; H' = Hash(M').
     var j = 0;
-    while (j < 8) { store8(&_pss_mprime + j, 0); j = j + 1; }
-    memcpy(&_pss_mprime + 8, mhash, hlen);
-    memcpy(&_pss_mprime + 8 + hlen, &_pss_db + sep + 1, slen);
-    _rsa_pss_hash(hid, &_pss_mprime, 8 + hlen + slen, &_pss_h);
+    while (j < 8) { store8(mprime + j, 0); j = j + 1; }
+    memcpy(mprime + 8, mhash, hlen);
+    memcpy(mprime + 8 + hlen, db + sep + 1, slen);
+    _rsa_pss_hash(hid, mprime, 8 + hlen + slen, ph);
 
     # Constant-time compare H' against the embedded H.
-    return ct_eq_bytes(hptr, &_pss_h, hlen);
+    return ct_eq_bytes(hptr, ph, hlen);
 }
 
 # Verify an RSASSA-PSS signature (RFC 8017 §8.1.2) over the `hid` digest
 # of msg, public key (n_be, e_be). Returns 1 iff valid, else 0.
 fn _rsa_pss_verify(hid, n_be, n_len, e_be, e_len, msg, msg_len, sig, sig_len): i64 {
     var hlen = _rsa_pss_hlen(hid);
-    if (_rsa_recover_em(n_be, n_len, e_be, e_len, sig, sig_len, &_rsa_em) < 0) { return 0; }
+    var bk = cbank();
+    var rem = &_rsa_em + bk * 512;          # this thread's lane (PUBLIC)
+    var mhash = &_pss_mhash + bk * 64;
+    if (_rsa_recover_em(n_be, n_len, e_be, e_len, sig, sig_len, rem) < 0) { return 0; }
 
     var modbits = _rsa_bitlen_be(n_be, n_len);
     var embits = modbits - 1;
@@ -685,10 +830,10 @@ fn _rsa_pss_verify(hid, n_be, n_len, e_be, e_len, msg, msg_len, sig, sig_len): i
 
     # EM is the low `emlen` octets of the k-byte RSAVP1 output (the top
     # n_len-emlen octets are zero by I2OSP). _rsa_recover_em wrote k bytes.
-    var em = (&_rsa_em) + (n_len - emlen);
+    var em = rem + (n_len - emlen);
 
-    _rsa_pss_hash(hid, msg, msg_len, &_pss_mhash);
-    return _rsa_emsa_pss_verify(hid, em, emlen, embits, &_pss_mhash, hlen);
+    _rsa_pss_hash(hid, msg, msg_len, mhash);
+    return _rsa_emsa_pss_verify(hid, em, emlen, embits, mhash, hlen);
 }
 
 # Sign msg with RSASSA-PSS (RFC 8017 §8.1.1). `key` is an RSAK struct;
@@ -707,34 +852,42 @@ fn _rsa_pss_sign(hid, key, msg, msg_len, sig_out): i64 {
     if (emlen < hlen + slen + 2) { return 0 - 1; }
     var dblen = emlen - hlen - 1;
 
+    var bk = cbank();                       # this thread's lane (PUBLIC)
+    var mhash  = &_pss_mhash  + bk * 64;
+    var salt   = &_pss_salt   + bk * 64;
+    var pem    = &_pss_em     + bk * 512;
+    var mprime = &_pss_mprime + bk * 600;
+    var db     = &_pss_db     + bk * 512;
+    var dbmask = &_pss_dbmask + bk * 512;
+
     # mHash = Hash(M); salt <- random hLen bytes.
-    _rsa_pss_hash(hid, msg, msg_len, &_pss_mhash);
-    if (_rsa_pss_rand(&_pss_salt, slen) < 0) { return 0 - 1; }
+    _rsa_pss_hash(hid, msg, msg_len, mhash);
+    if (_rsa_pss_rand(salt, slen) < 0) { return 0 - 1; }
 
     # EM is built right-aligned in an nlen-byte buffer (leading zero pad
     # when emlen < nlen). emstart points at EM[0].
-    memset(&_pss_em, 0, nlen);
-    var emstart = (&_pss_em) + (nlen - emlen);
+    memset(pem, 0, nlen);
+    var emstart = pem + (nlen - emlen);
     var hptr = emstart + dblen;             # H lands here in EM
 
     # M' = (0x)00*8 || mHash || salt ; H = Hash(M') written directly to EM.
     var j = 0;
-    while (j < 8) { store8(&_pss_mprime + j, 0); j = j + 1; }
-    memcpy(&_pss_mprime + 8, &_pss_mhash, hlen);
-    memcpy(&_pss_mprime + 8 + hlen, &_pss_salt, slen);
-    _rsa_pss_hash(hid, &_pss_mprime, 8 + hlen + slen, hptr);
+    while (j < 8) { store8(mprime + j, 0); j = j + 1; }
+    memcpy(mprime + 8, mhash, hlen);
+    memcpy(mprime + 8 + hlen, salt, slen);
+    _rsa_pss_hash(hid, mprime, 8 + hlen + slen, hptr);
 
     # DB = (0x)00*(dbLen-slen-1) || 0x01 || salt.
     var i = 0;
-    while (i < dblen) { store8(&_pss_db + i, 0); i = i + 1; }
-    store8(&_pss_db + (dblen - slen - 1), 0x01);
-    memcpy(&_pss_db + (dblen - slen), &_pss_salt, slen);
+    while (i < dblen) { store8(db + i, 0); i = i + 1; }
+    store8(db + (dblen - slen - 1), 0x01);
+    memcpy(db + (dblen - slen), salt, slen);
 
     # maskedDB = DB XOR MGF1(H, dbLen) -> written into EM[0..dbLen).
-    _rsa_mgf1(hid, hptr, hlen, &_pss_dbmask, dblen);
+    _rsa_mgf1(hid, hptr, hlen, dbmask, dblen);
     i = 0;
     while (i < dblen) {
-        store8(emstart + i, (load8(&_pss_db + i) & 0xFF) ^ (load8(&_pss_dbmask + i) & 0xFF));
+        store8(emstart + i, (load8(db + i) & 0xFF) ^ (load8(dbmask + i) & 0xFF));
         i = i + 1;
     }
     # Clear the top (8*emlen - embits) bits of maskedDB[0]; set trailer.
@@ -743,7 +896,7 @@ fn _rsa_pss_sign(hid, key, msg, msg_len, sig_out): i64 {
     store8(emstart + emlen - 1, 0xbc);
 
     # m = OS2IP(EM); s = m^d mod n via the shared blinded/CRT RSASP1.
-    return _rsa_raw_sign(key, &_pss_em, sig_out);
+    return _rsa_raw_sign(key, pem, sig_out);
 }
 
 # Verify an RSASSA-PSS signature over SHA-256(msg). Returns 1 iff valid.

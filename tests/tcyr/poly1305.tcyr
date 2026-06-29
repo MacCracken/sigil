@@ -84,6 +84,57 @@ fn main() {
     store8(&vtag, load8(&vtag) ^ 0x01);
     assert_eq(poly1305_verify(&key, "Cryptographic Forum Research Group", 34, &vtag), 0, "verify rejects bad tag");
 
+    # ============================================================
+    # Streaming API (3.9.7) — poly1305_init/update*/finalize must
+    # equal the one-shot poly1305_mac for ANY chunk split, incl.
+    # sub-16-byte and block-straddling updates. This pins the
+    # streaming _p1305_absorb to the one-shot loop body; the AEAD
+    # _cp_tag (src/chacha20poly1305.cyr) depends on it.
+    # ============================================================
+    test_group("Poly1305 streaming == one-shot");
+    var smsg = "Cryptographic Forum Research Group";   # 34 bytes = 2 blocks + 2
+    var oneshot[16];
+    poly1305_mac(&key, smsg, 34, &oneshot);
+
+    # Whole message in a single update.
+    var s1[16];
+    poly1305_init(&key); poly1305_update(smsg, 34); poly1305_finalize(&s1);
+    assert_eq(ct_eq_bytes(&s1, &oneshot, 16), 1, "stream 1x34 == one-shot");
+
+    # Split on a block boundary (16 + 18).
+    var s2[16];
+    poly1305_init(&key); poly1305_update(smsg, 16); poly1305_update(smsg + 16, 18); poly1305_finalize(&s2);
+    assert_eq(ct_eq_bytes(&s2, &oneshot, 16), 1, "stream 16+18 == one-shot");
+
+    # Mid-block straddle (7 + 7 + 20) — exercises cross-update buffering.
+    var s3[16];
+    poly1305_init(&key);
+    poly1305_update(smsg, 7); poly1305_update(smsg + 7, 7); poly1305_update(smsg + 14, 20);
+    poly1305_finalize(&s3);
+    assert_eq(ct_eq_bytes(&s3, &oneshot, 16), 1, "stream 7+7+20 == one-shot");
+
+    # Byte-at-a-time — worst-case partial buffering across 34 updates.
+    var s4[16];
+    poly1305_init(&key);
+    var sbi = 0;
+    while (sbi < 34) { poly1305_update(smsg + sbi, 1); sbi = sbi + 1; }
+    poly1305_finalize(&s4);
+    assert_eq(ct_eq_bytes(&s4, &oneshot, 16), 1, "stream byte-at-a-time == one-shot");
+
+    # Empty message — zero updates must equal one-shot over len 0.
+    var os_empty[16];
+    poly1305_mac(&key, smsg, 0, &os_empty);
+    var s5[16];
+    poly1305_init(&key); poly1305_finalize(&s5);
+    assert_eq(ct_eq_bytes(&s5, &os_empty, 16), 1, "stream empty == one-shot empty");
+
+    # Exact multiple of 16 (32 bytes) — the AEAD mac_data shape (no partial).
+    var os32[16];
+    poly1305_mac(&key, smsg, 32, &os32);
+    var s6[16];
+    poly1305_init(&key); poly1305_update(smsg, 16); poly1305_update(smsg + 16, 16); poly1305_finalize(&s6);
+    assert_eq(ct_eq_bytes(&s6, &os32, 16), 1, "stream 16+16 (mult of 16) == one-shot");
+
     return assert_summary();
 }
 

@@ -15,12 +15,17 @@
 # no new hashing primitive is introduced.
 #
 # Scope: this is the TLS 1.2 master-secret / key-block / Finished KDF
-# for the cyrius native-TLS arc. Like the rest of sigil's HMAC/HKDF
-# surface (and unlike the banked batch-verify path), the working
-# buffers here are plain static function-scope scratch -- the KDF is
-# called per-handshake on a single thread, not fanned out across the
-# batch workers. Output (master secret / key block) is key material,
-# so the intermediates are `secret var` (zeroized on scope exit); the
+# for the cyrius native-TLS arc. The working buffers are function-scope
+# `var X[N]` arrays, i.e. STATIC globals (CLAUDE.md quirk #1) — and a
+# `secret var X[N]` array is ALSO a function-scope static (the `secret`
+# qualifier only adds a whole-array zeroize on scope exit; it does NOT
+# make the array per-call). They are therefore SHARED across threads and
+# raced concurrent PRF callers. 3.9.7 banked them across `cbank()` lanes
+# (each `var X[N]` widened to `[N*SIGIL_CRYPTO_BANKS]`, fn operates on
+# `&X + cbank()*N`; see src/crypto_scratch.cyr). Output (master secret /
+# key block) is key material, so each fn `memset`s ONLY its own lane
+# before return (quirk #9 / ADR 0004 — plain `var`, NEVER `secret var`,
+# whose whole-array wipe would clobber a sibling worker's live lane). The
 # caller owns zeroization of `out`.
 #
 # Combined `label || seed` is capped at TLS12_PRF_SEED_MAX bytes
@@ -38,36 +43,44 @@ fn _tls12_p_hash(is384, sec, secret_len, seedp, seedp_len, out, out_len): i64 {
     var hlen = 32;
     if (is384 == 1) { hlen = 48; }
 
-    # A(i), one HMAC output block, and the HMAC input `A(i) || seedp`.
-    # All hold derived key material ? `secret var` (zeroized on exit).
-    secret var A[48];
-    secret var block[48];
-    secret var hin[304];        # 48 (max hlen) + TLS12_PRF_SEED_MAX
+    # A(i), one HMAC output block, and the HMAC input `A(i) || seedp`,
+    # banked across `cbank()` lanes (quirk #1: these are STATIC globals,
+    # raced by concurrent PRF callers). All hold derived key material, so
+    # the calling worker's lane is `memset` to 0 before every return
+    # (quirk #9 — plain `var` + per-lane wipe, NEVER `secret var`).
+    var bk = cbank();
+    var A[3072];     var Ab     = &A     + bk * 48;    # 48  * SIGIL_CRYPTO_BANKS
+    var block[3072]; var blockb = &block + bk * 48;
+    var hin[19456];  var hinb   = &hin   + bk * 304;   # 304 * SIGIL_CRYPTO_BANKS
 
     # A(1) = HMAC(sec, seedp)
-    if (is384 == 1) { hmac_sha384(sec, secret_len, seedp, seedp_len, &A); }
-    else { hmac_sha256(sec, secret_len, seedp, seedp_len, &A); }
+    if (is384 == 1) { hmac_sha384(sec, secret_len, seedp, seedp_len, Ab); }
+    else { hmac_sha256(sec, secret_len, seedp, seedp_len, Ab); }
 
     var filled = 0;
     while (filled < out_len) {
         # block = HMAC(sec, A(i) || seedp)
-        memcpy(&hin, &A, hlen);
-        memcpy(&hin + hlen, seedp, seedp_len);
-        if (is384 == 1) { hmac_sha384(sec, secret_len, &hin, hlen + seedp_len, &block); }
-        else { hmac_sha256(sec, secret_len, &hin, hlen + seedp_len, &block); }
+        memcpy(hinb, Ab, hlen);
+        memcpy(hinb + hlen, seedp, seedp_len);
+        if (is384 == 1) { hmac_sha384(sec, secret_len, hinb, hlen + seedp_len, blockb); }
+        else { hmac_sha256(sec, secret_len, hinb, hlen + seedp_len, blockb); }
 
         # Emit min(hlen, remaining) bytes of this block.
         var take = hlen;
         var rem = out_len - filled;
         if (take > rem) { take = rem; }
-        memcpy(out + filled, &block, take);
+        memcpy(out + filled, blockb, take);
         filled = filled + take;
 
         # A(i+1) = HMAC(sec, A(i))
-        if (is384 == 1) { hmac_sha384(sec, secret_len, &A, hlen, &block); }
-        else { hmac_sha256(sec, secret_len, &A, hlen, &block); }
-        memcpy(&A, &block, hlen);
+        if (is384 == 1) { hmac_sha384(sec, secret_len, Ab, hlen, blockb); }
+        else { hmac_sha256(sec, secret_len, Ab, hlen, blockb); }
+        memcpy(Ab, blockb, hlen);
     }
+    # Wipe this lane's secret PRF state (quirk #9).
+    memset(Ab, 0, 48);
+    memset(blockb, 0, 48);
+    memset(hinb, 0, 304);
     return out_len;
 }
 
@@ -77,10 +90,17 @@ fn _tls12_p_hash(is384, sec, secret_len, seedp, seedp_len, out, out_len): i64 {
 fn tls12_prf_sha256(sec, secret_len, label, label_len, seed, seed_len, out, out_len): i64 {
     var slen = label_len + seed_len;
     if (slen > TLS12_PRF_SEED_MAX) { return 0; }
-    secret var seedp[256];      # label || seed (TLS12_PRF_SEED_MAX)
-    memcpy(&seedp, label, label_len);
-    memcpy(&seedp + label_len, seed, seed_len);
-    return _tls12_p_hash(0, sec, secret_len, &seedp, slen, out, out_len);
+    # `label || seed`, banked across `cbank()` lanes (quirk #1: STATIC
+    # global raced by concurrent callers). Holds key-schedule input, so
+    # the calling worker's lane is wiped before return (quirk #9 — plain
+    # `var` + per-lane memset, NEVER `secret var`).
+    var bk = cbank();
+    var seedp[16384];           var seedpb = &seedp + bk * 256;   # 256 * SIGIL_CRYPTO_BANKS
+    memcpy(seedpb, label, label_len);
+    memcpy(seedpb + label_len, seed, seed_len);
+    var rc = _tls12_p_hash(0, sec, secret_len, seedpb, slen, out, out_len);
+    memset(seedpb, 0, 256);
+    return rc;
 }
 
 # TLS 1.2 PRF over SHA-384 (RFC 5246 sec 5 with the SHA-384 suites'
@@ -88,8 +108,12 @@ fn tls12_prf_sha256(sec, secret_len, label, label_len, seed, seed_len, out, out_
 fn tls12_prf_sha384(sec, secret_len, label, label_len, seed, seed_len, out, out_len): i64 {
     var slen = label_len + seed_len;
     if (slen > TLS12_PRF_SEED_MAX) { return 0; }
-    secret var seedp[256];      # label || seed (TLS12_PRF_SEED_MAX)
-    memcpy(&seedp, label, label_len);
-    memcpy(&seedp + label_len, seed, seed_len);
-    return _tls12_p_hash(1, sec, secret_len, &seedp, slen, out, out_len);
+    # `label || seed`, banked across `cbank()` lanes (see tls12_prf_sha256).
+    var bk = cbank();
+    var seedp[16384];           var seedpb = &seedp + bk * 256;   # 256 * SIGIL_CRYPTO_BANKS
+    memcpy(seedpb, label, label_len);
+    memcpy(seedpb + label_len, seed, seed_len);
+    var rc = _tls12_p_hash(1, sec, secret_len, seedpb, slen, out, out_len);
+    memset(seedpb, 0, 256);
+    return rc;
 }

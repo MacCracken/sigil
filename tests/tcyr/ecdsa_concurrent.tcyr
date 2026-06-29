@@ -1,0 +1,222 @@
+# ecdsa_concurrent.tcyr — race-detector for ECDSA P-256 / P-384 banking
+# (3.9.7). The EC modules keep ~80 (P-256) / ~70 (P-384) process-global
+# alloc'd scratch buffers reused per call; 3.9.7 lane-banks them via
+# cbank() so concurrent TLS workers (an ECDSA-cert server under
+# max_conns>1) don't corrupt each other's in-flight field/point/scalar
+# arithmetic.
+#
+# Each worker repeatedly SIGNS its own distinct message (the secret-nonce
+# path — pt_scalarmul k·G, scalar-inverse, mod-n multiply) and VERIFIES
+# it (the public comb/window path). RFC 6979 signing is deterministic, so
+# a worker's signature must equal the serial (bank-0) reference computed
+# on the main thread; any cross-lane clobber corrupts a signature or
+# fails a verify. A serial KAT at bank 0 cannot catch a wrong lane stride
+# (offset 0 hides it) — only this non-zero-bank concurrent run does.
+#
+# P-384 coverage is gated on _EC_P384 so this file lands with the P-256
+# bite and the P-384 section activates when that bite banks P-384.
+
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/string.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fmt.cyr"
+include "lib/bayan.cyr"
+include "lib/sakshi.cyr"
+include "lib/chrono.cyr"
+include "lib/ct.cyr"
+include "lib/thread.cyr"
+include "lib/thread_local.cyr"
+include "src/crypto_scratch.cyr"
+include "src/types.cyr"
+include "src/error.cyr"
+include "lib/random.cyr"
+include "src/random.cyr"
+include "src/sha256.cyr"
+include "src/hex.cyr"
+include "src/sha512.cyr"
+include "src/sha384.cyr"
+include "src/hmac.cyr"
+include "src/hmac_sha384.cyr"
+include "src/bigint_ext.cyr"
+include "src/ecdsa_p256.cyr"
+include "src/ecdsa_p384.cyr"
+include "src/ecdsa_sign.cyr"
+
+# P-256 RFC 6979 A.2.5 key/pubkey (same vector as ecdsa_sign.tcyr).
+var _ecc_d   = 0;   # 32-byte private scalar
+var _ecc_pk  = 0;   # 64-byte public key (x||y)
+var _ecc_msgs = 0;  # NA × 16  distinct per-worker messages
+var _ecc_sigs = 0;  # NA × 64  worker-written signatures
+var _ecc_vrc  = 0;  # NA × 8   worker-written verify results (1=ok)
+var _ecc_der  = 0;  # NA × 80  worker-written DER signatures
+var _ecc_drok = 0;  # NA × 8   worker-written DER sign+verify_der results (1=ok)
+
+fn _ecc_worker(arg): i64 {
+    var bank = load64(arg + 0);
+    var idx  = load64(arg + 8);
+    crypto_bank_set(bank);
+    var rep = 0;
+    while (rep < 4) {
+        ecdsa_p256_sign(_ecc_d, _ecc_msgs + idx * 16, 16, _ecc_sigs + idx * 64);
+        var ok = ecdsa_p256_verify(_ecc_pk, _ecc_msgs + idx * 16, 16, _ecc_sigs + idx * 64);
+        store64(_ecc_vrc + idx * 8, ok);
+        # DER round-trip — exercises the banked sign_der `sig` and
+        # verify_der `raw_sig` scratch (the TLS CertificateVerify path).
+        var dl = ecdsa_p256_sign_der(_ecc_d, _ecc_msgs + idx * 16, 16, _ecc_der + idx * 80, 80);
+        var dok = ecdsa_p256_verify_der(_ecc_pk, _ecc_msgs + idx * 16, 16, _ecc_der + idx * 80, dl);
+        store64(_ecc_drok + idx * 8, dok);
+        rep = rep + 1;
+    }
+    return 0;
+}
+
+# P-384 RFC 6979 A.2.6 key/pubkey (same vector as ecdsa_sign.tcyr).
+var _ecc_d384   = 0;   # 48-byte private scalar
+var _ecc_pk384  = 0;   # 96-byte public key
+var _ecc_msgs384 = 0;  # NA × 16
+var _ecc_sigs384 = 0;  # NA × 96
+var _ecc_vrc384  = 0;  # NA × 8
+var _ecc_der384    = 0;  # NA × 112  worker-written DER signatures
+var _ecc_derlen384 = 0;  # NA × 8    worker-written DER lengths
+
+fn _ecc_worker384(arg): i64 {
+    var bank = load64(arg + 0);
+    var idx  = load64(arg + 8);
+    crypto_bank_set(bank);
+    var rep = 0;
+    while (rep < 4) {
+        ecdsa_p384_sign(_ecc_d384, _ecc_msgs384 + idx * 16, 16, _ecc_sigs384 + idx * 96);
+        var ok = ecdsa_p384_verify(_ecc_pk384, _ecc_msgs384 + idx * 16, 16, _ecc_sigs384 + idx * 96);
+        store64(_ecc_vrc384 + idx * 8, ok);
+        # DER round-trip — exercises the banked sign_der `sig[96]` scratch.
+        var dl = ecdsa_p384_sign_der(_ecc_d384, _ecc_msgs384 + idx * 16, 16, _ecc_der384 + idx * 112, 112);
+        store64(_ecc_derlen384 + idx * 8, dl);
+        rep = rep + 1;
+    }
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    crypto_tls_main_init();
+    # Prewarm all lazy P-256 scratch/tables on the main thread (ADR 0007)
+    # so workers never race the non-thread-safe allocator (quirk #7). A
+    # real ECDSA-cert server makes this same call at startup before fan-out.
+    ecdsa_p256_warm();
+
+    _ecc_d  = hex_decode("c9afa9d845ba75166b5c215767b1d6934e50c3db36e89b127b8a622b120f6721", 64);
+    _ecc_pk = hex_decode("60fed4ba255a9d31c961eb74c6356d68c049b8923b61fa6ce669622e60f29fb67903fe1008b8bc99a41ae9e95628bc64f2f1b20c2d7e9f5177a3c294d4462299", 128);
+
+    var NA = 8;                      # banks 1..8 (> pre-3.9.6 cap)
+    _ecc_msgs = alloc(NA * 16);
+    _ecc_sigs = alloc(NA * 64);
+    _ecc_vrc  = alloc(NA * 8);
+    _ecc_der  = alloc(NA * 80);
+    _ecc_drok = alloc(NA * 8);
+    var exp_sigs = alloc(NA * 64);
+
+    # Distinct per-worker messages; serial (bank-0) reference signatures.
+    # The serial pass also pre-warms every lazy _init on the main thread
+    # (alloc is not thread-safe — quirk #7), so workers only ever read the
+    # tables / hit already-initialised guards.
+    var i = 0;
+    while (i < NA) {
+        var k = 0;
+        while (k < 16) { store8(_ecc_msgs + i * 16 + k, (i * 19 + k * 7 + 1) & 0xFF); k = k + 1; }
+        ecdsa_p256_sign(_ecc_d, _ecc_msgs + i * 16, 16, exp_sigs + i * 64);
+        i = i + 1;
+    }
+
+    var args = alloc(NA * 16);
+    var ths  = alloc(NA * 8);
+    i = 0;
+    while (i < NA) {
+        store64(args + i * 16 + 0, i + 1);
+        store64(args + i * 16 + 8, i);
+        store64(ths + i * 8, thread_create(&_ecc_worker, args + i * 16));
+        i = i + 1;
+    }
+    i = 0;
+    while (i < NA) { thread_join(load64(ths + i * 8)); i = i + 1; }
+
+    test_group("ECDSA P-256 banking — concurrent sign/verify == serial");
+    var sig_bad = 0;
+    var ver_bad = 0;
+    var der_bad = 0;
+    i = 0;
+    while (i < NA) {
+        if (ct_eq_bytes(_ecc_sigs + i * 64, exp_sigs + i * 64, 64) == 0) { sig_bad = sig_bad + 1; }
+        if (load64(_ecc_vrc + i * 8) != 1) { ver_bad = ver_bad + 1; }
+        if (load64(_ecc_drok + i * 8) != 1) { der_bad = der_bad + 1; }
+        i = i + 1;
+    }
+    assert_eq(sig_bad, 0, "8 concurrent P-256 signers (banks 1-8) match serial signatures");
+    assert_eq(ver_bad, 0, "8 concurrent P-256 verifies all accept");
+    assert_eq(der_bad, 0, "8 concurrent P-256 DER sign+verify_der round-trips accept");
+
+    # ============================================================
+    # P-384 — same harness on the secp384r1 sign/verify call graph.
+    # ============================================================
+    ecdsa_p384_warm();
+    _ecc_d384  = hex_decode("6b9d3dad2e1b8c1c05b19875b6659f4de23c3b667bf297ba9aa47740787137d896d5724e4c70a825f872c9ea60d2edf5", 96);
+    _ecc_pk384 = hex_decode("ec3a4e415b4e19a4568618029f427fa5da9a8bc4ae92e02e06aae5286b300c64def8f0ea9055866064a254515480bc138015d9b72d7d57244ea8ef9ac0c621896708a59367f9dfb9f54ca84b3f1c9db1288b231c3ae0d4fe7344fd2533264720", 192);
+    _ecc_msgs384 = alloc(NA * 16);
+    _ecc_sigs384 = alloc(NA * 96);
+    _ecc_vrc384  = alloc(NA * 8);
+    _ecc_der384    = alloc(NA * 112);
+    _ecc_derlen384 = alloc(NA * 8);
+    var exp_sigs384 = alloc(NA * 96);
+    var exp_der384  = alloc(NA * 112);
+    var exp_derlen384 = alloc(NA * 8);
+
+    i = 0;
+    while (i < NA) {
+        var k384 = 0;
+        while (k384 < 16) { store8(_ecc_msgs384 + i * 16 + k384, (i * 23 + k384 * 5 + 9) & 0xFF); k384 = k384 + 1; }
+        ecdsa_p384_sign(_ecc_d384, _ecc_msgs384 + i * 16, 16, exp_sigs384 + i * 96);
+        store64(exp_derlen384 + i * 8, ecdsa_p384_sign_der(_ecc_d384, _ecc_msgs384 + i * 16, 16, exp_der384 + i * 112, 112));
+        i = i + 1;
+    }
+
+    var args384 = alloc(NA * 16);
+    var ths384  = alloc(NA * 8);
+    i = 0;
+    while (i < NA) {
+        store64(args384 + i * 16 + 0, i + 1);
+        store64(args384 + i * 16 + 8, i);
+        store64(ths384 + i * 8, thread_create(&_ecc_worker384, args384 + i * 16));
+        i = i + 1;
+    }
+    i = 0;
+    while (i < NA) { thread_join(load64(ths384 + i * 8)); i = i + 1; }
+
+    test_group("ECDSA P-384 banking — concurrent sign/verify == serial");
+    var sig_bad384 = 0;
+    var ver_bad384 = 0;
+    var der_bad384 = 0;
+    i = 0;
+    while (i < NA) {
+        if (ct_eq_bytes(_ecc_sigs384 + i * 96, exp_sigs384 + i * 96, 96) == 0) { sig_bad384 = sig_bad384 + 1; }
+        if (load64(_ecc_vrc384 + i * 8) != 1) { ver_bad384 = ver_bad384 + 1; }
+        # DER must match the serial reference (length + bytes); a raced
+        # sign_der `sig[96]` corrupts the encoded signature.
+        var dl384 = load64(_ecc_derlen384 + i * 8);
+        if (dl384 != load64(exp_derlen384 + i * 8)) { der_bad384 = der_bad384 + 1; }
+        else { if (ct_eq_bytes(_ecc_der384 + i * 112, exp_der384 + i * 112, dl384) == 0) { der_bad384 = der_bad384 + 1; } }
+        i = i + 1;
+    }
+    assert_eq(sig_bad384, 0, "8 concurrent P-384 signers (banks 1-8) match serial signatures");
+    assert_eq(ver_bad384, 0, "8 concurrent P-384 verifies all accept");
+    assert_eq(der_bad384, 0, "8 concurrent P-384 DER signatures match serial reference");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

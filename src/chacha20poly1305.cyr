@@ -56,28 +56,33 @@ fn _cp_keygen(key, nonce, otk_out): i64 {
 }
 
 # Compute the Poly1305 tag over the RFC 8439 §2.8 mac_data layout.
-# mac_data is built in a per-call fl_alloc scratch buffer (public
-# data — AAD + ciphertext — so no zeroization needed) and freed
-# before return.
+# 3.9.7: streams the segments — AAD || pad16(AAD) || ct || pad16(ct)
+# || le64(aad_len) || le64(ct_len) — through the streaming Poly1305 API
+# (src/poly1305.cyr) IN PLACE, so the tag is computed WITHOUT the
+# per-call `fl_alloc`'d concat buffer that used to assemble mac_data
+# (the last concurrent-path heap allocation on the AEAD record path).
+# The two pad16 regions feed zero bytes; the trailing 16-byte length
+# block is one full block, so mac_data is always a multiple of 16 (no
+# partial). The zero-pad + length scratch hold only PUBLIC data (banked
+# per lane for race-freedom; no secret, so no wipe).
 fn _cp_tag(otk, aad, aad_len, ct, ct_len, tag_out): i64 {
     var aad_pad = _cp_pad16len(aad_len);
     var ct_pad = _cp_pad16len(ct_len);
-    var mac_len = aad_len + aad_pad + ct_len + ct_pad + 16;
 
-    var md = fl_alloc(mac_len);
-    memset(md, 0, mac_len);           # zero-fills both pad regions
+    var bk = cbank();
+    var zero16[1024];   var zb = &zero16 + bk * 16;   # 16 * SIGIL_CRYPTO_BANKS (zero pad source)
+    var lenblk[1024];   var lb = &lenblk + bk * 16;   # 16 * SIGIL_CRYPTO_BANKS (public lengths)
+    memset(zb, 0, 16);
+    _cp_store_le64(lb, aad_len);
+    _cp_store_le64(lb + 8, ct_len);
 
-    var off = 0;
-    memcpy(md + off, aad, aad_len);
-    off = off + aad_len + aad_pad;
-    memcpy(md + off, ct, ct_len);
-    off = off + ct_len + ct_pad;
-    _cp_store_le64(md + off, aad_len);
-    off = off + 8;
-    _cp_store_le64(md + off, ct_len);
-
-    poly1305_mac(otk, md, mac_len, tag_out);
-    fl_free(md);
+    poly1305_init(otk);
+    poly1305_update(aad, aad_len);
+    poly1305_update(zb, aad_pad);
+    poly1305_update(ct, ct_len);
+    poly1305_update(zb, ct_pad);
+    poly1305_update(lb, 16);
+    poly1305_finalize(tag_out);
     return 0;
 }
 
