@@ -113,6 +113,13 @@ so **every reachable concurrent crypto path is now race-free**:
       [ADR 0006](../adr/0006-park-ec-scalarmul-10ms-target.md) + the 3.7
       closed-cycle summary.
 
+- [ ] **Switch hand-rolled JSON serializers to `#derive(Serialize)`** once
+      cyrius's `#derive(Serialize)` supports cstring-pointer fields.
+      `certpin_info_to_json` (`src/certpin_core.cyr`) is hand-rolled *only*
+      because the derive macro cannot yet emit cstring-pointer fields; drop the
+      hand-rolled path and re-`#derive` the type when the toolchain gains it.
+      Gated on cyrius. Re-check on each toolchain bump.
+
 - [ ] **Retire the per-thread bank-indexing workaround** if cyrius gains
       a native thread-local *array* qualifier (`threadlocal var X[N]`).
       The 3.6 bank scheme (`src/crypto_scratch.cyr`) exists only because

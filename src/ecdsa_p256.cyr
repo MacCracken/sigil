@@ -487,9 +487,15 @@ var _p256fi_inited = 0;
 fn _p256fi_init(): i64 {
     if (_p256fi_inited == 1) { return 0; }
     _p256_init();
-    _p256fi_t1  = alloc(32 * SIGIL_CRYPTO_BANKS);  _p256fi_t2  = alloc(32 * SIGIL_CRYPTO_BANKS);  _p256fi_t3  = alloc(32 * SIGIL_CRYPTO_BANKS);
-    _p256fi_t6  = alloc(32 * SIGIL_CRYPTO_BANKS);  _p256fi_t12 = alloc(32 * SIGIL_CRYPTO_BANKS);  _p256fi_t15 = alloc(32 * SIGIL_CRYPTO_BANKS);
-    _p256fi_t30 = alloc(32 * SIGIL_CRYPTO_BANKS);  _p256fi_t32 = alloc(32 * SIGIL_CRYPTO_BANKS);  _p256fi_acc = alloc(32 * SIGIL_CRYPTO_BANKS);
+    _p256fi_t1  = alloc(32 * SIGIL_CRYPTO_BANKS);
+    _p256fi_t2  = alloc(32 * SIGIL_CRYPTO_BANKS);
+    _p256fi_t3  = alloc(32 * SIGIL_CRYPTO_BANKS);
+    _p256fi_t6  = alloc(32 * SIGIL_CRYPTO_BANKS);
+    _p256fi_t12 = alloc(32 * SIGIL_CRYPTO_BANKS);
+    _p256fi_t15 = alloc(32 * SIGIL_CRYPTO_BANKS);
+    _p256fi_t30 = alloc(32 * SIGIL_CRYPTO_BANKS);
+    _p256fi_t32 = alloc(32 * SIGIL_CRYPTO_BANKS);
+    _p256fi_acc = alloc(32 * SIGIL_CRYPTO_BANKS);
     _p256fi_inited = 1;
     return 0;
 }

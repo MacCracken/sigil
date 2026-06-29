@@ -317,8 +317,10 @@ fn certpin_info_new(): i64 {
     return c;
 }
 
-# Hand-rolled JSON serializer (cstring-pointer fields not yet
-# supported by cyrius #derive(Serialize)).
+# Hand-rolled JSON serializer for certpin_info. cyrius #derive(Serialize)
+# does not yet support cstring-pointer fields — see docs/development/roadmap.md
+# backlog "switch hand-rolled JSON serializers to #derive(Serialize)".
+# Drop this and re-#derive the type when the toolchain gains it.
 fn certpin_info_to_json(c, sb): i64 {
     str_builder_add_cstr(sb, "{\"subject\":");
     agnosys_json_emit_cstr_or_null(sb, certpin_info_subject(c));
