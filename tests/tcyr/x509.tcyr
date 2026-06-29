@@ -42,10 +42,14 @@ include "src/random.cyr"
 include "src/sha256.cyr"
 include "src/hex.cyr"
 include "src/sha512.cyr"
+include "src/sha384.cyr"
 include "src/bigint_ext.cyr"
+include "src/bignum.cyr"
 include "src/ed25519.cyr"
 include "src/ecdsa_p256.cyr"
+include "src/ecdsa_p384.cyr"
 include "src/x509.cyr"
+include "src/rsa.cyr"
 
 # Test certs — generated 2026-05-22 (see file header comment).
 # Root validity:  2026-05-22 00:37:06 UTC → 2036-05-19 00:37:06 UTC

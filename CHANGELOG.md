@@ -63,6 +63,16 @@ audit: [`2026-06-29-3.9.6-concurrent-tls-handshake-banking-audit`](docs/audit/20
   ChaCha20-Poly1305 vs. a serial reference. Caught two of the races live; stable
   30/30 after the fixes. (+7 assertions.)
 
+### Fixed
+- **Test + fuzz include-chain drift repaired** — 9 `.tcyr` files (`pem`, `x509`/
+  `x509_offdiag`/`x509_p384`/`x509_rsa`, `tdx`, and the 3 `*_verify_full`) had
+  incomplete `src/` include lists and failed to compile (pre-existing on both
+  6.2.48 and 6.3.5); the 3 `fuzz/*.fcyr` harnesses additionally lost compilation
+  once banking made `cbank()` reachable in their call graph (they lacked
+  `crypto_scratch`/`thread_local`/`bayan`/`random`). All now compile and pass —
+  the suite goes 49→**58 compiling files, 1509 assertions / 0 failures**; fuzz
+  3/3.
+
 ### Deferred (tracked, not buried → 3.9.7)
 - ChaCha20-Poly1305's `_cp_tag` `fl_alloc` mac_data buffer (the only remaining
   concurrent-path `fl_alloc`; needs a streaming Poly1305). AES-GCM — the issue's

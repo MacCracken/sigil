@@ -31,7 +31,8 @@
 | Metric | Value |
 |---|---|
 | `.tcyr` test files | 58 (`ls tests/tcyr/*.tcyr`) — +1 @3.9.6 (`concurrent_tls_handshake.tcyr`) |
-| Total assertions | **1290** / 0 failures @3.9.6 across the 49 compiling test files (+7: the new `concurrent_tls_handshake` race-detector). ⚠️ 9 test files (`pem`, `x509`/`x509_offdiag`/`x509_p384`/`x509_rsa`, `tdx`, and the 3 `*_verify_full`) currently fail to **compile** at HEAD — identical failure on both 6.2.48 and 6.3.5, so pre-existing include-chain drift unrelated to 3.9.6. Their assertions (incl. the ~44 from the verify_full trio) are NOT in the 1290 until those includes are repaired. Flagged for Robert. |
+| Total assertions | **1509** / 0 failures @3.9.6 across all 58 files (+7: the new `concurrent_tls_handshake` race-detector; +219 restored by repairing the test/fuzz include drift below). |
+| Fuzz harnesses | 3 (`fuzz/*.fcyr`) — `fuzz_ed25519`/`fuzz_integrity`/`fuzz_revocation`, all build + run clean @3.9.6. |
 | Benchmark suite | `benches/` — `history.csv`; RSA via `tests/bcyr/rsa.bcyr`, P-256/P-384 verify via `tests/bcyr/ecdsa_p256.bcyr` / `ecdsa_p384.bcyr` |
 
 > Counting note: the 3 `*_verify_full.tcyr` tests (sgx 17 + tdx 16 +

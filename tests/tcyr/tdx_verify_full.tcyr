@@ -44,10 +44,13 @@ include "src/hex.cyr"
 include "src/sha512.cyr"
 include "src/sha384.cyr"
 include "src/bigint_ext.cyr"
+include "src/bignum.cyr"
+include "src/ed25519.cyr"
 include "src/ecdsa_p256.cyr"
 include "src/ecdsa_p384.cyr"
 include "src/x509.cyr"
 include "src/pem.cyr"
+include "src/rsa.cyr"
 include "src/tdx.cyr"
 
 # ----------------------------------------------------------------
