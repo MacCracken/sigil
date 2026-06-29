@@ -142,6 +142,31 @@ fn main() {
         assert_eq(bytes_eq(ct_ni, expected, 16), 1, "NI path matches C.3 vector");
     }
 
+    # ============================================================
+    # Re-probe after a cache reset must NOT deadlock.
+    # Regression for the bf54ba5 (3.9.6) probe-latch bug: the one-shot
+    # CAS lock `_aes_ni_probe_lock` was claimed once and never released,
+    # so resetting `_aes_ni_cache` to the `2` re-probe sentinel after the
+    # latch had been taken made the next `aes_ni_available()` spin forever
+    # on `while (_aes_ni_cache == 2) {}`. (The SHA-NI twin of this latch is
+    # what actually hung `cyrius bench`; this guards the AES path against
+    # the identical fault.) The fix releases the latch after publishing
+    # the cache. If it regresses, THIS test hangs the suite — by design.
+    # ============================================================
+    test_group("aes_ni re-probe after cache reset (no deadlock)");
+
+    _aes_ni_cache = 2;
+    var reprobe = aes_ni_available();
+    assert_eq(reprobe == 0 || reprobe == 1, 1, "re-probe resolves to 0 or 1");
+    assert_eq(reprobe, first, "re-probe matches original host probe");
+
+    # Full dispatcher path (aes256_encrypt_block -> aes_ni_available)
+    # after a reset must complete and stay correct.
+    _aes_ni_cache = 2;
+    var ct_re = alloc(16);
+    aes256_encrypt_block(round_keys, pt, ct_re);
+    assert_eq(bytes_eq(ct_re, expected, 16), 1, "block encrypt after cache reset matches C.3");
+
     return assert_summary();
 }
 

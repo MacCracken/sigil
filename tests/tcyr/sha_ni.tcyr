@@ -216,6 +216,37 @@ fn main() {
         assert_eq(bytes_eq(dsw, dni, 32), 1, "cross-path 64KB equal");
     }
 
+    # ============================================================
+    # Ring 4 — re-probe after a cache reset must NOT deadlock.
+    # Regression for the bf54ba5 (3.9.6) probe-latch bug: the one-shot
+    # CAS lock `_sha_ni_probe_lock` was claimed once and never released,
+    # so resetting `_sha_ni_cache` to the `2` re-probe sentinel AFTER the
+    # latch had been taken made the next `sha_ni_available()` spin forever
+    # on `while (_sha_ni_cache == 2) {}` (nothing republishes the cache on
+    # a single thread). The benchmark's natural-state restore did exactly
+    # `_sha_ni_cache = 2`, hanging the whole `cyrius bench` run. The fix
+    # releases the latch after publishing the cache. If it regresses,
+    # THIS test hangs the suite (no exit) — that is the intended guard.
+    # ============================================================
+    test_group("re-probe after cache reset (no deadlock)");
+
+    # The latch was already claimed by the probe at the top of main.
+    # Force the re-probe sentinel and confirm the next probe resolves
+    # instead of dead-spinning on the held lock.
+    _sha_ni_cache = 2;
+    var reprobe = sha_ni_available();
+    assert_eq(reprobe == 0 || reprobe == 1, 1, "re-probe resolves to 0 or 1");
+    assert_eq(reprobe, host_supports_ni, "re-probe matches original host probe");
+
+    # Full dispatcher path (sha256 -> sha_ni_available) after a reset —
+    # the exact call shape the benchmark hung on.
+    _sha_ni_cache = 2;
+    var rd = alloc(32);
+    sha256(abc, 3, rd);
+    assert_streq(hex_encode(rd, 32),
+    "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+    "sha256 after cache reset still correct");
+
     # Restore the natural cache state for any later test stages.
     _sha_ni_cache = host_supports_ni;
 
