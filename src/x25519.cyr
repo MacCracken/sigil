@@ -63,7 +63,7 @@ fn x25519(scalar, u_in, out): i64 {
     # Single zeroized scratch block; 18 field-element slots, per-worker
     # banked (3.8.0): each call operates on its own `cbank()` lane.
     var bk = cbank();
-    var W[4608];   # 18 field slots × SIGIL_CRYPTO_BANKS lanes (per-lane wiped below)
+    var W[36864];   # 18 field slots × SIGIL_CRYPTO_BANKS lanes (per-lane wiped below)
     var Wb = &W + bk * 576;
     memset(Wb, 0, 576);
     var x_1 = Wb + 0;
@@ -95,7 +95,7 @@ fn x25519(scalar, u_in, out): i64 {
     # then load little-endian into limb form. (Plain `var` — public
     # peer data, and arrays that aren't `secret`/`defer` don't count
     # against the 8-block cap.)
-    var ub[256];   # 32 B × SIGIL_CRYPTO_BANKS lanes
+    var ub[2048];   # 32 B × SIGIL_CRYPTO_BANKS lanes
     var ubb = &ub + bk * 32;
     memcpy(ubb, u_in, 32);
     store8(ubb + 31, load8(ubb + 31) & 127);
@@ -161,7 +161,7 @@ fn x25519(scalar, u_in, out): i64 {
 # ================================================================
 fn x25519_base(scalar, out): i64 {
     var bk = cbank();
-    var base[256];   # 32 B × SIGIL_CRYPTO_BANKS lanes
+    var base[2048];   # 32 B × SIGIL_CRYPTO_BANKS lanes
     var baseb = &base + bk * 32;
     memset(baseb, 0, 32);
     store8(baseb, 9);

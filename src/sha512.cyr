@@ -177,7 +177,7 @@ fn sha512_transform(ctx): i64 {
     # static function-scope global (CLAUDE.md quirk #1); each batch
     # worker uses its own 640-byte lane so concurrent compresses on
     # the Ed25519 HRAM hash never race. `Wb` is this thread's lane.
-    var W[5120];          # 80 words × 8 bytes × SIGIL_CRYPTO_BANKS
+    var W[40960];          # 80 words × 8 bytes × SIGIL_CRYPTO_BANKS
     var Wb = &W + cbank() * 640;
     var buf = ctx + 64;
 
@@ -342,9 +342,15 @@ fn sha512_finalize(ctx, out): i64 {
 # ================================================================
 
 fn sha512(data, len, out): i64 {
-    var ctx = sha512_init();
-    sha512_update(ctx, data, len);
-    sha512_finalize(ctx, out);
-    fl_free(ctx);
+    # Banked one-shot (3.9.6): the ctx was `fl_alloc`'d, but `fl_alloc`
+    # is NOT thread-safe (quirk #7), so concurrent one-shot hashes (TLS
+    # transcript / HKDF / HMAC long-key) raced the freelist — a
+    # concurrent-TLS-handshake crash site. Use a per-worker banked
+    # static ctx + the `_into` variant; no allocator touched.
+    var bk = cbank();
+    var ctx[13312];   var ctxb = &ctx + bk * 208;   # 208 * SIGIL_CRYPTO_BANKS
+    sha512_init_into(ctxb);
+    sha512_update(ctxb, data, len);
+    sha512_finalize(ctxb, out);
     return 0;
 }

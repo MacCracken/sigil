@@ -1,0 +1,265 @@
+# concurrent_tls_handshake.tcyr — race-detector for the 3.9.6
+# concurrent-TLS-handshake fix (auto-banking + banked HKDF/HMAC/ed25519_sign +
+# banked AEAD: AES-GCM and ChaCha20-Poly1305).
+#
+# Background: a TLS 1.3 server crashed (SIGSEGV / ECONNRESET) the moment two
+# handshakes ran concurrently, because the handshake-critical crypto scratch
+# was process-global and shared across threads:
+#   - HKDF / HMAC (the key schedule) held expand state in process-global
+#     pointers + a non-thread-safe fl_alloc;
+#   - ed25519_sign (CertificateVerify) and the one-shot SHA-2 hashes raced
+#     their function-scope static scratch (quirk #1);
+#   - BOTH AEAD suites (AES-256-GCM and ChaCha20-Poly1305) — which protect the
+#     encrypted handshake flight AND every record — raced their per-op static
+#     scratch (GHASH/CTR state, Poly1305 blocks, one-time keys);
+#   - the per-worker BANKS existed but no TLS consumer ever called
+#     crypto_bank_set, so every concurrent handshake collided on bank 0.
+# See docs/development/issues/2026-06-28-concurrent-tls-handshake-global-
+# scratch-race.md and ADR 0007.
+#
+# 3.9.6 makes cbank() AUTO-ASSIGN a private lane to each thread on first use
+# (no crypto_bank_set needed) and banks every previously-unbanked handshake +
+# AEAD primitive. This test PROVES the fix: N=16 worker threads — MORE than the
+# old SIGIL_CRYPTO_BANKS=8 cap, and crucially WITHOUT calling crypto_bank_set —
+# each recompute a deterministic slice of the handshake + record crypto
+# (ed25519_sign, HKDF-SHA384, HKDF-SHA256, SHA-384 transcript, AES-256-GCM
+# round-trip, ChaCha20 stream + Poly1305 MAC) in a tight loop. The
+# chacha20poly1305 AEAD *wrapper* is intentionally excluded — its `_cp_tag`
+# `fl_alloc` mac_data buffer is deferred to 3.9.7 (the underlying ChaCha20 +
+# Poly1305 primitives it composes ARE banked + tested here). If any two threads
+# aliased a lane (a banking bug, or the old bank-0 collision) the concurrent
+# results would be corrupted and differ from the serial (bank-0) reference. The
+# byte-for-byte equality check is the race detector; a separate assertion
+# confirms auto-banking handed out lanes beyond the old 8-bank cap.
+
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/string.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fmt.cyr"
+include "lib/bayan.cyr"
+include "lib/sakshi.cyr"
+include "lib/chrono.cyr"
+include "lib/ct.cyr"
+include "lib/thread.cyr"
+include "lib/thread_local.cyr"
+include "src/types.cyr"
+include "src/error.cyr"
+include "src/crypto_scratch.cyr"
+include "src/sha256.cyr"
+include "src/hex.cyr"
+include "src/hmac.cyr"
+include "src/hkdf.cyr"
+include "src/aes_gcm.cyr"
+include "src/poly1305.cyr"
+include "src/chacha20.cyr"
+include "src/chacha20poly1305.cyr"
+include "src/sha512.cyr"
+include "src/sha384.cyr"
+include "src/hmac_sha384.cyr"
+include "src/hkdf_sha384.cyr"
+include "src/bigint_ext.cyr"
+include "src/ed25519.cyr"
+
+var _NH = 16;            # worker threads — exceeds the old SIGIL_CRYPTO_BANKS=8
+
+# Per-slot inputs (distinct per worker so a cross-lane bleed shows up).
+var _h_sks    = 0;       # N × 64  ed25519 secret keys (seed||pk)
+var _h_msgs   = 0;       # N × 32  messages
+var _h_ikm    = 0;       # N × 32  HKDF input keying material
+var _h_akey   = 0;       # N × 32  AEAD keys
+var _h_anonce = 0;       # N × 12  AEAD nonces
+var _h_apt    = 0;       # N × 32  AEAD plaintext
+var _h_salt   = 0;       # 16 B    shared (read-only) salt
+var _h_info   = 0;       # 8 B     shared (read-only) info
+
+# Worker-written outputs.
+var _h_sig    = 0;       # N × 64  ed25519 signatures
+var _h_okm384 = 0;       # N × 48  HKDF-SHA384 OKM
+var _h_okm256 = 0;       # N × 32  HKDF-SHA256 OKM
+var _h_th     = 0;       # N × 48  SHA-384 transcript
+var _h_gct    = 0;       # N × 32  AES-256-GCM ciphertext
+var _h_gtag   = 0;       # N × 16  AES-256-GCM tag
+var _h_cct    = 0;       # N × 32  ChaCha20 keystream-XOR output
+var _h_ctag   = 0;       # N × 16  Poly1305 MAC
+var _h_bank   = 0;       # N × 8   the auto-assigned cbank() each worker saw
+
+# Serial (bank-0) reference outputs.
+var _e_sig    = 0;
+var _e_okm384 = 0;
+var _e_okm256 = 0;
+var _e_th     = 0;
+var _e_gct    = 0;
+var _e_gtag   = 0;
+var _e_cct    = 0;
+var _e_ctag   = 0;
+
+# Recompute one slot's handshake + record crypto slice into the supplied
+# buffers. No `var X[N]` locals here (those would be shared statics, quirk #1)
+# — only the banked primitives + distinct caller buffers are touched.
+fn _h_compute(idx, sig, okm384, okm256, th, gct, gtag, cct, ctag): i64 {
+    ed25519_sign(_h_sks + idx * 64, _h_msgs + idx * 32, 32, sig);
+    hkdf_sha384(_h_salt, 16, _h_ikm + idx * 32, 32, _h_info, 8, okm384, 48);
+    hkdf(_h_salt, 16, _h_ikm + idx * 32, 32, _h_info, 8, okm256, 32);
+    sha384(_h_msgs + idx * 32, 32, th);
+    # AES-256-GCM AEAD — fully banked in 3.9.6 (the issue's repro suite).
+    aes_gcm_encrypt(_h_akey + idx * 32, _h_anonce + idx * 12,
+                    0, 0, _h_apt + idx * 32, 32, gct, gtag);
+    # ChaCha20 stream (banked 3.8.0) + Poly1305 MAC (banked 3.9.6) — the
+    # fixed primitives. NOTE: the chacha20poly1305_encrypt AEAD *wrapper* is
+    # deliberately NOT exercised here — its `_cp_tag` `fl_alloc` mac_data
+    # buffer is the one remaining concurrent-path allocator, deferred to
+    # 3.9.7 (see ADR 0007 / roadmap). Driving these two primitives directly
+    # race-tests everything 3.9.6 fixed on the ChaCha path.
+    chacha20_xor(_h_akey + idx * 32, _h_anonce + idx * 12, 1,
+                 _h_apt + idx * 32, 32, cct);
+    poly1305_mac(_h_akey + idx * 32, _h_apt + idx * 32, 32, ctag);
+    return 0;
+}
+
+# One worker: deliberately does NOT call crypto_bank_set — auto-banking must
+# hand it a private lane on its first banked-primitive call. Records that lane,
+# then hammers its slot to widen the race window.
+fn _h_worker(arg): i64 {
+    var idx = load64(arg);
+    store64(_h_bank + idx * 8, cbank());
+    var rep = 0;
+    while (rep < 50) {
+        _h_compute(idx, _h_sig + idx * 64, _h_okm384 + idx * 48,
+                   _h_okm256 + idx * 32, _h_th + idx * 48,
+                   _h_gct + idx * 32, _h_gtag + idx * 16,
+                   _h_cct + idx * 32, _h_ctag + idx * 16);
+        rep = rep + 1;
+    }
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    crypto_tls_main_init();
+    ed25519_init();
+
+    var N = _NH;
+    _h_sks    = alloc(N * 64);
+    _h_msgs   = alloc(N * 32);
+    _h_ikm    = alloc(N * 32);
+    _h_akey   = alloc(N * 32);
+    _h_anonce = alloc(N * 12);
+    _h_apt    = alloc(N * 32);
+    _h_salt   = alloc(16);
+    _h_info   = alloc(8);
+    _h_sig    = alloc(N * 64);
+    _h_okm384 = alloc(N * 48);
+    _h_okm256 = alloc(N * 32);
+    _h_th     = alloc(N * 48);
+    _h_gct    = alloc(N * 32);
+    _h_gtag   = alloc(N * 16);
+    _h_cct    = alloc(N * 32);
+    _h_ctag   = alloc(N * 16);
+    _h_bank   = alloc(N * 8);
+    _e_sig    = alloc(N * 64);
+    _e_okm384 = alloc(N * 48);
+    _e_okm256 = alloc(N * 32);
+    _e_th     = alloc(N * 48);
+    _e_gct    = alloc(N * 32);
+    _e_gtag   = alloc(N * 16);
+    _e_cct    = alloc(N * 32);
+    _e_ctag   = alloc(N * 16);
+    var pk_throwaway = alloc(32);
+    var seed = alloc(32);
+
+    # Shared read-only salt / info.
+    var j = 0;
+    while (j < 16) { store8(_h_salt + j, 0x40 + j); j = j + 1; }
+    j = 0;
+    while (j < 8) { store8(_h_info + j, 0x80 + j); j = j + 1; }
+
+    # Distinct per-slot inputs; derive a real ed25519 key from a per-slot seed
+    # (ed25519_keypair is deterministic — no entropy needed). Then compute the
+    # serial (bank-0) reference for every slot.
+    var i = 0;
+    while (i < N) {
+        memset(seed, 0, 32);
+        store8(seed, (i + 1) * 7 + 3);
+        store8(seed + 31, (i + 1) * 5 + 1);
+        ed25519_keypair(seed, _h_sks + i * 64, pk_throwaway);
+
+        memset(_h_msgs + i * 32, 0, 32);
+        store8(_h_msgs + i * 32, (i + 1) * 11 + 2);
+        store8(_h_msgs + i * 32 + 17, (i + 1) * 3 + 9);
+
+        memset(_h_ikm + i * 32, 0, 32);
+        store8(_h_ikm + i * 32, (i + 1) * 17 + 4);
+        store8(_h_ikm + i * 32 + 9, (i + 1) * 19 + 6);
+
+        memset(_h_akey + i * 32, 0, 32);
+        store8(_h_akey + i * 32, (i + 1) * 23 + 8);
+        store8(_h_akey + i * 32 + 13, (i + 1) * 29 + 5);
+        memset(_h_anonce + i * 12, 0, 12);
+        store8(_h_anonce + i * 12, (i + 1) * 31 + 1);
+        memset(_h_apt + i * 32, 0, 32);
+        store8(_h_apt + i * 32, (i + 1) * 37 + 2);
+        store8(_h_apt + i * 32 + 21, (i + 1) * 41 + 7);
+
+        _h_compute(i, _e_sig + i * 64, _e_okm384 + i * 48,
+                   _e_okm256 + i * 32, _e_th + i * 48,
+                   _e_gct + i * 32, _e_gtag + i * 16,
+                   _e_cct + i * 32, _e_ctag + i * 16);
+        i = i + 1;
+    }
+
+    # Fan out N workers, each computing its own slot. No bank assignment.
+    var args = alloc(N * 8);
+    var ths  = alloc(N * 8);
+    i = 0;
+    while (i < N) {
+        store64(args + i * 8, i);
+        store64(ths + i * 8, thread_create(&_h_worker, args + i * 8));
+        i = i + 1;
+    }
+    i = 0;
+    while (i < N) { thread_join(load64(ths + i * 8)); i = i + 1; }
+
+    # Concurrent results must equal the serial reference, byte-for-byte.
+    test_group("concurrent TLS handshake + AEAD crypto — concurrent == serial (auto-banked)");
+    var sig_bad = 0;
+    var k384_bad = 0;
+    var k256_bad = 0;
+    var th_bad = 0;
+    var gcm_bad = 0;
+    var cp_bad = 0;
+    var max_bank = 0;
+    i = 0;
+    while (i < N) {
+        if (ct_eq_bytes(_h_sig + i * 64, _e_sig + i * 64, 64) == 0) { sig_bad = sig_bad + 1; }
+        if (ct_eq_bytes(_h_okm384 + i * 48, _e_okm384 + i * 48, 48) == 0) { k384_bad = k384_bad + 1; }
+        if (ct_eq_bytes(_h_okm256 + i * 32, _e_okm256 + i * 32, 32) == 0) { k256_bad = k256_bad + 1; }
+        if (ct_eq_bytes(_h_th + i * 48, _e_th + i * 48, 48) == 0) { th_bad = th_bad + 1; }
+        if (ct_eq_bytes(_h_gct + i * 32, _e_gct + i * 32, 32) == 0) { gcm_bad = gcm_bad + 1; }
+        if (ct_eq_bytes(_h_gtag + i * 16, _e_gtag + i * 16, 16) == 0) { gcm_bad = gcm_bad + 1; }
+        if (ct_eq_bytes(_h_cct + i * 32, _e_cct + i * 32, 32) == 0) { cp_bad = cp_bad + 1; }
+        if (ct_eq_bytes(_h_ctag + i * 16, _e_ctag + i * 16, 16) == 0) { cp_bad = cp_bad + 1; }
+        var b = load64(_h_bank + i * 8);
+        if (b > max_bank) { max_bank = b; }
+        i = i + 1;
+    }
+    assert_eq(sig_bad, 0, "16 concurrent ed25519_sign workers match serial");
+    assert_eq(k384_bad, 0, "16 concurrent HKDF-SHA384 workers match serial");
+    assert_eq(k256_bad, 0, "16 concurrent HKDF-SHA256 workers match serial");
+    assert_eq(th_bad, 0, "16 concurrent SHA-384 transcript workers match serial");
+    assert_eq(gcm_bad, 0, "16 concurrent AES-256-GCM workers match serial");
+    assert_eq(cp_bad, 0, "16 concurrent ChaCha20 + Poly1305 primitive workers match serial");
+    # Auto-banking must have handed out lanes past the old 8-bank cap, proving
+    # the 64-lane path is exercised and no crypto_bank_set was needed.
+    assert_eq(max_bank > 7, 1, "auto-banking assigned a lane beyond the old 8-bank cap");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

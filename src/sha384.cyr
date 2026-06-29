@@ -52,17 +52,29 @@ fn sha384_update(ctx, data, len): i64 {
 # Finalize — run the SHA-512 finaliser into a 64-byte scratch, then
 # truncate to the leftmost 48 bytes.
 fn sha384_finalize(ctx, out): i64 {
-    var tmp[64];
-    sha512_finalize(ctx, &tmp);
-    memcpy(out, &tmp, 48);
+    # Banked (3.9.6): `var tmp[64]` is a function-scope static global
+    # (quirk #1) — two concurrent SHA-384 finalizes (the TLS-SHA384
+    # transcript / HKDF-SHA384 path) raced it. (SHA-256's finalize
+    # writes straight to `out`, so it has no analogous buffer — which is
+    # why only the SHA-384 path showed the race.) Per-`cbank()` lane;
+    # public digest, no wipe needed.
+    var bk = cbank();
+    var tmp[4096];   var tmpb = &tmp + bk * 64;   # 64 * SIGIL_CRYPTO_BANKS
+    sha512_finalize(ctx, tmpb);
+    memcpy(out, tmpb, 48);
     return 0;
 }
 
 # Convenience — hash `data` (len bytes) into `out` (48 bytes).
 fn sha384(data, len, out): i64 {
-    var ctx = sha384_init();
-    sha384_update(ctx, data, len);
-    sha384_finalize(ctx, out);
-    fl_free(ctx);
+    # Banked one-shot (3.9.6): `fl_alloc` is not thread-safe (quirk #7),
+    # so concurrent SHA-384 one-shots (the TLS_AES_256_GCM_SHA384
+    # transcript / HKDF-SHA384 key schedule) raced the freelist. Use a
+    # per-worker banked static ctx + the `_into` variant.
+    var bk = cbank();
+    var ctx[13312];   var ctxb = &ctx + bk * 208;   # 208 * SIGIL_CRYPTO_BANKS
+    sha384_init_into(ctxb);
+    sha384_update(ctxb, data, len);
+    sha384_finalize(ctxb, out);
     return 0;
 }

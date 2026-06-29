@@ -42,10 +42,13 @@ fn hkdf_extract(salt, salt_len, ikm, ikm_len, prk_out): i64 {
 
     # RFC 5869 §2.2: a NULL/empty salt is treated as HashLen zero bytes.
     if (salt_len == 0) {
-        var zero_salt[32];
-        memset(&zero_salt, 0, 32);
-        hmac_sha256(&zero_salt, 32, ikm, ikm_len, prk_out);
-        memset(&zero_salt, 0, 32);
+        # Banked (3.9.6): `var zero_salt[32]` is a static global (quirk
+        # #1). It only ever holds zeros, but bank it per `cbank()` lane
+        # so the contract matches the rest of the crypto core.
+        var bk = cbank();
+        var zero_salt[2048];   var zsb = &zero_salt + bk * 32;   # 32 * SIGIL_CRYPTO_BANKS
+        memset(zsb, 0, 32);
+        hmac_sha256(zsb, 32, ikm, ikm_len, prk_out);
         return 0;
     }
 
@@ -68,20 +71,53 @@ fn hkdf_extract(salt, salt_len, ikm, ikm_len, prk_out): i64 {
 #  -1   on negative-length input
 #  -2   on out_len > 255*32 (RFC 5869 §2.3 cap)
 
-# Globals: Cyrius single-pass compiler can clobber locals across
-# nested call chains. hkdf_expand has a deep call chain (hmac_sha256
-# itself calls sha256_init / update / finalize with memcpy/memset
-# around them), so the round state lives in globals.
-var _hkdf_scratch = 0;
-var _hkdf_scratch_len = 0;
-var _hkdf_prk = 0;
-var _hkdf_prk_len = 0;
-var _hkdf_info = 0;
-var _hkdf_info_len = 0;
-var _hkdf_out = 0;
-var _hkdf_out_len = 0;
-var _hkdf_produced = 0;
-var _hkdf_counter = 0;
+# HMAC-SHA256 over the concatenation s1 || s2 || s3 (any segment may be
+# empty — pass len 0). Writes the 32-byte MAC to `out`. Fully banked /
+# thread-safe (3.9.6): used by hkdf_expand to compute each round's
+# T(i) = HMAC(PRK, T(i-1) || info || counter) WITHOUT a variable-size
+# concat buffer — the pre-3.9.6 code built that input in a process-global
+# `fl_alloc`'d scratch (`_hkdf_scratch`) guarded by module-global
+# pointers, which raced + crashed under concurrent TLS handshakes (the
+# issue's PRIMARY crash site). Streaming the three segments through the
+# banked SHA-256 `_into` ctx removes the shared scratch entirely while
+# preserving the exact RFC 5869 contract (no info-length cap, no leak).
+# Secret K'/ipad/opad lanes are plain `var` + per-lane wipe (quirk #9).
+fn _hkdf_hmac_seg3(key, key_len, s1, l1, s2, l2, s3, l3, out): i64 {
+    var bk = cbank();
+    var kprime[4096];     var kprimeb     = &kprime     + bk * 64;   # 64 * SIGIL_CRYPTO_BANKS
+    var ipad[4096];       var ipadb       = &ipad       + bk * 64;
+    var opad[4096];       var opadb       = &opad       + bk * 64;
+    var inner_hash[2048]; var inner_hashb = &inner_hash + bk * 32;   # 32 * SIGIL_CRYPTO_BANKS
+    var hctx[9216];       var hctxb       = &hctx       + bk * 144;  # 144 * SIGIL_CRYPTO_BANKS (reused)
+
+    memset(kprimeb, 0, 64);
+    if (key_len > 64) {
+        sha256(key, key_len, kprimeb);
+    } else {
+        memcpy(kprimeb, key, key_len);
+    }
+
+    var i = 0;
+    while (i < 64) { store8(ipadb + i, (load8(kprimeb + i) & 0xFF) ^ 0x36); i = i + 1; }
+    sha256_init_into(hctxb);
+    sha256_update(hctxb, ipadb, 64);
+    if (l1 > 0) { sha256_update(hctxb, s1, l1); }
+    if (l2 > 0) { sha256_update(hctxb, s2, l2); }
+    if (l3 > 0) { sha256_update(hctxb, s3, l3); }
+    sha256_finalize(hctxb, inner_hashb);
+
+    i = 0;
+    while (i < 64) { store8(opadb + i, (load8(kprimeb + i) & 0xFF) ^ 0x5c); i = i + 1; }
+    sha256_init_into(hctxb);
+    sha256_update(hctxb, opadb, 64);
+    sha256_update(hctxb, inner_hashb, 32);
+    sha256_finalize(hctxb, out);
+
+    memset(kprimeb, 0, 64);
+    memset(ipadb, 0, 64);
+    memset(opadb, 0, 64);
+    return 0;
+}
 
 # Expands `prk` into `out_len` bytes of output keying material bound to
 # `info` (RFC 5869 §2.3). Returns 0 on success, -1 on negative-length
@@ -95,76 +131,45 @@ fn hkdf_expand(prk, prk_len, info, info_len, out, out_len): i64 {
     if (out_len > 8160) { return (0 - 2); }
     if (out_len == 0) { return 0; }
 
-    # Promote all parameters to globals so nested HMAC calls can't
-    # clobber them via cc5's register allocator.
-    _hkdf_prk = prk;
-    _hkdf_prk_len = prk_len;
-    _hkdf_info = info;
-    _hkdf_info_len = info_len;
-    _hkdf_out = out;
-    _hkdf_out_len = out_len;
+    # Per-worker banked round state (3.9.6 — concurrent-TLS-handshake
+    # fix). t_prev/t_current are HMAC outputs, i.e. key material per RFC
+    # 5869; cbuf holds the 1-byte round counter. All three were function-
+    # scope `secret var`/globals (static, quirk #1) raced under concurrent
+    # handshakes. Banked across `cbank()` lanes; plain `var` + per-lane
+    # wipe (quirk #9). The HMAC input is streamed via `_hkdf_hmac_seg3`
+    # (no concat scratch — see note above).
+    var bk = cbank();
+    var t_prev[2048];    var t_prevb = &t_prev    + bk * 32;   # 32 * SIGIL_CRYPTO_BANKS
+    var t_current[2048]; var t_currb = &t_current + bk * 32;
+    var cbuf[64];        var cbufb   = &cbuf      + bk * 1;    # 1-byte counter * SIGIL_CRYPTO_BANKS
+    memset(t_prevb, 0, 32);
 
-    # Scratch holds "T(i-1) || info || counter" — the HMAC input for
-    # each round. Max size = 32 + info_len + 1. `alloc` via fl_alloc
-    # because we want a proper free at the end + secret material.
-    _hkdf_scratch_len = 32 + info_len + 1;
-    _hkdf_scratch = fl_alloc(_hkdf_scratch_len);
-    memset(_hkdf_scratch, 0, _hkdf_scratch_len);
+    var produced = 0;
+    var counter = 1;     # RFC 5869: i starts at 1
 
-    # T(i-1) and T(i) are HMAC outputs and therefore key material
-    # per RFC 5869. `secret var` zeroes both on function exit
-    # (covers the happy-path ret and any early errors); init
-    # memsets retained because the counter==1 branch leaves t_prev
-    # untouched and we memcpy out of it.
-    secret var t_prev[32];
-    memset(&t_prev, 0, 32);
-    secret var t_current[32];
-    memset(&t_current, 0, 32);
-
-    _hkdf_produced = 0;
-    _hkdf_counter = 1;   # RFC 5869: i starts at 1
-
-    while (_hkdf_produced < _hkdf_out_len) {
-        # Build input to HMAC: T(i-1) || info || counter
-        # First round (counter=1): T(0) is empty, so skip the T_prev copy.
-        var scratch_write = 0;
-        if (_hkdf_counter > 1) {
-            memcpy(_hkdf_scratch, &t_prev, 32);
-            scratch_write = 32;
-        }
-        if (_hkdf_info_len > 0) {
-            memcpy(_hkdf_scratch + scratch_write, _hkdf_info, _hkdf_info_len);
-            scratch_write = scratch_write + _hkdf_info_len;
-        }
-        store8(_hkdf_scratch + scratch_write, _hkdf_counter & 0xFF);
-        scratch_write = scratch_write + 1;
-
-        # T(i) = HMAC-SHA256(PRK, scratch[0..scratch_write])
-        hmac_sha256(_hkdf_prk, _hkdf_prk_len, _hkdf_scratch, scratch_write, &t_current);
+    while (produced < out_len) {
+        store8(cbufb, counter & 0xFF);
+        # T(i) = HMAC-SHA256(PRK, T(i-1) || info || counter).
+        # First round (counter==1): T(0) is empty, so feed segment 1
+        # with length 0.
+        var l_prev = 32;
+        if (counter == 1) { l_prev = 0; }
+        _hkdf_hmac_seg3(prk, prk_len, t_prevb, l_prev, info, info_len, cbufb, 1, t_currb);
 
         # Copy min(32, out_len - produced) bytes into the output.
         var take = 32;
-        if (_hkdf_out_len - _hkdf_produced < 32) {
-            take = _hkdf_out_len - _hkdf_produced;
-        }
-        memcpy(_hkdf_out + _hkdf_produced, &t_current, take);
-        _hkdf_produced = _hkdf_produced + take;
+        if (out_len - produced < 32) { take = out_len - produced; }
+        memcpy(out + produced, t_currb, take);
+        produced = produced + take;
 
         # Save T(i) for the next iteration.
-        memcpy(&t_prev, &t_current, 32);
-
-        _hkdf_counter = _hkdf_counter + 1;
+        memcpy(t_prevb, t_currb, 32);
+        counter = counter + 1;
     }
 
-    # Zeroize the heap scratch before free. t_prev / t_current are
-    # `secret var` — zeroed on function exit by the compiler.
-    memset(_hkdf_scratch, 0, _hkdf_scratch_len);
-    fl_free(_hkdf_scratch);
-    # Wipe the global pointers so nothing leaks between calls.
-    _hkdf_scratch = 0;
-    _hkdf_prk = 0;
-    _hkdf_info = 0;
-    _hkdf_out = 0;
+    # Per-lane secret zeroization (replaces the lost `secret var`).
+    memset(t_prevb, 0, 32);
+    memset(t_currb, 0, 32);
     return 0;
 }
 
@@ -180,10 +185,16 @@ fn hkdf_expand(prk, prk_len, info, info_len, out, out_len): i64 {
 #  -1   on negative-length input
 #  -2   on out_len > 255*32
 fn hkdf(salt, salt_len, ikm, ikm_len, info, info_len, out, out_len): i64 {
-    # PRK is key material. `secret var` handles zeroization on
-    # every return path (both rc1 error and rc2 success/error).
-    secret var prk[32];
-    var rc1 = hkdf_extract(salt, salt_len, ikm, ikm_len, &prk);
-    if (rc1 != 0) { return rc1; }
-    return hkdf_expand(&prk, 32, info, info_len, out, out_len);
+    # PRK is key material. Banked (3.9.6): was a `secret var` static
+    # global (quirk #1) raced under concurrent handshakes. Plain `var` +
+    # per-lane wipe on every return path (quirk #9) — including the
+    # extract-error path, where the lane may still hold a prior call's
+    # PRK.
+    var bk = cbank();
+    var prk[2048];   var prkb = &prk + bk * 32;   # 32 * SIGIL_CRYPTO_BANKS
+    var rc1 = hkdf_extract(salt, salt_len, ikm, ikm_len, prkb);
+    if (rc1 != 0) { memset(prkb, 0, 32); return rc1; }
+    var rc2 = hkdf_expand(prkb, 32, info, info_len, out, out_len);
+    memset(prkb, 0, 32);
+    return rc2;
 }

@@ -44,10 +44,12 @@ fn hkdf_extract_sha384(salt, salt_len, ikm, ikm_len, prk_out48): i64 {
 
     # RFC 5869 §2.2: a NULL/empty salt is HashLen (48) zero bytes.
     if (salt_len == 0) {
-        var zero_salt384[48];
-        memset(&zero_salt384, 0, 48);
-        hmac_sha384(&zero_salt384, 48, ikm, ikm_len, prk_out48);
-        memset(&zero_salt384, 0, 48);
+        # Banked (3.9.6): static global (quirk #1), banked per `cbank()`
+        # lane for the concurrent-handshake fix.
+        var bk = cbank();
+        var zero_salt384[3072];   var zsb = &zero_salt384 + bk * 48;   # 48 * SIGIL_CRYPTO_BANKS
+        memset(zsb, 0, 48);
+        hmac_sha384(zsb, 48, ikm, ikm_len, prk_out48);
         return 0;
     }
 
@@ -70,21 +72,49 @@ fn hkdf_extract_sha384(salt, salt_len, ikm, ikm_len, prk_out48): i64 {
 #  -1   on negative-length input
 #  -2   on out_len > 255*48 (RFC 5869 §2.3 cap)
 
-# Globals: same rationale as `src/hkdf.cyr` — hkdf_expand has a deep
-# nested call chain (hmac_sha384 -> sha384_init/update/finalize with
-# memcpy/memset around them) that the single-pass register allocator
-# can clobber locals across, so the round state lives in globals.
-# Distinct `_hkdf384_*` names so they never alias the SHA-256 set.
-var _hkdf384_scratch = 0;
-var _hkdf384_scratch_len = 0;
-var _hkdf384_prk = 0;
-var _hkdf384_prk_len = 0;
-var _hkdf384_info = 0;
-var _hkdf384_info_len = 0;
-var _hkdf384_out = 0;
-var _hkdf384_out_len = 0;
-var _hkdf384_produced = 0;
-var _hkdf384_counter = 0;
+# HMAC-SHA384 over the concatenation s1 || s2 || s3 (any segment may be
+# empty — pass len 0). Writes the 48-byte MAC to `out`. Fully banked /
+# thread-safe (3.9.6): the SHA-384 analogue of `_hkdf_hmac_seg3`. Lets
+# hkdf_expand_sha384 compute T(i) = HMAC(PRK, T(i-1) || info || counter)
+# WITHOUT the pre-3.9.6 process-global `fl_alloc`'d concat scratch
+# (`_hkdf384_scratch`) that raced + crashed under concurrent
+# TLS_AES_256_GCM_SHA384 handshakes. Block B = 128, digest L = 48.
+fn _hkdf384_hmac_seg3(key, key_len, s1, l1, s2, l2, s3, l3, out): i64 {
+    var bk = cbank();
+    var kprime384[8192];     var kprime384b     = &kprime384     + bk * 128;  # 128 * SIGIL_CRYPTO_BANKS
+    var ipad384[8192];       var ipad384b       = &ipad384       + bk * 128;
+    var opad384[8192];       var opad384b       = &opad384       + bk * 128;
+    var inner_hash384[3072]; var inner_hash384b = &inner_hash384 + bk * 48;   # 48 * SIGIL_CRYPTO_BANKS
+    var hctx[13312];         var hctxb          = &hctx          + bk * 208;  # 208 * SIGIL_CRYPTO_BANKS (reused)
+
+    memset(kprime384b, 0, 128);
+    if (key_len > 128) {
+        sha384(key, key_len, kprime384b);
+    } else {
+        memcpy(kprime384b, key, key_len);
+    }
+
+    var i = 0;
+    while (i < 128) { store8(ipad384b + i, (load8(kprime384b + i) & 0xFF) ^ 0x36); i = i + 1; }
+    sha384_init_into(hctxb);
+    sha384_update(hctxb, ipad384b, 128);
+    if (l1 > 0) { sha384_update(hctxb, s1, l1); }
+    if (l2 > 0) { sha384_update(hctxb, s2, l2); }
+    if (l3 > 0) { sha384_update(hctxb, s3, l3); }
+    sha384_finalize(hctxb, inner_hash384b);
+
+    i = 0;
+    while (i < 128) { store8(opad384b + i, (load8(kprime384b + i) & 0xFF) ^ 0x5c); i = i + 1; }
+    sha384_init_into(hctxb);
+    sha384_update(hctxb, opad384b, 128);
+    sha384_update(hctxb, inner_hash384b, 48);
+    sha384_finalize(hctxb, out);
+
+    memset(kprime384b, 0, 128);
+    memset(ipad384b, 0, 128);
+    memset(opad384b, 0, 128);
+    return 0;
+}
 
 # Expands `prk` into `out_len` bytes of output keying material bound to
 # `info` (RFC 5869 §2.3). Returns 0 on success, -1 on negative-length
@@ -98,75 +128,43 @@ fn hkdf_expand_sha384(prk, prk_len, info, info_len, out, out_len): i64 {
     if (out_len > 12240) { return (0 - 2); }
     if (out_len == 0) { return 0; }
 
-    # Promote all parameters to globals so nested HMAC calls can't
-    # clobber them via the register allocator.
-    _hkdf384_prk = prk;
-    _hkdf384_prk_len = prk_len;
-    _hkdf384_info = info;
-    _hkdf384_info_len = info_len;
-    _hkdf384_out = out;
-    _hkdf384_out_len = out_len;
+    # Per-worker banked round state (3.9.6 — concurrent-TLS-handshake
+    # fix). t384_prev/t384_current are HMAC outputs (key material per RFC
+    # 5869); cbuf holds the 1-byte round counter. All were `secret var`/
+    # globals (static, quirk #1) raced under concurrent handshakes.
+    # Banked across `cbank()` lanes; plain `var` + per-lane wipe
+    # (quirk #9). The HMAC input is streamed via `_hkdf384_hmac_seg3`.
+    var bk = cbank();
+    var t384_prev[3072];    var t384_prevb = &t384_prev    + bk * 48;   # 48 * SIGIL_CRYPTO_BANKS
+    var t384_current[3072]; var t384_currb = &t384_current + bk * 48;
+    var cbuf[64];           var cbufb      = &cbuf         + bk * 1;    # 1-byte counter * SIGIL_CRYPTO_BANKS
+    memset(t384_prevb, 0, 48);
 
-    # Scratch holds "T(i-1) || info || counter" — the HMAC input for
-    # each round. Max size = 48 + info_len + 1.
-    _hkdf384_scratch_len = 48 + info_len + 1;
-    _hkdf384_scratch = fl_alloc(_hkdf384_scratch_len);
-    memset(_hkdf384_scratch, 0, _hkdf384_scratch_len);
+    var produced = 0;
+    var counter = 1;   # RFC 5869: i starts at 1
 
-    # T(i-1) and T(i) are HMAC outputs and therefore key material per
-    # RFC 5869. `secret var` zeroes both on function exit (covers the
-    # happy path and any early errors); init memsets retained because
-    # the counter==1 branch leaves t384_prev untouched and we memcpy
-    # out of it.
-    secret var t384_prev[48];
-    memset(&t384_prev, 0, 48);
-    secret var t384_current[48];
-    memset(&t384_current, 0, 48);
-
-    _hkdf384_produced = 0;
-    _hkdf384_counter = 1;   # RFC 5869: i starts at 1
-
-    while (_hkdf384_produced < _hkdf384_out_len) {
-        # Build input to HMAC: T(i-1) || info || counter.
-        # First round (counter=1): T(0) is empty, so skip the T_prev copy.
-        var scratch_write = 0;
-        if (_hkdf384_counter > 1) {
-            memcpy(_hkdf384_scratch, &t384_prev, 48);
-            scratch_write = 48;
-        }
-        if (_hkdf384_info_len > 0) {
-            memcpy(_hkdf384_scratch + scratch_write, _hkdf384_info, _hkdf384_info_len);
-            scratch_write = scratch_write + _hkdf384_info_len;
-        }
-        store8(_hkdf384_scratch + scratch_write, _hkdf384_counter & 0xFF);
-        scratch_write = scratch_write + 1;
-
-        # T(i) = HMAC-SHA384(PRK, scratch[0..scratch_write])
-        hmac_sha384(_hkdf384_prk, _hkdf384_prk_len, _hkdf384_scratch, scratch_write, &t384_current);
+    while (produced < out_len) {
+        store8(cbufb, counter & 0xFF);
+        # T(i) = HMAC-SHA384(PRK, T(i-1) || info || counter). First round
+        # (counter==1): T(0) is empty, so feed segment 1 with length 0.
+        var l_prev = 48;
+        if (counter == 1) { l_prev = 0; }
+        _hkdf384_hmac_seg3(prk, prk_len, t384_prevb, l_prev, info, info_len, cbufb, 1, t384_currb);
 
         # Copy min(48, out_len - produced) bytes into the output.
         var take = 48;
-        if (_hkdf384_out_len - _hkdf384_produced < 48) {
-            take = _hkdf384_out_len - _hkdf384_produced;
-        }
-        memcpy(_hkdf384_out + _hkdf384_produced, &t384_current, take);
-        _hkdf384_produced = _hkdf384_produced + take;
+        if (out_len - produced < 48) { take = out_len - produced; }
+        memcpy(out + produced, t384_currb, take);
+        produced = produced + take;
 
         # Save T(i) for the next iteration.
-        memcpy(&t384_prev, &t384_current, 48);
-
-        _hkdf384_counter = _hkdf384_counter + 1;
+        memcpy(t384_prevb, t384_currb, 48);
+        counter = counter + 1;
     }
 
-    # Zeroize the heap scratch before free. t384_prev / t384_current
-    # are `secret var` — zeroed on function exit by the compiler.
-    memset(_hkdf384_scratch, 0, _hkdf384_scratch_len);
-    fl_free(_hkdf384_scratch);
-    # Wipe the global pointers so nothing leaks between calls.
-    _hkdf384_scratch = 0;
-    _hkdf384_prk = 0;
-    _hkdf384_info = 0;
-    _hkdf384_out = 0;
+    # Per-lane secret zeroization (replaces the lost `secret var`).
+    memset(t384_prevb, 0, 48);
+    memset(t384_currb, 0, 48);
     return 0;
 }
 
@@ -182,10 +180,15 @@ fn hkdf_expand_sha384(prk, prk_len, info, info_len, out, out_len): i64 {
 #  -1   on negative-length input
 #  -2   on out_len > 255*48
 fn hkdf_sha384(salt, salt_len, ikm, ikm_len, info, info_len, out, out_len): i64 {
-    # PRK is key material. `secret var` handles zeroization on every
-    # return path (both rc1 error and rc2 success/error).
-    secret var prk384[48];
-    var rc1 = hkdf_extract_sha384(salt, salt_len, ikm, ikm_len, &prk384);
-    if (rc1 != 0) { return rc1; }
-    return hkdf_expand_sha384(&prk384, 48, info, info_len, out, out_len);
+    # PRK is key material. Banked (3.9.6): was a `secret var` static
+    # global (quirk #1) raced under concurrent handshakes. Plain `var` +
+    # per-lane wipe on every return path (quirk #9), including the
+    # extract-error path where the lane may still hold a prior PRK.
+    var bk = cbank();
+    var prk384[3072];   var prk384b = &prk384 + bk * 48;   # 48 * SIGIL_CRYPTO_BANKS
+    var rc1 = hkdf_extract_sha384(salt, salt_len, ikm, ikm_len, prk384b);
+    if (rc1 != 0) { memset(prk384b, 0, 48); return rc1; }
+    var rc2 = hkdf_expand_sha384(prk384b, 48, info, info_len, out, out_len);
+    memset(prk384b, 0, 48);
+    return rc2;
 }

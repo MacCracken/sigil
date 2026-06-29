@@ -307,12 +307,12 @@ fn u512_mod_p(out, val): i64 {
     # batch-verify worker carves its own lane. One `cbank()` read per
     # call; all lanes derive from the same bank index.
     var bk = cbank();
-    var aH[256];   var aHb = &aH + bk * 32;     # 32 * SIGIL_CRYPTO_BANKS
-    var aL[256];   var aLb = &aL + bk * 32;
-    var prod[512]; var prodb = &prod + bk * 64; # 64 * SIGIL_CRYPTO_BANKS
-    var lowp[256]; var lowpb = &lowp + bk * 32;
-    var r[256];    var rb = &r + bk * 32;
-    var extra[256];var extrab = &extra + bk * 32;
+    var aH[2048];   var aHb = &aH + bk * 32;     # 32 * SIGIL_CRYPTO_BANKS
+    var aL[2048];   var aLb = &aL + bk * 32;
+    var prod[4096]; var prodb = &prod + bk * 64; # 64 * SIGIL_CRYPTO_BANKS
+    var lowp[2048]; var lowpb = &lowp + bk * 32;
+    var r[2048];    var rb = &r + bk * 32;
+    var extra[2048];var extrab = &extra + bk * 32;
 
     store64(aHb, load64(val + 32));
     store64(aHb + 8, load64(val + 40));
@@ -383,7 +383,7 @@ fn fp_mul(r, a, b): i64 {
     # function-scope global (CLAUDE.md quirk #1). Each batch-verify
     # worker uses its own 64-byte lane so concurrent field
     # multiplies on the [h]A / [S]B ladders never collide.
-    var prod[512];                       # 64 * SIGIL_CRYPTO_BANKS
+    var prod[4096];                       # 64 * SIGIL_CRYPTO_BANKS
     var prodb = &prod + cbank() * 64;
     u256_mul_full(prodb, a, b);
     u512_mod_p(r, prodb);
@@ -402,9 +402,9 @@ fn fp_pow(r, base, exp): i64 {
     _init_ed_p();
     # Per-thread banked scratch (3.6) — see fp_mul / u512_mod_p.
     var bk = cbank();
-    var tmp[256];      var tmpb = &tmp + bk * 32;       # 32 * SIGIL_CRYPTO_BANKS
-    var result[256];   var resultb = &result + bk * 32;
-    var base_buf[256]; var base_bufb = &base_buf + bk * 32;
+    var tmp[2048];      var tmpb = &tmp + bk * 32;       # 32 * SIGIL_CRYPTO_BANKS
+    var result[2048];   var resultb = &result + bk * 32;
+    var base_buf[2048]; var base_bufb = &base_buf + bk * 32;
     store64(resultb, 1);
     store64(resultb + 8, 0);
     store64(resultb + 16, 0);
@@ -451,14 +451,14 @@ fn fp_inv(r, a): i64 {
     # on the parallel verify path (ge_to_bytes → fp_inv), so each
     # worker inverts into its own lane. One `cbank()` read per call.
     var bk = cbank();
-    var t0[256];    var t0b = &t0 + bk * 32;       # 32 * SIGIL_CRYPTO_BANKS
-    var z9[256];    var z9b = &z9 + bk * 32;
-    var z11[256];   var z11b = &z11 + bk * 32;
-    var z5[256];    var z5b = &z5 + bk * 32;
-    var z10[256];   var z10b = &z10 + bk * 32;
-    var z50[256];   var z50b = &z50 + bk * 32;
-    var z100[256];  var z100b = &z100 + bk * 32;
-    var a_buf[256]; var a_bufb = &a_buf + bk * 32;
+    var t0[2048];    var t0b = &t0 + bk * 32;       # 32 * SIGIL_CRYPTO_BANKS
+    var z9[2048];    var z9b = &z9 + bk * 32;
+    var z11[2048];   var z11b = &z11 + bk * 32;
+    var z5[2048];    var z5b = &z5 + bk * 32;
+    var z10[2048];   var z10b = &z10 + bk * 32;
+    var z50[2048];   var z50b = &z50 + bk * 32;
+    var z100[2048];  var z100b = &z100 + bk * 32;
+    var a_buf[2048]; var a_bufb = &a_buf + bk * 32;
     u256_copy(a_bufb, a);
 
     # z2 in t0: t0 = a^2

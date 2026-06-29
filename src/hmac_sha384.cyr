@@ -34,53 +34,62 @@
 # ipad / opad scratch buffers are `secret var` and zeroized on
 # return. Returns 0.
 fn hmac_sha384(key, key_len, msg, msg_len, out48): i64 {
-    # Step 1: Derive K' (128 bytes — the SHA-384 block size).
-    # `secret var` zeroes the buffer on function exit (Cyrius 5.3.5+).
-    # The init memset is retained because the key_len <= 128 branch
-    # relies on the upper bytes being zero.
-    secret var kprime384[128];
-    memset(&kprime384, 0, 128);
+    # Per-worker banked scratch (3.9.6 — concurrent-TLS-handshake fix).
+    # kprime384/ipad384/opad384/inner_hash384 were function-scope
+    # `secret var`s (static globals, quirk #1) and the two SHA-384 ctxs
+    # were `fl_alloc`'d — both raced under concurrent handshakes
+    # (HMAC-SHA384 is the HKDF-SHA384 primitive driving the
+    # TLS_AES_256_GCM_SHA384 key schedule on every handshake). Banked
+    # across `cbank()` lanes; secret lanes are plain `var` + per-lane
+    # `memset` on exit (quirk #9); streaming ctx uses a banked `_into`
+    # buffer (no fl_alloc). Block size B = 128, digest L = 48.
+    var bk = cbank();
+    var kprime384[8192];    var kprime384b    = &kprime384    + bk * 128;  # 128 * SIGIL_CRYPTO_BANKS
+    var ipad384[8192];      var ipad384b      = &ipad384      + bk * 128;
+    var opad384[8192];      var opad384b      = &opad384      + bk * 128;
+    var inner_hash384[3072]; var inner_hash384b = &inner_hash384 + bk * 48;  # 48 * SIGIL_CRYPTO_BANKS
+    var hctx[13312];        var hctxb         = &hctx         + bk * 208;  # 208 * SIGIL_CRYPTO_BANKS (reused)
 
+    # Step 1: Derive K' (128 bytes — the SHA-384 block size). The init
+    # memset is retained because the key_len <= 128 branch relies on the
+    # upper bytes being zero.
+    memset(kprime384b, 0, 128);
     if (key_len > 128) {
-        # Key longer than block — replace with its 48-byte hash.
-        sha384(key, key_len, &kprime384);
-        # kprime384 is now 48 bytes of hash + 80 bytes of zeros.
+        # Key longer than block — replace with its 48-byte hash
+        # (48 B hash + 80 B zeros).
+        sha384(key, key_len, kprime384b);
     } else {
-        memcpy(&kprime384, key, key_len);
+        memcpy(kprime384b, key, key_len);
         # Rest already zeroed.
     }
 
     # Step 2: inner = SHA-384((K' xor ipad) || message)
-    secret var ipad384[128];
     var i = 0;
     while (i < 128) {
-        store8(&ipad384 + i, (load8(&kprime384 + i) & 0xFF) ^ 0x36);
+        store8(ipad384b + i, (load8(kprime384b + i) & 0xFF) ^ 0x36);
         i = i + 1;
     }
+    sha384_init_into(hctxb);
+    sha384_update(hctxb, ipad384b, 128);
+    sha384_update(hctxb, msg, msg_len);
+    sha384_finalize(hctxb, inner_hash384b);
 
-    var inner_ctx = sha384_init();
-    sha384_update(inner_ctx, &ipad384, 128);
-    sha384_update(inner_ctx, msg, msg_len);
-    var inner_hash384[48];
-    sha384_finalize(inner_ctx, &inner_hash384);
-    fl_free(inner_ctx);
-
-    # Step 3: outer = SHA-384((K' xor opad) || inner)
-    secret var opad384[128];
+    # Step 3: outer = SHA-384((K' xor opad) || inner)  (reuse the ctx)
     i = 0;
     while (i < 128) {
-        store8(&opad384 + i, (load8(&kprime384 + i) & 0xFF) ^ 0x5c);
+        store8(opad384b + i, (load8(kprime384b + i) & 0xFF) ^ 0x5c);
         i = i + 1;
     }
+    sha384_init_into(hctxb);
+    sha384_update(hctxb, opad384b, 128);
+    sha384_update(hctxb, inner_hash384b, 48);
+    sha384_finalize(hctxb, out48);
 
-    var outer_ctx = sha384_init();
-    sha384_update(outer_ctx, &opad384, 128);
-    sha384_update(outer_ctx, &inner_hash384, 48);
-    sha384_finalize(outer_ctx, out48);
-    fl_free(outer_ctx);
-
-    # kprime384 / ipad384 / opad384 are `secret var` — zeroed on
-    # return by the compiler. inner_hash384 is a public digest; left
-    # as a plain var (no security need to clear).
+    # Per-lane secret zeroization (replaces the lost `secret var`
+    # guarantee; wipes only THIS worker's lane). inner_hash384 is a
+    # public digest — left as-is.
+    memset(kprime384b, 0, 128);
+    memset(ipad384b, 0, 128);
+    memset(opad384b, 0, 128);
     return 0;
 }

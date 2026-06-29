@@ -83,9 +83,9 @@ fn chacha20_block(key, nonce, counter, out): i64 {
     # (quirk #1), so concurrent callers would race; each operates on its
     # own `cbank()` lane. Bank 0 on the serial path.
     var bk = cbank();
-    var st[1024];   # 16 words × SIGIL_CRYPTO_BANKS lanes (per-lane zeroized below)
+    var st[8192];   # 16 words × SIGIL_CRYPTO_BANKS lanes (per-lane zeroized below)
     var stb = &st + bk * 128;
-    var ws[1024];
+    var ws[8192];   # 16 words × SIGIL_CRYPTO_BANKS lanes
     var wsb = &ws + bk * 128;
 
     # Constants — little-endian words of "expand 32-byte k".
@@ -160,7 +160,7 @@ fn chacha20_block(key, nonce, counter, out): i64 {
 # ================================================================
 fn chacha20_xor(key, nonce, counter, input, in_len, out): i64 {
     var bk = cbank();
-    var ks[512];   # 64-byte keystream block × SIGIL_CRYPTO_BANKS lanes
+    var ks[4096];   # 64-byte keystream block × SIGIL_CRYPTO_BANKS lanes
     var ksb = &ks + bk * 64;
     var done = 0;
     var ctr = counter & 0xffffffff;

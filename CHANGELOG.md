@@ -7,6 +7,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.9.6] — 2026-06-29
+
+**Concurrent TLS handshakes no longer race sigil's crypto scratch.** A TLS 1.3
+server crashed (SIGSEGV / ECONNRESET) the moment two handshakes ran concurrently:
+the handshake-critical crypto scratch was process-global and shared across threads.
+Root cause was two-fold — (1) the per-worker crypto banks
+(`src/crypto_scratch.cyr`) existed since 3.6 but were only ever activated by the
+batch-verify path, so concurrent TLS workers all collided on bank 0; and (2) the
+primitives the TLS 1.3 key schedule actually drives (HKDF, HMAC, `ed25519_sign`,
+the one-shot SHA-2 hashes, and **both** AEAD suites) were either unbanked or used
+the non-thread-safe `fl_alloc`. Fixed by making `cbank()` **auto-assign** a
+per-thread lane (no consumer cooperation needed) and banking every affected
+primitive. Surfaced by `yeo-cy-test` pointing concurrent clients at sandhi's
+multi-worker `sandhi_server_run_pooled_tls`. Toolchain pin 6.2.48 → **6.3.5**.
+Issue: [`…concurrent-tls-handshake-global-scratch-race`](docs/development/issues/2026-06-28-concurrent-tls-handshake-global-scratch-race.md);
+decision: [ADR 0007](docs/adr/0007-auto-banking-for-concurrent-tls.md);
+audit: [`2026-06-29-3.9.6-concurrent-tls-handshake-banking-audit`](docs/audit/2026-06-29-3.9.6-concurrent-tls-handshake-banking-audit.md).
+
+### Security
+- **Concurrent-TLS-handshake crash (HIGH 🔴) fixed.** Auto-assigned crypto banks
+  + banked HKDF/HMAC/`ed25519_sign`/AEAD scratch eliminate the cross-thread
+  scratch race that crashed a multi-worker TLS server. The Ed25519 signing path
+  (`ed25519_sign` / `sc_muladd`) also carried a nonce-corruption hazard beyond
+  the crash; both the nonce scratch and the secret product are now banked +
+  per-lane-wiped. See the audit for the 10-finding table (CRITICAL×3, HIGH×5,
+  MEDIUM×2).
+
+### Changed
+- **`cbank()` auto-assigns a private lane per thread** on first use
+  (`atomic_fetch_add` into lanes `1..63`; bank 0 reserved for main/serial). No
+  TLS consumer needs to call `crypto_bank_set` — that call is retained only for
+  the batch path. `SIGIL_CRYPTO_BANKS` 8 → **64** (covers a 63-core TLS pool);
+  every banked array widened ×8.
+- **HKDF / HKDF-SHA384 rewritten allocation-free** — each round's HMAC is
+  streamed over `(T(i-1), info, counter)` segments (new internal
+  `_hkdf_hmac_seg3` / `_hkdf384_hmac_seg3`), removing the process-global
+  `fl_alloc` concat scratch and its module-global pointers. Exact RFC 5869
+  contract preserved (no info-length cap, no leak).
+- **One-shot `sha256` / `sha512` / `sha384`** now use a banked `_into` context
+  instead of `fl_alloc` — thread-safe at the source for every caller.
+- **HMAC / HMAC-SHA384, `ed25519_sign` / `sc_muladd`, `sha384_finalize`, the full
+  AES-GCM AEAD path (GHASH/CTR/encrypt/decrypt + the round-key schedule), and
+  ChaCha20-Poly1305 / Poly1305** scratch are banked across `cbank()` lanes (plain
+  `var` + per-lane wipe, ADR 0004). The AES-GCM round-key schedule moved off
+  `fl_alloc` to a banked static (240 B/lane keeps AES-NI 16-byte alignment).
+- **NI self-test probes** (`aes_ni_available` / `sha_ni_available`) CAS-guarded so
+  concurrent first-probes can't race the one-time self-test scratch.
+- Toolchain pin `6.2.48` → `6.3.5`.
+
+### Added
+- `tests/tcyr/concurrent_tls_handshake.tcyr` — race-detector: 16 auto-banked
+  worker threads (no `crypto_bank_set`, exceeding the old 8-bank cap) recompute
+  `ed25519_sign` + HKDF-SHA256/384 + SHA-384 transcript + AES-256-GCM +
+  ChaCha20-Poly1305 vs. a serial reference. Caught two of the races live; stable
+  30/30 after the fixes. (+7 assertions.)
+
+### Deferred (tracked, not buried → 3.9.7)
+- ChaCha20-Poly1305's `_cp_tag` `fl_alloc` mac_data buffer (the only remaining
+  concurrent-path `fl_alloc`; needs a streaming Poly1305). AES-GCM — the issue's
+  `TLS_AES_256_GCM_SHA384` repro suite — is fully fixed.
+- ECDSA P-256/P-384 sign+verify banking (~100 pointer-globals/curve; latent —
+  `tls_native` rejects RSA and the probe cert is Ed25519).
+- `bignum` (RSA modexp/Montgomery) and `tls12_prf` (TLS 1.2) statics — off the
+  TLS 1.3 server path.
+
 ## [3.9.5] — 2026-06-27
 
 **Re-fold via `cyrius distlib` + ship the `dist/sigil.deps` dependency sidecar.**

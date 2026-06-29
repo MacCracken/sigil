@@ -29,54 +29,62 @@
 # / ipad / opad scratch buffers are `secret var` and zeroized on
 # return. Returns 0.
 fn hmac_sha256(key, key_len, msg, msg_len, out): i64 {
-    # Step 1: Derive K' (64 bytes). `secret var` guarantees the
-    # buffer is zeroed on function exit (Cyrius 5.3.5+). The init
-    # memset below is retained for program correctness — the
-    # key_len < 64 branch relies on the upper bytes being zero.
-    secret var kprime[64];
-    memset(&kprime, 0, 64);
+    # Per-worker banked scratch (3.9.6 — concurrent-TLS-handshake fix).
+    # kprime/ipad/opad/inner_hash were function-scope `secret var`s, i.e.
+    # STATIC globals (quirk #1), and the two SHA-256 ctxs were `fl_alloc`'d
+    # — both raced under concurrent TLS handshakes (HMAC is the HKDF
+    # building block driven on every TLS 1.3 key-schedule step). Banked
+    # across `cbank()` lanes; the secret K'/ipad/opad lanes are plain
+    # `var` + per-lane `memset` on exit (quirk #9 — a `secret var`
+    # whole-array wipe would clobber a sibling worker's live lane), and
+    # the streaming ctx uses a banked `_into` buffer (no fl_alloc).
+    var bk = cbank();
+    var kprime[4096];     var kprimeb     = &kprime     + bk * 64;   # 64 * SIGIL_CRYPTO_BANKS
+    var ipad[4096];       var ipadb       = &ipad       + bk * 64;
+    var opad[4096];       var opadb       = &opad       + bk * 64;
+    var inner_hash[2048]; var inner_hashb = &inner_hash + bk * 32;   # 32 * SIGIL_CRYPTO_BANKS
+    var hctx[9216];       var hctxb       = &hctx       + bk * 144;  # 144 * SIGIL_CRYPTO_BANKS (reused)
 
+    # Step 1: Derive K' (64 bytes). The init memset is retained for
+    # correctness — the key_len < 64 branch relies on the upper bytes
+    # being zero.
+    memset(kprimeb, 0, 64);
     if (key_len > 64) {
-        # Key too long — hash it
-        sha256(key, key_len, &kprime);
-        # kprime is now 32 bytes of hash + 32 bytes of zeros
+        # Key too long — hash it. kprime is then 32 B hash + 32 B zeros.
+        sha256(key, key_len, kprimeb);
     } else {
-        memcpy(&kprime, key, key_len);
+        memcpy(kprimeb, key, key_len);
         # Rest already zeroed
     }
 
     # Step 2: inner = SHA-256((K' xor ipad) || message)
-    secret var ipad[64];
     var i = 0;
     while (i < 64) {
-        store8(&ipad + i, (load8(&kprime + i) & 0xFF) ^ 0x36);
+        store8(ipadb + i, (load8(kprimeb + i) & 0xFF) ^ 0x36);
         i = i + 1;
     }
+    sha256_init_into(hctxb);
+    sha256_update(hctxb, ipadb, 64);
+    sha256_update(hctxb, msg, msg_len);
+    sha256_finalize(hctxb, inner_hashb);
 
-    var inner_ctx = sha256_init();
-    sha256_update(inner_ctx, &ipad, 64);
-    sha256_update(inner_ctx, msg, msg_len);
-    var inner_hash[32];
-    sha256_finalize(inner_ctx, &inner_hash);
-    fl_free(inner_ctx);
-
-    # Step 3: outer = SHA-256((K' xor opad) || inner)
-    secret var opad[64];
+    # Step 3: outer = SHA-256((K' xor opad) || inner)  (reuse the ctx)
     i = 0;
     while (i < 64) {
-        store8(&opad + i, (load8(&kprime + i) & 0xFF) ^ 0x5c);
+        store8(opadb + i, (load8(kprimeb + i) & 0xFF) ^ 0x5c);
         i = i + 1;
     }
+    sha256_init_into(hctxb);
+    sha256_update(hctxb, opadb, 64);
+    sha256_update(hctxb, inner_hashb, 32);
+    sha256_finalize(hctxb, out);
 
-    var outer_ctx = sha256_init();
-    sha256_update(outer_ctx, &opad, 64);
-    sha256_update(outer_ctx, &inner_hash, 32);
-    sha256_finalize(outer_ctx, out);
-    fl_free(outer_ctx);
-
-    # kprime / ipad / opad are `secret var` — zeroed on return by
-    # the compiler. inner_hash is a public digest; left as a plain
-    # var (no security need to clear).
+    # Per-lane secret zeroization (replaces the lost `secret var`
+    # guarantee; wipes only THIS worker's lane). inner_hash is a public
+    # digest — left as-is.
+    memset(kprimeb, 0, 64);
+    memset(ipadb, 0, 64);
+    memset(opadb, 0, 64);
     return 0;
 }
 

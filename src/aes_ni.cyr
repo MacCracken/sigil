@@ -45,6 +45,7 @@
 # is a serializing instruction so we want to pay it exactly once.
 var _aes_ni_cache = 2;
 var _aes_ni_probe_out = 0;      # 8-byte scratch for the probe's *out param
+var _aes_ni_probe_lock = 0;     # CAS guard: serializes the one-time self-test (3.9.6)
 
 # Self-test scratch — module-level so `var rk[240]` lands on a
 # 16-byte boundary (CLAUDE.md quirk #6). Required because the
@@ -58,6 +59,18 @@ var _aes_ni_st_ct[16];
 
 fn aes_ni_available(): i64 {
     if (_aes_ni_cache != 2) { return _aes_ni_cache; }
+    # First-probe serialization (3.9.6 — concurrent-TLS-handshake fix):
+    # the self-test below drives the module-global `_aes_ni_st_*`
+    # scratch, so two threads probing concurrently (the first AES on
+    # each of two TLS workers, if the main thread never pre-warmed)
+    # would race it and could spuriously downgrade NI to software. CAS
+    # so exactly one thread runs the probe; the rest spin until it
+    # publishes the cached result. x86-only path (CPUID/AES-NI), so the
+    # plain cache read/write is visibility-safe under x86-TSO.
+    if (atomic_cas(&_aes_ni_probe_lock, 0, 1) == 0) {
+        while (_aes_ni_cache == 2) { }
+        return _aes_ni_cache;
+    }
     if (_aes_ni_probe_out == 0) { _aes_ni_probe_out = alloc(8); }
     store64(_aes_ni_probe_out, 0);
     _aes_ni_cpuid_probe(_aes_ni_probe_out);

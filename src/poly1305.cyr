@@ -91,9 +91,13 @@ fn poly1305_mac(key, msg, msg_len, out): i64 {
     # ---- Accumulator (5×26-bit limbs), starts at 0.
     var h0 = 0; var h1 = 0; var h2 = 0; var h3 = 0; var h4 = 0;
 
-    # Single-call scratch for the final partial block; `secret var`
-    # zeroes it on return (it transiently holds message bytes).
-    secret var block[16];
+    # Scratch for the final partial block. Banked (3.9.6): was a
+    # function-scope static (quirk #1) raced under concurrent
+    # ChaCha20-Poly1305 (the TLS_CHACHA20_POLY1305_SHA256 suite — the
+    # issue confirmed both AEAD suites crash). Plain `var` + per-lane
+    # wipe (it transiently holds message bytes).
+    var bk = cbank();
+    var block[1024];   var blockb = &block + bk * 16;   # 16 * SIGIL_CRYPTO_BANKS
 
     var done = 0;
     while (done < msg_len) {
@@ -104,10 +108,10 @@ fn poly1305_mac(key, msg, msg_len, out): i64 {
         # after the data and hibit = 0.
         var hibit = 1 << 24;
         if (remaining < 16) {
-            memset(&block, 0, 16);
-            memcpy(&block, msg + done, remaining);
-            store8(&block + remaining, 1);
-            mp = &block;
+            memset(blockb, 0, 16);
+            memcpy(blockb, msg + done, remaining);
+            store8(blockb + remaining, 1);
+            mp = blockb;
             hibit = 0;
         }
 
@@ -192,6 +196,7 @@ fn poly1305_mac(key, msg, msg_len, out): i64 {
     s1 = 0; s2 = 0; s3 = 0; s4 = 0;
     pad0 = 0; pad1 = 0; pad2 = 0; pad3 = 0;
     t0 = 0; t1 = 0; t2 = 0; t3 = 0;
+    memset(blockb, 0, 16);   # wipe this worker's lane (was `secret var`)
     return 0;
 }
 
@@ -202,8 +207,12 @@ fn poly1305_mac(key, msg, msg_len, out): i64 {
 #   forgery attempt learns nothing from comparison timing.
 # ================================================================
 fn poly1305_verify(key, msg, msg_len, tag): i64 {
-    secret var computed[16];
-    poly1305_mac(key, msg, msg_len, &computed);
-    var ok = ct_eq_bytes(&computed, tag, 16);
+    # Banked (3.9.6): was a function-scope static (quirk #1) raced under
+    # concurrent ChaCha20-Poly1305. Plain `var` + per-lane wipe.
+    var bk = cbank();
+    var computed[1024];   var computedb = &computed + bk * 16;   # 16 * SIGIL_CRYPTO_BANKS
+    poly1305_mac(key, msg, msg_len, computedb);
+    var ok = ct_eq_bytes(computedb, tag, 16);
+    memset(computedb, 0, 16);
     return ok;
 }

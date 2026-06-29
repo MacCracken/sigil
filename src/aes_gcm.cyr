@@ -272,33 +272,36 @@ fn _aes_shift_rows(state): i64 {
     # ShiftRows rotates row r left by r columns: row 0 unchanged,
     # row 1 rotated by 1, row 2 by 2, row 3 by 3.
     # Read into tmp then write back permuted.
-    var tmp[16];
-    memcpy(&tmp, state, 16);
+    # Banked (3.9.6): function-scope static (quirk #1) — raced under
+    # concurrent AES-GCM (the encrypted TLS handshake flight + records).
+    var bk = cbank();
+    var tmp[1024];   var tb = &tmp + bk * 16;   # 16 * SIGIL_CRYPTO_BANKS
+    memcpy(tb, state, 16);
 
     # Row 0 (unchanged): columns 0,1,2,3
-    # store8(state + 0*4 + 0, load8(&tmp + 0*4 + 0));  (no-op)
+    # store8(state + 0*4 + 0, load8(tb + 0*4 + 0));  (no-op)
 
     # Row 1 rotated left by 1:
     #   new s[0,1] = old s[1,1]    → state[0*4+1] = tmp[1*4+1]
     #   new s[1,1] = old s[2,1]    → state[1*4+1] = tmp[2*4+1]
     #   new s[2,1] = old s[3,1]    → state[2*4+1] = tmp[3*4+1]
     #   new s[3,1] = old s[0,1]    → state[3*4+1] = tmp[0*4+1]
-    store8(state +  1, load8(&tmp +  5));
-    store8(state +  5, load8(&tmp +  9));
-    store8(state +  9, load8(&tmp + 13));
-    store8(state + 13, load8(&tmp +  1));
+    store8(state +  1, load8(tb +  5));
+    store8(state +  5, load8(tb +  9));
+    store8(state +  9, load8(tb + 13));
+    store8(state + 13, load8(tb +  1));
 
     # Row 2 rotated left by 2:
-    store8(state +  2, load8(&tmp + 10));
-    store8(state +  6, load8(&tmp + 14));
-    store8(state + 10, load8(&tmp +  2));
-    store8(state + 14, load8(&tmp +  6));
+    store8(state +  2, load8(tb + 10));
+    store8(state +  6, load8(tb + 14));
+    store8(state + 10, load8(tb +  2));
+    store8(state + 14, load8(tb +  6));
 
     # Row 3 rotated left by 3 (equivalently: right by 1):
-    store8(state +  3, load8(&tmp + 15));
-    store8(state +  7, load8(&tmp +  3));
-    store8(state + 11, load8(&tmp +  7));
-    store8(state + 15, load8(&tmp + 11));
+    store8(state +  3, load8(tb + 15));
+    store8(state +  7, load8(tb +  3));
+    store8(state + 11, load8(tb +  7));
+    store8(state + 15, load8(tb + 11));
     return 0;
 }
 
@@ -342,28 +345,32 @@ fn _aes_mix_columns(state): i64 {
 # differ. `nr - 1` middle rounds (SubBytes/ShiftRows/MixColumns/
 # AddRoundKey), then the final round drops MixColumns.
 fn _aes_encrypt_block_sw(round_keys, in_block, out_block, nr): i64 {
-    var state[16];
-    memcpy(&state, in_block, 16);
+    # Banked (3.9.6): function-scope static (quirk #1) — raced under
+    # concurrent AES-GCM. (Software fallback path; the AES-NI block
+    # encrypt is the common case.)
+    var bk = cbank();
+    var state[1024];   var sb = &state + bk * 16;   # 16 * SIGIL_CRYPTO_BANKS
+    memcpy(sb, in_block, 16);
 
     # Initial round key
-    _aes_add_round_key(&state, round_keys, 0);
+    _aes_add_round_key(sb, round_keys, 0);
 
     # Middle rounds
     var r = 1;
     while (r < nr) {
-        _aes_sub_bytes(&state);
-        _aes_shift_rows(&state);
-        _aes_mix_columns(&state);
-        _aes_add_round_key(&state, round_keys, r);
+        _aes_sub_bytes(sb);
+        _aes_shift_rows(sb);
+        _aes_mix_columns(sb);
+        _aes_add_round_key(sb, round_keys, r);
         r = r + 1;
     }
 
     # Final round (no MixColumns)
-    _aes_sub_bytes(&state);
-    _aes_shift_rows(&state);
-    _aes_add_round_key(&state, round_keys, nr);
+    _aes_sub_bytes(sb);
+    _aes_shift_rows(sb);
+    _aes_add_round_key(sb, round_keys, nr);
 
-    memcpy(out_block, &state, 16);
+    memcpy(out_block, sb, 16);
     return 0;
 }
 
@@ -466,8 +473,12 @@ fn _ghash_xor_16(dst, src): i64 {
 # V is a 16-byte working copy of H — secret material; `secret var`
 # zeroizes it on every return path.
 fn _ghash_mul(z, x, h): i64 {
-    secret var v[16];
-    memcpy(&v, h, 16);
+    # Banked (3.9.6): `v` is a function-scope static (quirk #1) — GHASH
+    # runs per AEAD block, so concurrent AES-GCM raced it. Plain `var` +
+    # per-lane wipe (quirk #9; secret working copy of H).
+    var bk = cbank();
+    var v[1024];   var vb = &v + bk * 16;   # 16 * SIGIL_CRYPTO_BANKS
+    memcpy(vb, h, 16);
     memset(z, 0, 16);
 
     var byte = 0;
@@ -477,13 +488,14 @@ fn _ghash_mul(z, x, h): i64 {
         while (bit < 8) {
             var mask = (b >> (7 - bit)) & 1;
             if (mask == 1) {
-                _ghash_xor_16(z, &v);
+                _ghash_xor_16(z, vb);
             }
-            _ghash_shift_right_and_reduce(&v);
+            _ghash_shift_right_and_reduce(vb);
             bit = bit + 1;
         }
         byte = byte + 1;
     }
+    memset(vb, 0, 16);
     return 0;
 }
 
@@ -496,16 +508,19 @@ fn _ghash_update(y, h, data, len): i64 {
     # block holds plaintext / ciphertext bytes during GHASH absorb;
     # scratch / scratch2 hold the GF(2^128) product. All three are
     # secret-derived — `secret var` zeroes them on return.
-    secret var block[16];
-    secret var scratch[16];
-    secret var scratch2[16];
+    # Banked (3.9.6): function-scope statics (quirk #1) raced under
+    # concurrent AES-GCM. Plain `var` + per-lane wipe (secret-derived).
+    var bk = cbank();
+    var block[1024];    var blockb    = &block    + bk * 16;   # 16 * SIGIL_CRYPTO_BANKS
+    var scratch[1024];  var scratchb  = &scratch  + bk * 16;
+    var scratch2[1024]; var scratch2b = &scratch2 + bk * 16;
     var pos = 0;
     while (pos + 16 <= len) {
-        memcpy(&block, data + pos, 16);
-        _ghash_xor_16(y, &block);
+        memcpy(blockb, data + pos, 16);
+        _ghash_xor_16(y, blockb);
         # Z = Y * H, stored back into Y via scratch.
-        _ghash_mul(&scratch, y, h);
-        memcpy(y, &scratch, 16);
+        _ghash_mul(scratchb, y, h);
+        memcpy(y, scratchb, 16);
         pos = pos + 16;
     }
     var remaining = len - pos;
@@ -513,12 +528,15 @@ fn _ghash_update(y, h, data, len): i64 {
         # Re-zero block: only `remaining` bytes get copied in below;
         # the upper (16 - remaining) bytes must be zero for the
         # zero-padded tail-block convention.
-        memset(&block, 0, 16);
-        memcpy(&block, data + pos, remaining);
-        _ghash_xor_16(y, &block);
-        _ghash_mul(&scratch2, y, h);
-        memcpy(y, &scratch2, 16);
+        memset(blockb, 0, 16);
+        memcpy(blockb, data + pos, remaining);
+        _ghash_xor_16(y, blockb);
+        _ghash_mul(scratch2b, y, h);
+        memcpy(y, scratch2b, 16);
     }
+    memset(blockb, 0, 16);
+    memset(scratchb, 0, 16);
+    memset(scratch2b, 0, 16);
     return 0;
 }
 
@@ -562,16 +580,20 @@ fn _be32_load(buf): i64 {
 fn _aes_gcm_ctr_xor(round_keys, counter, src, dst, len, nr): i64 {
     # CTR keystream block — XOR-masks the plaintext, so leakage
     # recovers plaintext. `secret var` zeroes on every return.
-    secret var ks[16];
+    # Banked (3.9.6): `ks` is a function-scope static (quirk #1) — the
+    # CTR keystream block, raced under concurrent AES-GCM. Plain `var` +
+    # per-lane wipe (XOR-mask, leakage recovers plaintext).
+    var bk = cbank();
+    var ks[1024];   var ksb = &ks + bk * 16;   # 16 * SIGIL_CRYPTO_BANKS
     var pos = 0;
     while (pos < len) {
-        _aes_block_enc(round_keys, counter, &ks, nr);
+        _aes_block_enc(round_keys, counter, ksb, nr);
         var chunk = 16;
         if (len - pos < 16) { chunk = len - pos; }
         var i = 0;
         while (i < chunk) {
             store8(dst + pos + i,
-            (load8(src + pos + i) ^ load8(&ks + i)) & 0xFF);
+            (load8(src + pos + i) ^ load8(ksb + i)) & 0xFF);
             i = i + 1;
         }
         # Increment low 32 bits, big-endian, in place.
@@ -580,6 +602,7 @@ fn _aes_gcm_ctr_xor(round_keys, counter, src, dst, len, nr): i64 {
         _be32_store(counter + 12, ctr_val);
         pos = pos + chunk;
     }
+    memset(ksb, 0, 16);
     return 0;
 }
 
@@ -621,15 +644,20 @@ fn _gcm_compute_j0(h, iv, iv_len, j0_out): i64 {
     # Arbitrary-length IV: GHASH the IV (zero-padded to a block by
     # _ghash_update) then the (0^64 || 64-bit-BE IV bit length) block.
     # y is derived through the secret subkey h — zeroed on scope exit.
-    secret var y[16];
-    memset(&y, 0, 16);
-    _ghash_update(&y, h, iv, iv_len);
-    var lenb[16];
-    memset(&lenb, 0, 16);
-    _be64_store(&lenb + 8, iv_len * 8);
-    _ghash_update(&y, h, &lenb, 16);
-    memcpy(j0_out, &y, 16);
-    memset(&lenb, 0, 16);
+    # Banked (3.9.6): function-scope statics (quirk #1) raced under
+    # concurrent AES-GCM (arbitrary-length-IV path). Plain `var` +
+    # per-lane wipe.
+    var bk = cbank();
+    var y[1024];    var yb    = &y    + bk * 16;   # 16 * SIGIL_CRYPTO_BANKS
+    var lenb[1024]; var lenbb = &lenb + bk * 16;
+    memset(yb, 0, 16);
+    _ghash_update(yb, h, iv, iv_len);
+    memset(lenbb, 0, 16);
+    _be64_store(lenbb + 8, iv_len * 8);
+    _ghash_update(yb, h, lenbb, 16);
+    memcpy(j0_out, yb, 16);
+    memset(lenbb, 0, 16);
+    memset(yb, 0, 16);
     return 0;
 }
 
@@ -640,69 +668,80 @@ fn _aes_gcm_encrypt_impl(key, iv, iv_len, aad, aad_len, pt, pt_len, ct_out, tag_
 
     aes_gcm_global_init();
 
+    # Banked (3.9.6 — concurrent-TLS-handshake fix): every 16-byte buffer
+    # below was a function-scope static (quirk #1) shared across threads;
+    # two concurrent AES-GCM ops (the encrypted TLS handshake flight + the
+    # record path) raced them. Banked across `cbank()` lanes; plain `var`
+    # + per-lane wipe (quirk #9 — h/y/s are key-derived secrets).
+    var bk = cbank();
+    var zero_block[1024]; var zbb = &zero_block + bk * 16;   # 16 * SIGIL_CRYPTO_BANKS
+    var h[1024];          var hb  = &h          + bk * 16;
+    var j0[1024];         var j0b = &j0         + bk * 16;
+    var counter[1024];    var cnb = &counter    + bk * 16;
+    var y[1024];          var yb  = &y          + bk * 16;
+    var len_block[1024];  var lbb = &len_block  + bk * 16;
+    var s[1024];          var sb  = &s          + bk * 16;
+
+    # Banked key schedule (3.9.6): was `fl_alloc(rk_size)`, but fl_alloc
+    # is NOT thread-safe (quirk #7) — concurrent GCM ops raced the
+    # freelist. Banked static buffer instead (no allocator). 240 B/lane
+    # (AES-256: 16*15) is divisible by 16, so each lane keeps the
+    # 16-byte alignment the AES-NI round-key loads require (quirk #6).
     var rk_size = 16 * (nr + 1);
-    var round_keys = fl_alloc(rk_size);
+    var rkbuf[15360];   var round_keys = &rkbuf + bk * 240;   # 240 * SIGIL_CRYPTO_BANKS
     _aes_keyexp(key, round_keys, nr);
 
     # H = AES_K(0^128). h is the GHASH subkey — key-derived secret.
-    var zero_block[16];
-    memset(&zero_block, 0, 16);
-    secret var h[16];
-    _aes_block_enc(round_keys, &zero_block, &h, nr);
+    memset(zbb, 0, 16);
+    _aes_block_enc(round_keys, zbb, hb, nr);
 
     # J0 (SP 800-38D §7.1): 96-bit IV fast path or GHASH-based for any
     # other IV length.
-    var j0[16];
-    _gcm_compute_j0(&h, iv, iv_len, &j0);
+    _gcm_compute_j0(hb, iv, iv_len, j0b);
 
     # Counter starts at inc32(J0) — low 32 bits incremented.
-    var counter[16];
-    memcpy(&counter, &j0, 16);
-    var ctr_val = _be32_load(&counter + 12);
+    memcpy(cnb, j0b, 16);
+    var ctr_val = _be32_load(cnb + 12);
     ctr_val = (ctr_val + 1) & 0xFFFFFFFF;
-    _be32_store(&counter + 12, ctr_val);
+    _be32_store(cnb + 12, ctr_val);
 
     # Encrypt plaintext via CTR mode
     if (pt_len > 0) {
-        _aes_gcm_ctr_xor(round_keys, &counter, pt, ct_out, pt_len, nr);
+        _aes_gcm_ctr_xor(round_keys, cnb, pt, ct_out, pt_len, nr);
     }
 
     # GHASH over AAD || pad || CT || pad || len(AAD)||len(CT) in bits BE.
     # y is the running GHASH accumulator — secret-derived.
-    secret var y[16];
-    memset(&y, 0, 16);
+    memset(yb, 0, 16);
     if (aad_len > 0) {
-        _ghash_update(&y, &h, aad, aad_len);
+        _ghash_update(yb, hb, aad, aad_len);
     }
     if (pt_len > 0) {
-        _ghash_update(&y, &h, ct_out, pt_len);
+        _ghash_update(yb, hb, ct_out, pt_len);
     }
-    var len_block[16];
-    memset(&len_block, 0, 16);
-    _be64_store(&len_block + 0, aad_len * 8);
-    _be64_store(&len_block + 8, pt_len * 8);
-    _ghash_update(&y, &h, &len_block, 16);
+    memset(lbb, 0, 16);
+    _be64_store(lbb + 0, aad_len * 8);
+    _be64_store(lbb + 8, pt_len * 8);
+    _ghash_update(yb, hb, lbb, 16);
 
     # Tag = Y XOR AES_K(J0). s = AES_K(J0) — key-derived secret.
-    secret var s[16];
-    _aes_block_enc(round_keys, &j0, &s, nr);
+    _aes_block_enc(round_keys, j0b, sb, nr);
     var i = 0;
     while (i < 16) {
-        store8(tag_out + i, (load8(&y + i) ^ load8(&s + i)) & 0xFF);
+        store8(tag_out + i, (load8(yb + i) ^ load8(sb + i)) & 0xFF);
         i = i + 1;
     }
 
-    # round_keys is heap (fl_alloc) — `secret var` doesn't reach it;
-    # zero explicitly before free. h/y/s are `secret var` — zeroed
-    # by the compiler on return. j0/counter/zero_block/len_block are
-    # IV / length / constant inputs (not key material); zeroed
-    # explicitly as defense-in-depth.
+    # Per-lane wipe of the key schedule + every secret/derived buffer
+    # (replaces the old fl_free + `secret var` zeroization).
     memset(round_keys, 0, rk_size);
-    fl_free(round_keys);
-    memset(&counter, 0, 16);
-    memset(&j0, 0, 16);
-    memset(&zero_block, 0, 16);
-    memset(&len_block, 0, 16);
+    memset(hb, 0, 16);
+    memset(yb, 0, 16);
+    memset(sb, 0, 16);
+    memset(cnb, 0, 16);
+    memset(j0b, 0, 16);
+    memset(zbb, 0, 16);
+    memset(lbb, 0, 16);
     return 0;
 }
 
@@ -769,43 +808,53 @@ fn _aes_gcm_decrypt_impl(key, iv, iv_len, aad, aad_len, ct, ct_len, tag, pt_out,
 
     aes_gcm_global_init();
 
+    # Banked (3.9.6 — concurrent-TLS-handshake fix): every 16-byte buffer
+    # below was a function-scope static (quirk #1) raced by concurrent
+    # AES-GCM. Banked across `cbank()` lanes; plain `var` + per-lane wipe
+    # (quirk #9 — h/y/s/expected_tag are key-derived secrets).
+    var bk = cbank();
+    var zero_block[1024];   var zbb = &zero_block   + bk * 16;   # 16 * SIGIL_CRYPTO_BANKS
+    var h[1024];            var hb  = &h            + bk * 16;
+    var j0[1024];           var j0b = &j0           + bk * 16;
+    var y[1024];            var yb  = &y            + bk * 16;
+    var len_block[1024];    var lbb = &len_block    + bk * 16;
+    var s[1024];            var sb  = &s            + bk * 16;
+    var expected_tag[1024]; var etb = &expected_tag + bk * 16;
+    var counter[1024];      var cnb = &counter      + bk * 16;
+
+    # Banked key schedule (3.9.6): was `fl_alloc` (not thread-safe,
+    # quirk #7). Banked static buffer; 240 B/lane keeps 16-byte
+    # alignment for AES-NI round-key loads (quirk #6).
     var rk_size = 16 * (nr + 1);
-    var round_keys = fl_alloc(rk_size);
+    var rkbuf[15360];   var round_keys = &rkbuf + bk * 240;   # 240 * SIGIL_CRYPTO_BANKS
     _aes_keyexp(key, round_keys, nr);
 
     # H = AES_K(0). h is the GHASH subkey — key-derived secret.
-    var zero_block[16];
-    memset(&zero_block, 0, 16);
-    secret var h[16];
-    _aes_block_enc(round_keys, &zero_block, &h, nr);
+    memset(zbb, 0, 16);
+    _aes_block_enc(round_keys, zbb, hb, nr);
 
     # J0 (SP 800-38D §7.1): 96-bit IV fast path or GHASH-based otherwise.
-    var j0[16];
-    _gcm_compute_j0(&h, iv, iv_len, &j0);
+    _gcm_compute_j0(hb, iv, iv_len, j0b);
 
     # Compute expected tag over received ciphertext BEFORE
     # touching pt_out. y is the running GHASH accumulator — secret.
-    secret var y[16];
-    memset(&y, 0, 16);
+    memset(yb, 0, 16);
     if (aad_len > 0) {
-        _ghash_update(&y, &h, aad, aad_len);
+        _ghash_update(yb, hb, aad, aad_len);
     }
     if (ct_len > 0) {
-        _ghash_update(&y, &h, ct, ct_len);
+        _ghash_update(yb, hb, ct, ct_len);
     }
-    var len_block[16];
-    memset(&len_block, 0, 16);
-    _be64_store(&len_block + 0, aad_len * 8);
-    _be64_store(&len_block + 8, ct_len * 8);
-    _ghash_update(&y, &h, &len_block, 16);
+    memset(lbb, 0, 16);
+    _be64_store(lbb + 0, aad_len * 8);
+    _be64_store(lbb + 8, ct_len * 8);
+    _ghash_update(yb, hb, lbb, 16);
 
     # s = AES_K(J0); expected_tag = Y XOR s. Both key-derived.
-    secret var s[16];
-    _aes_block_enc(round_keys, &j0, &s, nr);
-    secret var expected_tag[16];
+    _aes_block_enc(round_keys, j0b, sb, nr);
     var i = 0;
     while (i < 16) {
-        store8(&expected_tag + i, (load8(&y + i) ^ load8(&s + i)) & 0xFF);
+        store8(etb + i, (load8(yb + i) ^ load8(sb + i)) & 0xFF);
         i = i + 1;
     }
 
@@ -815,20 +864,19 @@ fn _aes_gcm_decrypt_impl(key, iv, iv_len, aad, aad_len, ct, ct_len, tag, pt_out,
     # equivalently call ct_eq_bytes(_, _, 16) since the dual-length
     # form's mismatch-fast-path is unreachable here. Kept dual-length
     # for symmetry with the v5.9.20 sigil 3.0.2 migration shape.
-    var ok = ct_eq_bytes_lens(&expected_tag, 16, tag, 16);
+    var ok = ct_eq_bytes_lens(etb, 16, tag, 16);
 
     # Decrypt via CTR starting at inc32(J0) — we perform the CTR
     # pass unconditionally to keep the work profile flat across
     # valid and forged tag paths. If the tag failed, pt_out is
     # zeroed *after* CTR so no real plaintext ever escapes.
-    var counter[16];
-    memcpy(&counter, &j0, 16);
-    var ctr_val = _be32_load(&counter + 12);
+    memcpy(cnb, j0b, 16);
+    var ctr_val = _be32_load(cnb + 12);
     ctr_val = (ctr_val + 1) & 0xFFFFFFFF;
-    _be32_store(&counter + 12, ctr_val);
+    _be32_store(cnb + 12, ctr_val);
 
     if (ct_len > 0) {
-        _aes_gcm_ctr_xor(round_keys, &counter, ct, pt_out, ct_len, nr);
+        _aes_gcm_ctr_xor(round_keys, cnb, ct, pt_out, ct_len, nr);
     }
 
     var rc = SIGIL_ERR_NONE;
@@ -841,16 +889,17 @@ fn _aes_gcm_decrypt_impl(key, iv, iv_len, aad, aad_len, ct, ct_len, tag, pt_out,
         rc = SIGIL_ERR_INTEGRITY_MISMATCH;
     }
 
-    # round_keys is heap (fl_alloc); zero explicitly before free.
-    # h/y/s/expected_tag are `secret var` — zeroed on return by the
-    # compiler. j0/counter/zero_block/len_block are IV / length /
-    # constant inputs (not key material); zeroed as defense-in-depth.
+    # Per-lane wipe of the key schedule + every secret/derived buffer
+    # (replaces the old fl_free + `secret var` zeroization).
     memset(round_keys, 0, rk_size);
-    fl_free(round_keys);
-    memset(&counter, 0, 16);
-    memset(&j0, 0, 16);
-    memset(&zero_block, 0, 16);
-    memset(&len_block, 0, 16);
+    memset(hb, 0, 16);
+    memset(yb, 0, 16);
+    memset(sb, 0, 16);
+    memset(etb, 0, 16);
+    memset(cnb, 0, 16);
+    memset(j0b, 0, 16);
+    memset(zbb, 0, 16);
+    memset(lbb, 0, 16);
     return rc;
 }
 

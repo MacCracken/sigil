@@ -143,3 +143,35 @@ please fold these in:
   currently rejects RSA keys, so RSA-PSS sign scratch is dead code on the server
   path — not in scope.)
 
+
+---
+
+## Resolution — 3.9.6 (2026-06-29)
+
+**Crash FIXED.** Root cause was two-fold and both halves are addressed:
+
+1. **Banks never activated for TLS** → `cbank()` now **auto-assigns** a private
+   lane to each thread on first use (atomic counter → lanes `1..63`, bank 0 =
+   main/serial). No consumer `crypto_bank_set` call is required.
+   `SIGIL_CRYPTO_BANKS` 8 → 64.
+2. **Unbanked / `fl_alloc` handshake+AEAD primitives** → banked HKDF / HKDF-SHA384
+   (rewritten allocation-free), HMAC / HMAC-SHA384, `ed25519_sign` + `sc_muladd`,
+   the one-shot SHA-256/384/512 (banked `_into`, no `fl_alloc`), `sha384_finalize`,
+   the full **AES-GCM** AEAD path (GHASH/CTR/encrypt/decrypt + the round-key
+   schedule, off `fl_alloc`), and the ChaCha20-Poly1305 / Poly1305 static scratch.
+   NI self-test CAS-guarded.
+
+Validated by `tests/tcyr/concurrent_tls_handshake.tcyr` (16 auto-banked workers,
+no `crypto_bank_set`, > 8 lanes; byte-for-byte vs. serial; stable 40/40 — caught
+the `sha384_finalize` and AES-GCM round-key races during development). The repro's
+`TLS_AES_256_GCM_SHA384` suite is fully race-clean.
+
+ADR [0007](../adr/0007-auto-banking-for-concurrent-tls.md); audit
+[`2026-06-29-3.9.6-…-banking`](../audit/2026-06-29-3.9.6-concurrent-tls-handshake-banking-audit.md).
+
+**Deferred to 3.9.7** (tracked in [roadmap](../roadmap.md) "Thread-safety
+follow-up → 3.9.7", not dropped): the ChaCha20-Poly1305 `_cp_tag` `fl_alloc`
+mac_data buffer (needs a streaming Poly1305 — the only remaining concurrent-path
+`fl_alloc`); ECDSA P-256/P-384 sign+verify banking (latent — `tls_native` rejects
+RSA and the probe cert is Ed25519); the `bignum`/`tls12_prf` statics (off the TLS
+1.3 server path). Maintainer may archive this issue once 3.9.7 closes those.

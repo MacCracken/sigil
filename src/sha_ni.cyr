@@ -51,6 +51,7 @@
 # against any future wrong-output asm regression.
 var _sha_ni_cache = 2;
 var _sha_ni_probe_out = 0;      # 8-byte scratch for the probe's *out param
+var _sha_ni_probe_lock = 0;     # CAS guard: serializes the one-time self-test (3.9.6)
 
 # Self-test scratch — module-level so the 144-byte ctx and the
 # expected-digest slots live in BSS rather than on the stack. ctx
@@ -66,6 +67,14 @@ var _sha_ni_st_ctx[144];
 # cached after the first probe (one CPUID + self-test per process).
 fn sha_ni_available(): i64 {
     if (_sha_ni_cache != 2) { return _sha_ni_cache; }
+    # First-probe serialization (3.9.6): the self-test drives the
+    # module-global `_sha_ni_st_ctx` scratch; CAS so exactly one thread
+    # runs it and the rest spin for the published result (x86-only path,
+    # x86-TSO visibility). Matches `aes_ni_available`.
+    if (atomic_cas(&_sha_ni_probe_lock, 0, 1) == 0) {
+        while (_sha_ni_cache == 2) { }
+        return _sha_ni_cache;
+    }
     if (_sha_ni_probe_out == 0) { _sha_ni_probe_out = alloc(8); }
     store64(_sha_ni_probe_out, 0);
     _sha_ni_cpuid_probe(_sha_ni_probe_out);
@@ -546,7 +555,7 @@ fn sha256_transform_ni(ctx): i64 {
     # concurrent compresses never stomp this shared static scratch
     # (CLAUDE.md quirk #1). 96 is a multiple of 16, so each lane stays
     # 16-aligned and `_sha_ni_align16` is a no-op within it.
-    var raw[768];   # 96 * SIGIL_CRYPTO_BANKS
+    var raw[6144];   # 96 * SIGIL_CRYPTO_BANKS
     var buf = _sha_ni_align16(&raw + cbank() * 96);
     memcpy(buf + 64, _sha_ni_bswap_src, 16);
     _sha_ni_compress_one(ctx, buf, _sha_ni_K);

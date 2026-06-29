@@ -45,9 +45,13 @@ fn _cp_store_le64(p, v): i64 {
 # Derive the one-time Poly1305 key: first 32 bytes of the ChaCha20
 # keystream block at counter 0.
 fn _cp_keygen(key, nonce, otk_out): i64 {
-    secret var block[64];
-    chacha20_block(key, nonce, 0, &block);
-    memcpy(otk_out, &block, 32);
+    # Banked (3.9.6): function-scope static (quirk #1) raced under
+    # concurrent ChaCha20-Poly1305. Plain `var` + per-lane wipe.
+    var bk = cbank();
+    var block[4096];   var blockb = &block + bk * 64;   # 64 * SIGIL_CRYPTO_BANKS
+    chacha20_block(key, nonce, 0, blockb);
+    memcpy(otk_out, blockb, 32);
+    memset(blockb, 0, 64);
     return 0;
 }
 
@@ -91,11 +95,15 @@ fn chacha20poly1305_encrypt(key, nonce, aad, aad_len, pt, pt_len, ct_out, tag_ou
     if (aad_len < 0) { return SIGIL_ERR_INVALID_INPUT; }
     if (pt_len < 0) { return SIGIL_ERR_INVALID_INPUT; }
 
-    secret var otk[32];
-    _cp_keygen(key, nonce, &otk);
+    # Banked (3.9.6): function-scope static (quirk #1) raced under
+    # concurrent ChaCha20-Poly1305. Plain `var` + per-lane wipe.
+    var bk = cbank();
+    var otk[2048];   var otkb = &otk + bk * 32;   # 32 * SIGIL_CRYPTO_BANKS
+    _cp_keygen(key, nonce, otkb);
 
     chacha20_xor(key, nonce, 1, pt, pt_len, ct_out);
-    _cp_tag(&otk, aad, aad_len, ct_out, pt_len, tag_out);
+    _cp_tag(otkb, aad, aad_len, ct_out, pt_len, tag_out);
+    memset(otkb, 0, 32);
     return SIGIL_ERR_NONE;
 }
 
@@ -114,18 +122,25 @@ fn chacha20poly1305_decrypt(key, nonce, aad, aad_len, ct, ct_len, tag, pt_out): 
     if (aad_len < 0) { return SIGIL_ERR_INVALID_INPUT; }
     if (ct_len < 0) { return SIGIL_ERR_INVALID_INPUT; }
 
-    secret var otk[32];
-    _cp_keygen(key, nonce, &otk);
+    # Banked (3.9.6): function-scope statics (quirk #1) raced under
+    # concurrent ChaCha20-Poly1305. Plain `var` + per-lane wipe.
+    var bk = cbank();
+    var otk[2048];      var otkb      = &otk      + bk * 32;   # 32 * SIGIL_CRYPTO_BANKS
+    var expected[1024]; var expectedb = &expected + bk * 16;   # 16 * SIGIL_CRYPTO_BANKS
+    _cp_keygen(key, nonce, otkb);
 
     # Verify the tag over the received ciphertext BEFORE deriving
     # plaintext. Constant-time compare via the stdlib ct_eq_bytes.
-    secret var expected[16];
-    _cp_tag(&otk, aad, aad_len, ct, ct_len, &expected);
-    if (ct_eq_bytes(&expected, tag, 16) == 0) {
+    _cp_tag(otkb, aad, aad_len, ct, ct_len, expectedb);
+    if (ct_eq_bytes(expectedb, tag, 16) == 0) {
         memset(pt_out, 0, ct_len);
+        memset(otkb, 0, 32);
+        memset(expectedb, 0, 16);
         return SIGIL_ERR_INTEGRITY_MISMATCH;
     }
 
     chacha20_xor(key, nonce, 1, ct, ct_len, pt_out);
+    memset(otkb, 0, 32);
+    memset(expectedb, 0, 16);
     return SIGIL_ERR_NONE;
 }

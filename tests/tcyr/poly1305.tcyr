@@ -28,8 +28,10 @@ include "lib/sakshi.cyr"
 include "lib/chrono.cyr"
 include "lib/ct.cyr"
 
+include "lib/thread_local.cyr"
 include "src/types.cyr"
 include "src/error.cyr"
+include "src/crypto_scratch.cyr"
 include "src/hex.cyr"
 include "src/poly1305.cyr"
 

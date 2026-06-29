@@ -50,39 +50,87 @@
 # before any banked crypto module (src/sha_ni.cyr onward).
 
 # Number of concurrent crypto-scratch lanes. MUST be a power of two
-# (the `cbank()` mask relies on it) and MUST exceed _SIGIL_BATCH_WORKERS
-# (src/verify.cyr) since bank 0 is reserved for the main/serial path
-# and workers take banks 1..workers. 8 covers the default 4 workers
-# with headroom; widening only costs a few KB of static scratch.
-var SIGIL_CRYPTO_BANKS = 8;
-var _SIGIL_CBANK_MASK = 7;      # SIGIL_CRYPTO_BANKS - 1
-var _SIGIL_CBANK_SLOT = 0;      # thread-local slot holding the bank index
+# (the `cbank()` mask relies on it). Bank 0 is reserved for the
+# main/serial path; banks 1..SIGIL_CRYPTO_BANKS-1 are handed to
+# concurrent worker threads. 64 covers a 63-worker TLS termination
+# pool (one worker per core on any realistic host) plus the main
+# thread; widening only costs banked-array static scratch (each
+# banked `var X[N]` is sized N*SIGIL_CRYPTO_BANKS bytes).
+#
+# 3.9.6 — concurrent-TLS-handshake fix: bumped 8 -> 64 and made
+# `cbank()` AUTO-ASSIGN a private lane per thread (see below). Before
+# 3.9.6 the only caller that ever set a non-zero bank was the
+# batch-verify path (`crypto_bank_set`); every other concurrent caller
+# — notably cyrius `tls_native` / sandhi TLS worker threads — collided
+# on bank 0, racing the banked scratch (the concurrent-TLS-handshake
+# crash). Auto-assignment removes the need for any per-worker
+# cooperation: a worker's first `cbank()` claims the next free lane.
+# See docs/development/issues/2026-06-28-concurrent-tls-handshake-
+# global-scratch-race.md and ADR 0007.
+var SIGIL_CRYPTO_BANKS = 64;
+var _SIGIL_CBANK_MASK = 63;     # SIGIL_CRYPTO_BANKS - 1
+var _SIGIL_CBANK_SLOT = 0;      # thread-local slot. Holds (bank+1):
+                                # 0 = unassigned, v = bank (v-1).
 var _crypto_tls_inited = 0;
+var _crypto_next_bank = 0;      # atomic counter; auto-assigned worker
+                                # threads draw lanes 1..BANKS-1 from it.
 
-# Install a TLS block on the calling (main) thread so `cbank()` is
-# well-defined on the serial path. Idempotent. The batch path calls
-# this on the main thread before fan-out; `cbank()` also calls it
-# lazily as a backstop. Returns 0.
+# Install a TLS block on the calling (main) thread and claim bank 0
+# for it so `cbank()` is well-defined on the serial path. Idempotent
+# (a CAS guard makes concurrent first-callers init exactly once, so a
+# worker that races here cannot double-`alloc` the TLS block — quirk
+# #7: alloc is not thread-safe).
+#
+# MULTI-THREADED CONSUMER CONTRACT: a server that spawns crypto worker
+# threads (e.g. a TLS termination pool) should call this once on the
+# MAIN thread at startup, before spawning workers — it installs main's
+# TLS block (main has none until installed; workers get a zeroed block
+# via CLONE_SETTLS) and marks the subsystem inited so each worker's
+# first `cbank()` only reads/auto-assigns and never races init. In
+# practice any sigil crypto call on the main thread (e.g. parsing the
+# server cert/key) triggers this via the lazy backstop in `cbank()`
+# before workers start; the explicit call is belt-and-suspenders.
+# Returns 0.
 fn crypto_tls_main_init(): i64 {
-    if (_crypto_tls_inited == 1) { return 0; }
+    # CAS 0 -> 1: exactly one thread wins and runs the init.
+    if (atomic_cas(&_crypto_tls_inited, 0, 1) == 0) { return 0; }
     thread_local_init();
-    _crypto_tls_inited = 1;
+    # Claim bank 0 for this (main) thread: slot = bank0 encoded = 1.
+    thread_local_set(_SIGIL_CBANK_SLOT, 1);
     return 0;
 }
 
-# Assign the calling (worker) thread its bank index. Called once at
-# worker entry, before any banked primitive runs on that thread. Bank
-# must be in 1 .. SIGIL_CRYPTO_BANKS-1. Returns 0.
+# Explicitly assign the calling thread a bank index (legacy / batch
+# path). Bank must be in 0 .. SIGIL_CRYPTO_BANKS-1. Stored as (bank+1)
+# so a fresh (unassigned) slot reads 0. Most callers no longer need
+# this — `cbank()` auto-assigns — but the batch-verify path keeps using
+# it for deterministic lane fan-out. Returns 0.
 fn crypto_bank_set(bank): i64 {
-    thread_local_set(_SIGIL_CBANK_SLOT, bank);
+    thread_local_set(_SIGIL_CBANK_SLOT, bank + 1);
     return 0;
 }
 
-# Bank index for the calling thread: 0 on the main/serial path,
-# 1..workers inside a batch worker. Self-installs the main-thread TLS
-# block on first use so direct (non-batch) crypto calls are safe. The
-# mask guarantees the result is always a valid lane index.
+# Bank (lane) index for the calling thread. Bank 0 on the main/serial
+# path; a distinct 1..BANKS-1 lane on each concurrent worker. On a
+# thread whose slot is still unassigned (a fresh worker that never
+# called crypto_bank_set), the FIRST call atomically claims the next
+# lane from `_crypto_next_bank` (cycled into 1..BANKS-1 so bank 0 stays
+# the exclusive main lane) and pins it in the thread-local slot for the
+# life of the thread. This is what makes concurrent callers (TLS
+# handshake workers) race-free with zero per-worker cooperation. The
+# mask guarantees the result is always a valid lane index (defence in
+# depth).
 fn cbank(): i64 {
     if (_crypto_tls_inited == 0) { crypto_tls_main_init(); }
-    return thread_local_get(_SIGIL_CBANK_SLOT) & _SIGIL_CBANK_MASK;
+    var raw = thread_local_get(_SIGIL_CBANK_SLOT);
+    if (raw == 0) {
+        # Unassigned thread: claim the next lane. atomic_fetch_add
+        # returns the prior counter value (0,1,2,...); map it onto
+        # 1..BANKS-1 so we never alias the main thread's bank 0.
+        var n = atomic_fetch_add(&_crypto_next_bank, 1);
+        var bank = (n % (SIGIL_CRYPTO_BANKS - 1)) + 1;
+        thread_local_set(_SIGIL_CBANK_SLOT, bank + 1);
+        return bank & _SIGIL_CBANK_MASK;
+    }
+    return (raw - 1) & _SIGIL_CBANK_MASK;
 }

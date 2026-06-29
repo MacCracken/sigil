@@ -23,20 +23,42 @@ perf cycle have shipped — see "Closed cycles" below + CHANGELOG.
 > "not reachable with current approaches"** (ADR 0006), with exotic levers parked
 > to Backlog (not a current priority).
 
-**Thread-safety follow-up (🔴 HIGH — new)**
+**Thread-safety follow-up (🔴 HIGH)**
 
-- [ ] **Concurrent TLS handshakes race sigil's module-global crypto scratch →
-      server crash.** The AES-NI / SHA-NI / bignum scratch is process-**global**
-      (`_aes_ni_st_*` `src/aes_ni.cyr:54-56`, `_sha_ni_st_ctx` `src/sha_ni.cyr:61`,
-      `_bn_mont_*`/`_bn_exp_*`/`_bn_inv_*` `src/bignum.cyr`), so two TLS 1.3
-      handshakes (`TLS_AES_256_GCM_SHA384`) on two threads corrupt each other →
-      ECONNRESET or **SIGSEGV**. Surfaced by `yeo-cy-test` pointing concurrent
-      clients at sandhi's multi-worker `sandhi_server_run_pooled_tls` (sandhi's own
-      gate only ever serialized handshakes). Extends the 3.8.0 ChaCha20/X25519
-      "parallel-path banking" to the handshake-critical primitives (thread-local /
-      per-call / caller-arena scratch). Consumer mitigation: pin the TLS pool to 1
-      worker. Issue:
+- [x] **Concurrent TLS handshakes race sigil's crypto scratch → server crash.**
+      ✅ **DONE (3.9.6).** Root cause was two-fold: the per-worker banks existed
+      but only the batch-verify path ever activated them (concurrent TLS workers
+      all collided on bank 0), and the handshake/AEAD primitives the TLS 1.3 key
+      schedule drives were unbanked or used non-thread-safe `fl_alloc`. Fixed by
+      making `cbank()` **auto-assign** a per-thread lane (no consumer cooperation)
+      + banking HKDF/HMAC/`ed25519_sign`/one-shot-SHA-2/`sha384_finalize`/the full
+      AES-GCM AEAD path + ChaCha20-Poly1305/Poly1305, and CAS-guarding the NI
+      self-test. `SIGIL_CRYPTO_BANKS` 8→64. New race-detector
+      `tests/tcyr/concurrent_tls_handshake.tcyr` (16 auto-banked workers, stable
+      30/30). [ADR 0007](../adr/0007-auto-banking-for-concurrent-tls.md); audit
+      [`2026-06-29-3.9.6-…-banking`](../audit/2026-06-29-3.9.6-concurrent-tls-handshake-banking-audit.md).
+      Issue:
       [`…concurrent-tls-handshake-global-scratch-race`](issues/2026-06-28-concurrent-tls-handshake-global-scratch-race.md).
+
+**Thread-safety follow-up → 3.9.7 (deferred from 3.9.6, NOT dropped)**
+
+The 3.9.6 fix covers the reproduced crash path (Ed25519-cert + both AEAD suites'
+handshake/record crypto). These remaining unbanked sites are tracked for 3.9.7:
+
+- [ ] **ChaCha20-Poly1305 `_cp_tag` `fl_alloc` mac_data buffer**
+      (`src/chacha20poly1305.cyr`). The only remaining concurrent-path `fl_alloc`.
+      Needs a streaming Poly1305 (init/update/finalize) so the tag is computed
+      without the concat buffer. AES-GCM (the issue's `TLS_AES_256_GCM_SHA384`
+      repro suite) is fully fixed; this is the ChaCha-suite AEAD tag only.
+- [ ] **ECDSA P-256/P-384 sign+verify banking** (`src/ecdsa_p256.cyr`,
+      `src/ecdsa_p384.cyr`). ~100 process-global pointer-scratch buffers per curve
+      (different shape from `var X[N]` banking — lane-slice the `alloc`'d buffers).
+      Latent: not reproduced (probe cert is Ed25519; `tls_native` rejects RSA), but
+      an ECDSA-cert server under `max_conns > 1` would hit the same class.
+- [ ] **`bignum` + `tls12_prf` statics** (`src/bignum.cyr` modexp/Montgomery,
+      `src/tls12_prf.cyr`). Off the TLS 1.3 server path (RSA rejected by
+      `tls_native`; TLS 1.3 doesn't use the 1.2 PRF) — lowest priority, banked for
+      completeness when ECDSA lands.
 
 **Verification follow-up**
 

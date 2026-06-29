@@ -498,8 +498,8 @@ fn hash_file_into(path, hex_out, ctx_buf): i64 {
     # workers and corrupt the content hash. (ctx_buf is already a
     # caller-provided per-artifact slot.)
     var bk = cbank();
-    var buf[32768];  var bufb = &buf + bk * 4096;     # 4096 * SIGIL_CRYPTO_BANKS
-    var digest[256]; var digestb = &digest + bk * 32; # 32 * SIGIL_CRYPTO_BANKS
+    var buf[262144];  var bufb = &buf + bk * 4096;     # 4096 * SIGIL_CRYPTO_BANKS
+    var digest[2048]; var digestb = &digest + bk * 32; # 32 * SIGIL_CRYPTO_BANKS
     var n = file_read(fd, bufb, 4096);
     while (n > 0) {
         sha256_update(ctx_buf, bufb, n);
