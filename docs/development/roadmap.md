@@ -23,6 +23,21 @@ perf cycle have shipped — see "Closed cycles" below + CHANGELOG.
 > "not reachable with current approaches"** (ADR 0006), with exotic levers parked
 > to Backlog (not a current priority).
 
+**Thread-safety follow-up (🔴 HIGH — new)**
+
+- [ ] **Concurrent TLS handshakes race sigil's module-global crypto scratch →
+      server crash.** The AES-NI / SHA-NI / bignum scratch is process-**global**
+      (`_aes_ni_st_*` `src/aes_ni.cyr:54-56`, `_sha_ni_st_ctx` `src/sha_ni.cyr:61`,
+      `_bn_mont_*`/`_bn_exp_*`/`_bn_inv_*` `src/bignum.cyr`), so two TLS 1.3
+      handshakes (`TLS_AES_256_GCM_SHA384`) on two threads corrupt each other →
+      ECONNRESET or **SIGSEGV**. Surfaced by `yeo-cy-test` pointing concurrent
+      clients at sandhi's multi-worker `sandhi_server_run_pooled_tls` (sandhi's own
+      gate only ever serialized handshakes). Extends the 3.8.0 ChaCha20/X25519
+      "parallel-path banking" to the handshake-critical primitives (thread-local /
+      per-call / caller-arena scratch). Consumer mitigation: pin the TLS pool to 1
+      worker. Issue:
+      [`…concurrent-tls-handshake-global-scratch-race`](issues/2026-06-28-concurrent-tls-handshake-global-scratch-race.md).
+
 **Verification follow-up**
 
 - [ ] **Windows entropy (3.7.15) — `cass` acceptance + cyrius `tls_native`
