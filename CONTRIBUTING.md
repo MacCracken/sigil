@@ -15,10 +15,10 @@ cyrius build programs/smoke.cyr build/sigil
 
 ## Cyrius Toolchain
 
-Sigil pins **cyrius `6.2.12`** across `cyrius.cyml` and CI. Match
-that pin locally — installing a newer cyrius is fine, but builds
-should be run against the pinned version for reproducible
-diagnostics. The pinned cyrius release notes are in
+Sigil pins its cyrius toolchain in `cyrius.cyml`'s `[package].cyrius`
+line (the single source of truth — read the pin there). Match that pin
+locally — installing a newer cyrius is fine, but builds should be run
+against the pinned version for reproducible diagnostics. The pinned cyrius release notes are in
 [`cyrius/CHANGELOG.md`](https://github.com/MacCracken/cyrius)
 upstream. The **single source of truth** for the pin is
 `cyrius.cyml`'s `[package].cyrius` line (CLAUDE.md hard rule: no

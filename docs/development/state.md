@@ -18,12 +18,15 @@
 | Last release date | 2026-06-29 |
 | Last release audit | [`2026-06-29-3.9.7-ecdsa-bignum-banking-audit.md`](../audit/2026-06-29-3.9.7-ecdsa-bignum-banking-audit.md) (3.9.7 thread-safety banking completion — ECDSA/bignum/PRF/AEAD; F1 MEDIUM latent DER-wrapper race fixed, F2 LOW RSA-sign residue gap closed, F3 `secret var` arrays = shared statics documented; red→green race-detectors). Prior: `2026-06-29-3.9.6-concurrent-tls-handshake-banking-audit.md`. |
 
-> ⚠️ **State drift note (2026-06-29):** the Phase narrative below is stale at
-> 3.8.0 — the release post-hook did not refresh state.md across 3.9.0–3.9.5
-> (those shipped per CHANGELOG: dist via `cyrius distlib`, trust-API bundling,
-> CVE-20/21 trust-chain work). The volatile fields above are corrected to 3.9.6;
-> the per-version Phase prose still needs a hook fix (CLAUDE.md: "if the hook
-> doesn't, fix the hook — don't hand-maintain state"). Flagged for Robert.
+> ⚠️ **State drift note (2026-06-29):** the volatile fields above and the
+> Phase headline are now current at **3.9.7**. The per-version Phase **prose
+> stack** (the historical 3.8.0 / 3.7.x narrative below the headline) is still
+> hand-maintained — the release post-hook refreshes the volatile fields but
+> does not regenerate that prose, so it remains a manual carry-forward (across
+> 3.9.0–3.9.5 the hook also did not refresh state.md; those shipped per
+> CHANGELOG: dist via `cyrius distlib`, trust-API bundling, CVE-20/21
+> trust-chain work). Per CLAUDE.md ("if the hook doesn't, fix the hook — don't
+> hand-maintain state") the prose-refresh gap stays flagged for Robert.
 | Phase | Released. **3.9.7 — thread-safety banking completed (follow-up to 3.9.6).** Banked every remaining concurrent-path crypto scratch, so **every reachable concurrent crypto path is now race-free**: ChaCha20-Poly1305 `_cp_tag` (new streaming `poly1305_init`/`update`/`finalize` — last `fl_alloc` gone), ECDSA P-256/P-384 sign+verify (~150 buffers + RFC 6979 DRBG + per-sign `k·G` + sign secret scratch; P-384 `_p384_mul64` return-slot restructure; `ecdsa_p256_warm`/`ecdsa_p384_warm` main-thread prewarm), and `bignum`/`rsa`/`tls12_prf` (off-TLS-1.3, for completeness). **Security:** fixed a latent race in the ECDSA DER wrappers (`*_sign_der`/`verify_der`) — `secret var X[N]` ARRAYS are shared statics that race (proven by probe; the v6.2.25 "arena fix" only stopped a heap leak), and these are the TLS CertificateVerify path; closed a pre-existing RSA-sign secret-residue gap. New `ecdsa_concurrent.tcyr` + `bignum_tls12_concurrent.tcyr` race-detectors (red→green); extended `poly1305.tcyr` + `banking_concurrent.tcyr`. Suite **1576/0 across 60 files**. 64-lane banking grew static `.bss` ~14 MB (lazy zero-pages; informational). ——— *(historical below)* **3.9.6 — concurrent-TLS-handshake crash fixed (🔴 HIGH).** A multi-worker TLS 1.3 server crashed (SIGSEGV/ECONNRESET) on the second simultaneous handshake: the per-worker crypto banks (`crypto_scratch.cyr`) existed but only the batch-verify path ever activated them, so concurrent TLS workers all collided on bank 0; and the handshake/AEAD primitives the key schedule drives (HKDF, HMAC, `ed25519_sign`, one-shot SHA-2, both AEAD suites) were unbanked or used non-thread-safe `fl_alloc`. Fixed: **`cbank()` now auto-assigns a per-thread lane** (atomic counter → lanes 1..63, bank 0 = main; no consumer `crypto_bank_set` needed), `SIGIL_CRYPTO_BANKS` 8→64, and banked HKDF/HKDF-SHA384 (rewritten allocation-free, streaming segments), HMAC/HMAC-SHA384, `ed25519_sign`/`sc_muladd`, the one-shot `sha256/512/384` (→ banked `_into`, no fl_alloc), `sha384_finalize`, the full AES-GCM AEAD path (GHASH/CTR/encrypt/decrypt + banked round-key schedule), and ChaCha20-Poly1305/Poly1305. NI self-test CAS-guarded. New `concurrent_tls_handshake.tcyr` race-detector (16 auto-banked workers, stable 30/30; caught 2 races live). Toolchain pin 6.2.48→**6.3.5**. No perf regression (`ecdsa_p256_verify` ~10.66 ms vs ~10.89 baseline). **Deferred → 3.9.7 (tracked, not dropped):** ChaCha `_cp_tag` fl_alloc (needs streaming Poly1305), ECDSA P-256/P-384 banking (latent), bignum/tls12_prf statics (off TLS-1.3 path). [ADR 0007](../adr/0007-auto-banking-for-concurrent-tls.md). ——— *(historical, stale below)* Released. **3.8.0** opens the 3.8.x cycle as a **housekeeping bookend to 3.7.x**: **ChaCha20 + X25519 per-worker banking** (st/ws/ks, W/ub/base widened to `SIGIL_CRYPTO_BANKS` lanes via `cbank()`; plain `var` + per-lane zeroize — a `secret var` whole-array wipe would clobber concurrent lanes, a bug caught by the new `banking_concurrent.tcyr` race-detector, 5/5 clean post-fix). **Backlog-accuracy sweep**: TDX/SGX in-quote PCK walk found already-shipped (stale note → DONE), `bn_modexp` RESOLVED-keep (modexp test-oracle), scatter-store re-scoped MOOT/parked (guards a public value). **Windows-entropy issue archived** after **wine/ProcessPrng runtime verification** (Windows-PE via `cyrius build --win`, run under wine: `random`/`ed25519`/`win_entropy_probe` all exit 0 — fresh unique entropy + keygen; same probe green on Linux); the `docs/development/issues/` folder is now **clear** (12 archived). **3.7.x EC-squeeze cycle closed** (all 4 levers shipped; ≤ 10 ms not reached, ~10.9 ms floor, parked; full bench re-run captured, no regressions). Defensive: no concurrent ChaCha20/X25519 caller exists yet. Audit: `docs/audit/2026-06-16-3.8.0-chacha-x25519-banking-audit.md`. **3.7.17** closes the EC-squeeze perf cycle with **levers 2b + 3**: **Karatsuba `u256_mul_full`** (the 256×256→512 multiply under all of Ed25519/X25519/ECDSA, schoolbook → 3-mul Karatsuba; **~3–4% across the board** — Ed25519 verify 6.90 → 6.63 ms, P-256 verify ~11.58 → ~11.25 ms; thread-safe, schoolbook retained as oracle) + the marginal `u2·Q`-window mixed add. **≤ 10 ms is NOT reached — `ecdsa_p256_verify` floors at ~10.9 ms (12.50 → ~10.9, ~13% cumulative across the cycle); the known levers are exhausted** (at 256-bit, fast hardware multiply caps Karatsuba). Karatsuba is **conclusively verified** (KAT 200 random + 14 adversarial edges + full RFC-vector suite + concurrent batch path + a 5-lens adversarial carry review over millions of differential cases; CT posture unchanged from the schoolbook). **≤ 10 ms item closed 2026-06-16 (Robert) as "not reachable with current approaches" (ADR 0006); exotic levers (asm / alt-representation) parked to Backlog — not a current priority.** Audit: `docs/audit/2026-06-16-3.7.17-karatsuba-multiply-audit.md`. **3.7.16** ships **P-256 verify EC-squeeze levers 1 + 2a** (+ the cyrlint gate-retirement): both modular inversions moved off generic Fermat — field `fp_p256_inv` → fixed `2^k-1` addition chain, scalar `fn_p256_inv` → 4-bit window — and the fixed-base `u1·G` comb table is now **affine** with a new `pt_add_mixed` (Jacobian+affine, madd-2007-bl) on its 64 adds. `ecdsa_p256_verify` **12.50 → ~11.00 ms (~12%)**, clean A/B on 6.2.12. **Verify-only / non-CT** (public data; the secret-nonce signing path stays on the CT ladder). KAT-conclusive (`a*inv≡1`, `pt_add_mixed==pt_add` + double/−Q edges); +10 assertions. **≤ 10 ms still open (~11.0 ms)** — verify is doubling/inversion-bound, so the remaining levers (2b `u2·Q`-window batch-inversion mixed-add; 3 Karatsuba `u256_mul_full` with a security re-review) land in **3.7.17**. The buried-deferral gate is now enforced by `cyrlint` natively (every AGNOS repo), with the 2 `\uXXXX` false positives `#skip-lint`-suppressed. Audit: `docs/audit/2026-06-16-3.7.16-ec-inversion-mixedadd-audit.md`. **3.7.15** was the **Windows-entropy fix**: sigil keygen / nonce / blinding no longer open `/dev/urandom` directly (non-functional on Windows even after the v6.2.12 ProcessPrng CSPRNG) — all entropy now routes through a single boundary, `_sigil_random_fill` (`src/random.cyr`), over the stdlib `random_bytes` (per-target getrandom / getentropy / ProcessPrng). Fail-closed preserved verbatim (no weak fallback; CVE-19 invariant intact). 5 dist sites converted (`generate_keypair`, `ed25519_generate_keypair`, `mldsa65_keypair`, `_rsa_gen_blind`, `_rsa_pss_rand`); new `lib/random.cyr` opt-in include (now **five** required; README "Usage" updated); pin `6.2.11` → `6.2.12`; +9 assertions (new `random.tcyr`). `src/tpm.cyr` `tpm_random` also converted (a 6th, AGNOS-only / off-dist site) — **zero raw `/dev/urandom` opens remain in `src/`**. **Linux verified; Windows ProcessPrng path pending verification on `cass` (cannot run on Linux dev host).** Issue stays open until `cass` confirms. Issue: `docs/development/issues/archive/2026-06-15-sigil-windows-entropy-not-via-getrandom.md`. **3.7.14** was a toolchain/dependency refresh: cyrius pin `6.2.1` → `6.2.11` (manifest aligned to the already-installed `cycc`), agnosys `1.3.2` → `1.4.3`, sakshi `2.2.6` → `2.3.0`. No `src/*.cyr` edits; clean `cyrius deps` + smoke build + 55/55 `.tcyr` + healthy bench, dist regenerated self-contained (doc-check 0 undocumented). **3.7.13** bumped the pin `6.1.20` → `6.2.1`, fixed the attestation cert-pointer-array daimon byte-vs-slot class (`var name: i64[4]`), and dropped `json` / replaced `bigint` with `bayan` in `[deps]`. **3.7.8 resolved the cyrius-6.1.20 bundle-consumer SIGILL** reported as an NI re-break. Root cause was NOT the asm `[rbp-N]` param-load drift but **missing opt-in stdlib deps in bundle builds**: cyrius stdlib is opt-in, and a consumer including only `dist/sigil.cyr` leaves `thread_local_*` / `ct_eq_bytes_lens` / `shake256` undefined → cyrius 6.1.x emits `ud2` → SIGILL on the first banked crypto call (`sha256`/`ed25519`/`aes`). Fixed by documenting all four required includes (`lib/ct.cyr`, `lib/keccak.cyr`, `lib/thread.cyr`, `lib/thread_local.cyr`) in the README "Usage" section. Belt-and-suspenders: the long-queued NI structural fix landed — `sha_ni.cyr`/`aes_ni.cyr` migrated off hardcoded `mov r__, [rbp-N]` loads to the `param_load(reg, idx)` pseudo (cyrius 6.0.67+). Pin 6.0.87 → 6.1.20. **3.7.7 was a buried-deferral sweep** — triaged all 19 deferral-vocabulary hits in `src/`: genuine pending work (ChaCha20/X25519 parallel-path, TDX chain walk, scalar-inversion addition-chain, `bn_modexp` dead-code) **promoted to the roadmap Backlog, not deleted**; stale comments referencing shipped work (Solinas, RSA sign, Montgomery, `_into`, `pem_decode_privkey`) updated; false positives reduced to a `\uXXXX` allowlist. Comment-only; no behavior change. **3.7.6** made ML-DSA-65 post-quantum signing default-on (dropped `#ifdef SIGIL_PQC`; 6.0.87 cap raise; +~40 KB smoke). **3.7.5** closed the P1 off-diagonal ECDSA chain-link verification + bumped the pin 6.0.62 → 6.0.87. **Remaining v3.7:** EC scalar-mult speedup (≤ 10 ms) + full bench re-run. (The buried-deferral *gate* is **done — superseded by `cyrlint`'s native untracked-deferral check**, which covers every AGNOS repo; the 2 `\uXXXX` false positives in `src/policy.cyr` are now `#skip-lint`-suppressed.) |
 
 ## Test surface
@@ -38,13 +41,30 @@
 > Counting note: the 3 `*_verify_full.tcyr` tests (sgx 17 + tdx 16 +
 > snp 11 = 44) emit their `N passed` summary in a tty-sensitive way that
 > is dropped under any pipe or file redirect, so a scripted `grep`-sum of
-> `cyrius test` output yields **1415** across the other 50 files and
-> silently omits those 44. Add them back for the true total: **1459**.
+> `cyrius test` output yields **1532** across the other 57 files and
+> silently omits those 44. Add them back for the true total: **1576**.
 > (Each verify_full still prints its summary on an interactive run; it's
 > only the redirected/scripted sum that loses them.)
 
 Per-cycle assertion delta:
 
+- **3.9.7 ship**: +new race-detectors & streaming/AEAD coverage (thread-safety
+  banking completion). New `ecdsa_concurrent.tcyr` (concurrent P-256/P-384
+  sign+verify incl. the DER wrappers — caught the latent `secret var`-array
+  DER-wrapper race, red→green) + `bignum_tls12_concurrent.tcyr` (concurrent
+  bignum/rsa/tls12_prf race-detector, red→green); extended `poly1305.tcyr`
+  (streaming `poly1305_init`/`update`/`finalize`) + `banking_concurrent.tcyr`
+  (ChaCha20-Poly1305 streaming AEAD coverage). Running total → **1576 / 60
+  files** (+2 files since 3.9.6: `ecdsa_concurrent.tcyr`,
+  `bignum_tls12_concurrent.tcyr`).
+- **3.9.6 ship**: +concurrent-TLS race-detector (concurrent-TLS-handshake crash
+  fix). New `concurrent_tls_handshake.tcyr` — 16 auto-banked TLS workers
+  (`cbank()` auto-assign, banks 8→64) vs the serial path, stable 30/30; caught
+  2 live races (HKDF/AEAD bank-0 collision). +1 test file (→ 58 files).
+- **3.9.0–3.9.5 ships**: +0 net new `.tcyr` assertions on the housekeeping/
+  bundling/CVE-trust-chain bites (dist via `cyrius distlib`, trust-API bundling,
+  CVE-20/21 trust-chain work — correctness covered by the existing trust/x509/
+  ed25519 KATs); suite held at the 3.8.x basis across the run. See CHANGELOG.
 - **3.8.0 ship**: +2 (ChaCha20 + X25519 banking — new `banking_concurrent.tcyr`
   race-detector: 4 concurrent workers on banks 1–4 vs serial, validating the
   `cbank()` lane isolation. Caught a cross-lane `secret var` clobber bug, fixed
@@ -150,30 +170,29 @@ list).
 
 | Slot | State | Notes |
 |---|---|---|
-| 3.7.6 — PQC default-on | **completed** | ML-DSA-65 default-on; `#ifdef SIGIL_PQC` gate dropped (6.0.87 cap raise). Shipped 2026-06-07. |
-| 3.7.7 — buried-deferral sweep | **completed** | Triaged all 19 `src/` deferral-vocabulary hits: genuine pending work (ChaCha20/X25519 parallel, TDX chain walk, scalar-inversion addition-chain, `bn_modexp` dead-code) **surfaced to the roadmap Backlog** (not deleted); stale comments referencing shipped work (Solinas, RSA sign, Montgomery, `_into`, `pem_decode_privkey`) updated; false positives reduced to a `\uXXXX` allowlist. Shipped 2026-06-07. |
-| 3.7.8 — cyrius-6.1.20 bundle-consumer SIGILL fix | **completed** | Reported NI re-break was missing **opt-in** stdlib deps in bundle builds (`thread_local_*`/`ct_*`/`shake256` → `ud2` → SIGILL), NOT asm `[rbp-N]` drift. Fixed via README docs for the four required includes; belt-and-suspenders NI `param_load` structural migration; pin 6.0.87→6.1.20. Shipped 2026-06-09. |
-| 3.7.8 — EC scalar-mult speedup (comb-G + windowed-Q) | **completed** | Fixed-base 4-bit comb for `u1·G` + 4-bit windowed double-and-add for `u2·Q`, **verify-only / non-CT** (signing stays on the CT ladder). `ecdsa_p256_verify` 24.675→11.600 ms (2.13×), `ecdsa_p384_verify` 54.6→26.263 ms (2.08×). ≤ 10 ms P-256 squeeze still OPEN (see slot below). Shipped 2026-06-09. |
-| 3.7.x — buried-deferral gate | **completed (superseded by `cyrlint`)** | Built natively into `cyrlint` instead of a sigil-local script — covers every AGNOS repo. Flags any untracked deferral (`cross-reference a CHANGELOG/issue/roadmap entry, or #skip-lint`). The 2 `\uXXXX` false positives (`src/policy.cyr`) are `#skip-lint`-suppressed; `cyrlint src/*.cyr` = 0 untracked deferrals. |
-| 3.7.x — EC scalar-mult ≤ 10 ms squeeze | **closed 2026-06-16 — not reachable with current approaches (ADR 0006)** | Levers 1 (inversion chains), 2a (comb-G mixed add), 2b (`u2·Q` batch-inv mixed add), 3 (Karatsuba `u256_mul_full`, ~3–4% across all 256-bit ECC) all shipped. `ecdsa_p256_verify` 12.50 → **~10.9 ms** (~13% cumulative). **≤ 10 ms unreached — known approaches exhausted** (verify is doubling/inversion-bound; Karatsuba caps at ~3–4% at 256-bit). **Closed (Robert, 2026-06-16) as "not reachable with current approaches" — [ADR 0006](../adr/0006-park-ec-scalarmul-10ms-target.md).** Exotic levers (asm multiply / alt point representation) **parked to the roadmap Backlog, not a current priority** (revisit only on a hard consumer latency requirement). |
-| 3.7.x — full crypto bench re-run | pending | Capture before/after rows for every verify-path bench at the cycle close. |
+| 3.9.x — thread-safety banking arc | **COMPLETED at 3.9.7** | Every reachable concurrent crypto path is now race-free. 3.9.6 fixed the concurrent-TLS-handshake crash (`cbank()` auto-assigns a per-thread lane, `SIGIL_CRYPTO_BANKS` 8→64; banked HKDF/HMAC/`ed25519_sign`/one-shot-SHA/AES-GCM/Poly1305) — see [ADR 0007](../adr/0007-auto-banking-for-concurrent-tls.md). 3.9.7 closed out the carried items: streaming Poly1305 (`_cp_tag` last `fl_alloc` gone), ECDSA P-256/P-384 sign+verify incl. DER wrappers + RFC 6979 DRBG, bignum/rsa/tls12_prf; fixed the latent `secret var`-array DER-wrapper race (TLS CertificateVerify path) + closed an RSA-sign secret-residue gap. Audits: `2026-06-29-3.9.6-…` + `2026-06-29-3.9.7-…`. |
+| 3.8.x — housekeeping bookend | **CLOSED at 3.8.1** | 3.8.0 ChaCha20 + X25519 per-worker banking + backlog-accuracy sweep + Windows-entropy issue archived. **3.8.1 dropped the `agnosys` dependency** — trust primitives internalized as `src/*_core.cyr` + `src/sys_error.cyr` / `src/sys_util.cyr`; `cyrius.cyml [deps]` now lists **only sakshi (2.3.0)**. |
+| 3.7.x — EC scalar-mult ≤ 10 ms squeeze | **CLOSED 2026-06-16 — not reachable with current approaches ([ADR 0006](../adr/0006-park-ec-scalarmul-10ms-target.md))** | Levers 1 (inversion chains), 2a (comb-G mixed add), 2b (`u2·Q` batch-inv mixed add), 3 (Karatsuba `u256_mul_full`, ~3–4% across all 256-bit ECC) all shipped. `ecdsa_p256_verify` 12.50 → **~10.9 ms** (~13% cumulative). **≤ 10 ms unreached — known approaches exhausted** (verify is doubling/inversion-bound; Karatsuba caps at ~3–4% at 256-bit). **Closed (Robert, 2026-06-16) as "not reachable with current approaches."** Exotic levers (asm multiply / alt point representation) **parked to the roadmap Backlog, not a current priority** (revisit only on a hard consumer latency requirement). |
+| 3.7.x — buried-deferral gate | **completed (superseded by `cyrlint`)** | Built natively into `cyrlint` instead of a sigil-local script — covers every AGNOS repo. Flags any untracked deferral (must cross-reference a CHANGELOG/issue/roadmap entry, or carry `#skip-lint`). The 2 `\uXXXX` false positives (`src/policy.cyr`) are `#skip-lint`-suppressed; `cyrlint src/*.cyr` = 0 untracked deferrals. |
 
-The 3.6.x cyrius-native-TLS arc is **closed** (3.6.0–3.6.8). The **v3.7
-cycle is OPEN**: Solinas P-256 (3.7.0), Solinas P-384 (3.7.1), AES-GCM
-arbitrary IVs (3.7.2), the caller-scratch `_into` API + audit-floor clear
-(3.7.3), the x509 off-diagonal ECDSA **parse** fix (3.7.4) and **verify**
-closer + pin 6.0.62→6.0.87 (3.7.5), **PQC default-on** (3.7.6), the
-**buried-deferral sweep** (3.7.7), and the **cyrius-6.1.20 bundle-consumer
-SIGILL fix** (3.7.8 — README opt-in-include docs + NI `param_load` structural
-fix + pin 6.0.87→6.1.20), and the **Windows-entropy single-boundary fix**
-(3.7.15 — pin 6.2.12) shipped. **Remaining: the EC scalar-mult speedup and the
-bench re-run** close the cycle (the buried-deferral gate is done — superseded by
-`cyrlint`). Backlog:
-bank-retire / CLMUL-GHASH remain blocked on cyrius `asm` global-symbol /
-thread-local-array features still absent in 6.1.20 (the **NI-dispatch
-structural fix shipped in 3.7.8** via the `param_load` pseudo); plus the work
-surfaced from the 3.7.7 sweep (ChaCha20/X25519 parallel, TDX chain walk,
-scalar-inversion addition-chain, `bn_modexp` dead-code decision).
+**No open in-flight slots.** The 3.6.x cyrius-native-TLS arc **closed**
+(3.6.0–3.6.8); the v3.7 EC-squeeze cycle **closed** at 3.7.17 (≤ 10 ms not
+reached, ~10.9 ms floor, parked per ADR 0006); the 3.8.x housekeeping bookend
+**closed** at 3.8.1 (ChaCha20/X25519 banking, backlog-accuracy sweep,
+Windows-entropy issue archived, **agnosys dependency dropped**); and the 3.9.x
+thread-safety-banking arc **completed** at 3.9.7 — **every reachable concurrent
+crypto path is race-free** (concurrent-TLS crash fixed at 3.9.6 via auto-lane
+banking; streaming Poly1305 / ECDSA P-256/P-384 sign+verify+DER / bignum / rsa /
+tls12_prf banked at 3.9.7; latent DER-wrapper race + RSA-sign residue closed).
+
+**Carried-forward roadmap Backlog (genuinely open — do NOT bury):**
+the EC ≤ 10 ms exotic levers (asm multiply / alt point representation, per
+ADR 0006), the TDX/SGX in-quote PCK X.509 chain walk, retire-bank-indexing,
+scatter-store, CLMUL-GHASH, ML-KEM-768, the `#derive(Serialize)` completeness
+backlog, the Windows-entropy `cass` ProcessPrng runtime confirmation, and
+retire-sysinfo — several remain blocked on cyrius `asm` global-symbol /
+thread-local-array features. See [`roadmap.md`](roadmap.md) "Outstanding work —
+full inventory" for the authoritative list.
 
 When a cycle is opened, list each work-item bite here as it
 moves through `pending → in_progress → completed`. The release
@@ -188,13 +207,20 @@ CI fleet, list the hosts here.
 
 ## Audit floor
 
-**EMPTY — cleared at 3.7.3, holds through 3.7.5.** Zero findings of any
-severity outstanding. The 3.7.5 off-diagonal ECDSA change passed a 4-lens
-adversarial review with no false-accept and only one confirmed finding (a
-stale `dist/` bundle) + one LOW (parse scratch reuse), **both resolved
-in-cycle** — see `docs/audit/2026-06-07-3.7.5-offdiag-ecdsa-audit.md`. The
-eight prior LOWs (all bump-allocator-lifetime shape) were resolved as
-follows:
+**EMPTY — cleared at 3.7.3, holds through 3.9.7.** Zero findings of any
+severity outstanding. The 3.9.6 and 3.9.7 banking audits resolved **every**
+finding in-cycle: 3.9.6 (`2026-06-29-3.9.6-concurrent-tls-handshake-banking-audit.md`)
+closed the concurrent-TLS-handshake crash via auto-lane banking; 3.9.7
+(`2026-06-29-3.9.7-ecdsa-bignum-banking-audit.md`) found and fixed **F1 MEDIUM**
+(latent `secret var`-array race in the ECDSA `*_sign_der`/`verify_der` wrappers —
+the TLS CertificateVerify path) and **F2 LOW** (pre-existing RSA-sign
+secret-residue gap), both **fixed before ship**, with F3 (`secret var` arrays =
+shared statics) documented; red→green race-detectors. Earlier, the 3.7.5
+off-diagonal ECDSA change passed a 4-lens adversarial review with no
+false-accept and only one confirmed finding (a stale `dist/` bundle) + one LOW
+(parse scratch reuse), **both resolved in-cycle** — see
+`docs/audit/2026-06-07-3.7.5-offdiag-ecdsa-audit.md`. The eight prior LOWs (all
+bump-allocator-lifetime shape) were resolved as follows:
 
 **Resolved via the `_into` caller-scratch API (3.7.3)** — genuine
 per-call drift, now with a drift-free path (the one-shot bump wrappers
@@ -217,10 +243,13 @@ Zero CRITICAL / HIGH / MEDIUM / LOW findings outstanding.
 
 ## Open architectural blockers
 
-None on the critical path. Roadmap cycles 3.6 (parallel verify)
-and 3.7 (perf tuning) both have explicit "open when forcing
-function arrives" sequencing decisions; neither has triggered
-as of the 3.5 open. The 3.5 cycle itself (modern AEAD + key
-agreement) is open: Poly1305 lands standalone now, while
-ChaCha20 / AEAD / X25519 stay gated on the cyrius v6.2.x
-native-TLS slot.
+**None on the critical path.** The modern-crypto surface that was once
+"gated on the cyrius native-TLS slot" — Poly1305, ChaCha20, ChaCha20-Poly1305
+AEAD, X25519 — has all **shipped** (3.5 arc), and the concurrent-crypto banking
+arc (3.6 parallel verify → 3.9.7 full thread-safety) is **complete**: every
+reachable concurrent crypto path is race-free. The remaining items are roadmap
+**Backlog**, not blockers — the exotic EC ≤ 10 ms levers (asm / alt point
+representation, ADR 0006) and the TDX/SGX in-quote PCK X.509 chain walk, plus
+retire-bank-indexing / scatter-store / CLMUL-GHASH / ML-KEM-768, several still
+blocked on absent cyrius `asm` global-symbol / thread-local-array features. See
+[`roadmap.md`](roadmap.md) for the full Backlog inventory.

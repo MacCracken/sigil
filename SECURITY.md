@@ -9,10 +9,10 @@ immediately preceding minor**.
 
 | Version | Supported |
 |---------|-----------|
-| 3.8.x | Yes (current minor) |
-| 3.7.x | Yes (prior minor) |
-| 3.6.x | Best-effort (cyrius-native-TLS arc release; closed) |
-| < 3.6.0 | No — upgrade within the 3.x line |
+| 3.9.x | Yes (current minor) |
+| 3.8.x | Yes (prior minor) |
+| 3.7.x | Best-effort (EC-squeeze / Windows-entropy cycle; closed) |
+| < 3.7.0 | No — upgrade within the 3.x line |
 
 Older 2.x versions are no longer supported; the 3.0 cutover
 (2026-05-01) removed the Rust source after parity closeout and
@@ -132,8 +132,10 @@ of cryptographic and parsing code at **0 CRITICAL / 0 HIGH /
 0 MEDIUM** findings. The LOW findings of the bump-allocator
 per-call-lifetime shape were **resolved at 3.7.3** via the
 caller-scratch `_into` API — the **audit floor cleared 8 → 0**
-and has held empty through 3.8.0 (4 genuine drifts fixed, 4
-reclassified as correct init-once singletons).
+and has held empty through **3.9.7**. The 3.9.6 and 3.9.7
+concurrent-crypto banking audits resolved every finding in-cycle
+(3.9.7: F1 MEDIUM latent DER-wrapper race, F2 LOW RSA-sign
+secret-residue — both fixed before ship).
 
 ## Threat model assumptions
 

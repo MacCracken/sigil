@@ -21,7 +21,7 @@ lib.cyr (entry point)
   ├── hkdf.cyr          HKDF-SHA256 (RFC 5869)
   ├── aes_ni.cyr        AES-NI hardware dispatch (runtime probe)
   ├── aes_gcm.cyr       AES-256/128-GCM AEAD (FIPS 197 + NIST SP 800-38D)
-  ├── poly1305.cyr      Poly1305 one-time MAC (RFC 8439 §2.5)
+  ├── poly1305.cyr      Poly1305 MAC (RFC 8439 §2.5) — one-shot + streaming (3.9.7)
   ├── chacha20.cyr      ChaCha20 stream cipher (RFC 8439 §2.3/§2.4)
   ├── chacha20poly1305.cyr  ChaCha20-Poly1305 AEAD (RFC 8439 §2.8)
   │
@@ -143,9 +143,25 @@ a `secret var` whole-array wipe would zero *all* lanes and clobber a
 concurrent worker (a real corruption caught by `tests/tcyr/
 banking_concurrent.tcyr`; CLAUDE.md quirk #9 / ADR 0004). 3.8.0 extended
 the bank scheme from the verify primitives to `chacha20_block` /
-`chacha20_xor` / `x25519` / `x25519_base` ahead of any concurrent AEAD or
-TLS-handshake consumer. See
-`docs/audit/2026-06-16-3.8.0-chacha-x25519-banking-audit.md`.
+`chacha20_xor` / `x25519` / `x25519_base`.
+
+**3.9.6** made `cbank()` **auto-assign** a private lane per thread on first
+use (atomic counter → lanes 1..63, bank 0 = serial) — no `crypto_bank_set`
+call is required, so concurrent cyrius `tls_native` / sandhi TLS workers get
+disjoint lanes (`SIGIL_CRYPTO_BANKS` 8→64). This closed the
+concurrent-TLS-handshake crash ([ADR 0007](../adr/0007-auto-banking-for-concurrent-tls.md);
+`docs/audit/2026-06-29-3.9.6-concurrent-tls-handshake-banking-audit.md`).
+**3.9.7** completed the banking across every remaining reachable concurrent
+path — HKDF/HMAC, `ed25519_sign`, the one-shot SHA-2 hashes, the AES-GCM AEAD
+path, ECDSA P-256/P-384 sign+verify (incl. the RFC 6979 DRBG and the DER
+wrappers), `bignum`/`rsa`/`tls12_prf`, and a new **streaming Poly1305**
+(`poly1305_init`/`update`/`finalize`) that removed the last `fl_alloc` on the
+AEAD record path. **As of 3.9.7 every reachable concurrent crypto path is
+race-free.** A 3.9.7 gotcha: `secret var X[N]` *arrays* are themselves static
+globals that race (only scalar `secret var x` is per-call), so the ECDSA DER
+wrappers had to be banked too — see
+[`001-var-array-static-semantics.md`](001-var-array-static-semantics.md).
+See audits `2026-06-16-3.8.0-…`, `2026-06-29-3.9.6-…`, `2026-06-29-3.9.7-…`.
 
 ## Consumers
 
@@ -163,9 +179,11 @@ TLS-handshake consumer. See
   `lib/keccak.cyr`, `lib/thread.cyr`, `lib/thread_local.cyr`,
   `lib/random.cyr` — see README → Usage. Omitting any is a runtime
   `ud2`/SIGILL, not a build failure.
-- **AGNOS first-party crates**: `sakshi` (structured tracing, `2.3.0`)
-  — `programs/smoke.cyr` + full `src/lib.cyr` only; `agnosys` (kernel
-  interfaces, `1.4.3`) — `tpm`/`ima`/`secureboot`/`certpin` only.
+- **AGNOS first-party crate**: `sakshi` (structured tracing, `2.3.0`)
+  — `programs/smoke.cyr` + full `src/lib.cyr` only; not referenced by the
+  `dist/sigil.cyr` bundle. (The former `agnosys` kernel-interface dep was
+  **dropped at 3.8.1** — its `agnosys_*` / `SYSE_*` helpers are internalized
+  in `src/sys_error.cyr` / `src/sys_util.cyr`.)
   **Neither is referenced by the `dist/sigil.cyr` crypto bundle.**
 - **External**: none
 

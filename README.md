@@ -12,9 +12,11 @@ revocation management.
 Cyrius (ported from Rust v1.0.0; original Rust source removed in
 2.7.0). **Zero external _crypto_ dependencies** — every primitive is
 implemented in-house. The full (small) dependency set — cyrius stdlib +
-two AGNOS first-party crates — is listed under [Dependencies](#dependencies).
+one AGNOS first-party crate (`sakshi`, tracing) — is listed under
+[Dependencies](#dependencies). (The former `agnosys` kernel-interface dep
+was dropped at 3.8.1; its helpers are internalized.)
 
-**Cyrius pin:** `6.2.12` (synced across `cyrius.cyml` and CI).
+**Cyrius pin:** `6.3.5` (synced across `cyrius.cyml` and CI).
 
 ## Crypto stack
 
@@ -35,8 +37,8 @@ All cryptography implemented in Cyrius — no external crypto libraries:
   (Bellcore) fault guard
 - **AES-256-GCM / AES-128-GCM** (FIPS 197 + NIST SP 800-38D) — AEAD
   with runtime-detected AES-NI dispatch
-- **ChaCha20-Poly1305** (RFC 8439) — AEAD (ChaCha20 cipher +
-  Poly1305 one-time MAC)
+- **ChaCha20-Poly1305** (RFC 8439) — AEAD (ChaCha20 cipher + Poly1305
+  one-time MAC; Poly1305 also exposes a streaming `init`/`update`/`finalize` API)
 - **ML-DSA-65** (FIPS 204) — post-quantum signing, **default-on since
   3.7.6** (`-D SIGIL_PQC` is now a back-compat no-op; needs `lib/keccak.cyr`)
 - **Private-key parsers** — PEM + DER for ECDSA P-256/P-384 (SEC1 /
@@ -45,6 +47,12 @@ All cryptography implemented in Cyrius — no external crypto libraries:
   early-exit branches on secret data
 - **Cryptographic RNG** — kernel CSPRNG via the stdlib `random_bytes`
   (getrandom / getentropy / ProcessPrng), fail-closed (no weak fallback)
+
+> **Concurrency (since 3.9.7):** every reachable concurrent crypto path is
+> race-free — per-thread `cbank()` lanes back all banked scratch (no caller
+> mutex). A server that fans crypto out to worker threads calls
+> `crypto_tls_main_init()` plus, for ECDSA, `ecdsa_p256_warm()` /
+> `ecdsa_p384_warm()` once on the main thread before spawning workers (ADR 0007).
 
 ## Modules
 
@@ -65,8 +73,8 @@ All cryptography implemented in Cyrius — no external crypto libraries:
 - **`ecdsa_sign.cyr`** — ECDSA P-256/P-384 RFC 6979 deterministic sign
 - **`privkey.cyr`** — EC + Ed25519 private-key parsers (PEM + DER)
 - **`aes_gcm.cyr`**, **`aes_ni.cyr`** — AES-256/128-GCM AEAD
-- **`chacha20.cyr`**, **`poly1305.cyr`**, **`chacha20poly1305.cyr`**
-  — ChaCha20-Poly1305 AEAD
+- **`chacha20.cyr`**, **`poly1305.cyr`** (one-shot + streaming
+  `init`/`update`/`finalize`), **`chacha20poly1305.cyr`** — ChaCha20-Poly1305 AEAD
 - **`mldsa_*.cyr`** — ML-DSA-65 (PQC, default-on since 3.7.6)
 - **`hex.cyr`** — hex encode/decode
 
@@ -135,9 +143,9 @@ for the full module map and data flow.
 
 Sigil implements **all cryptography itself** — there are no external crypto
 libraries. The complete dependency set (declared in [`cyrius.cyml`](cyrius.cyml))
-is the Cyrius standard library plus two AGNOS first-party crates:
+is the Cyrius standard library plus one AGNOS first-party crate (`sakshi`):
 
-### Cyrius stdlib — pinned `6.2.12`
+### Cyrius stdlib — pinned `6.3.5`
 
 - **Auto-included** (cyrius pulls these on symbol reference — nothing for a
   consumer to do): `syscalls`, `alloc`, `freelist`, `assert`, `str`,
@@ -160,19 +168,24 @@ is the Cyrius standard library plus two AGNOS first-party crates:
   why omitting these is a **runtime** crash under cyrius 6.1.x. Requires
   **cyrius ≥ 6.0.52** (the release that shipped `lib/thread_local.cyr`).
 
-### AGNOS first-party crates (git deps)
+### AGNOS first-party crate (git dep)
 
 | Crate | Pin | Provides | Required by |
 |---|---|---|---|
 | [**sakshi**](https://github.com/MacCracken/sakshi) | `2.3.0` | structured tracing / spans (`dist/sakshi.cyr`) | `programs/smoke.cyr` and the full `src/lib.cyr` build — **not** referenced by the `dist/sigil.cyr` crypto bundle |
-| [**agnosys**](https://github.com/MacCracken/agnosys) | `1.4.3` | AGNOS kernel interfaces — TPM seal/unseal, IMA measurements, Secure Boot state (`dist/agnosys.cyr`) | **only** the kernel-integration modules (`tpm.cyr`, `ima.cyr`, `secureboot.cyr`, `certpin.cyr`) |
+
+> The former **agnosys** kernel-interface dep was **dropped at 3.8.1**: the
+> kernel-layer helpers it provided (the `agnosys_*` / `SYSE_*` surface) were
+> internalized into sigil's own `src/sys_error.cyr` / `src/sys_util.cyr`, so
+> `cyrius.cyml [deps]` now lists only `sakshi`.
 
 **`dist/sigil.cyr` is self-contained** beyond the five opt-in stdlib modules
-above: it references **no sakshi and no agnosys** symbols. The four
-agnosys-wrapping modules are deliberately excluded from the bundle —
-consumers who need the kernel layer include via `src/lib.cyr` against a
-sibling agnosys checkout (which pulls agnosys as a proper dep). The bundle is
-the self-contained crypto + trust engine core.
+above: it references no *external* crate symbols (the `agnosys_*` helpers it
+uses are now defined internally). Since 3.9.0 the bundle is no longer crypto-only
+— it carries the full trust + kernel-integration surface too (TPM seal/unseal,
+IMA, Secure Boot, cert-pin, dm-verity, LUKS — internalized `*_core.cyr`), so a
+consumer gets the crypto **and** trust engine from the one bundle plus the five
+opt-in stdlib modules.
 
 ## Usage — stdlib include order (3.6+)
 
@@ -239,7 +252,7 @@ Requires **cyrius ≥ 6.0.52** (the release that shipped `lib/thread_local.cyr`)
 
 ## Tests
 
-1483 assertions across 57 test files, 0 failures (3.8.0). Crypto
+1576 assertions across 60 test files, 0 failures (3.9.7). Crypto
 suites use published known-answer vectors (RFC / FIPS / NIST); the
 TEE attestation arc ships synthesised end-to-end fixtures.
 `tests/tcyr/batch_parallel.tcyr` doubles as the parallel-verify race
@@ -265,14 +278,22 @@ taking `ecdsa_p256_verify` 24.7 → ~10.9 ms. The 3.6 cyrius-native-TLS arc clos
 at 3.6.8 (parallel batch verify, full RSA PKCS#1 v1.5 + PSS, RSA/P-384 x509
 chain-link).
 
-**v3.8.x — OPEN (housekeeping bookend).** 3.8.0 ships **ChaCha20 + X25519
-per-worker banking** (race-validated; plain `var` + per-lane wipe, not
-`secret var`) plus a backlog-accuracy sweep and the Windows-entropy issue
-archived after wine/ProcessPrng runtime verification (issues folder now clear).
-The ≤ 10 ms P-256 verify target is **closed as not-reachable with current
-approaches** (~10.9 ms floor after all portable levers; ADR 0006) — exotic
-levers (asm multiply, GLV) are parked to the backlog, not a current priority.
-The buried-deferral gate landed natively in `cyrlint`.
+**v3.8.x — CLOSED at 3.8.1.** ChaCha20 + X25519 per-worker banking, a
+backlog-accuracy sweep, the Windows-entropy issue archived after
+wine/ProcessPrng runtime verification, and the **agnosys dependency drop**
+(trust primitives internalized as `*_core.cyr`).
+
+**v3.9.x — concurrent-crypto thread-safety, CLOSED at 3.9.7.** 3.9.0 promoted
+the full trust API into `dist/sigil.cyr`. **3.9.6** fixed a
+concurrent-TLS-handshake crash — `cbank()` now **auto-assigns** a per-thread
+lane (no `crypto_bank_set` call), `SIGIL_CRYPTO_BANKS` 8→64. **3.9.7**
+completed the banking across **every reachable concurrent crypto path**:
+streaming Poly1305 (the last `fl_alloc` on the AEAD record path removed), full
+ECDSA P-256/P-384 sign+verify banking (incl. RFC 6979 DRBG + the DER wrappers +
+`*_warm` prewarm), and bignum/RSA/TLS-1.2-PRF — and closed a pre-existing
+RSA-sign secret-residue gap. See [ADR 0007](docs/adr/0007-auto-banking-for-concurrent-tls.md).
+The ≤ 10 ms P-256 verify target stays **closed as not-reachable with current
+approaches** (~10.9 ms floor; ADR 0006) — exotic levers parked to the backlog.
 
 See [`docs/development/roadmap.md`](docs/development/roadmap.md) for the full
 forward-looking work + backlog, and [`CHANGELOG.md`](CHANGELOG.md) for

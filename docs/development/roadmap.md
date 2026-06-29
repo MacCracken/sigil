@@ -6,64 +6,13 @@ shipped").
 
 ## Outstanding work
 
-The only open items. The 3.6 cyrius-native-TLS arc and most of the v3.7
-perf cycle have shipped — see "Closed cycles" below + CHANGELOG.
-
-> **3.8.0 — opened 2026-06-16 (housekeeping bookend to 3.7.x).** The
-> `docs/development/issues/` folder is now **CLEAR** (all 12 archived): the
-> Windows-entropy issue was archived after **wine/ProcessPrng runtime
-> verification** (sigil-side done; `cass` + cyrius `tls_native` residual tracked
-> below). 3.8.0 ships the **ChaCha20 + X25519 parallel-path banking** (the one
-> real buildable Backlog item, now done + race-tested) and a **backlog-accuracy
-> sweep**: the TDX/SGX in-quote PCK walk was found already-shipped (stale note →
-> marked DONE), `bn_modexp` resolved (KEEP as the modexp test-oracle), and the
-> scatter-store comb re-scoped as MOOT/parked (it guards a public value). The
-> **3.7.x EC-squeeze perf cycle is closed** — all levers shipped, ≤ 10 ms not
-> reached (~10.9 ms floor); the target was **closed 2026-06-16 as
-> "not reachable with current approaches"** (ADR 0006), with exotic levers parked
-> to Backlog (not a current priority).
-
-**Thread-safety follow-up (🔴 HIGH)**
-
-- [x] **Concurrent TLS handshakes race sigil's crypto scratch → server crash.**
-      ✅ **DONE (3.9.6).** Root cause was two-fold: the per-worker banks existed
-      but only the batch-verify path ever activated them (concurrent TLS workers
-      all collided on bank 0), and the handshake/AEAD primitives the TLS 1.3 key
-      schedule drives were unbanked or used non-thread-safe `fl_alloc`. Fixed by
-      making `cbank()` **auto-assign** a per-thread lane (no consumer cooperation)
-      + banking HKDF/HMAC/`ed25519_sign`/one-shot-SHA-2/`sha384_finalize`/the full
-      AES-GCM AEAD path + ChaCha20-Poly1305/Poly1305, and CAS-guarding the NI
-      self-test. `SIGIL_CRYPTO_BANKS` 8→64. New race-detector
-      `tests/tcyr/concurrent_tls_handshake.tcyr` (16 auto-banked workers, stable
-      30/30). [ADR 0007](../adr/0007-auto-banking-for-concurrent-tls.md); audit
-      [`2026-06-29-3.9.6-…-banking`](../audit/2026-06-29-3.9.6-concurrent-tls-handshake-banking-audit.md).
-      Issue:
-      [`…concurrent-tls-handshake-global-scratch-race`](issues/2026-06-28-concurrent-tls-handshake-global-scratch-race.md).
-
-**Thread-safety follow-up → 3.9.7 ✅ DONE (3.9.7)**
-
-The 3.9.6 fix covered the reproduced crash path (Ed25519-cert + both AEAD suites'
-handshake/record crypto). 3.9.7 banked every remaining unbanked concurrent site,
-so **every reachable concurrent crypto path is now race-free**:
-
-- [x] **ChaCha20-Poly1305 `_cp_tag` `fl_alloc` mac_data buffer**
-      (`src/chacha20poly1305.cyr`). ✅ **DONE (3.9.7).** Added a streaming
-      Poly1305 (`poly1305_init`/`update`/`finalize`); `_cp_tag` streams the
-      RFC 8439 §2.8 segments in place — the last concurrent-path `fl_alloc` is
-      gone. AEAD encrypt marginally faster.
-- [x] **ECDSA P-256/P-384 sign+verify banking** (`src/ecdsa_p256.cyr`,
-      `src/ecdsa_p384.cyr`, `src/ecdsa_sign.cyr`). ✅ **DONE (3.9.7).** ~150
-      scratch buffers lane-sliced + the RFC 6979 DRBG + the per-sign `k·G` + the
-      sign secret scratch banked; P-384's `_p384_mul64` return slots restructured;
-      `ecdsa_p256_warm()`/`ecdsa_p384_warm()` main-thread prewarm added.
-      **Also fixed a latent race in the DER wrappers** (`*_sign_der`/`verify_der`):
-      `secret var` ARRAYS are shared statics (proven by probe), so the TLS
-      CertificateVerify path was racing — now banked.
-- [x] **`bignum` + `tls12_prf` (+ `rsa`) statics** (`src/bignum.cyr`,
-      `src/tls12_prf.cyr`, `src/rsa.cyr`). ✅ **DONE (3.9.7).** Banked the
-      Montgomery modexp scratch, the `_mul64` output locals, the RSA verify/sign/
-      blind/CRT workspaces, and the P_hash PRF buffers; **closed a pre-existing
-      RSA-sign secret-residue gap**. Off the TLS 1.3 path — done for completeness.
+The only open items — all parked / gated or verification-only. The 3.6 TLS arc,
+the 3.7 perf cycle, and the 3.8 / 3.9 thread-safety + decomposition cycles have
+all shipped — see "Closed cycles" below + [CHANGELOG](../../CHANGELOG.md).
+**As of 3.9.7 every reachable concurrent crypto path is race-free**
+([ADR 0007](../adr/0007-auto-banking-for-concurrent-tls.md)) — the
+concurrent-TLS-handshake crash (3.9.6) and the full thread-safety banking (3.9.7)
+are done; see the **3.9** closed-cycle entry below.
 
 **Verification follow-up**
 
@@ -78,21 +27,9 @@ so **every reachable concurrent crypto path is now race-free**:
       re-verify the native-TLS handshake). Archived issue:
       [`…windows-entropy…`](issues/archive/2026-06-15-sigil-windows-entropy-not-via-getrandom.md).
 
-**Decomposition follow-up (post-3.8.1)**
+**Decomposition follow-up (post-3.8.1)** — the (P2) trust-API-in-`dist` item
+**shipped at 3.9.0** (105 trust fns now bundled; see the 3.9 closed-cycle entry).
 
-- [x] **(P2) Promote the trust API to first-class in `dist/sigil.cyr`.** ✅ **DONE (3.9.0).**
-      3.8.1 internalized the trust primitives (`certpin`/`tpm`/`ima`/`secureboot` `*_core`
-      + `dmverity`/`luks` + `sys_error`/`sys_util`/`sysinfo`) and dropped
-      `[deps.agnosys]`, clearing the blocker that kept the wrappers out of the dist
-      bundle. 3.9.0 adds all 13 modules (3 support + 6 cores + 4 wrappers) to the
-      `[lib]` list and the `scripts/regen-dist.sh` `MODULES` list (both in
-      `src/lib.cyr` src-include order: support+cores before `types`, wrappers after
-      `audit` before `verify`). Result: **105 trust fns** now in `dist/sigil.cyr`
-      (`tpm_seal`/`tpm_unseal`/`tpm_detect`/`tpm_verify_measured_boot`, IMA,
-      SecureBoot, cert-pin, `dmverity_verify`, `luks_format`). Verified: **no
-      duplicate-fn definitions**, bundle compiles clean (`tpm_detect` resolves from
-      the dist), self-containment intact, full suite green (1475/0). **Unblocks the
-      downstream tpm rewire** (libro/kybernet) — see the decomposition plan.
 - [ ] **Retire the interim `src/sysinfo.cyr` (uname)** when the sysinfo value-add
       lands in cyrius's syscall layer (decomposition decision 1) — switch
       `secureboot_core` to cyrius's portable uname. Part of the `agnosys → agnodrm`
@@ -211,11 +148,27 @@ audits in [`docs/audit/`](../audit/).
   (cyrlint-native) and the full bench re-run was captured at the 3.8.0 close; the
   Windows `cass` acceptance + cyrius `tls_native` re-fold are the only residual
   (verification-only, tracked in Outstanding).
-- **3.8 — OPEN (housekeeping bookend to 3.7.x).** ChaCha20 + X25519 per-worker
-  banking (race-validated; plain `var` + per-lane wipe, not `secret var`); a
-  backlog-accuracy sweep (TDX/SGX in-quote PCK walk found already-shipped;
-  `bn_modexp` kept as the modexp test-oracle; scatter-store re-scoped MOOT/parked);
-  the Windows-entropy issue archived after wine/ProcessPrng runtime verification;
-  the issues folder cleared (all 12 archived). See CHANGELOG `[3.8.0]`.
+- **3.8 — housekeeping bookend to 3.7.x (CLOSED at 3.8.1).** ChaCha20 + X25519
+  per-worker banking (race-validated; plain `var` + per-lane wipe, not
+  `secret var`); a backlog-accuracy sweep (TDX/SGX in-quote PCK walk found
+  already-shipped; `bn_modexp` kept as the modexp test-oracle; scatter-store
+  re-scoped MOOT/parked); the Windows-entropy issue archived after wine/ProcessPrng
+  runtime verification; **3.8.1 dropped the `agnosys` dependency** (trust
+  primitives internalized as `*_core.cyr` + `sys_error`/`sys_util`). See
+  CHANGELOG `[3.8.0]`/`[3.8.1]`.
+- **3.9 — trust-API in `dist` + concurrent-crypto thread-safety (CLOSED at 3.9.7).**
+  **3.9.0** promoted the full trust API into `dist/sigil.cyr` (105 trust fns —
+  TPM/IMA/SecureBoot/cert-pin/dm-verity/LUKS). **3.9.6** fixed the
+  concurrent-TLS-handshake crash: `cbank()` now **auto-assigns** a per-thread lane
+  (no `crypto_bank_set` call), `SIGIL_CRYPTO_BANKS` 8→64, with HKDF/HMAC/
+  `ed25519_sign`/one-shot-SHA-2/AES-GCM/ChaCha-Poly banked + the NI self-test
+  CAS-guarded ([ADR 0007](../adr/0007-auto-banking-for-concurrent-tls.md)).
+  **3.9.7** completed the banking across **every reachable concurrent crypto
+  path**: streaming Poly1305 (last `fl_alloc` gone), full ECDSA P-256/P-384
+  sign+verify (incl. RFC 6979 DRBG + the DER wrappers + `*_warm` prewarm),
+  bignum/RSA/TLS-1.2-PRF, and closed a pre-existing RSA-sign secret-residue gap.
+  Security finding: `secret var X[N]` arrays are shared statics that race (fixed a
+  latent DER-wrapper race). Audits `2026-06-29-3.9.6-…` + `2026-06-29-3.9.7-…`.
+  See CHANGELOG `[3.9.0]`/`[3.9.6]`/`[3.9.7]`.
 
-**Cyrius pin:** `6.2.12` (synced across `cyrius.cyml` and CI).
+**Cyrius pin:** see `cyrius.cyml` `[package].cyrius` (the single source of truth).

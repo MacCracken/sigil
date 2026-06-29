@@ -69,3 +69,12 @@ warning and the latent hazard for all sigil+bote consumers.
 - bote `docs/development/issues/2026-06-23-err-io-enum-collision-namespace.md`.
 - sakshi / ai-hwaccel `…2026-06-23-err-timeout-enum-collision-namespace.md`.
 - Precedent: bote × ai-hwaccel `registry_new` collision (`2026-06-11-registry-new-collision.md`).
+
+---
+
+**CLOSED (2026-06-29) — sigil-side shipped at 3.9.4.** The recommended rename
+landed at **3.9.4**: the entire `SigilError` + `sys_error` enum was namespaced
+`ERR_* → SIGIL_ERR_*` (BREAKING; no compat aliases; enum values unchanged) —
+zero bare `ERR_*` definitions remain in `src/` (verified: `src/error.cyr` uses
+`SIGIL_ERR_*`, `SIGIL_ERR_IO = 6`). The "suggest sigil 3.10.0" framing is
+superseded — it shipped as a patch. See CHANGELOG `[3.9.4]`. Archived.

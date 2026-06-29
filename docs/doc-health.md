@@ -6,60 +6,68 @@ type: state
 
 # Documentation Health — sigil
 
-> **Last refresh**: 2026-06-16 (**3.8.0 — ChaCha20 + X25519 per-worker
-> banking (`cbank()` lanes; st/ws/ks, W/ub/base widened to
-> `SIGIL_CRYPTO_BANKS` lanes), plain `var` + per-lane `memset` zeroize —
-> NOT `secret var`, whose whole-array wipe would clobber concurrent lanes
-> (a real bug caught by the new `banking_concurrent.tcyr` race-detector,
-> 5/5 clean post-fix); a backlog-accuracy sweep; and the Windows-entropy
-> issue archived after wine/ProcessPrng runtime verification (issues
-> folder now clear, 12 archived)**; prior: 3.7.17 Karatsuba
-> `u256_mul_full` + `u2·Q`-window mixed add, 3.7.16 EC inversion
-> addition-chains + affine comb-G mixed add, 3.7.15 Windows-entropy
-> single-boundary fix). The 3.6 cyrius-native-TLS arc closed at 3.6.8;
-> the v3.7 EC-squeeze cycle closed at 3.7.17 (≤ 10 ms not reached,
-> ~10.9 ms floor, parked); **3.8.0 opens the 3.8.x housekeeping cycle**.
-> This is a consolidated row-by-row re-sweep across the whole
-> 3.6.5 → 3.8.0 run.
+> **Last refresh**: 2026-06-29 (**3.9.7 — thread-safety banking arc
+> completed**: banked every remaining concurrent-path crypto scratch so
+> **every reachable concurrent crypto path is race-free** — streaming
+> Poly1305 (`_cp_tag` last `fl_alloc` gone), ECDSA P-256/P-384 sign+verify
+> incl. DER wrappers + RFC 6979 DRBG, bignum/rsa/tls12_prf; security: fixed
+> the latent `secret var`-array DER-wrapper race (TLS CertificateVerify
+> path) + closed an RSA-sign secret-residue gap; new
+> `ecdsa_concurrent.tcyr` + `bignum_tls12_concurrent.tcyr` race-detectors,
+> red→green; prior: 3.9.6 concurrent-TLS-handshake crash fix —
+> `cbank()` auto-assigns a per-thread lane, `SIGIL_CRYPTO_BANKS` 8→64, new
+> `concurrent_tls_handshake.tcyr`). The 3.6 cyrius-native-TLS arc closed at
+> 3.6.8; the v3.7 EC-squeeze cycle closed at 3.7.17 (≤ 10 ms not reached,
+> ~10.9 ms floor, parked per ADR 0006); the 3.8.x housekeeping bookend
+> closed at 3.8.1 (**agnosys dependency dropped** — trust primitives
+> internalized as `src/*_core.cyr` + `sys_error.cyr`/`sys_util.cyr`); the
+> 3.9.x thread-safety-banking arc completed at 3.9.7.
 > Per-version detail lives in
 > [`CHANGELOG.md`](../CHANGELOG.md) and per-cycle audit docs in
 > [`docs/audit/`](audit/) — the daily-stack notes that used to live here
 > were retired in favour of those sources.
 >
 > **Headline changes since the last full row-refresh (3.4.1 inventory):**
-> - **Version `3.8.0`**, cyrius pin **`6.2.12`** (was 3.5.4 / 6.0.3 at
->   the 3.4.1 inventory). Deps agnosys 1.4.3, sakshi 2.3.0.
-> - **Audit floor: EMPTY** (cleared at 3.7.3, holds through 3.8.0 — see
+> - **Version `3.9.7`**, cyrius pin **`6.3.5`** (was 3.5.4 / 6.0.3 at
+>   the 3.4.1 inventory). Deps: **sakshi 2.3.0 ONLY** — **agnosys was
+>   DROPPED at 3.8.1** (its trust primitives were internalized as
+>   `src/*_core.cyr` + `src/sys_error.cyr` / `src/sys_util.cyr`);
+>   `cyrius.cyml [deps]` no longer references agnosys.
+> - **Audit floor: EMPTY** (cleared at 3.7.3, holds through 3.9.7 — see
 >   state.md). The seven bump-allocator LOWs ADR 0003 batched are
->   resolved/reclassified; ADR 0003 is now closed-out.
-> - **57 `.tcyr` files (`ls tests/tcyr/*.tcyr`) / 1483 assertions** (was
+>   resolved/reclassified; ADR 0003 is now closed-out. The 3.9.6/3.9.7
+>   banking audits resolved every finding in-cycle (3.9.7: F1 MEDIUM
+>   DER-wrapper race + F2 LOW RSA-sign residue, both fixed before ship).
+> - **60 `.tcyr` files (`ls tests/tcyr/*.tcyr`) / 1576 assertions** (was
 >   ~1178 at the 3.4.1 inventory). README + state.md now carry the true
->   **57**. Assertion-count caveat (unchanged): the 3 `*_verify_full`
+>   **60**. Assertion-count caveat (unchanged): the 3 `*_verify_full`
 >   tests print their summary to a tty-only path dropped under pipe/
->   redirect, so a scripted grep-sum undercounts the assertion total by
->   their combined 44 — add it back for the true figure (see state.md
->   "Counting note"). A couple of non-suite helper/regression probes
->   (`sha256_locals_probe.tcyr`, `var_array_semantics.tcyr`,
->   `ed25519_bug.tcyr`) ran but were historically not summed into the
->   suite tally — the source of the old 55-vs-57 drift, now resolved to
->   57. New modules across 3.6/3.7/3.8:
->   `bignum`, `tls12_prf`, `hmac_sha384`, `hkdf_sha384`, `random` and the
->   RSA / PSS / Solinas / `_into` / off-diagonal-ECDSA / Karatsuba /
->   ChaCha20+X25519-banking surfaces; new bench files
+>   redirect, so a scripted grep-sum yields 1532 across the other 57 files
+>   and undercounts by their combined 44 — add it back for the true figure
+>   1576 (see state.md "Counting note"). New modules/surfaces across
+>   3.6/3.7/3.8/3.9: `bignum`, `tls12_prf`, `hmac_sha384`, `hkdf_sha384`,
+>   `random`, the internalized trust `*_core.cyr` / `sys_error.cyr` /
+>   `sys_util.cyr` (agnosys-drop @3.8.1), and the RSA / PSS / Solinas /
+>   `_into` / off-diagonal-ECDSA / Karatsuba / ChaCha20+X25519-banking /
+>   **full concurrent-crypto banking (3.9.x)** surfaces; new bench files
 >   `tests/bcyr/{rsa,ecdsa_p384}.bcyr`; new tests
->   `tests/tcyr/{x509_offdiag,random,banking_concurrent}.tcyr`.
+>   `tests/tcyr/{x509_offdiag,random,banking_concurrent,concurrent_tls_handshake,ecdsa_concurrent,bignum_tls12_concurrent}.tcyr`
+>   (3 of those new in 3.9.x: `concurrent_tls_handshake` @3.9.6,
+>   `ecdsa_concurrent` + `bignum_tls12_concurrent` @3.9.7).
 > - **Audit docs**: 3.5.6 retro + 3.6.0–3.6.8 + 3.7.0–3.7.5 + 3.7.15–3.7.17
->   + 3.8.0 added under `docs/audit/` (per-cycle, dated artifacts).
-> - **CHANGELOG / roadmap / state.md** are current through 3.8.0;
->   roadmap.md reflects the closed v3.7 EC-squeeze cycle (≤ 10 ms parked,
->   bench re-run captured) and the 3.8.0 ChaCha20/X25519 banking +
->   backlog-accuracy sweep. README gained a **Dependencies** section
->   identifying the cyrius stdlib (auto + the **five** opt-in modules:
->   `ct`, `keccak`, `thread`, `thread_local`, `random`) plus sakshi/agnosys.
+>   + 3.8.0 + the two 2026-06-29 banking audits (3.9.6 + 3.9.7) under
+>   `docs/audit/` (per-cycle, dated artifacts).
+> - **CHANGELOG / roadmap / state.md** are current through 3.9.7;
+>   roadmap.md reflects the closed v3.7 EC-squeeze cycle (≤ 10 ms parked),
+>   the 3.8.x housekeeping bookend (agnosys drop @3.8.1), and the
+>   completed 3.9.x thread-safety-banking arc. README carries a
+>   **Dependencies** section identifying the cyrius stdlib (auto + the
+>   opt-in modules: `ct`, `keccak`, `thread`, `thread_local`, `random`)
+>   plus sakshi (agnosys removed @3.8.1).
 >
 > **Refresh cadence**: when docs are touched, update the
 > affected row inline. Full audit at minor closeout
-> (next: the 3.8.x housekeeping cycle close).
+> (next: the 3.9.x cycle close).
 >
 > **Scope**: this repo only (`sigil`) — the entire `docs/` tree
 > plus root-level files (README, CHANGELOG, CLAUDE.md, VERSION,
@@ -74,9 +82,9 @@ docs change.
 
 ## At a glance — 2026-05-22 inventory (3.4.1)
 
-> Historical 3.4.1 snapshot; for current counts see the 3.8.0 header
+> Historical 3.4.1 snapshot; for current counts see the 3.9.7 header
 > refresh above and the per-tier tables. The audit-doc count alone has
-> grown from ~6 to **35** files since this snapshot.
+> grown from ~6 to **37** files since this snapshot.
 
 **~38 markdown files** across the repo (post-sweep).
 
@@ -130,16 +138,16 @@ citation index for every crypto primitive.
 | File | Last touched | Status | Notes |
 |---|---|---|---|
 | `README.md` | 2026-05-22 | ✅ Fresh | Rewritten this sweep; trimmed module-list duplication against `docs/architecture/overview.md`. |
-| `CHANGELOG.md` | 2026-06-16 | ✅ Fresh | Source of truth per CLAUDE.md. **Through 3.8.0.** Refreshed every release. |
+| `CHANGELOG.md` | 2026-06-29 | ✅ Fresh | Source of truth per CLAUDE.md. **Through 3.9.7.** Refreshed every release. |
 | `CLAUDE.md` | 2026-06-04 | ✅ Fresh | agnosticos `example_claude.md` template; durable rules only. 3.6.8 fixed the stale `benches/sigil.bcyr` → `tests/bcyr/sigil.bcyr` Quick-Start path. |
 | `CONTRIBUTING.md` | 2026-05-22 | ✅ Fresh | Cyrius work loop + commit/hook rules; no Rust/cargo references. |
-| `SECURITY.md` | 2026-05-22 | 🟡 Stale | Supported-versions table topped at 3.4.x/3.3.x — refresh to 3.8.x. Crypto-primitive surface predates the RSA/PSS/GCM-IV/ChaCha20-Poly1305/X25519 additions. |
+| `SECURITY.md` | 2026-06-29 | ✅ Fresh | Supported-versions table tops at **3.9.x** (current minor) / 3.8.x (prior); crypto-primitive surface lists RSA/PSS/GCM-IV/ChaCha20-Poly1305/X25519 + PQC default-on; audit-floor note holds EMPTY through 3.9.7 (3.9.6/3.9.7 banking findings resolved in-cycle). |
 | `CODE_OF_CONDUCT.md` | (per upstream) | 🔵 Evergreen | Standard contributor covenant. |
 | `LICENSE` | (per upstream) | 🔵 Evergreen | GPL-3.0-only. |
-| `VERSION` | 2026-06-16 | ✅ Fresh | **`3.8.0`**. Bumped every release. |
-| `cyrius.cyml` | 2026-06-16 | ✅ Fresh | `[lib].modules` extended across 3.6/3.7/3.8 (bignum, tls12_prf, hmac/hkdf_sha384, random, …); toolchain pin **`6.2.12`** (6.0.87 → 6.1.20 @3.7.8 → 6.2.1 @3.7.13 → 6.2.11 @3.7.14 → 6.2.12 @3.7.15). Deps agnosys 1.4.3 / sakshi 2.3.0; `json` / `bigint` dropped at the 6.2.1 pin (bigint → bayan). |
-| `dist/sigil.deps` + `cyrius distlib` | 2026-06-27 | ✅ Fresh | **@3.9.5**: the bash `scripts/regen-dist.sh` retired — the sovereign `cyrius distlib` (≥6.2.48) folds `dist/sigil.cyr` AND emits the `dist/sigil.deps` sidecar (24 stdlib leaves, captured from the modules + the `src/lib.cyr` umbrella). Re-run `cyrius distlib` after a `[lib].modules` or VERSION change. |
-| `dist/sigil.cyr` | 2026-06-16 | ✅ Fresh | Regenerated every release (last, after the VERSION bump). Header reads `# Version: 3.8.0`; carries the 3.7.8 NI `param_load` migration, the 3.7.15 `src/random.cyr` entropy boundary, and the 3.8.0 ChaCha20/X25519 banking. |
+| `VERSION` | 2026-06-29 | ✅ Fresh | **`3.9.7`**. Bumped every release. |
+| `cyrius.cyml` | 2026-06-29 | ✅ Fresh | `[lib].modules` extended across 3.6–3.9 (bignum, tls12_prf, hmac/hkdf_sha384, random, the internalized trust `*_core`/`sys_error`/`sys_util`, …); toolchain pin **`6.3.5`** (6.0.87 @3.7.8 → 6.2.x @3.7.13–3.7.15 → 6.2.48 → **6.3.5** @3.9.6). Deps: **sakshi 2.3.0 ONLY — agnosys DROPPED @3.8.1** (trust primitives internalized); `json` / `bigint` previously dropped at the 6.2.1 pin (bigint → bayan). |
+| `dist/sigil.deps` + `cyrius distlib` | 2026-06-29 | ✅ Fresh | **@3.9.5+**: the bash `scripts/regen-dist.sh` retired — the sovereign `cyrius distlib` (≥6.2.48) folds `dist/sigil.cyr` AND emits the `dist/sigil.deps` sidecar (stdlib leaves, captured from the modules + the `src/lib.cyr` umbrella). Re-run `cyrius distlib` after a `[lib].modules` or VERSION change. |
+| `dist/sigil.cyr` | 2026-06-29 | ✅ Fresh | Regenerated every release (last, after the VERSION bump). Header reads **`# Version: 3.9.7`**; carries the 3.7.8 NI `param_load` migration, the 3.7.15 `src/random.cyr` entropy boundary, the 3.8.x ChaCha20/X25519 banking + agnosys-drop internalized trust modules, and the **3.9.x full concurrent-crypto banking** (auto-lane `cbank()`, streaming Poly1305, ECDSA/bignum banking). |
 | `benchmarks-rust-v-cyrius.md` | (closed) | 🔵 Evergreen | Frozen cross-implementation perf baseline; not rebuilt per release. |
 
 ---
@@ -149,7 +157,7 @@ citation index for every crypto primitive.
 | File | Last touched | Status | Notes |
 |---|---|---|---|
 | `README.md` | 2026-05-22 | ✅ Fresh | New this sweep. Index + candidates for the first numbered notes (currently empty; promote from CLAUDE.md's "Known Cyrius Compiler Quirks" when a reader hits one from grep — a strong candidate is now the 3.8.0 banked-secret-scratch "plain `var` + per-lane wipe, NOT `secret var`" invariant). |
-| `overview.md` | 2026-05-27 | 🟡 Stale | Module map + TEE data-flow + parallel-batch framing; 3.5 arc added the four modern-crypto modules (poly1305, chacha20, chacha20poly1305, x25519). **Stale**: agnosys still listed at `0.98.0` (now 1.4.3); stdlib list still names dropped `json`/`bigint` (now `bayan`); `src/random.cyr` (3.7.15 entropy boundary) absent from the map; the `[SIGIL_PQC]` gate + "without the flag … under cap" narrative describe a gate removed at 3.7.6; the parallel-batch note omits the 3.8.0 ChaCha20/X25519 banking (`cbank()` lanes; per-lane zeroize, not `secret var`). |
+| `overview.md` | 2026-05-27 | 🟡 Stale | Module map + TEE data-flow + parallel-batch framing; 3.5 arc added the four modern-crypto modules (poly1305, chacha20, chacha20poly1305, x25519). **Stale**: agnosys still listed as a dep — **agnosys was DROPPED at 3.8.1**; remove it from the module map / dep refs and add the internalized trust `*_core.cyr` + `sys_error.cyr` / `sys_util.cyr` modules. Also stale: stdlib list still names dropped `json`/`bigint` (now `bayan`); `src/random.cyr` (3.7.15 entropy boundary) absent from the map; the `[SIGIL_PQC]` gate + "without the flag … under cap" narrative describe a gate removed at 3.7.6; the parallel-batch note omits the 3.8.0 ChaCha20/X25519 banking and the **3.9.x full concurrent-crypto banking** (auto-lane `cbank()`, banks 8→64; per-lane zeroize, not `secret var`). |
 
 ---
 
@@ -161,7 +169,7 @@ citation index for every crypto primitive.
 | `template.md` | 2026-05-22 | ✅ Fresh | New this sweep. Verbatim shape from `sit/docs/adr/template.md`. |
 | `0001-retain-batch-mutex-until-caller-scratch.md` | 2026-05-27 | ✅ Fresh / 🔵 Evergreen-ish | Mutex-drop deferral rationale. Superseded by its own outcome — the `_sigil_batch_mutex` was dropped at **3.6.0** via per-worker banks (the banking pattern extended to ChaCha20/X25519 at 3.8.0; see the per-lane-zeroize-not-`secret var` rule below). |
 | `0002-mldsa-cmdline-gate.md` | 2026-05-22 | ✅ Fresh | Captures the `-D SIGIL_PQC` gate rationale (cyrius preprocessor 1 MB cap). **Resolved**: cyrius 6.0.87 raised the cap; PQC went default-on at 3.7.6 and `-D SIGIL_PQC` is now a back-compat no-op. |
-| `0003-bump-alloc-drift-acceptable-until-3-6.md` | 2026-06-16 | 🔵 Resolved | The batched-closure target it tracked is **done**: the audit floor was cleared at 3.7.3 (4 LOWs resolved via the `_into` API, 4 reclassified as correct init-once); holds EMPTY through 3.8.0. Confirm the ADR body carries a Resolved/Superseded marker. |
+| `0003-bump-alloc-drift-acceptable-until-3-6.md` | 2026-06-16 | 🔵 Resolved | The batched-closure target it tracked is **done**: the audit floor was cleared at 3.7.3 (4 LOWs resolved via the `_into` API, 4 reclassified as correct init-once); holds EMPTY through 3.9.7. Confirm the ADR body carries a Resolved/Superseded marker. |
 
 ---
 
@@ -208,16 +216,22 @@ finding closes).
 | `2026-06-16-3.7.16-ec-inversion-mixedadd-audit.md` | 2026-06-16 | 🔵 Dated artifact (3.7.16 — EC inversion addition-chains + affine comb mixed-add) |
 | `2026-06-16-3.7.17-karatsuba-multiply-audit.md` | 2026-06-16 | 🔵 Dated artifact (3.7.17 — Karatsuba `u256_mul_full`) |
 | `2026-06-16-3.8.0-chacha-x25519-banking-audit.md` | 2026-06-16 | 🔵 Dated artifact (3.8.0 — ChaCha20 + X25519 per-worker banking) |
+| `2026-06-29-3.9.6-concurrent-tls-handshake-banking-audit.md` | 2026-06-29 | 🔵 Dated artifact (3.9.6 — concurrent-TLS-handshake crash fix; `cbank()` auto-lane banking, banks 8→64) |
+| `2026-06-29-3.9.7-ecdsa-bignum-banking-audit.md` | 2026-06-29 | 🔵 Dated artifact (3.9.7 — ECDSA/bignum/PRF thread-safety banking; F1 MEDIUM DER-wrapper race + F2 LOW RSA-sign residue, both fixed in-cycle) |
 
-> **Table complete through 3.8.0** — every dated audit artifact under
-> `docs/audit/` is itemised above (the prior "queued for the v3.7 closeout"
-> caveat is retired; the v3.7 cycle closed at 3.7.17 and 3.8.0 has shipped).
+> **Table complete through 3.9.7** — every dated audit artifact under
+> `docs/audit/` is itemised above. (There are no separate 3.9.0–3.9.5 audit
+> docs; those bites were housekeeping/bundling/CVE-trust-chain work covered by
+> CHANGELOG. The v3.7 cycle closed at 3.7.17, 3.8.0 shipped, and the 3.9.x
+> thread-safety-banking arc closed at 3.9.7 with the two 2026-06-29 audits.)
 
-**Audit floor**: **EMPTY (cleared at 3.7.3, holds through 3.8.0).** The seven (then eight,
+**Audit floor**: **EMPTY (cleared at 3.7.3, holds through 3.9.7).** The seven (then eight,
 +3.6.5 RSA SPKI block) bump-allocator LOWs ADR 0003 batched are
 resolved (4 via the `_into` caller-scratch API) or reclassified as
-correct init-once singletons (4). Zero findings of any severity
-outstanding.
+correct init-once singletons (4). The 3.9.6 and 3.9.7 banking audits resolved
+every finding in-cycle (3.9.7: F1 MEDIUM DER-wrapper `secret var`-array race +
+F2 LOW RSA-sign secret-residue gap, both fixed before ship). Zero findings of
+any severity outstanding.
 
 Naming convention note: multi-cycle days disambiguate via
 `YYYY-MM-DD-<version>-audit.md`; the bare `YYYY-MM-DD-audit.md` form is
@@ -229,8 +243,8 @@ reserved for the first cycle of a day.
 
 | File | Last touched | Status | Notes |
 |---|---|---|---|
-| `roadmap.md` | 2026-06-16 | ✅ Fresh | Through 3.8.0: the EC-squeeze cycle closed at 3.7.17 (4 levers shipped, ≤ 10 ms unreached / parked at ~10.9 ms, bench re-run captured at 3.8.0); ChaCha20/X25519 parallel-banking shipped at 3.8.0; backlog-accuracy sweep reconciled TDX/SGX PCK-walk (done), `bn_modexp` (keep), scatter-store (moot). Open backlog: TDX chain walk, scalar-inversion addition-chain follow-ups, exotic EC levers (asm / alt-representation). The buried-deferral gate is done — superseded by `cyrlint`'s native untracked-deferral check. |
-| `state.md` | 2026-06-16 | ✅ Fresh | Live state snapshot — bumped every release. **Through 3.8.0**; audit floor EMPTY; EC-squeeze cycle closed (≤ 10 ms parked); 3.8.0 = ChaCha20/X25519 banking + backlog-accuracy sweep + Windows-entropy issue archived. |
+| `roadmap.md` | 2026-06-29 | ✅ Fresh | **Through 3.9.7**: the EC-squeeze cycle closed at 3.7.17 (4 levers shipped, ≤ 10 ms unreached / parked at ~10.9 ms per ADR 0006); ChaCha20/X25519 parallel-banking shipped at 3.8.0; **agnosys dropped at 3.8.1**; the 3.9.x thread-safety-banking arc completed at 3.9.7 (concurrent-TLS crash fix @3.9.6, streaming Poly1305 / ECDSA / bignum banking @3.9.7). Open backlog (carried forward, not buried): TDX/SGX in-quote PCK chain walk, exotic EC levers (asm / alt-representation, ADR 0006), retire-bank-indexing, scatter-store, CLMUL-GHASH, ML-KEM-768, `#derive(Serialize)` completeness, Windows-entropy `cass` ProcessPrng confirmation, retire-sysinfo. The buried-deferral gate is done — superseded by `cyrlint`'s native untracked-deferral check. |
+| `state.md` | 2026-06-29 | ✅ Fresh | Live state snapshot — bumped every release. **Through 3.9.7**; audit floor EMPTY (holds through 3.9.7); EC-squeeze cycle closed (≤ 10 ms parked); 3.8.x = ChaCha20/X25519 banking + backlog-accuracy sweep + Windows-entropy issue archived + **agnosys dropped @3.8.1**; 3.9.x thread-safety-banking arc completed @3.9.7. |
 | `3.0-handoff-2026-04-22.md` | 2026-04-22 | 📦 Archive | Frozen by design — closed-cycle handoff doc. |
 | `3.0-scope.md` | (closed) | 📦 Archive | Frozen by design — closed-cycle scope doc. |
 | `3.2-scope.md` | (closed) | 📦 Archive | Frozen by design — closed-cycle scope doc. |
@@ -245,17 +259,17 @@ internal observation). Archived when resolved.
 
 ### Open issues
 
-**No open issues** — `docs/development/issues/` is clear as of 3.8.0
-(only `archive/` remains; **12 files** inside). The Windows-entropy
-issue was the last open item, archived at 3.8.0 after wine/ProcessPrng
-runtime verification. The three previously-"open" rows
-(`cyrius-510-asm-stack-frame-drift`, `kavach-sgx-sev-tdx`,
-`tlsh-distance-segfault-phylax`) were all resolved and moved into
-`archive/` (see below).
+**0 open** — `docs/development/issues/` is clear as of 3.9.7 (only
+`archive/` remains; **14 files** inside). The two most recent open items
+were resolved and archived this cycle: the **err-io-enum-collision**
+namespace issue and the **concurrent-tls-handshake global-scratch-race**
+issue (the latter is the 3.9.6/3.9.7 banking work — `cbank()` auto-lane
+banking + full concurrent-crypto banking). Earlier, the Windows-entropy
+issue was archived at 3.8.0 after wine/ProcessPrng runtime verification.
 
 ### Archived issues
 
-12 files under `docs/development/issues/archive/`:
+14 files under `docs/development/issues/archive/`:
 
 | File | Resolution | Status |
 |---|---|---|
@@ -271,6 +285,8 @@ runtime verification. The three previously-"open" rows
 | `archive/2026-06-09-cyrius-6120-rebreaks-ni-paths-sigill.md` | Resolved at 3.7.8 (bundle opt-in stdlib includes) | 📦 Archive |
 | `archive/2026-06-12-attestation-cert-pointer-arrays-undersized.md` | Resolved at 3.7.13 (byte-vs-slot fix) | 📦 Archive |
 | `archive/2026-06-15-sigil-windows-entropy-not-via-getrandom.md` | Resolved at 3.7.15, archived at 3.8.0 (wine/ProcessPrng verified) | 📦 Archive |
+| `archive/2026-06-23-err-io-enum-collision-namespace.md` | Resolved + archived this cycle (err/io enum namespace collision) | 📦 Archive |
+| `archive/2026-06-28-concurrent-tls-handshake-global-scratch-race.md` | Resolved at 3.9.6/3.9.7 (`cbank()` auto-lane banking + full concurrent-crypto banking), archived this cycle | 📦 Archive |
 
 ---
 
@@ -360,15 +376,16 @@ manual 3.7.7 buried-deferral sweep.
 Candidates for future programmatic gates:
 
 - **Assertion-count drift gate**: `state.md`'s "Total
-  assertions: 1483" cross-checked against `for t in tests/tcyr/*.tcyr;
+  assertions: 1576" cross-checked against `for t in tests/tcyr/*.tcyr;
   do cyrius test "$t"; done` summary (caveat: the 3 `*_verify_full.tcyr`
   tty-only summaries drop 44 under any pipe/redirect — the gate must add
-  them back).
+  them back; scripted grep-sum 1532 + 44 = 1576).
 - **`.tcyr` file-count drift gate**: `state.md` + README now carry the
-  raw `ls tests/tcyr/*.tcyr | wc -l` count (**57**, reconciled this
-  sweep — the old 55 tally omitted 2 non-suite helper probes). A gate
-  would pin the counting basis (`ls`-count, not a hand-maintained tally)
-  and stop the tree-vs-doc drift from recurring each release.
+  raw `ls tests/tcyr/*.tcyr | wc -l` count (**60** as of 3.9.7; +3 in the
+  3.9.x cycle: `concurrent_tls_handshake`, `ecdsa_concurrent`,
+  `bignum_tls12_concurrent`). A gate would pin the counting basis
+  (`ls`-count, not a hand-maintained tally) and stop the tree-vs-doc
+  drift from recurring each release.
 - **Module-list drift gate**: `cyrius.cyml [lib].modules`
   cross-checked against `ls src/*.cyr` (this sweep caught
   `pem.cyr` missing from the dist bundle — a programmatic

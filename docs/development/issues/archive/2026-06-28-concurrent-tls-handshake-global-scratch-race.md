@@ -175,3 +175,13 @@ mac_data buffer (needs a streaming Poly1305 — the only remaining concurrent-pa
 `fl_alloc`); ECDSA P-256/P-384 sign+verify banking (latent — `tls_native` rejects
 RSA and the probe cert is Ed25519); the `bignum`/`tls12_prf` statics (off the TLS
 1.3 server path). Maintainer may archive this issue once 3.9.7 closes those.
+
+---
+
+**CLOSED (2026-06-29) — fully resolved.** 3.9.6 fixed the reproduced crash
+(`cbank()` auto-banking + handshake/AEAD banking); **3.9.7** closed every
+deferred item above — ChaCha `_cp_tag` streaming Poly1305, ECDSA P-256/P-384
+sign+verify (incl. the DER wrappers), and the `bignum`/`tls12_prf`/`rsa`
+statics — and closed a pre-existing RSA-sign secret-residue gap. **Every
+reachable concurrent crypto path is now race-free.** See CHANGELOG
+`[3.9.6]`/`[3.9.7]` + audits `2026-06-29-3.9.6-…` / `2026-06-29-3.9.7-…`. Archived.

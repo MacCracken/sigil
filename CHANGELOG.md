@@ -80,7 +80,7 @@ the non-thread-safe `fl_alloc`. Fixed by making `cbank()` **auto-assign** a
 per-thread lane (no consumer cooperation needed) and banking every affected
 primitive. Surfaced by `yeo-cy-test` pointing concurrent clients at sandhi's
 multi-worker `sandhi_server_run_pooled_tls`. Toolchain pin 6.2.48 → **6.3.5**.
-Issue: [`…concurrent-tls-handshake-global-scratch-race`](docs/development/issues/2026-06-28-concurrent-tls-handshake-global-scratch-race.md);
+Issue: [`…concurrent-tls-handshake-global-scratch-race`](docs/development/issues/archive/2026-06-28-concurrent-tls-handshake-global-scratch-race.md);
 decision: [ADR 0007](docs/adr/0007-auto-banking-for-concurrent-tls.md);
 audit: [`2026-06-29-3.9.6-concurrent-tls-handshake-banking-audit`](docs/audit/2026-06-29-3.9.6-concurrent-tls-handshake-banking-audit.md).
 

@@ -146,6 +146,10 @@ their specs inline; this file is the cross-module overview.
   (2018-06). §2.5 defines the MAC; §2.5.2 is the worked example;
   Appendix A.3 carries the test vectors.
   - https://www.rfc-editor.org/rfc/rfc8439
+  - 3.9.7 also exposes a streaming `poly1305_init`/`update`/`finalize`
+    computing the identical §2.5 MAC incrementally — it backs
+    ChaCha20-Poly1305 `_cp_tag` without a heap `mac_data` buffer (no new
+    citation; same algorithm).
 - **D. J. Bernstein — "The Poly1305-AES message-authentication
   code"** (FSE 2005): the original construction and the
   one-time-key security argument.

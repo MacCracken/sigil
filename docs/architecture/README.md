@@ -27,14 +27,16 @@ deep-dives on individual invariants.
 
 ## Index
 
-*No numbered notes yet — the CLAUDE.md "Known Cyrius Compiler
-Quirks" section enumerates the cross-cutting constraints that
-will become numbered notes the first time a reader hits one
-from grep instead of from CLAUDE.md. Candidates for first
-extraction:*
+- [`001-var-array-static-semantics.md`](001-var-array-static-semantics.md) —
+  **written.** quirk #1 (`var X[N]` is a static global) + the banked
+  crypto-scratch pattern (`cbank()`, per-lane secret `memset`) + the 3.9.7
+  corollary that `secret var` *arrays* race too. The most grep-hit invariant
+  in `src/`. Cross-links ADR 0004 / 0007.
 
-- `001-var-array-static-semantics.md` — quirk #1, the discovery
-  that motivated ADR 0001 and roadmap v3.5.
+*The remaining cross-cutting constraints from CLAUDE.md "Known Cyrius Compiler
+Quirks" become numbered notes the first time a reader hits one from grep
+instead of from CLAUDE.md. Candidates for next extraction:*
+
 - `002-preprocessor-output-cap.md` — quirk #8, the cap that
   motivated ADR 0002.
 - `003-stdlib-thread-safety-floor.md` — quirk #7, the
