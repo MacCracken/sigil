@@ -169,6 +169,14 @@ jobs:
     name: Benchmarks
     runs-on: ubuntu-latest
     needs: setup
+    # Benchmarks are perf-tracking, not a correctness gate. The full
+    # sigil.bcyr suite (ML-DSA + RSA + EC × 10 rounds) runs minutes, and
+    # `cyrius bench` only prints at the end — so this job must never
+    # silently block the pipeline. It is time-bounded and non-blocking:
+    # a slow/regressed bench surfaces as a (non-failing) annotation, not
+    # a stuck CI run. Promote to a gate only with an explicit budget.
+    continue-on-error: true
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - name: Install Cyrius ${{ needs.setup.outputs.cyrius_version }}
@@ -179,7 +187,9 @@ jobs:
       - name: Resolve deps
         run: cyrius deps
       - name: Run .bcyr suite
-        run: CYRIUS_DCE=1 cyrius bench tests/bcyr/sigil.bcyr 2>/dev/null
+        # No 2>/dev/null: surface compile warnings + per-bench results in
+        # the CI log so a long run is observable instead of a black box.
+        run: CYRIUS_DCE=1 cyrius bench tests/bcyr/sigil.bcyr
 
   # ── Fuzz ──
   fuzz:
