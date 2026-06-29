@@ -4446,6 +4446,14 @@ fn sha_ni_available(): i64 {
     # EBX bit 29 = SHA (Intel SDM Vol 2A §3.2 CPUID leaf 7 sub-leaf 0).
     if ((ebx & (1 << 29)) == 0) {
         _sha_ni_cache = 0;
+        # Release the one-shot latch AFTER publishing the cache, so a
+        # later re-probe (cache reset to the `2` sentinel — tests/benches
+        # force a specific path that way) re-acquires the probe instead
+        # of dead-spinning on a permanently-held lock (the 3.9.6 bench
+        # hang). Production never resets the cache, so the self-test
+        # still runs exactly once there and the concurrency guarantee
+        # (one thread probes, the rest spin until publish) is unchanged.
+        _sha_ni_probe_lock = 0;
         return 0;
     }
     # Defense-in-depth: confirm the NI compress produces the FIPS
@@ -4461,6 +4469,7 @@ fn sha_ni_available(): i64 {
     } else {
         _sha_ni_cache = 0;
     }
+    _sha_ni_probe_lock = 0;   # release the one-shot latch (see note above)
     return _sha_ni_cache;
 }
 
@@ -5902,6 +5911,13 @@ fn aes_ni_available(): i64 {
     # ECX bit 25 = AES-NI (Intel SDM Vol 2A §3.2 CPUID leaf 1).
     if ((ecx & (1 << 25)) == 0) {
         _aes_ni_cache = 0;
+        # Release the one-shot latch AFTER publishing the cache, so a
+        # later re-probe (cache reset to the `2` sentinel) re-acquires
+        # instead of dead-spinning on a permanently-held lock. Mirrors
+        # the sha_ni_available() fix; production never resets the cache,
+        # so the self-test still runs exactly once and the concurrency
+        # guarantee is unchanged.
+        _aes_ni_probe_lock = 0;
         return 0;
     }
     # Defense-in-depth: confirm the NI asm path produces FIPS 197 §C.3
@@ -5928,6 +5944,7 @@ fn aes_ni_available(): i64 {
     } else {
         _aes_ni_cache = 0;
     }
+    _aes_ni_probe_lock = 0;   # release the one-shot latch (see note above)
     return _aes_ni_cache;
 }
 
