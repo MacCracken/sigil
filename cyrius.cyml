@@ -5,7 +5,7 @@ description = "Sigil — system-wide trust verification for AGNOS. Ed25519, SHA-
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/sigil"
 language = "cyrius"
-cyrius = "6.3.5"
+cyrius = "6.3.15"
 
 [build]
 entry = "programs/smoke.cyr"
@@ -134,7 +134,7 @@ stdlib = ["syscalls", "alloc", "freelist", "assert", "str", "string", "vec", "ha
 # Pin to the published tag via git until the toolchain vendors it.
 [deps.sakshi]
 git = "https://github.com/MacCracken/sakshi.git"
-tag = "2.3.0"
+tag = "2.4.3"
 modules = ["dist/sakshi.cyr"]
 
 # (agnosys dep dropped — sigil internalized the trust primitives it needs

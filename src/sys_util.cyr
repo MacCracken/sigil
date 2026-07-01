@@ -101,3 +101,18 @@ fn agnosys_read_fd_to_str(fd, cap): i64 {
     store8(buf + total, 0);
     return str_new(buf, total);
 }
+
+# Portable unlink. The agnos syscall peer's `sys_unlink` is `(path, pathlen)`;
+# the Linux/host peer is `(path)`. Compute the length on agnos so temp-file
+# cleanup (tpm_core / luks `defer` blocks) passes the right arity instead of
+# garbage as the length. (agnos base-stack migration)
+fn _sig_unlink(path): i64 {
+    #ifdef CYRIUS_TARGET_AGNOS
+    var n = 0;
+    while (load8(path + n) != 0) { n = n + 1; }
+    return sys_unlink(path, n);
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
+    return sys_unlink(path);
+    #endif
+}

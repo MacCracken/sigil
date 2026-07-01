@@ -405,7 +405,7 @@ fn tpm_seal(bank, pcr_indices, data_ptr, data_len, output_dir): i64 {
 
     var cr_res = tpm_run_checked(cr_args);
     if (is_err_result(cr_res) == 1) {
-        sys_unlink(input_file);
+        _sig_unlink(input_file);
         return cr_res;
     }
 
@@ -422,7 +422,7 @@ fn tpm_seal(bank, pcr_indices, data_ptr, data_len, output_dir): i64 {
     vec_push(ld_args, ctx_file);
 
     var ld_res = tpm_run_checked(ld_args);
-    sys_unlink(input_file);
+    _sig_unlink(input_file);
 
     if (is_err_result(ld_res) == 1) { return ld_res; }
 

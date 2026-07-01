@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.9.8] — 2026-06-30
+
+**agnos base-stack migration — pin → 6.3.15 + `sys_unlink` arity fix.** Part of
+the coordinated base security-stack agnos-readiness migration (tier 1; sigil sits
+above sakshi, below majra/libro/bote). Fixes four `sys_unlink(path)` calls in the
+TPM (`tpm_core.cyr`) and LUKS (`luks.cyr`) temp-file cleanup paths that passed the
+Linux 1-arg form — but the agnos syscall peer's `sys_unlink` is `(path, pathlen)`,
+so on agnos those calls passed garbage as the length. Routed through a new portable
+`_sig_unlink` helper (`sys_util.cyr`) that computes the length on agnos and keeps
+the 1-arg form on host/Linux. These paths are host-only (they shell out to
+`tpm2_*`/`cryptsetup`), so the bug was latent, but the LUKS ones run in `defer`
+cleanup blocks reached on any exit — now correct on every target. Bumped the
+`sakshi` dep → 2.4.3 and the toolchain pin `6.3.5` → `6.3.15`. Verified: `src/lib.cyr`
+compiles clean on both host and `--agnos` with no `sys_unlink` arity warnings.
+
+### Fixed
+- `tpm_core.cyr` / `luks.cyr`: `sys_unlink` now passes the correct arity on agnos
+  via the portable `_sig_unlink` helper (was Linux 1-arg → garbage pathlen on agnos).
+
+### Changed
+- Toolchain pin `6.3.5` → `6.3.15`; `sakshi` dep `2.3.0` → `2.4.3`.
+
 ## [3.9.7] — 2026-06-29
 
 **Thread-safety banking, completed.** Finishes the 3.9.6 concurrent-TLS

@@ -442,7 +442,7 @@ fn luks_format(config, key_ptr, key_len): i64 {
     var kf_res = luks_write_keyfile(key_ptr, key_len);
     if (is_err_result(kf_res) == 1) { return kf_res; }
     var keyfile = payload(kf_res);
-    defer { sys_unlink(keyfile); }
+    defer { _sig_unlink(keyfile); }
 
     var cs_args = vec_new();
     vec_push(cs_args, "/usr/sbin/cryptsetup");
@@ -508,7 +508,7 @@ fn luks_open(config, key_ptr, key_len): i64 {
     var kf_res = luks_write_keyfile(key_ptr, key_len);
     if (is_err_result(kf_res) == 1) { return kf_res; }
     var keyfile = payload(kf_res);
-    defer { sys_unlink(keyfile); }
+    defer { _sig_unlink(keyfile); }
 
     # cryptsetup open --type luks2 --key-file <keyfile> <loop_dev> <name>
     var cs_args = vec_new();
