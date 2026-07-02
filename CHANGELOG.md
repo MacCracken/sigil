@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.9.9] — 2026-07-01
+
+### Fixed
+- **Crypto-bank thread-local slot moved off 0 → 8 (fixes a cross-lib collision that
+  corrupted TLS handshakes).** `_SIGIL_CBANK_SLOT` (the per-thread crypto-bank lane,
+  `src/crypto_scratch.cyr`) squatted cyrius thread-local **slot 0**, which patra also
+  owns (patra uses slots 0-4 for its SQL-parse scratch + page-slab). In a server that
+  links **both** sigil and patra — e.g. a TLS termination pool serving a patra-backed
+  API (SecureYeoman's `yeo-cy-test`) — a patra query clobbered sigil's pinned bank in
+  slot 0, so a later `cbank()` read patra's scratch as the bank index and pointed sigil
+  at the **wrong lane of the process-global banked crypto buffers**, corrupting an
+  in-flight handshake's key schedule → the client saw `RECORD_LAYER_FAILURE`. It
+  reproduced deterministically as "every 4th TLS handshake fails" under a specific
+  worker layout (root-caused cyrius-side; misfiled there as an aborted-handshake /
+  multi-worker-state bug — it is neither: single-threaded, deterministic, every 4th).
+  cyrius's thread-local namespace is a tiny (16-slot) shared integer space with no
+  allocator; slot 8 is clear of patra (0-4) and the common consumer high slots (15).
+  The underlying fix is a slot allocator in cyrius `thread_local.cyr` (filed upstream);
+  until then leaf crypto owns slot 8 by convention. No API change; the banking
+  mechanism is otherwise identical.
+
 ## [3.9.8] — 2026-06-30
 
 **agnos base-stack migration — pin → 6.3.15 + `sys_unlink` arity fix.** Part of
