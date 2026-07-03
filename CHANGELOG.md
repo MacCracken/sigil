@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.10.0] — 2026-07-03
+
+### Added
+- **Native UEFI Authenticode PE signing (`src/authenticode.cyr`).** The sovereign
+  equivalent of `sbsign` — signs a PE32+ EFI Application for UEFI Secure Boot using
+  keys AGNOS controls, with no shell-out to `sbsign` / `osslsigncode` / host openssl.
+  Closes the boot-trust sovereignty gap flagged in
+  `docs/development/issues/2026-07-03-authenticode-pe-signing.md` (P1 + P2) and the
+  cyrius toolchain proposal `2026-07-03-uefi-secure-boot-signing.md`. Built entirely
+  on sigil's *existing* crypto floor — RSA PKCS#1 v1.5 sign (`rsa_pkcs1v15_sign_sha256`),
+  X.509 + DER (`der_walk`), SHA-256 — so the new surface is only the UEFI packaging:
+  - **A bottom-up definite-length DER encoder** (`der_tlv` / `der_seq` / `der_set` /
+    `der_ctx` / `der_int_small` / `der_int_bytes` / `der_octet` / `der_oid_raw` /
+    `der_null` / `der_algid_null` / `der_raw`, on 16-byte `{ptr,len}` `dv_*` handles) —
+    sigil previously had only a DER *parser* (`der_walk`), no encoder.
+  - **`authenticode_pe_hash`** — the Authenticode SHA-256 digest, skipping the
+    optional-header `CheckSum` and the security data-directory entry per spec.
+  - **`_spc_indirect_data` / `authenticode_pkcs7_sign`** — the `SpcIndirectDataContent`
+    (obsolete `<<<Obsolete>>>` moniker + `SpcPeImageData` + `DigestInfo`) wrapped in a
+    PKCS#7 / CMS `SignedData` (`ContentInfo` → `SignedData` + `SignerInfo`, with the
+    signer's issuer-and-serial from the cert).
+  - **`authenticode_pe_sign`** — the top-level entry: appends the
+    `WIN_CERTIFICATE`-framed PKCS#7 to the PE (8-byte aligned) and updates the
+    security data directory. This is what a `cyrius sign-efi` driver will call.
+
+  Validated end-to-end against openssl on a real gnoboot `BOOTX64.EFI`
+  (30208 → 31584 bytes): `openssl pkcs7 -print_certs` shows the embedded db cert,
+  `openssl asn1parse` confirms the `SignedData` / `SpcIndirectData` structure, and
+  `openssl dgst -sha256 -verify` over the extracted `SpcIndirectData` returns
+  **`Verified OK`**. Regression-locked by `tests/tcyr/authenticode.tcyr` (DER-encoder,
+  `SpcIndirectData`, and Authenticode-PE-hash known-answer vectors). Firmware-interop
+  (booting the signed EFI under OVMF Secure Boot with AGNOS-owned PK/KEK/db enrolled)
+  is the documented remaining gate, blocked here only by absent key-enrollment tooling.
+
+### Changed
+- **cyrius pin 6.3.15 → 6.3.41.** The 6.3.15 snapshot's vendored `lib/thread.cyr`
+  no longer matched the toolchain (`_threads_active` undefined on cycc 6.3.4x);
+  re-pinned to a current toolchain and re-hydrated `lib/`. No source changes required.
+
 ## [3.9.9] — 2026-07-01
 
 ### Fixed

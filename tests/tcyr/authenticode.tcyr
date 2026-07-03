@@ -1,0 +1,117 @@
+# authenticode.tcyr -- native UEFI Authenticode PE signing (sigil 3.10).
+#
+# The end-to-end sign path (authenticode_pe_sign over a real gnoboot
+# BOOTX64.EFI) is validated against openssl in the release harness:
+#   openssl pkcs7 -print_certs   -> embedded db cert
+#   openssl asn1parse            -> SignedData / SpcIndirectData structure
+#   openssl dgst -sha256 -verify -> "Verified OK"
+# This tcyr locks the two hand-rolled, regression-fragile DER layers
+# (the bottom-up TLV encoder + the SpcIndirectData wrapper) and the
+# Authenticode PE-hash skip-region arithmetic against known-answer
+# vectors, so a future refactor can't silently corrupt them.
+
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/string.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fmt.cyr"
+include "lib/bayan.cyr"
+include "lib/sakshi.cyr"
+include "lib/chrono.cyr"
+include "lib/ct.cyr"
+include "lib/thread_local.cyr"
+include "src/crypto_scratch.cyr"
+include "src/types.cyr"
+include "src/error.cyr"
+include "lib/random.cyr"
+include "src/random.cyr"
+include "src/sha256.cyr"
+include "src/hex.cyr"
+include "src/sha512.cyr"
+include "src/sha384.cyr"
+include "src/bigint_ext.cyr"
+include "src/ed25519.cyr"
+include "src/ecdsa_p256.cyr"
+include "src/x509.cyr"
+include "src/bignum.cyr"
+include "src/rsa.cyr"
+include "src/authenticode.cyr"
+
+fn main() {
+    alloc_init();
+    _ac_oids_init();
+
+    # ============================================================
+    # DER encoder KAT -- SEQUENCE { INTEGER 1, AlgorithmIdentifier(sha256) }
+    # (the DigestInfo shape the messageDigest field is built from).
+    # openssl asn1parse over the same bytes at generation time:
+    #   SEQUENCE { INTEGER :01, SEQUENCE { OID sha256, NULL } }
+    # ============================================================
+    test_group("DER encoder");
+
+    var oid[9];
+    store8(&oid + 0, 0x60); store8(&oid + 1, 0x86); store8(&oid + 2, 0x48);
+    store8(&oid + 3, 0x01); store8(&oid + 4, 0x65); store8(&oid + 5, 0x03);
+    store8(&oid + 6, 0x04); store8(&oid + 7, 0x02); store8(&oid + 8, 0x01);
+    var v = vec_new();
+    vec_push(v, der_int_small(1));
+    vec_push(v, der_algid_null(&oid, 9));
+    var d = der_seq(v);
+    var d_exp = hex_decode("3012020101300d06096086480165030402010500", 40);
+    assert_eq(dv_len(d), 20, "der_seq DigestInfo is 20 bytes");
+    assert_eq(ct_eq_bytes(dv_ptr(d), d_exp, 20), 1, "der_seq DigestInfo matches KAT");
+
+    # ============================================================
+    # SpcIndirectDataContent KAT -- the Authenticode content structure
+    # wrapping a fixed PE hash (00 01 02 .. 1f). Locks the obsolete
+    # "<<<Obsolete>>>" moniker (UCS-2BE) + SpcPeImageData + DigestInfo.
+    # ============================================================
+    test_group("SpcIndirectData");
+
+    var hash[32];
+    var i = 0;
+    while (i < 32) { store8(&hash + i, i); i = i + 1; }
+    var spc = _spc_indirect_data(&hash);
+    var spc_exp = hex_decode("3063302e060a2b06010401823702010f3020a21e801c003c003c003c004f00620073006f006c006500740065003e003e003e3031300d060960864801650304020105000420000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f", 202);
+    assert_eq(dv_len(spc), 101, "SpcIndirectData is 101 bytes");
+    assert_eq(ct_eq_bytes(dv_ptr(spc), spc_exp, 101), 1, "SpcIndirectData matches KAT");
+
+    # ============================================================
+    # Authenticode PE-hash KAT -- a synthetic PE32+ (e_lfanew=0x40,
+    # magic 0x20b) with a byte-pattern body. The hash must SKIP the
+    # 4-byte CheckSum (opt+64 = 0x98) and the 8-byte security data-dir
+    # entry (opt+144 = 0xE8), then hash to EOF. Expected computed by an
+    # independent python SHA-256 over [0,0x98)+[0x9c,0xE8)+[0xF0,256).
+    # ============================================================
+    test_group("Authenticode PE hash");
+
+    var pe[256];
+    var j = 0;
+    while (j < 256) { store8(&pe + j, j); j = j + 1; }
+    # e_lfanew (LE u32) = 0x40
+    store8(&pe + 0x3c, 0x40); store8(&pe + 0x3d, 0);
+    store8(&pe + 0x3e, 0);    store8(&pe + 0x3f, 0);
+    # "PE\0\0"
+    store8(&pe + 0x40, 0x50); store8(&pe + 0x41, 0x45);
+    store8(&pe + 0x42, 0);    store8(&pe + 0x43, 0);
+    # optional-header magic (LE u16) = 0x20b (PE32+)
+    store8(&pe + 0x58, 0x0b); store8(&pe + 0x59, 0x02);
+    # security data-dir entry (RVA + Size) = 0 (unsigned)
+    var k = 0;
+    while (k < 8) { store8(&pe + 0xE8 + k, 0); k = k + 1; }
+
+    var out[32];
+    authenticode_pe_hash(&pe, 256, &out);
+    var pe_exp = hex_decode("86516a30e1c04065c5420af4f825390d23f6554dc0aa06871dc9ec58950a073e", 64);
+    assert_eq(ct_eq_bytes(&out, pe_exp, 32), 1, "Authenticode PE hash matches KAT");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

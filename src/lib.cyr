@@ -115,6 +115,7 @@ include "src/privkey.cyr"
 # src/bignum.cyr (modexp) + sha256/sha384. Verify-only (public data);
 # sign + PSS are later 3.6.x bites.
 include "src/rsa.cyr"
+include "src/authenticode.cyr"
 include "src/sgx.cyr"
 include "src/sev_snp.cyr"
 include "src/tdx.cyr"
