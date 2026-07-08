@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.10.1] — 2026-07-08
+
+### Fixed
+
+- **`authenticode_pe_hash` 1–2 byte OOB read of the PE optional-header magic.**
+  `src/authenticode.cyr` read the 2-byte magic at `opt = lfanew + 24` before validating
+  `opt + 2 <= pe_len` — the existing guard only ensured `opt <= pe_len`. On a PE truncated
+  at the optional header, `_pe_rd16(pe, opt)` read 1–2 bytes past the buffer. Hoisted
+  `if (opt + 2 > pe_len) { return 0 - 1; }` above the magic read; the downstream
+  checksum/ddir/secdir reads are covered by the existing `secdir_off + 8 > pe_len` guard.
+  Exercised on the UEFI Authenticode signing path (`cyrius sign-efi`).
+
 ## [3.10.0] — 2026-07-03
 
 ### Added
