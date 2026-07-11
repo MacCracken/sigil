@@ -99,6 +99,7 @@ modules = [
     "src/privkey.cyr",
     "src/rsa.cyr",
     "src/authenticode.cyr",
+    "src/efi_sigdb.cyr",
     "src/sgx.cyr",
     "src/sev_snp.cyr",
     "src/tdx.cyr",

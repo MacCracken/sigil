@@ -17986,6 +17986,56 @@ fn authenticode_pe_sign(pe, pe_len, key, cert, clen, out, out_len): i64 {
     return 0;
 }
 
+# --- efi_sigdb.cyr ---
+
+# efi_sigdb.cyr — UEFI Secure Boot key-enrollment artifacts (EFI_SIGNATURE_LIST
+# / signed variable). The enrollment half of the Secure Boot story; pairs with
+# authenticode.cyr's signing half. Depends on authenticode (for _wr32 / PKCS#7).
+#
+# An EFI_SIGNATURE_LIST (`.esl`) is what a user installs into the UEFI db / KEK /
+# PK variables. Layout (UEFI spec 32.4.1):
+#   SignatureType        GUID   (16)   — EFI_CERT_X509_GUID for an X.509 cert
+#   SignatureListSize    u32-LE (4)    — total bytes of this list
+#   SignatureHeaderSize  u32-LE (4)    — 0 for X.509
+#   SignatureSize        u32-LE (4)    — bytes per EFI_SIGNATURE_DATA
+#   EFI_SIGNATURE_DATA[]:
+#     SignatureOwner     GUID   (16)
+#     SignatureData      var          — the DER cert
+# CHANGELOG [3.11.1] (cyrius roadmap arc #3 bite 2a).
+
+# EFI_CERT_X509_GUID = {a5c059a1-9469-4aa7-87b5-ab155c2bf072}, in GUID
+# mixed-endian byte order (first three fields little-endian).
+var _EFI_CERT_X509[16];
+var _efi_sigdb_ready = 0;
+
+fn _efi_sigdb_init(): i64 {
+    if (_efi_sigdb_ready == 1) { return 0; }
+    var g = &_EFI_CERT_X509;
+    store8(g + 0,  0xA1); store8(g + 1,  0x59); store8(g + 2,  0xC0); store8(g + 3,  0xA5);
+    store8(g + 4,  0xE4); store8(g + 5,  0x94); store8(g + 6,  0xA7); store8(g + 7,  0x4A);
+    store8(g + 8,  0x87); store8(g + 9,  0xB5); store8(g + 10, 0xAB); store8(g + 11, 0x15);
+    store8(g + 12, 0x5C); store8(g + 13, 0x2B); store8(g + 14, 0xF0); store8(g + 15, 0x72);
+    _efi_sigdb_ready = 1;
+    return 0;
+}
+
+# Build an EFI_SIGNATURE_LIST holding one X.509 cert. `owner_guid` is the
+# 16-byte SignatureOwner. Writes the list to `out`; returns total byte length
+# (>0), or 0 - 1 on a bad argument. `out` must hold >= 44 + clen bytes.
+fn efi_signature_list_from_cert(cert, clen, owner_guid, out): i64 {
+    if (clen <= 0) { return 0 - 1; }
+    _efi_sigdb_init();
+    var sigsize  = 16 + clen;          # SignatureOwner GUID + cert DER
+    var listsize = 28 + sigsize;       # 28-byte header + one EFI_SIGNATURE_DATA
+    memcpy(out, &_EFI_CERT_X509, 16);  # SignatureType
+    _wr32(out, 16, listsize);          # SignatureListSize
+    _wr32(out, 20, 0);                 # SignatureHeaderSize (0 for X.509)
+    _wr32(out, 24, sigsize);           # SignatureSize
+    memcpy(out + 28, owner_guid, 16);  # SignatureOwner
+    memcpy(out + 44, cert, clen);      # SignatureData = the DER cert
+    return listsize;
+}
+
 # --- sgx.cyr ---
 
 # sgx.cyr — Intel SGX DCAP v3 quote parser + verify orchestrator.
