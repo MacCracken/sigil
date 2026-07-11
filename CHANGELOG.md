@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.11.0] — 2026-07-10
+
+### Added
+
+- **Per-primitive `[lib.<type>]` distlib profiles — pull only the crypto you need.**
+  Twelve new profiles extract a single primitive's self-contained closure instead of
+  the full 61-module bundle: `cyrius distlib sha` → `dist/sigil-sha.cyr` (a 5-module
+  SHA-2 closure), plus `hmac` (7), `hkdf` (9), `aes` (5), `chacha` (5), `ed25519` (6),
+  `ecdsa` (11), `mldsa` (14), `x509` (16), `authenticode` (15), `secureboot` (5), and
+  `tpm` (5). Every closure is compile-verified self-contained (no undefined sigil
+  symbol) and ordered to match the single-pass `[lib]` include chain. Motivation: a
+  downstream that only needs SHA-256 or ChaCha20-Poly1305 (~41 KB) stays well under
+  its initialised-globals budget instead of dragging the whole crypto suite. CI
+  regenerates all twelve and fails on drift.
+
+### Changed
+
+- **Cyrius pin `6.4.26` → `6.4.45`.** Re-resolved the stdlib snapshot (bayan / alloc /
+  syscalls / process_win refreshed across 6.4.42–6.4.45); `cyrius deps` idempotent,
+  smoke build + run green on 6.4.45.
+- **Doc sweep to current state.** The pin bump surfaced stale toolchain/version refs
+  the last two cuts left behind: `README.md` (Cyrius pin `6.3.5` → `6.4.45`, two
+  places), `SECURITY.md` (supported window → 3.11.x current / 3.10.x prior), and
+  `docs/development/state.md` (version 3.9.7 → 3.11.0, pin → 6.4.45, sakshi 2.3.0 →
+  2.4.3, release date). These were pre-existing drift, corrected here.
+
+### Notes
+
+- The per-profile `.deps` sidecar is not yet subsetted — `cyrius distlib` emits the
+  package's full stdlib dep list for every profile (a `sha` consumer is told to pull
+  `process`/`keccak`/`thread` it never references). The `.cyr` bundle *is* subsetted,
+  so the global-footprint win holds; subsetting the `.deps` is a `cyrius distlib`
+  toolchain follow-on, not a sigil change.
+- `docs/doc-health.md` still carries a 3.9.7-dated currency ledger and is left as-is:
+  bumping only its version strings would misrepresent its "Last refresh" date. A full
+  doc-health currency pass is a separate follow-on, tracked here.
+
 ## [3.10.1] — 2026-07-08
 
 ### Fixed

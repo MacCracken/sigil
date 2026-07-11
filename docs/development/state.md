@@ -12,14 +12,14 @@
 
 | Field | Value |
 |---|---|
-| Current version | **3.9.7** (`VERSION`) |
-| Cyrius toolchain pin | **6.3.5** (`cyrius.cyml [package].cyrius`) |
-| Dependencies | sakshi **2.3.0** (agnosys dropped — trust primitives internalized at 3.8.1) |
-| Last release date | 2026-06-29 |
+| Current version | **3.11.0** (`VERSION`) |
+| Cyrius toolchain pin | **6.4.45** (`cyrius.cyml [package].cyrius`) |
+| Dependencies | sakshi **2.4.3** (agnosys dropped — trust primitives internalized at 3.8.1) |
+| Last release date | 2026-07-10 |
 | Last release audit | [`2026-06-29-3.9.7-ecdsa-bignum-banking-audit.md`](../audit/2026-06-29-3.9.7-ecdsa-bignum-banking-audit.md) (3.9.7 thread-safety banking completion — ECDSA/bignum/PRF/AEAD; F1 MEDIUM latent DER-wrapper race fixed, F2 LOW RSA-sign residue gap closed, F3 `secret var` arrays = shared statics documented; red→green race-detectors). Prior: `2026-06-29-3.9.6-concurrent-tls-handshake-banking-audit.md`. |
 
 > ⚠️ **State drift note (2026-06-29):** the volatile fields above and the
-> Phase headline are now current at **3.9.7**. The per-version Phase **prose
+> Phase headline are now current at **3.11.0**. The per-version Phase **prose
 > stack** (the historical 3.8.0 / 3.7.x narrative below the headline) is still
 > hand-maintained — the release post-hook refreshes the volatile fields but
 > does not regenerate that prose, so it remains a manual carry-forward (across

@@ -9,10 +9,9 @@ immediately preceding minor**.
 
 | Version | Supported |
 |---------|-----------|
-| 3.9.x | Yes (current minor) |
-| 3.8.x | Yes (prior minor) |
-| 3.7.x | Best-effort (EC-squeeze / Windows-entropy cycle; closed) |
-| < 3.7.0 | No — upgrade within the 3.x line |
+| 3.11.x | Yes (current minor) |
+| 3.10.x | Yes (prior minor) |
+| < 3.10.0 | No — upgrade within the 3.x line |
 
 Older 2.x versions are no longer supported; the 3.0 cutover
 (2026-05-01) removed the Rust source after parity closeout and

@@ -5,7 +5,7 @@ description = "Sigil — system-wide trust verification for AGNOS. Ed25519, SHA-
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/sigil"
 language = "cyrius"
-cyrius = "6.4.26"
+cyrius = "6.4.45"
 
 [build]
 entry = "programs/smoke.cyr"
@@ -122,6 +122,218 @@ modules = [
     "src/secureboot.cyr",
     "src/certpin.cyr",
     "src/verify.cyr",
+]
+
+
+# `[lib.sha]` — SHA-2 family (SHA-256/384/512 + SHA-NI) — the hashing floor.
+# `cyrius distlib sha` -> dist/sigil-sha.cyr. 5-module closure of the
+# sha entry points, compile-verified self-contained (no undefined sigil symbol).
+# Order matches the [lib] include chain (single-pass). Lets a consumer that only
+# needs sha avoid the full 61-module bundle's global footprint.
+[lib.sha]
+modules = [
+    "src/crypto_scratch.cyr",
+    "src/sha_ni.cyr",
+    "src/sha256.cyr",
+    "src/sha512.cyr",
+    "src/sha384.cyr",
+]
+
+# `[lib.hmac]` — HMAC-SHA256 / HMAC-SHA384 message authentication.
+# `cyrius distlib hmac` -> dist/sigil-hmac.cyr. 7-module closure of the
+# hmac entry points, compile-verified self-contained (no undefined sigil symbol).
+# Order matches the [lib] include chain (single-pass). Lets a consumer that only
+# needs hmac avoid the full 61-module bundle's global footprint.
+[lib.hmac]
+modules = [
+    "src/crypto_scratch.cyr",
+    "src/sha_ni.cyr",
+    "src/sha256.cyr",
+    "src/hmac.cyr",
+    "src/sha512.cyr",
+    "src/sha384.cyr",
+    "src/hmac_sha384.cyr",
+]
+
+# `[lib.hkdf]` — HKDF (SHA-256 + SHA-384) key derivation.
+# `cyrius distlib hkdf` -> dist/sigil-hkdf.cyr. 9-module closure of the
+# hkdf entry points, compile-verified self-contained (no undefined sigil symbol).
+# Order matches the [lib] include chain (single-pass). Lets a consumer that only
+# needs hkdf avoid the full 61-module bundle's global footprint.
+[lib.hkdf]
+modules = [
+    "src/crypto_scratch.cyr",
+    "src/sha_ni.cyr",
+    "src/sha256.cyr",
+    "src/hmac.cyr",
+    "src/hkdf.cyr",
+    "src/sha512.cyr",
+    "src/sha384.cyr",
+    "src/hmac_sha384.cyr",
+    "src/hkdf_sha384.cyr",
+]
+
+# `[lib.aes]` — AES-GCM AEAD (128/256, AES-NI accelerated).
+# `cyrius distlib aes` -> dist/sigil-aes.cyr. 5-module closure of the
+# aes entry points, compile-verified self-contained (no undefined sigil symbol).
+# Order matches the [lib] include chain (single-pass). Lets a consumer that only
+# needs aes avoid the full 61-module bundle's global footprint.
+[lib.aes]
+modules = [
+    "src/error.cyr",
+    "src/crypto_scratch.cyr",
+    "src/sha_ni.cyr",
+    "src/aes_ni.cyr",
+    "src/aes_gcm.cyr",
+]
+
+# `[lib.chacha]` — ChaCha20-Poly1305 AEAD.
+# `cyrius distlib chacha` -> dist/sigil-chacha.cyr. 5-module closure of the
+# chacha entry points, compile-verified self-contained (no undefined sigil symbol).
+# Order matches the [lib] include chain (single-pass). Lets a consumer that only
+# needs chacha avoid the full 61-module bundle's global footprint.
+[lib.chacha]
+modules = [
+    "src/error.cyr",
+    "src/crypto_scratch.cyr",
+    "src/poly1305.cyr",
+    "src/chacha20.cyr",
+    "src/chacha20poly1305.cyr",
+]
+
+# `[lib.ed25519]` — Ed25519 signatures + X25519 key agreement.
+# `cyrius distlib ed25519` -> dist/sigil-ed25519.cyr. 6-module closure of the
+# ed25519 entry points, compile-verified self-contained (no undefined sigil symbol).
+# Order matches the [lib] include chain (single-pass). Lets a consumer that only
+# needs ed25519 avoid the full 61-module bundle's global footprint.
+[lib.ed25519]
+modules = [
+    "src/random.cyr",
+    "src/crypto_scratch.cyr",
+    "src/sha512.cyr",
+    "src/bigint_ext.cyr",
+    "src/ed25519.cyr",
+    "src/x25519.cyr",
+]
+
+# `[lib.ecdsa]` — ECDSA P-256 / P-384 sign+verify (RFC 6979 deterministic).
+# `cyrius distlib ecdsa` -> dist/sigil-ecdsa.cyr. 11-module closure of the
+# ecdsa entry points, compile-verified self-contained (no undefined sigil symbol).
+# Order matches the [lib] include chain (single-pass). Lets a consumer that only
+# needs ecdsa avoid the full 61-module bundle's global footprint.
+[lib.ecdsa]
+modules = [
+    "src/crypto_scratch.cyr",
+    "src/sha_ni.cyr",
+    "src/sha256.cyr",
+    "src/hmac.cyr",
+    "src/sha512.cyr",
+    "src/sha384.cyr",
+    "src/hmac_sha384.cyr",
+    "src/bigint_ext.cyr",
+    "src/ecdsa_p256.cyr",
+    "src/ecdsa_p384.cyr",
+    "src/ecdsa_sign.cyr",
+]
+
+# `[lib.mldsa]` — ML-DSA (FIPS 204, Dilithium) post-quantum signatures.
+# `cyrius distlib mldsa` -> dist/sigil-mldsa.cyr. 14-module closure of the
+# mldsa entry points, compile-verified self-contained (no undefined sigil symbol).
+# Order matches the [lib] include chain (single-pass). Lets a consumer that only
+# needs mldsa avoid the full 61-module bundle's global footprint.
+[lib.mldsa]
+modules = [
+    "src/types.cyr",
+    "src/random.cyr",
+    "src/crypto_scratch.cyr",
+    "src/sha512.cyr",
+    "src/bigint_ext.cyr",
+    "src/ed25519.cyr",
+    "src/mldsa_params.cyr",
+    "src/mldsa_reduce.cyr",
+    "src/mldsa_ntt.cyr",
+    "src/mldsa_poly.cyr",
+    "src/mldsa_rounding.cyr",
+    "src/mldsa_encode.cyr",
+    "src/mldsa_sample.cyr",
+    "src/mldsa.cyr",
+]
+
+# `[lib.x509]` — X.509 cert parse/verify + PEM + RSA + the ECDSA/Ed25519 verify closure.
+# `cyrius distlib x509` -> dist/sigil-x509.cyr. 16-module closure of the
+# x509 entry points, compile-verified self-contained (no undefined sigil symbol).
+# Order matches the [lib] include chain (single-pass). Lets a consumer that only
+# needs x509 avoid the full 61-module bundle's global footprint.
+[lib.x509]
+modules = [
+    "src/random.cyr",
+    "src/crypto_scratch.cyr",
+    "src/sha_ni.cyr",
+    "src/sha256.cyr",
+    "src/hex.cyr",
+    "src/sha512.cyr",
+    "src/sha384.cyr",
+    "src/bigint_ext.cyr",
+    "src/bignum.cyr",
+    "src/ed25519.cyr",
+    "src/ecdsa_p256.cyr",
+    "src/ecdsa_p384.cyr",
+    "src/x509.cyr",
+    "src/pem.cyr",
+    "src/privkey.cyr",
+    "src/rsa.cyr",
+]
+
+# `[lib.authenticode]` — UEFI Authenticode PE signing (the sovereign sbsign) + its RSA/X.509/SHA closure.
+# `cyrius distlib authenticode` -> dist/sigil-authenticode.cyr. 15-module closure of the
+# authenticode entry points, compile-verified self-contained (no undefined sigil symbol).
+# Order matches the [lib] include chain (single-pass). Lets a consumer that only
+# needs authenticode avoid the full 61-module bundle's global footprint.
+[lib.authenticode]
+modules = [
+    "src/random.cyr",
+    "src/crypto_scratch.cyr",
+    "src/sha_ni.cyr",
+    "src/sha256.cyr",
+    "src/hex.cyr",
+    "src/sha512.cyr",
+    "src/sha384.cyr",
+    "src/bigint_ext.cyr",
+    "src/bignum.cyr",
+    "src/ed25519.cyr",
+    "src/ecdsa_p256.cyr",
+    "src/ecdsa_p384.cyr",
+    "src/x509.cyr",
+    "src/rsa.cyr",
+    "src/authenticode.cyr",
+]
+
+# `[lib.secureboot]` — Secure Boot state detection + EFI-variable read.
+# `cyrius distlib secureboot` -> dist/sigil-secureboot.cyr. 5-module closure of the
+# secureboot entry points, compile-verified self-contained (no undefined sigil symbol).
+# Order matches the [lib] include chain (single-pass). Lets a consumer that only
+# needs secureboot avoid the full 61-module bundle's global footprint.
+[lib.secureboot]
+modules = [
+    "src/sys_error.cyr",
+    "src/sysinfo.cyr",
+    "src/secureboot_core.cyr",
+    "src/types.cyr",
+    "src/secureboot.cyr",
+]
+
+# `[lib.tpm]` — TPM 2.0 access + measurement.
+# `cyrius distlib tpm` -> dist/sigil-tpm.cyr. 5-module closure of the
+# tpm entry points, compile-verified self-contained (no undefined sigil symbol).
+# Order matches the [lib] include chain (single-pass). Lets a consumer that only
+# needs tpm avoid the full 61-module bundle's global footprint.
+[lib.tpm]
+modules = [
+    "src/sys_error.cyr",
+    "src/sys_util.cyr",
+    "src/tpm_core.cyr",
+    "src/random.cyr",
+    "src/tpm.cyr",
 ]
 
 [deps]

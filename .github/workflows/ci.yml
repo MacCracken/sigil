@@ -163,6 +163,23 @@ jobs:
             exit 1
           fi
           cyrius doc --check dist/sigil.cyr
+      - name: Verify per-primitive distlib profiles are in sync
+        # `[lib.<prof>]` profiles (3.11.0) let a consumer pull only the
+        # primitive it needs (`cyrius distlib sha` -> dist/sigil-sha.cyr, a
+        # 5-module closure vs. the 62-module full bundle). Regenerate every
+        # profile and fail if any committed bundle drifted from src/.
+        run: |
+          fail=0
+          for prof in sha hmac hkdf aes chacha ed25519 ecdsa mldsa x509 authenticode secureboot tpm; do
+            cyrius distlib "$prof"
+            if ! git diff --quiet "dist/sigil-$prof.cyr"; then
+              echo "ERROR: dist/sigil-$prof.cyr is stale — run 'cyrius distlib $prof' and commit"
+              git --no-pager diff --stat "dist/sigil-$prof.cyr"
+              fail=1
+            fi
+          done
+          [ $fail -eq 0 ] || exit 1
+          echo "all 12 distlib profiles match src/"
 
   # ── Benchmarks ──
   benchmarks:

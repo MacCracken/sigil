@@ -16,7 +16,7 @@ one AGNOS first-party crate (`sakshi`, tracing) — is listed under
 [Dependencies](#dependencies). (The former `agnosys` kernel-interface dep
 was dropped at 3.8.1; its helpers are internalized.)
 
-**Cyrius pin:** `6.3.5` (synced across `cyrius.cyml` and CI).
+**Cyrius pin:** `6.4.45` (synced across `cyrius.cyml` and CI).
 
 ## Crypto stack
 
@@ -145,7 +145,7 @@ Sigil implements **all cryptography itself** — there are no external crypto
 libraries. The complete dependency set (declared in [`cyrius.cyml`](cyrius.cyml))
 is the Cyrius standard library plus one AGNOS first-party crate (`sakshi`):
 
-### Cyrius stdlib — pinned `6.3.5`
+### Cyrius stdlib — pinned `6.4.45`
 
 - **Auto-included** (cyrius pulls these on symbol reference — nothing for a
   consumer to do): `syscalls`, `alloc`, `freelist`, `assert`, `str`,
