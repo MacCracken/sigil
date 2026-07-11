@@ -5,7 +5,7 @@ description = "Sigil — system-wide trust verification for AGNOS. Ed25519, SHA-
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/sigil"
 language = "cyrius"
-cyrius = "6.4.45"
+cyrius = "6.4.48"
 
 [build]
 entry = "programs/smoke.cyr"
@@ -307,6 +307,7 @@ modules = [
     "src/x509.cyr",
     "src/rsa.cyr",
     "src/authenticode.cyr",
+    "src/efi_sigdb.cyr",
 ]
 
 # `[lib.secureboot]` — Secure Boot state detection + EFI-variable read.

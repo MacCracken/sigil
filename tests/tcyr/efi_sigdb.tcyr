@@ -1,0 +1,93 @@
+# efi_sigdb.tcyr -- UEFI Secure Boot enrollment artifacts (sigil 3.11.1).
+#
+# KATs the deterministic, key-free layers of src/efi_sigdb.cyr:
+#   - efi_signature_list_from_cert (the .esl header + EFI_SIGNATURE_DATA),
+#     byte-verified against efitools' cert-to-efi-sig-list in the release harness;
+#   - efi_time (the 16-byte EFI_TIME).
+# The full .auth round-trip (needs an RSA key) is exercised end-to-end against
+# openssl in the release harness, not here.
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/string.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fmt.cyr"
+include "lib/bayan.cyr"
+include "lib/sakshi.cyr"
+include "lib/chrono.cyr"
+include "lib/ct.cyr"
+include "lib/thread_local.cyr"
+include "src/crypto_scratch.cyr"
+include "src/types.cyr"
+include "src/error.cyr"
+include "lib/random.cyr"
+include "src/random.cyr"
+include "src/sha256.cyr"
+include "src/hex.cyr"
+include "src/sha512.cyr"
+include "src/sha384.cyr"
+include "src/bigint_ext.cyr"
+include "src/ed25519.cyr"
+include "src/ecdsa_p256.cyr"
+include "src/x509.cyr"
+include "src/bignum.cyr"
+include "src/rsa.cyr"
+include "src/authenticode.cyr"
+include "src/efi_sigdb.cyr"
+
+fn main() {
+    alloc_init();
+
+    # ============================================================
+    # EFI_SIGNATURE_LIST — a 4-byte "cert" (AA BB CC DD) with a fixed
+    # SignatureOwner (0x11 x16). Header = 28 bytes, one EFI_SIGNATURE_DATA.
+    # ============================================================
+    test_group("EFI_SIGNATURE_LIST");
+
+    var cert[4];
+    store8(&cert + 0, 0xAA); store8(&cert + 1, 0xBB); store8(&cert + 2, 0xCC); store8(&cert + 3, 0xDD);
+    var owner[16];
+    var oi = 0; while (oi < 16) { store8(&owner + oi, 0x11); oi = oi + 1; }
+
+    var esl[64];
+    var n = efi_signature_list_from_cert(&cert, 4, &owner, &esl);
+    assert_eq(n, 48, "ESL total size = 28 hdr + 16 owner + 4 cert");
+    # SignatureType = EFI_CERT_X509_GUID (first + last byte)
+    assert_eq(load8(&esl + 0) & 0xFF, 0xA1, "SignatureType[0] = EFI_CERT_X509_GUID");
+    assert_eq(load8(&esl + 15) & 0xFF, 0x72, "SignatureType[15]");
+    # SignatureListSize (LE u32) = 48
+    assert_eq(load8(&esl + 16) & 0xFF, 48, "SignatureListSize LE = 48");
+    assert_eq(load8(&esl + 17) & 0xFF, 0, "SignatureListSize high byte 0");
+    # SignatureHeaderSize = 0
+    assert_eq(load8(&esl + 20) & 0xFF, 0, "SignatureHeaderSize = 0");
+    # SignatureSize (LE u32) = 20
+    assert_eq(load8(&esl + 24) & 0xFF, 20, "SignatureSize = 16 owner + 4 cert");
+    # SignatureOwner then cert
+    assert_eq(load8(&esl + 28) & 0xFF, 0x11, "SignatureOwner[0]");
+    assert_eq(load8(&esl + 44) & 0xFF, 0xAA, "SignatureData[0] = cert[0]");
+    assert_eq(load8(&esl + 47) & 0xFF, 0xDD, "SignatureData[3] = cert[3]");
+
+    # ============================================================
+    # EFI_TIME — 2026-07-10 00:00:00. Year is little-endian u16 (2026 = 0x07EA),
+    # then month/day/hour/min/sec, then zero pad.
+    # ============================================================
+    test_group("EFI_TIME");
+
+    var tm[16];
+    efi_time(2026, 7, 10, 0, 0, 0, &tm);
+    assert_eq(load8(&tm + 0) & 0xFF, 0xEA, "EFI_TIME year low byte (2026)");
+    assert_eq(load8(&tm + 1) & 0xFF, 0x07, "EFI_TIME year high byte");
+    assert_eq(load8(&tm + 2) & 0xFF, 7, "EFI_TIME month");
+    assert_eq(load8(&tm + 3) & 0xFF, 10, "EFI_TIME day");
+    assert_eq(load8(&tm + 6) & 0xFF, 0, "EFI_TIME sec");
+    assert_eq(load8(&tm + 15) & 0xFF, 0, "EFI_TIME pad zeroed");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

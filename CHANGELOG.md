@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.11.1] — 2026-07-10
+
+### Added — UEFI Secure Boot enrollment (`src/efi_sigdb.cyr`)
+
+- **`efi_signature_list_from_cert`** — build an `EFI_SIGNATURE_LIST` (`.esl`) wrapping an
+  X.509 cert for the UEFI db / KEK / PK variables. **Byte-identical** to efitools'
+  `cert-to-efi-sig-list`.
+- **`efi_auth_from_esl`** + **`efi_time`** — sign an enrollment variable into a `.auth`
+  (`EFI_VARIABLE_AUTHENTICATION_2`): `EFI_TIME` + `WIN_CERTIFICATE_UEFI_GUID` (a *detached*
+  PKCS#7 under `EFI_CERT_TYPE_PKCS7`, not SpcIndirectData) + the ESL, signed by the parent
+  key (KEK signs db, PK signs KEK). The PKCS#7 covers
+  `SHA-256(VariableName ‖ VendorGuid ‖ Attributes ‖ TimeStamp ‖ ESL)` — verified against
+  openssl (same message digest as `sign-efi-sig-list`; signature valid → UEFI-acceptable).
+- Pairs with 3.10's `authenticode_pe_sign`: sigil now covers **both halves** of the cyrius
+  UEFI Secure Boot arc — signing binaries *and* enrolling keys. Folded into the
+  `[lib.authenticode]` distlib profile. Test: `tests/tcyr/efi_sigdb.tcyr`.
+
+### Changed
+
+- **Cyrius pin `6.4.45` → `6.4.48`.** 6.4.48 fixes the per-profile `.deps` sidecar (it was
+  carrying the whole bundle's stdlib chain); the `[lib.<type>]` profile sidecars are now
+  subsetted (e.g. `sha` 23 → 6 leaves).
+
 ## [3.11.0] — 2026-07-10
 
 ### Added
