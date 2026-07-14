@@ -22,6 +22,7 @@ Sigil is the **single crypto / trust boundary** for AGNOS. It owns:
 - ECDSA P-256 / P-384 verification (TEE attestation chains) **and** RFC 6979 deterministic signing (`src/ecdsa_sign.cyr`)
 - SHA-256 / SHA-384 / SHA-512 hashing (file integrity, signature schemes)
 - HMAC-SHA256 (RFC 2104) and HKDF-SHA256 (RFC 5869)
+- BLAKE2b (RFC 7693) hashing, and Argon2id/i/d (RFC 9106) memory-hard password hashing
 - AES-256-GCM (FIPS 197 + NIST SP 800-38D) AEAD
 - ML-DSA-65 (FIPS 204) post-quantum signing (default-on since 3.7.6; `-D SIGIL_PQC` is now a back-compat no-op)
 - X.509 + PEM parsing for TEE attestation
@@ -53,7 +54,7 @@ CYRIUS_DCE=1 cyrius build ...                         # DCE release build
 ## Key Principles
 
 - **Sigil IS the trust boundary** — every crypto decision lives here. Don't push crypto choices onto consumers.
-- **Own the crypto** — Ed25519 (RFC 8032), ECDSA P-256/P-384 (FIPS 186-4), SHA-2 family (FIPS 180-4), HMAC (RFC 2104), HKDF (RFC 5869), AES-256-GCM (FIPS 197 + NIST SP 800-38D), ML-DSA-65 (FIPS 204) implemented in Cyrius, no external deps. See [`docs/sources.md`](docs/sources.md) for the citation index.
+- **Own the crypto** — Ed25519 (RFC 8032), ECDSA P-256/P-384 (FIPS 186-4), SHA-2 family (FIPS 180-4), HMAC (RFC 2104), HKDF (RFC 5869), AES-256-GCM (FIPS 197 + NIST SP 800-38D), ML-DSA-65 (FIPS 204), BLAKE2b (RFC 7693), Argon2 (RFC 9106) implemented in Cyrius, no external deps. See [`docs/sources.md`](docs/sources.md) for the citation index.
 - **Constant-time on secret data** — bitwise-OR accumulation for hash/signature/MAC compares; no early-exit branches on key material.
 - **Key zeroization** — every private key, HMAC key, PRK, and intermediate secret buffer overwritten before free. Prefer `secret var` (cyrius 5.3.5) for compiler-guaranteed zeroization on scope exit. **Exception — per-worker banked scratch:** arrays banked across `cbank()` lanes (`src/crypto_scratch.cyr`) must be **plain `var` + an explicit per-lane `memset`**, *never* `secret var`. A `secret var` whole-array wipe on scope exit zeroizes *all* lanes, clobbering a concurrent worker's in-flight lane (the 3.8.0 ChaCha20/X25519 banking bug — caught by `banking_concurrent.tcyr`). See quirk #9 and ADR 0004. **Caveat (3.9.7):** a function-scope `secret var X[N]` *array* is itself a static global (quirk #1) that **races** concurrent callers — only scalar `secret var x` locals are per-call. So `secret var` is safe only for scalars and non-concurrent arrays; any `secret var` array on a concurrent path must be banked as plain `var` + per-lane `memset` (this fixed the latent ECDSA DER-wrapper race in 3.9.7).
 - **Zero external dependencies** — Cyrius stdlib only (plus `sakshi` for tracing). The `agnosys` kernel-interface dep was **internalized at 3.8.1** — the `agnosys_*` / `SYSE_*` helpers now live in `src/sys_error.cyr` / `src/sys_util.cyr`, and `cyrius.cyml [deps]` lists only `sakshi`.

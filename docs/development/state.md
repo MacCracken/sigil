@@ -12,7 +12,7 @@
 
 | Field | Value |
 |---|---|
-| Current version | **3.11.0** (`VERSION`) |
+| Current version | **3.12.0** (`VERSION`) |
 | Cyrius toolchain pin | **6.4.45** (`cyrius.cyml [package].cyrius`) |
 | Dependencies | sakshi **2.4.3** (agnosys dropped — trust primitives internalized at 3.8.1) |
 | Last release date | 2026-07-10 |
@@ -33,16 +33,17 @@
 
 | Metric | Value |
 |---|---|
-| `.tcyr` test files | 60 (`ls tests/tcyr/*.tcyr`) — +2 @3.9.7 (`ecdsa_concurrent.tcyr`, `bignum_tls12_concurrent.tcyr`) |
-| Total assertions | **1576** / 0 failures @3.9.7 across all 60 files (scripted-sum 1532 + 44 for the 3 tty-only `*_verify_full` summaries). |
+| `.tcyr` test files | 64 (`ls tests/tcyr/*.tcyr`) — +2 @3.12.0 (`blake2b.tcyr`, `argon2.tcyr`) |
+| Total assertions | **1587** / 0 failures @3.12.0 across all 64 files (scripted `grep`-sum; +34 @3.12.0 = blake2b 14 + argon2 20). |
 | Fuzz harnesses | 3 (`fuzz/*.fcyr`) — `fuzz_ed25519`/`fuzz_integrity`/`fuzz_revocation`, all build + run clean @3.9.7. |
 | Benchmark suite | `benches/` — `history.csv`; RSA via `tests/bcyr/rsa.bcyr`, P-256/P-384 verify via `tests/bcyr/ecdsa_p256.bcyr` / `ecdsa_p384.bcyr` |
 
-> Counting note: the 3 `*_verify_full.tcyr` tests (sgx 17 + tdx 16 +
-> snp 11 = 44) emit their `N passed` summary in a tty-sensitive way that
-> is dropped under any pipe or file redirect, so a scripted `grep`-sum of
-> `cyrius test` output yields **1532** across the other 57 files and
-> silently omits those 44. Add them back for the true total: **1576**.
+> Counting note (revised @3.12.0): the 3 `*_verify_full.tcyr` tests
+> (sgx 17 + snp 11 + tdx 16 = 44) **no longer** drop their `N passed`
+> summary under a pipe — re-measured under cycc 6.4.62, all three emit it
+> through a redirect. The scripted `grep`-sum therefore now covers all 64
+> files and **includes** those 44; do NOT add them back (that was the
+> pre-3.12.0 correction and would double-count).
 > (Each verify_full still prints its summary on an interactive run; it's
 > only the redirected/scripted sum that loses them.)
 

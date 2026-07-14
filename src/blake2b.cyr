@@ -1,0 +1,327 @@
+# blake2b.cyr — RFC 7693 BLAKE2b implementation.
+#
+# The hash Argon2 (RFC 9106) is built on: Argon2's H and its variable-length H'
+# are BLAKE2b. Added to give sigil a native, sovereign password-hashing stack
+# (blake2b -> argon2id) with no external crypto dependency — the SecureYeoman
+# Cyrius port needs Argon2id for its auth module, and the only alternative was
+# escaping to OpenSSL's libcrypto EVP_KDF via a soft-deprecated dlsym hatch,
+# which would break the "zero external crypto dependencies" contract.
+#
+# BLAKE2b is a 64-bit design: 128-byte blocks, up to a 64-byte digest, 12
+# rounds, keyed or unkeyed. It reuses the SHA-512 IV (RFC 7693 §2.6) but is
+# otherwise unrelated to SHA-2.
+#
+# ENDIANNESS — BLAKE2b is LITTLE-endian. The SHA-2 modules in this repo are
+# BIG-endian; do NOT copy their word load/store helpers into this file.
+#
+# All arithmetic uses 64-bit words (native Cyrius i64); `>>` is a logical shift
+# (the same property sha512.cyr's rotr relies on), and adds wrap mod 2^64.
+
+var _blake2b_IV = 0;       # 8 x 8 bytes — RFC 7693 §2.6 initialisation vector
+var _blake2b_SIGMA = 0;    # 10 x 16 bytes — RFC 7693 §2.7 message permutation
+var _blake2b_inited = 0;
+
+# Rotate right, 64-bit. Relies on `>>` being logical (unsigned) — the same
+# assumption sha512.cyr's `_sha512_rotr` makes.
+fn _blake2b_rotr(x, n): i64 {
+    return (x >> n) | (x << (64 - n));
+}
+
+# Unsigned `a < b`. Cyrius `<` is a signed compare, so flip both sign bits to
+# map the unsigned order onto the signed one. Used only for the 128-bit
+# counter's carry detection, which must stay correct above 2^63.
+fn _blake2b_ult(a, b): i64 {
+    var x = a ^ 0x8000000000000000;
+    var y = b ^ 0x8000000000000000;
+    if (x < y) { return 1; }
+    return 0;
+}
+
+fn blake2b_global_init(): i64 {
+    if (_blake2b_inited == 1) { return 0; }
+
+    # IV — RFC 7693 §2.6 (identical to the SHA-512 IV, FIPS 180-4 §5.3.5).
+    _blake2b_IV = alloc(64);
+    store64(_blake2b_IV + 0,  0x6a09e667f3bcc908);
+    store64(_blake2b_IV + 8,  0xbb67ae8584caa73b);
+    store64(_blake2b_IV + 16, 0x3c6ef372fe94f82b);
+    store64(_blake2b_IV + 24, 0xa54ff53a5f1d36f1);
+    store64(_blake2b_IV + 32, 0x510e527fade682d1);
+    store64(_blake2b_IV + 40, 0x9b05688c2b3e6c1f);
+    store64(_blake2b_IV + 48, 0x1f83d9abfb41bd6b);
+    store64(_blake2b_IV + 56, 0x5be0cd19137e2179);
+
+    # SIGMA — RFC 7693 §2.7. Ten 16-entry permutations of 0..15; rounds 10 and
+    # 11 reuse rows 0 and 1 (see the `r % 10` in _blake2b_compress).
+    _blake2b_SIGMA = alloc(160);
+    _blake2b_sigma_row(0,   0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14, 15);
+    _blake2b_sigma_row(1,  14, 10,  4,  8,  9, 15, 13,  6,  1, 12,  0,  2, 11,  7,  5,  3);
+    _blake2b_sigma_row(2,  11,  8, 12,  0,  5,  2, 15, 13, 10, 14,  3,  6,  7,  1,  9,  4);
+    _blake2b_sigma_row(3,   7,  9,  3,  1, 13, 12, 11, 14,  2,  6,  5, 10,  4,  0, 15,  8);
+    _blake2b_sigma_row(4,   9,  0,  5,  7,  2,  4, 10, 15, 14,  1, 11, 12,  6,  8,  3, 13);
+    _blake2b_sigma_row(5,   2, 12,  6, 10,  0, 11,  8,  3,  4, 13,  7,  5, 15, 14,  1,  9);
+    _blake2b_sigma_row(6,  12,  5,  1, 15, 14, 13,  4, 10,  0,  7,  6,  3,  9,  2,  8, 11);
+    _blake2b_sigma_row(7,  13, 11,  7, 14, 12,  1,  3,  9,  5,  0, 15,  4,  8,  6,  2, 10);
+    _blake2b_sigma_row(8,   6, 15, 14,  9, 11,  3,  0,  8, 12,  2, 13,  7,  1,  4, 10,  5);
+    _blake2b_sigma_row(9,  10,  2,  8,  4,  7,  6,  1,  5, 15, 11,  9, 14,  3, 12, 13,  0);
+
+    _blake2b_inited = 1;
+    return 0;
+}
+
+# Store one 16-byte SIGMA row (one byte per message-word index).
+fn _blake2b_sigma_row(row, s0, s1, s2, s3, s4, s5, s6, s7, s8, s9, s10, s11, s12, s13, s14, s15): i64 {
+    var p = _blake2b_SIGMA + row * 16;
+    store8(p + 0,  s0);   store8(p + 1,  s1);   store8(p + 2,  s2);   store8(p + 3,  s3);
+    store8(p + 4,  s4);   store8(p + 5,  s5);   store8(p + 6,  s6);   store8(p + 7,  s7);
+    store8(p + 8,  s8);   store8(p + 9,  s9);   store8(p + 10, s10);  store8(p + 11, s11);
+    store8(p + 12, s12);  store8(p + 13, s13);  store8(p + 14, s14);  store8(p + 15, s15);
+    return 0;
+}
+
+# ================================================================
+# BLAKE2b context (224 bytes)
+# ================================================================
+# Layout:
+#   +0    h0..h7   (8 x 8 = 64 bytes) chaining state
+#   +64   buf      (128 bytes) block buffer
+#   +192  buflen   (8 bytes) bytes currently in buf
+#   +200  t0       (8 bytes) low  half of the 128-bit byte counter
+#   +208  t1       (8 bytes) high half of the 128-bit byte counter
+#   +216  outlen   (8 bytes) requested digest length
+
+# Add `inc` to the 128-bit byte counter (RFC 7693 §3.3's `t`).
+fn _blake2b_inc_counter(ctx, inc): i64 {
+    var t0 = load64(ctx + 200);
+    var n = t0 + inc;
+    store64(ctx + 200, n);
+    # Unsigned wrap => carry into the high half.
+    if (_blake2b_ult(n, t0) == 1) {
+        store64(ctx + 208, load64(ctx + 208) + 1);
+    }
+    return 0;
+}
+
+# The G mixing function — RFC 7693 §3.1. `v` is the caller's 16-word working
+# lane; a/b/c/d are word indices into it.
+fn _blake2b_g(v, a, b, c, d, x, y): i64 {
+    var va = load64(v + a * 8);
+    var vbb = load64(v + b * 8);
+    var vc = load64(v + c * 8);
+    var vd = load64(v + d * 8);
+
+    va = va + vbb + x;
+    vd = _blake2b_rotr(vd ^ va, 32);
+    vc = vc + vd;
+    vbb = _blake2b_rotr(vbb ^ vc, 24);
+    va = va + vbb + y;
+    vd = _blake2b_rotr(vd ^ va, 16);
+    vc = vc + vd;
+    vbb = _blake2b_rotr(vbb ^ vc, 63);
+
+    store64(v + a * 8, va);
+    store64(v + b * 8, vbb);
+    store64(v + c * 8, vc);
+    store64(v + d * 8, vd);
+    return 0;
+}
+
+# The compression function F — RFC 7693 §3.2. `last` = 1 marks the final block
+# (sets the f0 finalisation flag).
+fn _blake2b_compress(ctx, last): i64 {
+    # v[16] + m[16] working state, banked per thread: a function-scope
+    # `var X[N]` is a STATIC global in cyrius (CLAUDE.md quirk #1), so each
+    # caller operates on its own 256-byte lane. Plain `var` + an explicit
+    # per-lane memset below — NOT `secret var`, whose scope-exit wipe would
+    # clobber a concurrent worker's lane (quirk #9 / ADR 0004).
+    var VM[16384];                  # (16 v + 16 m) words x 8 B x SIGIL_CRYPTO_BANKS
+    var vb = &VM + cbank() * 256;
+    var m = vb + 128;
+    var buf = ctx + 64;
+
+    # m[0..15] <- the block, LITTLE-endian.
+    var i = 0;
+    while (i < 16) {
+        var off = i * 8;
+        var w = (load8(buf + off) & 0xFF)
+        | ((load8(buf + off + 1) & 0xFF) << 8)
+        | ((load8(buf + off + 2) & 0xFF) << 16)
+        | ((load8(buf + off + 3) & 0xFF) << 24)
+        | ((load8(buf + off + 4) & 0xFF) << 32)
+        | ((load8(buf + off + 5) & 0xFF) << 40)
+        | ((load8(buf + off + 6) & 0xFF) << 48)
+        | ((load8(buf + off + 7) & 0xFF) << 56);
+        store64(m + i * 8, w);
+        i = i + 1;
+    }
+
+    # v[0..7] <- h, v[8..15] <- IV.
+    i = 0;
+    while (i < 8) {
+        store64(vb + i * 8, load64(ctx + i * 8));
+        store64(vb + (i + 8) * 8, load64(_blake2b_IV + i * 8));
+        i = i + 1;
+    }
+    store64(vb + 96,  load64(vb + 96)  ^ load64(ctx + 200));   # v[12] ^= t0
+    store64(vb + 104, load64(vb + 104) ^ load64(ctx + 208));   # v[13] ^= t1
+    if (last == 1) {
+        store64(vb + 112, load64(vb + 112) ^ 0xFFFFFFFFFFFFFFFF);   # v[14] ^= f0
+    }
+
+    # 12 rounds; rounds 10/11 reuse SIGMA rows 0/1.
+    var r = 0;
+    while (r < 12) {
+        var s = _blake2b_SIGMA + (r % 10) * 16;
+        _blake2b_g(vb, 0, 4,  8, 12, load64(m + (load8(s + 0) & 0xFF) * 8),  load64(m + (load8(s + 1) & 0xFF) * 8));
+        _blake2b_g(vb, 1, 5,  9, 13, load64(m + (load8(s + 2) & 0xFF) * 8),  load64(m + (load8(s + 3) & 0xFF) * 8));
+        _blake2b_g(vb, 2, 6, 10, 14, load64(m + (load8(s + 4) & 0xFF) * 8),  load64(m + (load8(s + 5) & 0xFF) * 8));
+        _blake2b_g(vb, 3, 7, 11, 15, load64(m + (load8(s + 6) & 0xFF) * 8),  load64(m + (load8(s + 7) & 0xFF) * 8));
+        _blake2b_g(vb, 0, 5, 10, 15, load64(m + (load8(s + 8) & 0xFF) * 8),  load64(m + (load8(s + 9) & 0xFF) * 8));
+        _blake2b_g(vb, 1, 6, 11, 12, load64(m + (load8(s + 10) & 0xFF) * 8), load64(m + (load8(s + 11) & 0xFF) * 8));
+        _blake2b_g(vb, 2, 7,  8, 13, load64(m + (load8(s + 12) & 0xFF) * 8), load64(m + (load8(s + 13) & 0xFF) * 8));
+        _blake2b_g(vb, 3, 4,  9, 14, load64(m + (load8(s + 14) & 0xFF) * 8), load64(m + (load8(s + 15) & 0xFF) * 8));
+        r = r + 1;
+    }
+
+    # h[i] ^= v[i] ^ v[i+8]
+    i = 0;
+    while (i < 8) {
+        store64(ctx + i * 8, load64(ctx + i * 8) ^ load64(vb + i * 8) ^ load64(vb + (i + 8) * 8));
+        i = i + 1;
+    }
+
+    # This lane held message + chaining material: wipe it (per-lane only).
+    memset(vb, 0, 256);
+    return 0;
+}
+
+# ================================================================
+# Init
+# ================================================================
+
+# Keyed init into an existing >= 224-byte context. `outlen` is 1..64 bytes;
+# `keylen` is 0..64 (0 = unkeyed, `key` ignored). Returns `ctx`, or 0 if the
+# parameters are out of range. Alloc-free (quirk #7: fl_alloc is not
+# thread-safe), so concurrent callers can hash without touching the allocator.
+fn blake2b_init_key_into(ctx, outlen, key, keylen): i64 {
+    blake2b_global_init();
+    if ((outlen <= 0) || (outlen > 64)) { return 0; }
+    if ((keylen < 0) || (keylen > 64)) { return 0; }
+
+    var i = 0;
+    while (i < 8) {
+        store64(ctx + i * 8, load64(_blake2b_IV + i * 8));
+        i = i + 1;
+    }
+    # Parameter block, sequential mode — RFC 7693 §2.5/§3.2:
+    #   byte 0 = digest length, byte 1 = key length, byte 2 = fanout (1),
+    #   byte 3 = depth (1)  =>  0x01010000 ^ (kk << 8) ^ nn
+    store64(ctx, load64(ctx) ^ 0x01010000 ^ (keylen << 8) ^ outlen);
+
+    memset(ctx + 64, 0, 128);
+    store64(ctx + 192, 0);
+    store64(ctx + 200, 0);
+    store64(ctx + 208, 0);
+    store64(ctx + 216, outlen);
+
+    if (keylen > 0) {
+        # RFC 7693 §3.3: the key is fed as a full zero-padded 128-byte first
+        # block. Banked (quirk #1) + wiped — it is key material.
+        var KB[8192];               # 128 B x SIGIL_CRYPTO_BANKS
+        var kb = &KB + cbank() * 128;
+        memset(kb, 0, 128);
+        memcpy(kb, key, keylen);
+        blake2b_update(ctx, kb, 128);
+        memset(kb, 0, 128);
+    }
+    return ctx;
+}
+
+# Unkeyed init into an existing >= 224-byte context. Returns ctx, or 0 on an
+# out-of-range `outlen`.
+fn blake2b_init_into(ctx, outlen): i64 {
+    return blake2b_init_key_into(ctx, outlen, 0, 0);
+}
+
+# Allocating init (unkeyed). Returns a 224-byte context, or 0 on bad `outlen`.
+fn blake2b_init(outlen): i64 {
+    var ctx = fl_alloc(224);
+    return blake2b_init_into(ctx, outlen);
+}
+
+# ================================================================
+# Update / finalize
+# ================================================================
+
+# Absorb `len` bytes. A full buffer is only compressed once MORE input is
+# known to follow — BLAKE2b's last block must be compressed by the finaliser
+# with the f0 flag set, so it cannot be flushed eagerly.
+fn blake2b_update(ctx, data, len): i64 {
+    if (len <= 0) { return 0; }
+    var buflen = load64(ctx + 192);
+    var pos = 0;
+    while (pos < len) {
+        if (buflen == 128) {
+            _blake2b_inc_counter(ctx, 128);
+            _blake2b_compress(ctx, 0);
+            buflen = 0;
+        }
+        var take = 128 - buflen;
+        var remaining = len - pos;
+        if (take > remaining) { take = remaining; }
+        memcpy(ctx + 64 + buflen, data + pos, take);
+        buflen = buflen + take;
+        pos = pos + take;
+    }
+    store64(ctx + 192, buflen);
+    return 0;
+}
+
+# Emit the digest: `outlen` bytes (as fixed at init) into `out`. The context is
+# spent afterwards.
+fn blake2b_finalize(ctx, out): i64 {
+    var buflen = load64(ctx + 192);
+    _blake2b_inc_counter(ctx, buflen);
+    memset(ctx + 64 + buflen, 0, 128 - buflen);
+    _blake2b_compress(ctx, 1);
+
+    var outlen = load64(ctx + 216);
+    # h -> out, LITTLE-endian, truncated to outlen bytes.
+    var i = 0;
+    while (i < outlen) {
+        var word = load64(ctx + (i / 8) * 8);
+        store8(out + i, (word >> ((i % 8) * 8)) & 0xFF);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ================================================================
+# One-shot convenience
+# ================================================================
+
+# Keyed one-shot: `outlen` bytes into `out`. Returns SIGIL_ERR_NONE (0) on
+# success, SIGIL_ERR_INVALID_INPUT on an out-of-range outlen/keylen.
+# Banked static context (quirk #7: no allocator on the concurrent path).
+fn blake2b_key(data, len, key, keylen, out, outlen): i64 {
+    var C[14336];               # 224 B x SIGIL_CRYPTO_BANKS
+    var ctxb = &C + cbank() * 224;
+    if (blake2b_init_key_into(ctxb, outlen, key, keylen) == 0) {
+        return SIGIL_ERR_INVALID_INPUT;
+    }
+    blake2b_update(ctxb, data, len);
+    blake2b_finalize(ctxb, out);
+    memset(ctxb, 0, 224);
+    return SIGIL_ERR_NONE;
+}
+
+# Unkeyed one-shot: `outlen` bytes into `out`. Returns SIGIL_ERR_NONE (0) on
+# success, SIGIL_ERR_INVALID_INPUT on an out-of-range outlen.
+fn blake2b(data, len, out, outlen): i64 {
+    return blake2b_key(data, len, 0, 0, out, outlen);
+}
+
+# BLAKE2b-512 — the full 64-byte digest. Returns SIGIL_ERR_NONE (0).
+fn blake2b_512(data, len, out): i64 {
+    return blake2b(data, len, out, 64);
+}

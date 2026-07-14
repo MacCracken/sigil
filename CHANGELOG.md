@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.12.0] — 2026-07-14
+
+### Added — sovereign password hashing: BLAKE2b + Argon2id
+
+- **`src/blake2b.cyr` — BLAKE2b (RFC 7693).** Keyed and unkeyed, 1–64 byte digests,
+  streaming (`blake2b_init`/`_update`/`_finalize`) and one-shot (`blake2b`,
+  `blake2b_key`, `blake2b_512`), plus alloc-free `_into` variants. Little-endian
+  (unlike the SHA-2 family here); working state is `cbank()`-banked, so concurrent
+  callers never share scratch. Test: `tests/tcyr/blake2b.tcyr` (14 assertions) —
+  RFC 7693 Appendix A, the blake2b-kat keyed vector, and the 127/128/129-byte
+  block-boundary cases that catch the classic "final block flushed early" bug.
+- **`src/argon2.cyr` — Argon2id / Argon2i / Argon2d (RFC 9106).** The memory-hard
+  password KDF, built entirely on the BLAKE2b above. `argon2id` (allocating),
+  **`argon2id_into`** (caller-supplied arena — allocator-free, so it is safe to call
+  concurrently; size it with `argon2_mem_bytes`), and `argon2_hash_into` for the full
+  parameter set including secret and associated data. Test: `tests/tcyr/argon2.tcyr`
+  (20 assertions).
+- **Verified against independent implementations, not itself.** All three **RFC 9106 §5
+  official vectors** (Argon2d/i/id at t=3, m=32, p=4 with secret + associated data — the
+  configuration that exercises cross-lane referencing and the lane-wise XOR
+  finalisation) pass, and were reconfirmed byte-for-byte against **OpenSSL 3.6's**
+  ARGON2D/ARGON2I/ARGON2ID providers. Additional vectors cross-check `argon2id` against
+  `openssl kdf`, including **m=19456, t=2, p=1** — the parameters Rust's `argon2` 0.5
+  `Argon2::default()` emits.
+- **New `[lib.argon2]` distlib profile** — `cyrius distlib argon2` → `dist/sigil-argon2.cyr`,
+  a 4-module (1050-line / 44 KB) self-contained password-hashing bundle, so a login
+  endpoint need not pull the full 26k-line bundle.
+- **Performance:** `argon2id` at m=19456, t=2, p=1 measures **244 ms/hash** (avg of 5,
+  after warm-up, on this host) versus **~30 ms** for OpenSSL's SIMD-optimised C at the
+  same parameters — roughly 8× slower, as expected for a scalar implementation. That sits
+  inside RFC 9106's interactive-login budget, but it is a real cost: one hash allocates
+  and touches ~19 MiB, so a login endpoint **must rate-limit** or the KDF becomes a
+  memory-amplifying DoS vector.
+
+### Why
+
+Requested by a consumer: the **SecureYeoman** Cyrius port (`yeo-cy-test`) needs Argon2id
+for its `auth` module — sy-core's Rust `verify_admin_password` is `argon2` 0.5 — and sigil
+had no password KDF at all (HKDF is key derivation, not password hashing: no
+memory-hardness, no work factor). The only way to reach Argon2id was escaping to
+OpenSSL's libcrypto `EVP_KDF` through cyrius's soft-deprecated `tls_dlsym` hatch, which
+would have broken sigil's **"zero external crypto dependencies"** contract and bound
+password auth to the libssl ABI. Owning the primitive keeps the stack sovereign.
+
+Suite: **1587 assertions, 0 failed** across `tests/tcyr/` (was 1567).
+
 ## [3.11.1] — 2026-07-10
 
 ### Added — UEFI Secure Boot enrollment (`src/efi_sigdb.cyr`)

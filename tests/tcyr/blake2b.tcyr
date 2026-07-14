@@ -1,0 +1,131 @@
+# blake2b.tcyr — RFC 7693 BLAKE2b test vectors.
+#
+# Vectors are cross-checked against an INDEPENDENT implementation (Python's
+# hashlib.blake2b), which itself reproduces RFC 7693 Appendix A's "abc" vector
+# exactly — so these assert interop, not self-consistency.
+#
+# The 127/128/129-byte cases pin the block-boundary rule that is the classic
+# BLAKE2b implementation bug: a FULL buffer must NOT be compressed until more
+# input is known to follow, because the last block must be compressed by the
+# finaliser with the f0 flag set. An eager flush yields the wrong digest for
+# any input that is an exact multiple of 128 bytes.
+
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fmt.cyr"
+include "lib/bayan.cyr"
+include "lib/sakshi.cyr"
+include "lib/chrono.cyr"
+
+include "lib/thread_local.cyr"
+include "src/crypto_scratch.cyr"
+include "src/types.cyr"
+include "src/error.cyr"
+include "src/sha256.cyr"
+include "src/hex.cyr"
+include "lib/ct.cyr"
+include "src/blake2b.cyr"
+
+# Deterministic filler: byte i = (i*7+1) & 0xFF (matches the reference generator).
+fn _b2b_fill(p, n): i64 {
+    var i = 0;
+    while (i < n) {
+        store8(p + i, (i * 7 + 1) & 0xFF);
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+
+    var d[64];
+
+    test_group("BLAKE2b-512 known-answer");
+    blake2b_512("", 0, &d);
+    assert_streq(hex_encode(&d, 64),
+        "786a02f742015903c6c6fd852552d272912f4740e15847618a86e217f71f5419d25e1031afee585313896444934eb04b903a685b1448b755d56f701afe9be2ce",
+        "blake2b-512 empty");
+
+    blake2b_512("abc", 3, &d);
+    assert_streq(hex_encode(&d, 64),
+        "ba80a53f981c4d0d6a2797b69f12f6e94c212f14685ac4b74b12bb6fdbffa2d17d87c5392aab792dc252d5de4533cc9518d38aa8dbf1925ab92386edd4009923",
+        "blake2b-512 abc (RFC 7693 Appendix A)");
+
+    test_group("BLAKE2b truncated digest");
+    var d32[32];
+    blake2b("abc", 3, &d32, 32);
+    assert_streq(hex_encode(&d32, 32),
+        "bddd813c634239723171ef3fee98579b94964e3bb1cb3e427262c8c068d52319",
+        "blake2b-256 abc (outlen mixes into the param block, not a truncation of blake2b-512)");
+
+    test_group("BLAKE2b keyed");
+    var key[64];
+    var i = 0;
+    while (i < 64) { store8(&key + i, i); i = i + 1; }
+    blake2b_key("", 0, &key, 64, &d, 64);
+    assert_streq(hex_encode(&d, 64),
+        "10ebb67700b1868efb4417987acf4690ae9d972fb7a590c2f02871799aaa4786b5e996e8f0f4eb981fc214b005f42d2ff4233499391653df7aefcbc13fc51568",
+        "blake2b-512 keyed, empty input, key=00..3f (blake2b-kat vector 0)");
+
+    test_group("BLAKE2b block boundaries");
+    var buf[300];
+    var bp = &buf;
+    _b2b_fill(bp, 300);
+
+    blake2b_512(bp, 127, &d);
+    assert_streq(hex_encode(&d, 64),
+        "d073fb3259c723b20a64ecf77083891a157c81c1882da42060222dfc7ebbda6da1b8ed55197aabd0ab17cf935499d8e4f6d93a4bb83a1aa5670a1612c70df1bb",
+        "127 bytes (one short of a full block)");
+
+    blake2b_512(bp, 128, &d);
+    assert_streq(hex_encode(&d, 64),
+        "c6d375fd4421510489194b8ccd9b1fc9e96dd25eab56f33bd698266fb38d8fbde447b617cdb5779c5fbeafe53fae640c85c457f6449ce307a11d88d18788d7f0",
+        "128 bytes (EXACT block — final block must carry f0, not be flushed early)");
+
+    blake2b_512(bp, 129, &d);
+    assert_streq(hex_encode(&d, 64),
+        "7cb95d837c7ccea0f9137c7bcdca4cd71152aa6ca7bf16d399d261191bd7f919c5c7699d0fd0c6ad98d98eae7ee3f0f0fa1e9fc35d84410886343ffc79624765",
+        "129 bytes (block + 1)");
+
+    blake2b_512(bp, 300, &d);
+    assert_streq(hex_encode(&d, 64),
+        "b7e35afe31bddc8abfb9c98783f9a3687812d175ce351ed3c75301cae551af1c5b31a0086d90290b566de24f1f55e3da2e71dfce432ac0261f29c213c682904e",
+        "300 bytes (multi-block)");
+
+    test_group("BLAKE2b streaming == one-shot");
+    var ctx = blake2b_init(64);
+    blake2b_update(ctx, bp, 100);
+    blake2b_update(ctx, bp + 100, 200);
+    var d2[64];
+    blake2b_finalize(ctx, &d2);
+    assert_streq(hex_encode(&d2, 64),
+        "b7e35afe31bddc8abfb9c98783f9a3687812d175ce351ed3c75301cae551af1c5b31a0086d90290b566de24f1f55e3da2e71dfce432ac0261f29c213c682904e",
+        "streaming 100+200 == one-shot 300");
+
+    # Split exactly on the block boundary — exercises the "buffer full, more
+    # data follows" path in blake2b_update.
+    var ctx2 = blake2b_init(64);
+    blake2b_update(ctx2, bp, 128);
+    blake2b_update(ctx2, bp + 128, 172);
+    var d3[64];
+    blake2b_finalize(ctx2, &d3);
+    assert(ct_eq_bytes_lens(&d2, 64, &d3, 64) == 1, "streaming split on a 128-byte boundary == one-shot");
+
+    test_group("BLAKE2b parameter validation");
+    assert_eq(blake2b("abc", 3, &d, 0), SIGIL_ERR_INVALID_INPUT, "outlen 0 rejected");
+    assert_eq(blake2b("abc", 3, &d, 65), SIGIL_ERR_INVALID_INPUT, "outlen 65 rejected");
+    assert_eq(blake2b_key("abc", 3, &key, 65, &d, 64), SIGIL_ERR_INVALID_INPUT, "keylen 65 rejected");
+    assert_eq(blake2b("abc", 3, &d, 64), SIGIL_ERR_NONE, "outlen 64 accepted");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

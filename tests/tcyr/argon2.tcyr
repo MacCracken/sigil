@@ -1,0 +1,118 @@
+# argon2.tcyr — RFC 9106 Argon2 test vectors.
+#
+# The three §5 vectors are the RFC's own published outputs, independently
+# reconfirmed byte-for-byte against OpenSSL 3.6's ARGON2D/ARGON2I/ARGON2ID
+# providers before being pinned here. The remaining vectors were generated with
+# `openssl kdf ... ARGON2ID` — so every assertion below is interop against a
+# separate implementation, never self-consistency.
+#
+# The §5 vectors matter disproportionately: they use p=4 lanes with a secret and
+# associated data, which is the only configuration that exercises cross-lane
+# referencing, the lane-wise XOR finalisation, and the full H0 preimage.
+
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fmt.cyr"
+include "lib/bayan.cyr"
+include "lib/sakshi.cyr"
+include "lib/chrono.cyr"
+
+include "lib/thread_local.cyr"
+include "src/crypto_scratch.cyr"
+include "src/types.cyr"
+include "src/error.cyr"
+include "src/sha256.cyr"
+include "src/hex.cyr"
+include "lib/ct.cyr"
+include "src/blake2b.cyr"
+include "src/argon2.cyr"
+
+fn main() {
+    alloc_init();
+
+    var tag[64];
+
+    # RFC 9106 §5: t=3, m=32 KiB, p=4, T=32,
+    # P = 32 x 0x01, S = 16 x 0x02, K = 8 x 0x03, X = 12 x 0x04
+    var pwd[32];   memset(&pwd, 0x01, 32);
+    var salt[16];  memset(&salt, 0x02, 16);
+    var sec[8];    memset(&sec, 0x03, 8);
+    var ad[12];    memset(&ad, 0x04, 12);
+
+    test_group("Argon2 memory sizing");
+    assert_eq(argon2_mem_blocks(32, 4), 32, "m'=4*p*floor(m/4p) = 32 blocks at m=32,p=4");
+    assert_eq(argon2_mem_bytes(32, 4), 32768, "32 blocks = 32768 bytes");
+    assert_eq(argon2_mem_blocks(19456, 1), 19456, "m=19456,p=1 -> 19456 blocks (sy-core default)");
+
+    var mem = fl_alloc(argon2_mem_bytes(32, 4));
+    assert_nonnull(mem, "arena allocated");
+
+    test_group("RFC 9106 official vectors (p=4, with secret + associated data)");
+    argon2_hash_into(mem, ARGON2_TYPE_D, &pwd, 32, &salt, 16, &sec, 8, &ad, 12, 3, 32, 4, &tag, 32);
+    assert_streq(hex_encode(&tag, 32),
+        "512b391b6f1162975371d30919734294f868e3be3984f3c1a13a4db9fabe4acb",
+        "Argon2d (RFC 9106 5.1)");
+
+    argon2_hash_into(mem, ARGON2_TYPE_I, &pwd, 32, &salt, 16, &sec, 8, &ad, 12, 3, 32, 4, &tag, 32);
+    assert_streq(hex_encode(&tag, 32),
+        "c814d9d1dc7f37aa13f0d77f2494bda1c8de6b016dd388d29952a4c4672b6ce8",
+        "Argon2i (RFC 9106 5.2)");
+
+    argon2_hash_into(mem, ARGON2_TYPE_ID, &pwd, 32, &salt, 16, &sec, 8, &ad, 12, 3, 32, 4, &tag, 32);
+    assert_streq(hex_encode(&tag, 32),
+        "0d640df58d78766c08c037a34a8b53c9d01ef0452d75b65eb52520e96b01e659",
+        "Argon2id (RFC 9106 5.3)");
+    fl_free(mem);
+
+    test_group("Argon2id vs OpenSSL (no secret/AD — the password-storage shape)");
+    argon2id("pw", 2, "saltsalt", 8, 1, 64, 1, &tag, 32);
+    assert_streq(hex_encode(&tag, 32),
+        "85d38291f6074e3d229d39a1b90868665550dcdfd49d0e728e46b0590688640a",
+        "argon2id t=1 m=64 p=1 T=32");
+
+    argon2id("pw", 2, "saltsalt", 8, 2, 64, 2, &tag, 64);
+    assert_streq(hex_encode(&tag, 64),
+        "168b71a93d1a4c605630eab0aff25f4fd0908680539f622c4be1600bf3301e4d14880416a6b6825d3dfabff4737db1dd14ffcaa8deffa88304916650de96cdaa",
+        "argon2id t=2 m=64 p=2 T=64 (multi-lane, 64-byte tag)");
+
+    # The real deployment config: what Rust's argon2 0.5 `Argon2::default()`
+    # emits, and therefore what the SecureYeoman port must reproduce.
+    test_group("Argon2id @ sy-core defaults (m=19456, t=2, p=1) — ~19 MiB");
+    argon2id("password", 8, "somesalt", 8, 2, 19456, 1, &tag, 32);
+    assert_streq(hex_encode(&tag, 32),
+        "3cbd356a63f2794bb11bb1f4bc8af95fea87919bd69c79860465c562f87ccf61",
+        "argon2id m=19456 t=2 p=1 (Argon2::default params)");
+
+    test_group("Argon2 determinism + input sensitivity");
+    var tag2[32];
+    argon2id("pw", 2, "saltsalt", 8, 1, 64, 1, &tag2, 32);
+    assert(ct_eq_bytes_lens(&tag, 32, &tag2, 32) == 0, "different params/password -> different tag");
+    var tag3[32];
+    argon2id("pw", 2, "saltsalt", 8, 1, 64, 1, &tag3, 32);
+    assert(ct_eq_bytes_lens(&tag2, 32, &tag3, 32) == 1, "same inputs -> identical tag (deterministic)");
+    var tag4[32];
+    argon2id("pX", 2, "saltsalt", 8, 1, 64, 1, &tag4, 32);
+    assert(ct_eq_bytes_lens(&tag2, 32, &tag4, 32) == 0, "one password byte changed -> different tag");
+    var tag5[32];
+    argon2id("pw", 2, "saltsalX", 8, 1, 64, 1, &tag5, 32);
+    assert(ct_eq_bytes_lens(&tag2, 32, &tag5, 32) == 0, "one salt byte changed -> different tag");
+
+    test_group("Argon2 parameter validation");
+    assert_eq(argon2id("pw", 2, "saltsalt", 8, 0, 64, 1, &tag, 32), SIGIL_ERR_INVALID_INPUT, "t_cost 0 rejected");
+    assert_eq(argon2id("pw", 2, "saltsalt", 8, 1, 64, 0, &tag, 32), SIGIL_ERR_INVALID_INPUT, "parallelism 0 rejected");
+    assert_eq(argon2id("pw", 2, "short", 5, 1, 64, 1, &tag, 32), SIGIL_ERR_INVALID_INPUT, "salt < 8 bytes rejected");
+    assert_eq(argon2id("pw", 2, "saltsalt", 8, 1, 64, 1, &tag, 3), SIGIL_ERR_INVALID_INPUT, "tag < 4 bytes rejected");
+    assert_eq(argon2id("pw", 2, "saltsalt", 8, 1, 4, 1, &tag, 32), SIGIL_ERR_INVALID_INPUT, "m_cost < 8*p rejected");
+    assert_eq(argon2id("pw", 2, "saltsalt", 8, 1, 64, 1, &tag, 32), SIGIL_ERR_NONE, "valid params accepted");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

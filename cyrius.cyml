@@ -84,6 +84,8 @@ modules = [
     "src/chacha20poly1305.cyr",
     "src/sha512.cyr",
     "src/sha384.cyr",
+    "src/blake2b.cyr",
+    "src/argon2.cyr",
     "src/hmac_sha384.cyr",
     "src/hkdf_sha384.cyr",
     "src/tls12_prf.cyr",
@@ -125,6 +127,20 @@ modules = [
     "src/verify.cyr",
 ]
 
+
+# `[lib.argon2]` — Argon2id password hashing (RFC 9106) + its BLAKE2b (RFC 7693).
+# `cyrius distlib argon2` -> dist/sigil-argon2.cyr. 4-module closure of the
+# argon2/blake2b entry points, compile-verified self-contained (no undefined
+# sigil symbol). Order matches the [lib] include chain (single-pass). Lets a
+# consumer that only needs password hashing (e.g. a login endpoint) avoid the
+# full 63-module bundle's global footprint.
+[lib.argon2]
+modules = [
+    "src/error.cyr",
+    "src/crypto_scratch.cyr",
+    "src/blake2b.cyr",
+    "src/argon2.cyr",
+]
 
 # `[lib.sha]` — SHA-2 family (SHA-256/384/512 + SHA-NI) — the hashing floor.
 # `cyrius distlib sha` -> dist/sigil-sha.cyr. 5-module closure of the

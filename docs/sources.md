@@ -22,6 +22,40 @@ their specs inline; this file is the cross-module overview.
   `sha384.tcyr`, `sha512.tcyr` known-answer vectors.
   - https://csrc.nist.gov/projects/cryptographic-algorithm-validation-program/secure-hashing
 
+### BLAKE2b — `src/blake2b.cyr`
+
+- **RFC 7693** — The BLAKE2 Cryptographic Hash and Message
+  Authentication Code (MAC) (IRTF CFRG, 2015-11). Defines
+  BLAKE2b (64-bit, 128-byte blocks, ≤64-byte digest, 12
+  rounds), the parameter block, and keyed mode.
+  - https://www.rfc-editor.org/rfc/rfc7693
+- **Appendix A** — the `"abc"` known-answer vector used in
+  `tests/tcyr/blake2b.tcyr`.
+- **BLAKE2 KAT** — the reference keyed test vectors
+  (`blake2b-kat.txt`) for the keyed-mode assertion.
+  - https://github.com/BLAKE2/BLAKE2
+- Implemented for Argon2 (RFC 9106), whose `H` and
+  variable-length `H'` are BLAKE2b.
+
+### Argon2id / Argon2i / Argon2d — `src/argon2.cyr`
+
+- **RFC 9106** — Argon2 Memory-Hard Function for Password
+  Hashing and Proof-of-Work Applications (IRTF CFRG, 2021-09).
+  §3.2 H0, §3.3 the variable-length hash H', §3.4 indexing,
+  §3.5 the compression function G.
+  - https://www.rfc-editor.org/rfc/rfc9106
+- **RFC 9106 §5** — the official Argon2d / Argon2i / Argon2id
+  test vectors (t=3, m=32, p=4, with secret + associated
+  data) asserted in `tests/tcyr/argon2.tcyr`.
+- **Password Hashing Competition** — Argon2 reference
+  implementation (the `phc-winner-argon2` schedule this
+  follows for segment fill and `index_alpha`).
+  - https://github.com/P-H-C/phc-winner-argon2
+- Cross-checked against **OpenSSL 3.6**'s `ARGON2ID` provider
+  (`openssl kdf ... ARGON2ID`) for the non-RFC parameter sets,
+  including m=19456/t=2/p=1 (Rust `argon2` 0.5
+  `Argon2::default()`).
+
 ### SHA-NI hardware dispatch — `src/sha_ni.cyr`
 
 - **Intel SHA Extensions Whitepaper** (2013-07).

@@ -91,6 +91,12 @@ include "src/chacha20.cyr"
 include "src/chacha20poly1305.cyr"
 include "src/sha512.cyr"
 include "src/sha384.cyr"
+# BLAKE2b (RFC 7693) — the hash Argon2 (RFC 9106) is built on. Independent of
+# the SHA-2 chain above (it only needs error + crypto_scratch); grouped with
+# the hashes. Note it is LITTLE-endian, unlike SHA-2.
+include "src/blake2b.cyr"
+# Argon2 (RFC 9106) — memory-hard password KDF; built on blake2b (above).
+include "src/argon2.cyr"
 # HMAC-SHA384 / HKDF-SHA384 — depend on sha384 (above), so they
 # follow it in the chain. Added 3.5.6 for the cyrius TLS 1.3
 # TLS_AES_256_GCM_SHA384 key schedule.

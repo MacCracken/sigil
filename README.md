@@ -29,6 +29,8 @@ All cryptography implemented in Cyrius — no external crypto libraries:
 - **SHA-256 / SHA-384 / SHA-512** (FIPS 180-4) — hashing
 - **HMAC-SHA256 / HMAC-SHA384** (RFC 2104 / FIPS 198-1) — keyed hashing
 - **HKDF-SHA256 / HKDF-SHA384** (RFC 5869) — key derivation
+- **BLAKE2b** (RFC 7693) — hashing / keyed hashing; the primitive Argon2 is built on
+- **Argon2id / Argon2i / Argon2d** (RFC 9106) — memory-hard **password hashing**
 - **TLS 1.2 PRF** (RFC 5246 §5) — P_SHA256 / P_SHA384 key schedule
 - **RSA PKCS#1 v1.5** (RFC 8017) — signature verify **and** sign,
   SHA-256/384, with DER/PEM key parsing (PKCS#1, SPKI, PKCS#8); on a
@@ -62,6 +64,8 @@ All cryptography implemented in Cyrius — no external crypto libraries:
 - **`sha_ni.cyr`** — SHA-256-NI hardware dispatch (runtime probe)
 - **`hmac.cyr`**, **`hkdf.cyr`** — HMAC/HKDF-SHA256
 - **`hmac_sha384.cyr`**, **`hkdf_sha384.cyr`** — HMAC/HKDF-SHA384
+- **`blake2b.cyr`** — BLAKE2b (RFC 7693)
+- **`argon2.cyr`** — Argon2id/i/d password hashing (RFC 9106); `[lib.argon2]` profile
 - **`tls12_prf.cyr`** — TLS 1.2 PRF (RFC 5246 §5), P_SHA256/P_SHA384
 - **`bignum.cyr`** — general variable-width big integers + modexp
 - **`rsa.cyr`** — RSA PKCS#1 v1.5 verify + sign + key parsing (RFC 8017)
