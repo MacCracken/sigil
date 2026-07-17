@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.12.1] — 2026-07-17
+
+### Changed — migrate the crypto-bank thread-local slot off a hardcoded literal
+
+- **`src/crypto_scratch.cyr`: `_SIGIL_CBANK_SLOT` is now claimed from cyrius's
+  slot allocator (`thread_local_alloc`, cyrius ≥ 6.4.65) instead of the hardcoded
+  literal `8`.** The 3.9.9 stopgap moved the slot 0 → 8 by hand to dodge patra's
+  0-4 range; the real fix is a slot allocator, which cyrius shipped in v6.4.65
+  (issue `2026-07-01-thread-local-slot-namespace-no-allocator`). `_sigil_ensure_slot()`
+  claims one allocator-managed slot (always ≥ 16, so it can never alias patra's
+  0-4 or any app's frozen 0-15 slot) exactly once at runtime, via a CAS gate.
+  Behaviour is otherwise unchanged: same per-thread bank semantics, same
+  `crypto_tls_main_init` CAS. Concurrency suite (`banking_concurrent`,
+  `concurrent_tls_handshake`, `bignum_tls12_concurrent`, `ecdsa_concurrent`) green.
+- **Toolchain pin `6.4.48` → `6.4.65`** — `thread_local_alloc` requires it.
+
 ## [3.12.0] — 2026-07-14
 
 ### Added — sovereign password hashing: BLAKE2b + Argon2id
