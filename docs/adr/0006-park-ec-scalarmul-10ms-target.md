@@ -1,7 +1,24 @@
 # 0006 — Disposition of the EC scalar-mult ≤ 10 ms P-256 verify target
 
-**Status**: Accepted
+**Status**: Accepted — **premise revisited 2026-07-30, see ADR 0008**
 **Date**: 2026-06-16
+
+> **Update (2026-07-30, sigil 3.12.2).** This ADR named "a hand-written asm
+> multiply (MULX/ADCX/ADOX) — needs the cyrius `asm`-block global-symbol
+> pseudo" as one of three unavailable exotic levers. **That premise was too
+> pessimistic**: a *leaf* multiply needs no global-symbol pseudo at all —
+> `param_load` plus raw opcode bytes is sufficient — and a plain `MUL r/m64`
+> needs neither MULX nor ADX. 3.12.2 shipped it (`src/mul64.cyr`), and
+> `ecdsa_p256_verify` measured **9.732 ms**, against 10.539 ms on the same
+> host at the same toolchain pin: **below the ≤ 10 ms target this ADR parked
+> as not reachable.**
+>
+> This ADR is deliberately **not** superseded. The crossing is narrow (~7 %)
+> and single-host, and closing the target is Robert's call — the same call
+> that parked it — not something to inherit from a performance side-effect.
+> What has changed is the *premise*, not the disposition. See
+> [ADR 0008](0008-native-asm-multiply-and-public-modexp.md); the roadmap
+> backlog item is updated to match.
 
 > **Decided 2026-06-16 (Robert): option A — close the ≤ 10 ms target as
 > "not reachable with current approaches."** Option B (exotic-lever

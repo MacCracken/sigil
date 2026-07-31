@@ -26,6 +26,7 @@ include "lib/thread.cyr"
 include "lib/thread_local.cyr"
 
 include "src/crypto_scratch.cyr"
+include "src/mul64.cyr"
 include "src/types.cyr"
 include "src/error.cyr"
 include "src/hex.cyr"
@@ -33,6 +34,113 @@ include "src/bignum.cyr"
 
 fn main() {
     alloc_init();
+
+    # ============================================================
+    # Native 64x64 -> 128 multiply == bayan's portable _mul64 (3.12.2)
+    # ============================================================
+    # `_nmul64` / `_nmul64_hi` (src/mul64.cyr) are x86-64 `MUL r64`
+    # inside asm{} blocks. They feed
+    # every product in `bn_mul` / `_bn_mont_mul`, so a wrong high half
+    # would corrupt every RSA operation. Cross-checked against the
+    # portable `_mul64` it replaces, on the operand shapes that break a
+    # naive 32-bit-halves decomposition: both halves set, carry out of
+    # the middle partial product, and the 2^64-1 squared maximum.
+    test_group("bignum native mul64");
+
+    var mv_a[136]; var mv_b[136];      # 17 i64 each
+    store64(&mv_a +   0, 0);                     store64(&mv_b +   0, 0);
+    store64(&mv_a +   8, 1);                     store64(&mv_b +   8, 0 - 1);
+    store64(&mv_a +  16, 0 - 1);                 store64(&mv_b +  16, 0 - 1);
+    store64(&mv_a +  24, 0xFFFFFFFF);            store64(&mv_b +  24, 0xFFFFFFFF);
+    store64(&mv_a +  32, 0x100000000);           store64(&mv_b +  32, 0x100000000);
+    store64(&mv_a +  40, 0xFFFFFFFF00000001);    store64(&mv_b +  40, 0x0123456789ABCDEF);
+    store64(&mv_a +  48, 0x0123456789ABCDEF);    store64(&mv_b +  48, 0x76543210FEDCBA98);
+    store64(&mv_a +  56, 0x8000000000000000);    store64(&mv_b +  56, 2);
+    store64(&mv_a +  64, 0x8000000000000000);    store64(&mv_b +  64, 0x8000000000000000);
+    store64(&mv_a +  72, 0xDEADBEEFCAFEBABE);    store64(&mv_b +  72, 0xFEEDFACE12345678);
+    store64(&mv_a +  80, 0xFFFFFFFFFFFFFFFF);    store64(&mv_b +  80, 1);
+    store64(&mv_a +  88, 0x00000000FFFFFFFF);    store64(&mv_b +  88, 0xFFFFFFFF00000000);
+    store64(&mv_a +  96, 0xFFFFFFFF);            store64(&mv_b +  96, 0x100000001);
+    store64(&mv_a + 104, 0x7FFFFFFFFFFFFFFF);    store64(&mv_b + 104, 0x7FFFFFFFFFFFFFFF);
+    store64(&mv_a + 112, 3);                     store64(&mv_b + 112, 0x5555555555555555);
+    store64(&mv_a + 120, 0xABCDEF0123456789);    store64(&mv_b + 120, 0);
+    store64(&mv_a + 128, 0x1000000000000000);    store64(&mv_b + 128, 0x10);
+
+    var mv_ref[16]; var mv_got[16];
+    var mv_bad = 0;
+    var mv_i = 0;
+    while (mv_i < 17) {
+        var mv_x = load64(&mv_a + mv_i * 8);
+        var mv_y = load64(&mv_b + mv_i * 8);
+        _mul64(mv_x, mv_y, &mv_ref, &mv_ref + 8);
+        _nmul64(mv_x, mv_y, &mv_got, &mv_got + 8);
+        if (load64(&mv_got) != load64(&mv_ref)) { mv_bad = mv_bad + 1; }
+        if (load64(&mv_got + 8) != load64(&mv_ref + 8)) { mv_bad = mv_bad + 1; }
+        # Commuted: a*b == b*a through the same path.
+        _nmul64(mv_y, mv_x, &mv_got, &mv_got + 8);
+        if (load64(&mv_got) != load64(&mv_ref)) { mv_bad = mv_bad + 1; }
+        if (load64(&mv_got + 8) != load64(&mv_ref + 8)) { mv_bad = mv_bad + 1; }
+        mv_i = mv_i + 1;
+    }
+    assert_eq(mv_bad, 0, "_nmul64 == _mul64 over 17 vectors (both orders)");
+
+    # `_nmul64_hi` is the scalar-return form the EC engines use
+    # (bigint_ext u256, ecdsa_p384 u384) because they must stay
+    # static-scratch-free for the Ed25519 parallel batch-verify path. It
+    # returns through rax by FALLING THROUGH its asm block with no
+    # trailing `return` — a real dependency on cyrius codegen. THIS
+    # ASSERTION IS THE GATE ON THAT: a toolchain that ever zeroes or
+    # reuses rax in the epilogue must fail here, loudly, rather than
+    # silently corrupting every ECDSA and Ed25519 signature.
+    var mh_bad = 0;
+    mv_i = 0;
+    while (mv_i < 17) {
+        var mh_x = load64(&mv_a + mv_i * 8);
+        var mh_y = load64(&mv_b + mv_i * 8);
+        _mul64(mh_x, mh_y, &mv_ref, &mv_ref + 8);
+        if (_nmul64_hi(mh_x, mh_y) != load64(&mv_ref + 8)) { mh_bad = mh_bad + 1; }
+        if (_nmul64_hi(mh_y, mh_x) != load64(&mv_ref + 8)) { mh_bad = mh_bad + 1; }
+        # The paired low half is cyrius's own wrapping `*` — the identity
+        # the EC call sites rely on instead of a second output pointer.
+        if (mh_x * mh_y != load64(&mv_ref)) { mh_bad = mh_bad + 1; }
+        mv_i = mv_i + 1;
+    }
+    assert_eq(mh_bad, 0, "_nmul64_hi + wrapping `*` == _mul64 over 17 vectors");
+
+    # Called twice back to back with different operands: proves the
+    # return value is the CURRENT call's, not a stale register.
+    assert_eq(_nmul64_hi(0 - 1, 0 - 1), 0 - 2, "_nmul64_hi (2^64-1)^2 == 2^64-2");
+    assert_eq(_nmul64_hi(0x100, 0x200), 0, "_nmul64_hi 0x100*0x200 == 0");
+    assert_eq(_nmul64_hi(0x100000000, 0x100000000), 1, "_nmul64_hi 2^32*2^32 == 1");
+
+    # The portable fallback compiled on non-x86 must agree with the asm.
+    var mf_bad = 0;
+    mv_i = 0;
+    while (mv_i < 17) {
+        var mf_x = load64(&mv_a + mv_i * 8);
+        var mf_y = load64(&mv_b + mv_i * 8);
+        if (_nmul64_hi_sw(mf_x, mf_y) != _nmul64_hi(mf_x, mf_y)) { mf_bad = mf_bad + 1; }
+        mv_i = mv_i + 1;
+    }
+    assert_eq(mf_bad, 0, "_nmul64_hi_sw (aarch64 fallback) == asm path");
+
+    # (2^64-1)^2 = 2^128 - 2^65 + 1 -> hi = 0xFFFFFFFFFFFFFFFE, lo = 1.
+    _nmul64(0 - 1, 0 - 1, &mv_got, &mv_got + 8);
+    assert_eq(load64(&mv_got), 1, "(2^64-1)^2 low half == 1");
+    assert_eq(load64(&mv_got + 8), 0 - 2, "(2^64-1)^2 high half == 2^64-2");
+
+    # A pure-low product must leave the high half ZERO, not stale: the
+    # asm writes *out_hi unconditionally, so a leftover from the
+    # previous call would show up here.
+    _nmul64(0x100, 0x200, &mv_got, &mv_got + 8);
+    assert_eq(load64(&mv_got), 0x20000, "0x100 * 0x200 low == 0x20000");
+    assert_eq(load64(&mv_got + 8), 0, "0x100 * 0x200 high == 0 (not stale)");
+
+    # Aliasing the two output pointers onto ONE slot must land the HIGH
+    # half there — the asm stores lo first, then hi. No caller does this,
+    # but it pins the store order the CIOS loop depends on.
+    _nmul64(0 - 1, 0 - 1, &mv_got, &mv_got);
+    assert_eq(load64(&mv_got), 0 - 2, "aliased out_lo/out_hi keeps the high half");
 
     # ============================================================
     # Serialization round-trip
@@ -133,6 +241,98 @@ fn main() {
     assert_streq(hex_encode(&m2b, 256),
         "3d8306ccc59858067855f56b80ddd17caa76a0b5b854f8ff3bf5cbeabac5cd406ae0c78a6e2087efa183ba8dd193a493ab697775015c9429d48178edd7cf4c3d11880bac72265be8ffdc0004482c0b4791805f63d1c2ff1c7baa82ebe16c735b427490dd7269d1e54f2a844b8292d0b252f27bb350076e1a56d4b639d6a517cfc964ab58c25ae643038140ad08c5d2bd03469e7d2e578570cfe5b2977d86370bfb1581947b9d4181da965de467a64c8ab17260467465f672e58eafffce5012870d3fd11f1eda0c3c486cc08b1d0794725aa2652a2c33211f9e4497a7113b1b1f74f864478709434407868f8c26f8ac0e0fc5baf15e66886727fa8fe2a8415f1e",
         "mont 2048-bit s^65537 == schoolbook");
+
+    # ============================================================
+    # PUBLIC-exponent Montgomery modexp == the other two paths (3.12.2)
+    # ============================================================
+    # `bn_mont_modexp_pub` swaps the constant-time ladder's unconditional
+    # multiply for a high-bit scan + conditional multiply. It must agree
+    # with BOTH the schoolbook `bn_modexp` and the CT `bn_mont_modexp`
+    # on every vector, including the exponent shapes where the two
+    # schedules differ most: leading zero bytes, e = 0, e = 1.
+    test_group("bignum public-exponent Montgomery modexp");
+
+    # 256-bit s^65537 == the schoolbook KAT.
+    var p256[64];
+    bn_mont_modexp_pub(&p256, &b256bn, e3, 3, &n256bn, 4);
+    var p256b[32];
+    bn_to_be(&p256b, 32, &p256, 4);
+    assert_streq(hex_encode(&p256b, 32),
+        "9265279ef2e78bb2e7532b18a5f2a3bf4520c430fafb0fa99d92a426c4ea9712",
+        "mont_pub 256-bit s^65537 == schoolbook");
+
+    # 2048-bit s^65537 == the 2048-bit schoolbook KAT (RSA-2048 shape —
+    # this is the exact operation rsa_pkcs1v15_verify_sha256 performs).
+    var p2[256];
+    bn_mont_modexp_pub(&p2, &b2bn, e3, 3, &n2bn, 32);
+    var p2b[256];
+    bn_to_be(&p2b, 256, &p2, 32);
+    assert_streq(hex_encode(&p2b, 256),
+        "3d8306ccc59858067855f56b80ddd17caa76a0b5b854f8ff3bf5cbeabac5cd406ae0c78a6e2087efa183ba8dd193a493ab697775015c9429d48178edd7cf4c3d11880bac72265be8ffdc0004482c0b4791805f63d1c2ff1c7baa82ebe16c735b427490dd7269d1e54f2a844b8292d0b252f27bb350076e1a56d4b639d6a517cfc964ab58c25ae643038140ad08c5d2bd03469e7d2e578570cfe5b2977d86370bfb1581947b9d4181da965de467a64c8ab17260467465f672e58eafffce5012870d3fd11f1eda0c3c486cc08b1d0794725aa2652a2c33211f9e4497a7113b1b1f74f864478709434407868f8c26f8ac0e0fc5baf15e66886727fa8fe2a8415f1e",
+        "mont_pub 2048-bit s^65537 == schoolbook");
+
+    # Dense 256-bit exponent: the conditional-multiply schedule must
+    # agree with the ladder bit for bit, not just on sparse exponents.
+    var pmon[64];
+    bn_mont_modexp_pub(&pmon, &b256bn, bigexp, 32, &n256bn, 4);
+    var pmonb[32];
+    bn_to_be(&pmonb, 32, &pmon, 4);
+    assert_streq(hex_encode(&pmonb, 32), hex_encode(&monb, 32),
+        "mont_pub == CT ladder (256-bit dense exponent)");
+
+    # Leading zero bytes must not change the result: the high-bit scan
+    # has to skip them rather than treat exp_blen*8 as the bit length.
+    var e_pad = hex_decode("00000000010001", 14);   # 65537 in 7 bytes
+    var ppad[64];
+    bn_mont_modexp_pub(&ppad, &b256bn, e_pad, 7, &n256bn, 4);
+    var ppadb[32];
+    bn_to_be(&ppadb, 32, &ppad, 4);
+    assert_streq(hex_encode(&ppadb, 32),
+        "9265279ef2e78bb2e7532b18a5f2a3bf4520c430fafb0fa99d92a426c4ea9712",
+        "mont_pub 4 leading zero exponent bytes == unpadded");
+
+    # base^0 == 1: hb stays -1, res stays Montgomery 1.
+    var pz_exp = hex_decode("00", 2);
+    var pz[64];
+    bn_mont_modexp_pub(&pz, &b256bn, pz_exp, 1, &n256bn, 4);
+    var pzb[32];
+    bn_to_be(&pzb, 32, &pz, 4);
+    assert_streq(hex_encode(&pzb, 32),
+        "0000000000000000000000000000000000000000000000000000000000000001",
+        "mont_pub base^0 == 1");
+
+    # An all-zero MULTI-byte exponent is the same case, and exercises the
+    # scan running its full width without ever setting hb.
+    var e_zz = hex_decode("00000000", 8);
+    var pzz[64];
+    bn_mont_modexp_pub(&pzz, &b256bn, e_zz, 4, &n256bn, 4);
+    var pzzb[32];
+    bn_to_be(&pzzb, 32, &pzz, 4);
+    assert_streq(hex_encode(&pzzb, 32),
+        "0000000000000000000000000000000000000000000000000000000000000001",
+        "mont_pub base^0 (4 zero bytes) == 1");
+
+    # base^1 == base mod n: hb == 0, so the seed runs and the loop body
+    # never does. b256 < n256, so the answer is b256 unreduced.
+    var e_one = hex_decode("01", 2);
+    var pone[64];
+    bn_mont_modexp_pub(&pone, &b256bn, e_one, 1, &n256bn, 4);
+    var poneb[32];
+    bn_to_be(&poneb, 32, &pone, 4);
+    assert_streq(hex_encode(&poneb, 32),
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "mont_pub base^1 == base");
+
+    # 0^65537 mod n == 0.
+    var pzbase[64];
+    bn_zero(&pzbase, 4);
+    var pzero[64];
+    bn_mont_modexp_pub(&pzero, &pzbase, e3, 3, &n256bn, 4);
+    var pzerob[32];
+    bn_to_be(&pzerob, 32, &pzero, 4);
+    assert_streq(hex_encode(&pzerob, 32),
+        "0000000000000000000000000000000000000000000000000000000000000000",
+        "mont_pub 0^e == 0");
 
     # ============================================================
     # Modular inverse (self-checking: r * r^-1 == 1 mod n)

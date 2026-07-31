@@ -29,6 +29,7 @@ include "lib/ct.cyr"
 
 include "lib/thread_local.cyr"
 include "src/crypto_scratch.cyr"
+include "src/mul64.cyr"
 include "src/types.cyr"
 include "src/error.cyr"
 include "lib/random.cyr"
@@ -104,6 +105,47 @@ fn main() {
         ri = ri + 1;
     }
     vec_push(benches, b_mont);
+
+    # 3.12.2: the same s^e with the PUBLIC-exponent schedule — the row
+    # above walks all 24 bits of e with an unconditional multiply
+    # (51 mont_muls); this one scans to the high bit and multiplies only
+    # on a set bit (20). Difference between these two rows IS Piece 1.
+    var b_montp = bench_new("rsa2048_verify_montgomery_pub");
+    ri = 0;
+    while (ri < rounds) {
+        bench_batch_start(b_montp);
+        bi = 0;
+        while (bi < 50) { bn_mont_modexp_pub(&mx_out, &s_bn, e, 3, &n_bn, 32); bi = bi + 1; }
+        bench_batch_stop(b_montp, 50);
+        ri = ri + 1;
+    }
+    vec_push(benches, b_montp);
+
+    # 3.12.2 Piece 2: one CIOS Montgomery multiply at 32 limbs, isolated.
+    # This is the unit the filed issue measured at 42 us with bayan's
+    # portable `_mul64`; it runs 2*32^2 = 2048 64x64 products, so it is
+    # the direct read-out of the native `MUL r64` switch. Reproduces the
+    # issue's own repro block (odd 32-limb modulus, arbitrary operands).
+    var mm_n[256]; var mm_a[256]; var mm_b[256]; var mm_o[256];
+    var mm_k = 0;
+    while (mm_k < 32) {
+        store64(&mm_n + mm_k * 8, 0xFFFFFFFF00000001 + mm_k);
+        store64(&mm_a + mm_k * 8, 0x0123456789ABCDEF + mm_k);
+        store64(&mm_b + mm_k * 8, 0x76543210FEDCBA98 + mm_k);
+        mm_k = mm_k + 1;
+    }
+    store64(&mm_n, load64(&mm_n) | 1);          # CIOS needs an ODD modulus
+    var mm_n0inv = _bn_mont_n0inv(load64(&mm_n));
+    var b_mm = bench_new("bn_mont_mul_32limb");
+    ri = 0;
+    while (ri < rounds) {
+        bench_batch_start(b_mm);
+        bi = 0;
+        while (bi < 200) { _bn_mont_mul(&mm_o, &mm_a, &mm_b, &mm_n, mm_n0inv, 32); bi = bi + 1; }
+        bench_batch_stop(b_mm, 200);
+        ri = ri + 1;
+    }
+    vec_push(benches, b_mm);
 
     # End-to-end v1.5 sign (CRT + base blinding + verify-after-sign).
     var sigout = alloc(256);

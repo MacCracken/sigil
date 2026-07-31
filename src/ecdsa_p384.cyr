@@ -184,24 +184,15 @@ fn u384_shl1(r, a): i64 {
 # sibling worker's call could clobber them between write and read (a
 # read-modify-write race that can't be lane-banked as a scalar — quirk
 # #9 / ADR 0004). The caller hands in a per-lane banked 16-byte slot.
+#
+# 3.12.2: the 32-bit-halves body (four 32x32 multiplies plus two
+# comparison-based carry fixups) is replaced by the native `_nmul64`
+# (src/mul64.cyr) — one x86-64 `MUL r64`, with a portable fallback on
+# aarch64. Beyond the speed-up this REMOVES two value-dependent branches
+# from a routine that multiplies secret operands on the P-384 sign path.
+# The banked out-slot contract is unchanged.
 fn _p384_mul64(a, b, out): i64 {
-    var mask32 = 0xFFFFFFFF;
-    var aL = a & mask32;
-    var aH = (a >> 32) & mask32;
-    var bL = b & mask32;
-    var bH = (b >> 32) & mask32;
-    var ll = aL * bL;
-    var lh = aL * bH;
-    var hl = aH * bL;
-    var hh = aH * bH;
-    var mid = lh + hl;
-    var mid_carry = 0;
-    if ((mid ^ (1 << 63)) < (lh ^ (1 << 63))) { mid_carry = 1; }
-    var lo = ll + (mid << 32);
-    var lo_carry = 0;
-    if ((lo ^ (1 << 63)) < (ll ^ (1 << 63))) { lo_carry = 1; }
-    store64(out, lo);
-    store64(out + 8, hh + (mid >> 32) + (mid_carry << 32) + lo_carry);
+    _nmul64(a, b, out, out + 8);
     return 0;
 }
 

@@ -15,6 +15,10 @@
 # RSA *signing* (private exponent) shipped in 3.6.4 — it adds blinding +
 # a constant-time ladder (`bn_mont_modexp` + CRT); it does NOT reuse the
 # non-CT `bn_modexp`.
+# 3.12.2: every PUBLIC-exponent modexp on both paths (verify's `s^e`,
+# sign's blinding `r^e` and its verify-after-sign `s^e`) moved to
+# `bn_mont_modexp_pub` — same Montgomery core, public schedule. The
+# secret exponents (d / dp / dq) keep the constant-time ladder.
 #
 # Interop note: TLS 1.3 / X.509 RSA certs are overwhelmingly
 # `rsaEncryption` PKCS#1 v1.5 (and PSS); this lands the v1.5 verify
@@ -119,11 +123,14 @@ fn _rsa_recover_em(n_be, n_len, e_be, e_len, sig, sig_len, em_out): i64 {
     if (bn_cmp(rs, rn, limbs) >= 0) { return 0 - 1; }
 
     # m = s^e mod n  (RSAVP1), then I2OSP to k octets. The modulus is
-    # odd (RSA n), so the constant-time Montgomery ladder applies; it is
-    # ~Nx faster than the schoolbook `bn_modexp` here (3.6.6). The
-    # operands are public — Montgomery is used purely for speed, not for
-    # the side-channel posture (no secret to protect on the verify path).
-    bn_mont_modexp(rm, rs, e_be, e_len, rn, limbs);
+    # odd (RSA n), so the Montgomery core applies; it is ~Nx faster than
+    # the schoolbook `bn_modexp` here (3.6.6). Both operands are public,
+    # so this takes the PUBLIC-exponent schedule (`_pub`, 3.12.2): the
+    # constant-time ladder used through 3.12.1 walked every bit of e's
+    # byte width with an unconditional multiply — 51 mont_muls for
+    # e = 65537 where a public schedule needs 20. Nothing secret reaches
+    # this path, so there is nothing for the ladder to protect.
+    bn_mont_modexp_pub(rm, rs, e_be, e_len, rn, limbs);
     bn_to_be(em_out, n_len, rm, limbs);
     return 0;
 }
@@ -579,9 +586,11 @@ fn _rsa_raw_sign(key, em, sig_out): i64 {
     # public-exponent modexp). Decorrelates the secret modexp from the
     # key; the final s is unchanged.
     if (_rsa_gen_blind(br, brinv, sn, nlen, limbs) < 0) { _rsa_scrub_sign_lanes(); return 0 - 1; }
-    # r^e mod n: public exponent over the random (public) blinding base —
-    # Montgomery ladder for speed (modulus n is odd). 3.6.6.
-    bn_mont_modexp(bre, br, key + RSAK_E, elen, sn, limbs);
+    # r^e mod n: PUBLIC exponent e over the blinding base r. The `_pub`
+    # schedule (3.12.2) branches on the exponent only, and e is public —
+    # r never steers control flow, so blinding is not weakened. (The
+    # secret modexp below keeps the constant-time ladder.)
+    bn_mont_modexp_pub(bre, br, key + RSAK_E, elen, sn, limbs);
     bn_mul(bprod, sm, bre, limbs);
     bn_mod(bmb, bprod, 2 * limbs, sn, limbs);
 
@@ -596,9 +605,9 @@ fn _rsa_raw_sign(key, em, sig_out): i64 {
     bn_mod(ss, bprod, 2 * limbs, sn, limbs);
 
     # Verify-after-sign (Bellcore guard): s^e mod n must equal m. Public
-    # exponent over the (public) signature — Montgomery ladder for speed
-    # (modulus n is odd). 3.6.6.
-    bn_mont_modexp(schk, ss, key + RSAK_E, elen, sn, limbs);
+    # exponent over the (public) signature, so the `_pub` schedule
+    # (3.12.2) applies — this is a verify, not a sign.
+    bn_mont_modexp_pub(schk, ss, key + RSAK_E, elen, sn, limbs);
     if (bn_cmp(schk, sm, limbs) != 0) {
         bn_zero(ss, limbs);   # discard a faulty signature
         _rsa_scrub_sign_lanes();

@@ -136,15 +136,43 @@ their specs inline; this file is the cross-module overview.
   `RSAPrivateKey` ASN.1 (parsed by `rsa_pubkey_from_der` /
   `rsa_privkey_from_der`, also accepting X.509 SPKI / PKCS#8).
   - https://www.rfc-editor.org/rfc/rfc8017.txt
-- **Constant-time signing** — the secret-exponent modexp uses a
-  Montgomery (CIOS) square-and-multiply-always ladder
-  (`bn_mont_modexp`); cf. Koç, Acar, Kaliski, "Analyzing and Comparing
-  Montgomery Multiplication Algorithms" (1996). A **verify-after-sign**
-  step (recompute `s^e mod n`) is the Boneh–DeMillo–Lipton ("Bellcore")
-  fault-attack guard. **Base blinding** (`s=(m·r^e)^d·r^-1 mod n`,
-  random `r`; defends DPA / timing-correlation) and **CRT** (Garner
-  recombination, ~4×) shipped in 3.6.4; the modular inverse for `r^-1`
-  uses binary inversion (`bn_modinv`).
+- **Constant-time signing** — the *secret*-exponent modexp (RSA `d` /
+  `dp` / `dq`) uses a Montgomery (CIOS) square-and-multiply-always
+  ladder (`bn_mont_modexp`); cf. Koç, Acar, Kaliski, "Analyzing and
+  Comparing Montgomery Multiplication Algorithms" (1996). A
+  **verify-after-sign** step (recompute `s^e mod n`) is the
+  Boneh–DeMillo–Lipton ("Bellcore") fault-attack guard. **Base
+  blinding** (`s=(m·r^e)^d·r^-1 mod n`, random `r`; defends DPA /
+  timing-correlation) and **CRT** (Garner recombination, ~4×) shipped
+  in 3.6.4; the modular inverse for `r^-1` uses binary inversion
+  (`bn_modinv`).
+- **Public-exponent modexp** (3.12.2) — verification, the blinding
+  factor `r^e`, and the verify-after-sign `s^e` are public operations
+  on public operands, so all three call sites in `rsa.cyr` take
+  `bn_mont_modexp_pub`: the same CIOS Montgomery core with a high-bit
+  scan + conditional multiply in place of the unconditional one. For
+  `e = 65537` (the three bytes `01 00 01` that `rsa_pubkey_from_der`
+  hands back) that is 20 Montgomery multiplies where the constant-time
+  ladder does 51. Its control flow depends on the exponent by
+  construction, so it **must never be called with a secret exponent** —
+  `bn_mont_modexp` stays the only entry point for `d` / `dp` / `dq`.
+  The sign/verify split and its reasoning are recorded in
+  `docs/adr/0008-native-asm-multiply-and-public-modexp.md`.
+- **Limb multiply** — every 64×64→128 limb product under `bn_mul` /
+  `_bn_mont_mul` goes through `src/mul64.cyr` (3.12.2): x86-64
+  `MUL r/m64` in an `asm{}` block, with a portable aarch64 fallback.
+  Unlike SHA-NI and AES-NI this is **not** an ISA extension — `MUL
+  r/m64` is baseline long mode — so there is no CPUID probe, no
+  feature cache and no runtime dispatch, and it computes exactly the
+  product the portable 32-bit-halves code computed (no new citation;
+  same arithmetic). It replaced four separate portable copies — under
+  `bignum.cyr`, under `ecdsa_p384.cyr`, and twice inlined into
+  `bigint_ext.cyr` — so RSA, Ed25519, ECDSA P-256 and ECDSA P-384 all
+  inherit it. It is also a side-channel improvement: the portable code
+  carries two value-dependent carry-fixup branches per product, and
+  `MUL r64` is data-independent. See
+  `docs/architecture/002-native-asm-multiply.md` and
+  `docs/adr/0008-native-asm-multiply-and-public-modexp.md`.
 - **Verify hygiene** — sigil reconstructs the full expected `EM` and
   compares all octets (rather than parsing/skipping), the recommended
   defense against the PKCS#1 v1.5 forgery class (Bleichenbacher 2006 /
@@ -224,9 +252,11 @@ their specs inline; this file is the cross-module overview.
 - Field arithmetic (`src/bigint_ext.cyr`) multiplies via a
   Karatsuba 256×256→512 routine (`u256_mul_full`, 3.7.17); a
   schoolbook variant (`_u256_mul_full_schoolbook`) is retained
-  as the differential KAT oracle. The same field backs Ed25519
-  and ECDSA P-256. `x25519` / `x25519_base` are per-worker banked
-  (`cbank()` lanes) since 3.8.0 — plain `var` + per-lane wipe.
+  as the differential KAT oracle; both take their 64×64→128 limb
+  products from `src/mul64.cyr` since 3.12.2 (see the RSA section).
+  The same field backs Ed25519 and ECDSA P-256. `x25519` /
+  `x25519_base` are per-worker banked (`cbank()` lanes) since 3.8.0 —
+  plain `var` + per-lane wipe.
 
 ### Ed25519 — `src/ed25519.cyr` (with `src/bigint_ext.cyr` for field arithmetic)
 
@@ -259,6 +289,9 @@ their specs inline; this file is the cross-module overview.
 - **NIST SP 800-186** Appendix D — Solinas decomposition for
   P-384 modular reduction (`_p384_solinas_reduce`, shipped 3.7.1;
   the P-256 mirror `_p256_solinas_reduce` shipped 3.7.0).
+- `u384_mul_full`'s limb products come from `src/mul64.cyr` since
+  3.12.2 (see the RSA section), which retired the module-local
+  `_p384_mul64`.
 
 ### ECDSA P-256 / P-384 deterministic signing — `src/ecdsa_sign.cyr`
 
@@ -294,11 +327,22 @@ their specs inline; this file is the cross-module overview.
 - **RFC 5758** — Additional Algorithms and Identifiers for DSA
   and ECDSA (2010-01). Defines ecdsa-with-SHA256 OID.
   - https://www.rfc-editor.org/rfc/rfc5758.txt
-- Scope cuts deliberately taken: ECDSA-SHA256-only chain-link
-  signatures; P-256 and P-384 SPKIs; no policy mapping; no name
-  constraints; no CRL fetching. RSA chain-link verify is not wired
-  into `x509.cyr` yet (backlog) — though sigil does have standalone
-  RSA PKCS#1 v1.5 verify in `rsa.cyr` (3.6.2).
+- **RFC 8410** — Algorithm Identifiers for Ed25519, Ed448, X25519,
+  and X448 for Use in the Internet X.509 PKI (2018-08). The 32-byte
+  raw Ed25519 SPKI (`X509_CURVE_ED25519`, 3.7.9); PureEd25519
+  chain-link signatures verify the TBS bytes directly, no pre-hash.
+  - https://www.rfc-editor.org/rfc/rfc8410.txt
+- Chain-link coverage (`_x509_verify_link`): ECDSA over all four
+  {P-256, P-384} × {SHA-256, SHA-384} combos — the hash comes from
+  the child's signature-algorithm OID, the curve and verify primitive
+  from the issuer SPKI, *independently*, so off-diagonal links verify;
+  RSA PKCS#1 v1.5 SHA-256 / SHA-384 against an RSA issuer (3.6.5 —
+  real AMD ARK/ASK links are RSA-4096 + SHA-384); Ed25519 (3.7.9).
+  Standalone RSA verify lives in `rsa.cyr` (3.6.2).
+- Scope cuts deliberately taken: no policy mapping; no name
+  constraints; no CRL fetching. The root is a trust anchor — its
+  self-signature and basicConstraints are not re-checked; trust
+  establishment belongs to sigil's caller.
 
 ### PEM decoder — `src/pem.cyr`
 
@@ -344,6 +388,80 @@ their specs inline; this file is the cross-module overview.
   ISVSVN + key_id. The EGETKEY instruction is enclave-only;
   sigil's seal surface receives the sealing root from the
   caller's enclave-side bridge (Gramine, Occlum, TDX TDG_MR_REPORT).
+
+## Code signing / Secure Boot
+
+### Authenticode PE signing + verification — `src/authenticode.cyr`
+
+- **Microsoft — "Windows Authenticode Portable Executable Signature
+  Format"** (v1.0). Defines `SpcIndirectDataContent`, the PKCS#7
+  SignerInfo shape firmware expects, and the "Calculating the PE Image
+  Hash" algorithm: hash the image, skipping the 4-byte optional-header
+  CheckSum and the 8-byte Certificate-Table data-directory entry, and
+  stop at the attribute-certificate table. Implemented by
+  `_ac_pe_hash_range` / `authenticode_pe_hash` (unsigned image) and
+  `authenticode_pe_hash_signed` (already-signed image).
+- **RFC 5652** — Cryptographic Message Syntax (CMS) (2009-09). §5
+  `SignedData` / `SignerInfo` / `issuerAndSerialNumber`. **§5.4** is
+  the rule the verifier implements for third-party binaries: when
+  `signedAttrs` is present, the signature covers `DER(SET OF
+  Attribute)` — the same bytes as the `[0] IMPLICIT` span with tag
+  `0xA0` re-encoded as `0x31`, length bytes unchanged — and the
+  attributes' own `messageDigest` must equal SHA-256 of the
+  `SpcIndirectDataContent` TLV, without which signedAttrs would be a
+  signed statement about content nothing binds to this image. Sigil's
+  own signer emits no signedAttrs; both shapes verify.
+  - https://www.rfc-editor.org/rfc/rfc5652.txt
+- **Microsoft PE/COFF Specification** — the attribute certificate
+  table: `IMAGE_DIRECTORY_ENTRY_SECURITY` (data-directory index 4, a
+  file offset + size, *not* an RVA), its 8-byte alignment, and the
+  `WIN_CERTIFICATE` header (`wRevision = WIN_CERT_REVISION_2_0`
+  `0x0200`, `wCertificateType = WIN_CERT_TYPE_PKCS_SIGNED_DATA`
+  `0x0002`). The verifier additionally requires the optional-header
+  magic to be an allow-listed `0x10B` / `0x20B`, `NumberOfRvaAndSizes
+  >= 5`, `e_lfanew >= 0x40`, and the certificate table to be the file
+  trailer with a single entry that fills it.
+  - https://learn.microsoft.com/en-us/windows/win32/debug/pe-format
+- **RFC 5758 §3.2** — ecdsa-with-SHA256 takes **ABSENT** parameters,
+  not NULL. `authenticode_pkcs7_sign_p256` builds that
+  AlgorithmIdentifier directly rather than through `der_algid_null`
+  for exactly this reason.
+  - https://www.rfc-editor.org/rfc/rfc5758.txt
+- **RFC 8017** — the RSA PKCS#1 v1.5 SignerInfo signature, and
+  **RFC 6979** — the P-256 SignerInfo variant signs deterministically.
+  Both as cited in the RSA and ECDSA signing sections above.
+- **RFC 3161** — `unsignedAttrs` may carry a countersignature /
+  timestamp. Sigil parses past it and does not interpret it: it is by
+  definition outside the signature.
+  - https://www.rfc-editor.org/rfc/rfc3161.txt
+- Signing shipped 3.10.0. Verification (`authenticode_pe_verify`,
+  `_verify_ex`, `_verify_chain`, `_verify_chain_ex`), the
+  already-signed image hash, and the P-256 signer shipped 3.12.2 —
+  which also corrected the signer's hash range: the spec hashes up to
+  the attribute-certificate table, **including** the zero pad that
+  8-aligns it, which the 3.10.0–3.12.1 signer omitted. 8-aligned
+  inputs are unaffected; unaligned ones previously produced a
+  structurally valid signature over a byte range no spec verifier
+  recomputes.
+
+### UEFI Secure Boot enrollment artifacts — `src/efi_sigdb.cyr`
+
+- **UEFI Specification** — Secure Boot. §32.4.1 `EFI_SIGNATURE_LIST` /
+  `EFI_SIGNATURE_DATA` — the `.esl` a user installs into the db / KEK
+  / PK variables, with `EFI_CERT_X509_GUID`
+  `{a5c059a1-9469-4aa7-87b5-ab155c2bf072}` for an X.509 entry (GUID
+  mixed-endian byte order). The signed form,
+  `EFI_VARIABLE_AUTHENTICATION_2`, frames a detached PKCS#7 in a
+  `WIN_CERTIFICATE_UEFI_GUID` (`wCertificateType =
+  WIN_CERT_TYPE_EFI_GUID` `0x0EF1`, `CertType =
+  EFI_CERT_TYPE_PKCS7_GUID`) over SHA-256 of `VariableName` (UCS-2)
+  ‖ `VendorGuid` ‖ `Attributes` ‖ `TimeStamp` ‖ ESL, signed by the
+  parent key (KEK signs db, PK signs KEK).
+  - https://uefi.org/specifications
+- **RFC 5652** — that detached `SignedData` carries plain `pkcs7-data`
+  content, *not* `SpcIndirectData` (the one place the enrollment path
+  diverges from `authenticode.cyr`'s PKCS#7).
+- Shipped 3.11.1.
 
 ## Constant-time comparison
 

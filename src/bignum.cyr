@@ -8,7 +8,7 @@
 # module provides general big integers: little-endian arrays of 64-bit
 # limbs, backed by caller-provided byte buffers (limb i lives at byte
 # offset i*8; `var X[N]` is N BYTES, CLAUDE.md quirk #3). Schoolbook
-# multiply (reusing stdlib `_mul64`) + binary long-division reduction +
+# multiply (on the native `_nmul64`, src/mul64.cyr) + binary long-division reduction +
 # left-to-right square-and-multiply modexp.
 #
 # SCOPE / THREADING / TIMING
@@ -62,7 +62,7 @@ var _bn_exp_result[32768];  # 512 * SIGIL_CRYPTO_BANKS  (PUBLIC)
 var _bn_exp_prod[65536];    # 1024 * SIGIL_CRYPTO_BANKS (PUBLIC)
 var _bn_exp_base[32768];    # 512 * SIGIL_CRYPTO_BANKS  (PUBLIC)
 
-# Per-lane 16-byte slot for the `_mul64` lo||hi product used inside
+# Per-lane 16-byte slot for the `_nmul64` lo||hi product used inside
 # `bn_mul` / `_bn_mont_mul`. The original `var lo[8]; var hi[8];` locals
 # were ALSO function-scope statics (quirk #1) — written then immediately
 # read, so single-threaded reuse was fine, but concurrent multipliers
@@ -274,7 +274,7 @@ fn bn_mul(out, a, b, limbs): i64 {
         var j = 0;
         while (j < limbs) {
             var bv = load64(b + j * 8);
-            _mul64(av, bv, m64, m64 + 8);
+            _nmul64(av, bv, m64, m64 + 8);
             var lov = load64(m64);
             var hiv = load64(m64 + 8);
             var prev = load64(out + (i + j) * 8);
@@ -516,7 +516,7 @@ fn _bn_mont_mul(out, a, b, n, n0inv, limbs): i64 {
     # its other mont buffers — keeping the whole modexp on one lane.
     var bk = cbank();
     var t = &_bn_mont_t + bk * 528;
-    var m64 = &_bn_m64 + bk * 16;            # this thread's _mul64 lo||hi slot
+    var m64 = &_bn_m64 + bk * 16;            # this thread's _nmul64 lo||hi slot
     var s = limbs;
     var sbit = 1 << 63;
     bn_zero(t, s + 2);
@@ -528,7 +528,7 @@ fn _bn_mont_mul(out, a, b, n, n0inv, limbs): i64 {
         var C = 0;
         var j = 0;
         while (j < s) {
-            _mul64(load64(a + j * 8), bi, m64, m64 + 8);
+            _nmul64(load64(a + j * 8), bi, m64, m64 + 8);
             var tj = load64(t + j * 8);
             var s1 = tj + load64(m64);
             var c1 = 0;
@@ -549,7 +549,7 @@ fn _bn_mont_mul(out, a, b, n, n0inv, limbs): i64 {
 
         # m = t[0] * n0inv mod 2^64; t += m * n; shift down one limb
         var m = load64(t) * n0inv;
-        _mul64(m, load64(n), m64, m64 + 8);
+        _nmul64(m, load64(n), m64, m64 + 8);
         var t0 = load64(t);
         var u0 = t0 + load64(m64);
         var d0 = 0;
@@ -557,7 +557,7 @@ fn _bn_mont_mul(out, a, b, n, n0inv, limbs): i64 {
         C = load64(m64 + 8) + d0;       # t[0]+m*n[0] is == 0 mod 2^64 by construction
         j = 1;
         while (j < s) {
-            _mul64(m, load64(n + j * 8), m64, m64 + 8);
+            _nmul64(m, load64(n + j * 8), m64, m64 + 8);
             var tj = load64(t + j * 8);
             var x1 = tj + load64(m64);
             var e1 = 0;
@@ -619,13 +619,17 @@ fn _bn_mont_scrub_lanes(): i64 {
     memset(&_bn_mont_res   + bk * 512,  0, 512);
     memset(&_bn_mont_tmp   + bk * 512,  0, 512);
     memset(&_bn_mont_one   + bk * 512,  0, 512);
-    memset(&_bn_m64        + bk * 16,   0, 16);   # _mul64 lo||hi residue
+    memset(&_bn_m64        + bk * 16,   0, 16);   # _nmul64 lo||hi residue
     return 0;
 }
 
 # out (limbs) = base^exp mod modulus, `exp` = `exp_blen` big-endian
 # bytes. Constant-time in the exponent (square+multiply every bit over
 # the full width). Modulus MUST be odd. Safe for the secret exponent.
+#
+# For a PUBLIC exponent (RSA verify, blinding, verify-after-sign) call
+# `bn_mont_modexp_pub` below instead — same Montgomery core, ~2.5x
+# fewer multiplies. This entry point stays the one for d / dp / dq.
 fn bn_mont_modexp(out, base, exp, exp_blen, modulus, limbs): i64 {
     var bk = cbank();
     var r2src = &_bn_mont_r2src + bk * 1040;   # this thread's lane (SECRET)
@@ -660,5 +664,95 @@ fn bn_mont_modexp(out, base, exp, exp_blen, modulus, limbs): i64 {
     # convert out of Montgomery form: out = res * 1 * R^-1 mod n
     _bn_mont_mul(out, res, one, modulus, n0inv, limbs);
     _bn_mont_scrub_lanes();         # wipe this lane's secret residue (quirk #9)
+    return 0;
+}
+
+# ================================================================
+# PUBLIC-exponent Montgomery modular exponentiation (3.12.2)
+# ================================================================
+# Same CIOS Montgomery core as `bn_mont_modexp`, but with `bn_modexp`'s
+# public-exponent schedule transplanted in: locate the exponent's high
+# bit, seed the accumulator with the base, then square every iteration
+# and multiply ONLY when the bit is set. The control flow therefore
+# depends on the exponent — which is exactly why this must NEVER be
+# called with a secret exponent (RSA d / dp / dq). Use `bn_mont_modexp`
+# there.
+#
+# Why it exists: RSA *verification* is a public operation on public
+# operands (s^e mod n with e = 65537), and the constant-time ladder is
+# over-provisioning that costs 2.3x. For e = 65537 handed back by
+# `rsa_pubkey_from_der` as the 3 bytes `01 00 01`:
+#
+#   bn_mont_modexp      24 bits x (square + unconditional multiply)
+#                       + 3 setup/teardown                  = 51 mont_muls
+#   bn_mont_modexp_pub  high bit at 16 -> 16 squarings + 1 multiply
+#                       + 3 setup/teardown                  = 20 mont_muls
+#
+# Seeding `res = basem` at the high bit (rather than starting from
+# Montgomery 1 and letting the first iteration square it) saves the
+# leading square+multiply pair, which is where the last 2 of the 22 in
+# the filed issue's estimate go.
+#
+# Modulus MUST be odd (RSA n is p.q of two odd primes; callers enforce
+# this at their trust boundary). Banked scratch is shared with the
+# secret ladder above, so `_bn_mont_scrub_lanes()` still runs on the
+# return path: it is ~3.6 KB of memset against ~20 mont_muls, and it
+# keeps one hygiene surface rather than two (a public call landing on a
+# lane that a prior secret call used still leaves it clean).
+#
+# Issue: docs/development/issues/2026-07-30-rsa-verify-uses-secret-exponent-ladder.md
+fn bn_mont_modexp_pub(out, base, exp, exp_blen, modulus, limbs): i64 {
+    var bk = cbank();
+    var r2src = &_bn_mont_r2src + bk * 1040;   # this thread's lane (PUBLIC)
+    var r2    = &_bn_mont_r2    + bk * 512;
+    var one   = &_bn_mont_one   + bk * 512;
+    var basem = &_bn_mont_base  + bk * 512;
+    var res   = &_bn_mont_res   + bk * 512;
+    var n0inv = _bn_mont_n0inv(load64(modulus));
+
+    # R^2 mod n  =  2^(128*limbs) mod n
+    var r2limbs = 2 * limbs + 1;
+    bn_zero(r2src, r2limbs);
+    store64(r2src + (2 * limbs) * 8, 1);
+    bn_mod(r2, r2src, r2limbs, modulus, limbs);
+
+    bn_zero(one, limbs);
+    store64(one, 1);
+
+    # base_m = base*R mod n ; res = 1*R mod n (Montgomery 1)
+    _bn_mont_mul(basem, base, r2, modulus, n0inv, limbs);
+    _bn_mont_mul(res, one, r2, modulus, n0inv, limbs);
+
+    # Locate the highest set bit of exp. hb stays -1 when exp == 0 (or
+    # exp_blen == 0), leaving res = Montgomery 1 so out = 1 = base^0 —
+    # same answer `bn_modexp` gives. cyrius has no break/continue, so
+    # the scan is guarded with `hb < 0` rather than exited early.
+    var hb = 0 - 1;
+    var i = exp_blen * 8 - 1;
+    while (i >= 0) {
+        if (hb < 0) {
+            if (_bn_exp_bit(exp, exp_blen, i) == 1) { hb = i; }
+        }
+        i = i - 1;
+    }
+
+    if (hb >= 0) {
+        # Seed with the base at the high bit, then process hb-1 .. 0.
+        # `_bn_mont_mul` writes `out` only after consuming `a`/`b` (it
+        # accumulates into the banked `t`), so res-aliasing is safe.
+        bn_copy(res, basem, limbs);
+        i = hb - 1;
+        while (i >= 0) {
+            _bn_mont_mul(res, res, res, modulus, n0inv, limbs);
+            if (_bn_exp_bit(exp, exp_blen, i) == 1) {
+                _bn_mont_mul(res, res, basem, modulus, n0inv, limbs);
+            }
+            i = i - 1;
+        }
+    }
+
+    # convert out of Montgomery form: out = res * 1 * R^-1 mod n
+    _bn_mont_mul(out, res, one, modulus, n0inv, limbs);
+    _bn_mont_scrub_lanes();
     return 0;
 }

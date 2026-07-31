@@ -7,6 +7,198 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.12.2] — 2026-07-30
+
+### Security — `authenticode_pe_sign` hashed the wrong byte range for unaligned images
+
+- **`src/authenticode.cyr`: the Authenticode image hash excluded the alignment padding it
+  wrote into the file.** The signer hashed `pe[0, pe_len)`, then placed the attribute-
+  certificate table at `cert_start = (pe_len + 7) & ~7`, zero-padding `[pe_len, cert_start)`.
+  The Authenticode specification hashes the image up to the *start of the certificate table*
+  — which **includes** that pad, and is what firmware, `sbverify` and Windows recompute. For
+  any `pe_len` not a multiple of 8, sigil's signature therefore covered a different byte range
+  than any spec verifier checks: a structurally valid signature on an image firmware would
+  **reject**.
+- **Impact.** Not a forgery or key-recovery defect — no signature over the wrong content is
+  ever *accepted*; correctly signed images fail *closed*. The consequence is an
+  unbootable-image class of failure, on the sovereign UEFI Secure Boot path gnoboot depends
+  on. **Aligned inputs are unaffected and produce byte-identical signatures to 3.12.1** — PE
+  file alignment is 512 and the test fixture was 256 bytes, both 8-aligned, which is why it
+  went unnoticed since 3.10.0.
+- **Fix.** The image and its pad are laid down first, and the digest is taken over
+  `out[0, cert_start)`. Regression-locked by a **253-byte** (deliberately unaligned)
+  sign→verify round trip in `tests/tcyr/authenticode.tcyr`, which is **mutation-proven**: it
+  fails against the 3.12.1 signer body and passes against the fix.
+
+### Security — hardening of the PE parser (all inputs untrusted)
+
+Found while building the verifier; each is reachable from an attacker-supplied PE.
+
+- **`sha256_init()` leaked 144 bytes per `authenticode_pe_hash` call** — the context comes
+  from `fl_alloc(144)` and its caller must `fl_free`, which this path never did. It is now a
+  `cbank()`-banked lane plus `sha256_init_into`: allocator-free (so it no longer touches the
+  non-thread-safe freelist, quirk #7) and race-free.
+- **The optional-header magic is now an allow-list** (`0x10B` PE32 / `0x20B` PE32+). Anything
+  other than `0x10B` was previously treated as PE32+, so a crafted magic silently selected the
+  PE32+ data-directory offsets.
+- **`NumberOfRvaAndSizes >= 5` is now required.** Without it, an image declaring fewer than
+  five data directories had its *section-header* bytes read as a security directory entry.
+- **`e_lfanew >= 0x40` is now required** — a PE header claiming to start inside the DOS stub
+  would otherwise let the first hash segment overlap the signature area.
+- The certificate table must be 8-byte aligned, inside the file, disjoint from the hashed
+  headers, and the file trailer; the `WIN_CERTIFICATE` entry must fill it, so no trailing
+  un-inspected entry can ride along inside a file that verifies.
+
+### Added — Authenticode **verification** (`authenticode_pe_verify`), closing P4
+
+Closes the last open item of [`2026-07-03-authenticode-pe-signing`](docs/development/issues/archive/2026-07-03-authenticode-pe-signing.md)
+(P1/P2 shipped 3.10.0, P3 3.11.1). sigil can now verify what it signs — the sovereign
+`sbverify` to match its `sbsign`, and what gnoboot needs to verify a kernel.
+
+- **`authenticode_pe_verify(pe, pe_len, trust_der, trust_len, now_unix)`** — the signer
+  certificate must **be** the trust anchor (a UEFI `db` holding a leaf cert).
+  **`authenticode_pe_verify_chain(...)`** takes a CA anchor instead and layers on
+  `x509_verify_chain` (a `db` holding a CA). Both have `_ex` variants that report an
+  `AC_VERR_*` code. Predicates return **1/0 only** — every malformed-input path folds to 0,
+  matching `x509_verify_chain` / `rsa_pkcs1v15_verify_sha256`.
+- **`authenticode_pe_hash_signed`** — the Authenticode digest of an *already-signed* image
+  (final segment stops at the certificate table rather than EOF; hashing the signature into
+  the digest that authenticates it would be unsatisfiable).
+- **Interoperable, not just self-consistent.** Accepts sigil's own output (no signedAttrs,
+  `rsaEncryption`) **and** third-party binaries: CMS `signedAttrs` per RFC 5652 §5.4, where
+  the signature covers `DER(SET OF Attribute)` — the `[0] IMPLICIT` span with tag `0xA0`
+  re-encoded as `0x31`, length bytes unchanged. That substitution is done **while streaming
+  into SHA-256**, so nothing is copied and no attributes-sized buffer exists to overflow. Both
+  `rsaEncryption` and `sha256WithRSAEncryption` are accepted in
+  `digestEncryptionAlgorithm`. The `contentType` and `messageDigest` signed attributes are
+  both verified — without the latter, `signedAttrs` would be a signed statement about content
+  nothing binds to this image.
+- Every structural read goes through either the explicit bounds checks above or x509.cyr's
+  audited `der_walk`. No raw pointer arithmetic on untrusted offsets outside those helpers.
+- **The signedAttrs branch is tested against an independent implementation, not a
+  self-round-trip.** sigil's signer never emits signedAttrs, so signing-then-verifying would
+  have left that entire branch unexercised. `tests/tcyr/authenticode.tcyr` carries a signed
+  image produced by a separate Python DER writer + `cryptography` RSA signer, using the
+  third-party shape throughout; it verifies, and its mutations fail at the expected steps.
+
+### Added — ECDSA P-256 Authenticode signer (the other half of P4)
+
+- **`authenticode_pe_sign_p256`** / **`authenticode_pkcs7_sign_p256`** — the same container
+  and image layout as the RSA path with an `ecdsa-with-SHA256` SignerInfo, signed
+  deterministically per RFC 6979 (`ecdsa_p256_sign_der`), so no entropy source is consulted
+  and output is reproducible. `ecdsa-with-SHA256` takes **absent** parameters (RFC 5758 §3.2),
+  not `NULL`, so that AlgId is built directly rather than through `der_algid_null`.
+- **`_ecdsa_p256_verify_digest_der`** (`src/ecdsa_p256.cyr`) — verify a DER `SEQUENCE{r,s}`
+  over a *pre-computed* digest, which the CMS `signedAttrs` path needs because the signed
+  content is a re-encoding that is never materialised as a contiguous message.
+- Note on scope: UEFI firmware overwhelmingly expects RSA. This variant exists for
+  AGNOS-internal verification (sigil on both ends); use the RSA path for anything third-party
+  firmware must accept.
+
+### Added — `src/mul64.cyr`: a native 64×64→128 multiply
+
+- **`_nmul64` / `_nmul64_hi`** — one x86-64 `MUL r/m64` in an `asm{}` block, replacing **four**
+  separate portable 32-bit-halves implementations (bayan's `_mul64` under `bignum.cyr`,
+  `_p384_mul64`, and two copies inlined into `bigint_ext.cyr`), each of which cost four 32×32
+  multiplies plus two comparison-based carry fixups per product.
+- **No CPUID probe and no runtime dispatch** — unlike the SHA-NI / AES-NI paths. `MUL r/m64`
+  is baseline x86-64, not an ISA extension, so the gate is a compile-time
+  `#ifdef CYRIUS_ARCH_X86` with a portable aarch64 fallback. This is the third `asm{}` site in
+  `src/`. See [architecture note 002](docs/architecture/002-native-asm-multiply.md).
+- **This is also a side-channel improvement, not a trade.** The portable code it replaces
+  carries two *value-dependent* branches per product; `MUL r64` is data-independent. On RSA's
+  secret-exponent ladder and ECDSA P-384's signing nonce, two data-dependent branches per limb
+  product are now gone.
+- `_nmul64_hi` returns through `rax` by falling through its asm block with no trailing
+  `return` — a real dependency on cyrius codegen, **gated** by a 17-vector differential KAT
+  against bayan's `_mul64` in `tests/tcyr/bignum.tcyr` that fails at build time rather than
+  silently corrupting signatures.
+
+### Added — `bn_mont_modexp_pub`: a public-exponent Montgomery modexp
+
+Closes [`2026-07-30-rsa-verify-uses-secret-exponent-ladder`](docs/development/issues/archive/2026-07-30-rsa-verify-uses-secret-exponent-ladder.md),
+filed by agnosai against its RS256 JWT path.
+
+- RSA *verification* is a public operation on public operands, but routed through
+  `bn_mont_modexp` — the constant-time ladder built for the secret exponent, which walks every
+  bit of the exponent's byte width with an unconditional multiply. For `e = 65537` (3 bytes)
+  that is **51 Montgomery multiplies where a public schedule needs 20**.
+- `bn_mont_modexp_pub` reuses the same CIOS core with `bn_modexp`'s high-bit scan and a
+  conditional multiply. **It must never be called with a secret exponent** — `d`/`dp`/`dq`
+  keep `bn_mont_modexp`. Both entry points state the rule; the three converted call sites
+  (`_rsa_recover_em`, and the sign path's blinding `r^e` and verify-after-sign `s^e`) each
+  carry a justification that their exponent is public. Recorded as
+  [ADR 0008](docs/adr/0008-native-asm-multiply-and-public-modexp.md) because sigil is the
+  trust boundary and a non-constant-time modexp in a crypto library deserves an explicit rule.
+
+### Performance
+
+All measured on one host with **both sides at pin 6.5.3**, so the delta isolates the source
+changes rather than the toolchain bump. The ML-DSA and SHA-256 rows are **controls** — they do
+not use the 64×64 limb multiply, and they did not move.
+
+| Benchmark | 3.12.1 | 3.12.2 | |
+|---|---|---|---|
+| `rsa2048_verify_sha256` | 3.276 ms | **1.178 ms** | 2.78× |
+| `rsa2048_sign_sha256_crt` | 70.132 ms | **41.276 ms** | 1.70× |
+| `rsa2048_modexp_fullwidth` (secret ladder) | 232.807 ms | 132.376 ms | 1.76× |
+| `bn_mont_mul_32limb` *(new row)* | 42 µs † | **20.264 µs** | 2.07× |
+| `ecdsa_p256_verify` | 10.539 ms | **9.732 ms** | 1.08× |
+| `ecdsa_p384_verify` | 25.936 ms | 23.604 ms | 1.10× |
+| `ecdsa_p256_sign` | 14.110 ms | 13.053 ms | 1.08× |
+| `ecdsa_p384_sign` | 32.755 ms | 30.208 ms | 1.08× |
+| `ed25519_verify` | 6.425 ms | **5.146 ms** | 1.25× |
+| `ed25519_sign` | 1.103 ms | 0.899 ms | 1.23× |
+| `x25519_base` | 2.890 ms | 2.296 ms | 1.26× |
+| `fp_mul` | 900 ns | 721 ns | 1.25× |
+| `fp_inv` | 241.430 µs | 195.553 µs | 1.23× |
+| `mldsa65_sign` *(control)* | 4.758 ms | 4.714 ms | — |
+| `sha256_1kb_ni` *(control)* | 3.171 µs | 3.161 µs | — |
+
+† the 42 µs figure is agnosai's measurement in the filed issue; the row itself is new in
+3.12.2, so there is no prior sigil-side recording of it.
+
+**`ecdsa_p256_verify` at 9.732 ms is below the ≤ 10 ms target that
+[ADR 0006](docs/adr/0006-park-ec-scalarmul-10ms-target.md) parked as "not reachable with
+current approaches."** ADR 0006 is deliberately **not** superseded here: the crossing is
+narrow (7 %) and single-host, and closing that target is Robert's call, not a side-effect of a
+performance change. What 3.12.2 records is that the *premise* changed — ADR 0006 named a
+hand-written asm multiply as an unavailable lever "gated on the cyrius `asm`-block
+global-symbol pseudo", and it turns out a leaf multiply needs no such pseudo. The roadmap
+backlog item is updated to say so. See ADR 0008.
+
+### Changed — toolchain and dependencies
+
+- **Toolchain pin `6.4.65` → `6.5.3`.** Suite is identical at 1587/0 across the bump with no
+  source change, so nothing in 3.12.2's numbers is attributable to the toolchain.
+- **sakshi `2.4.3` → `2.4.7`**; bayan `1.1.0` → `1.3.0` (bundled with the toolchain, not a
+  pinned dep). bayan 1.3.0 carries a breaking rename (`bayan_json_v_parse_str` → `_parse_buf`)
+  that **does not affect sigil** — sigil uses only the `u256_*` compat aliases and `_mul64`.
+
+### Documentation
+
+- **[architecture note 002](docs/architecture/002-native-asm-multiply.md)** — the asm
+  multiply's register discipline, why it has no runtime dispatch, and why `_nmul64_hi`
+  returns a scalar (it would otherwise need a `var lo[8]`, which is a static global — quirk
+  #1 — on the Ed25519 parallel batch-verify path).
+- **[ADR 0008](docs/adr/0008-native-asm-multiply-and-public-modexp.md)** — the multiply, the
+  non-constant-time modexp policy, and the disposition of ADR 0006's premise.
+- A **full doc-currency pass** repaired drift that predates this release: `docs/doc-health.md`
+  was three minors stale, `README.md` cited pin 6.4.45 / sakshi 2.3.0 / "1576 assertions
+  across 60 test files" and omitted `authenticode.cyr` and `efi_sigdb.cyr` entirely,
+  `SECURITY.md`'s supported window stopped at 3.11.x, `benches/history.csv` had no rows since
+  3.9.6, and `docs/sources.md` had no Authenticode / CMS / UEFI citations at all.
+
+### Still open (named, not buried)
+
+- **`ecdsa_p256_verify` ≤ 10 ms** — now measured below the target; ADR 0006's disposition
+  awaits an explicit decision.
+- The 3.10 / 3.11 gap in `benches/history.csv` is **real and unfilled** — those runs were
+  never recorded, and fabricating them would corrupt the history.
+
+Suite: **1661 assertions, 0 failed** across 64 `tests/tcyr/` files (was 1587); fuzz **24, 0
+failed** across 3 `fuzz/*.fcyr` files.
+
 ## [3.12.1] — 2026-07-17
 
 ### Changed — migrate the crypto-bank thread-local slot off a hardcoded literal

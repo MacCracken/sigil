@@ -37,18 +37,22 @@ are done; see the **3.9** closed-cycle entry below.
 
 **Backlog — gated / parked** (open, but not actionable until the gate lifts)
 
-- [ ] **EC scalar-mult sub-10 ms via an exotic lever** — *possible future,
-      **not a current priority.*** The ≤ 10 ms P-256 verify target was **closed
-      2026-06-16 as "not reachable with current approaches"** (option A, ADR 0006):
-      all portable levers shipped across 3.7.8–3.7.17 took `ecdsa_p256_verify`
-      24.7 → **~10.9 ms** (~2.3×), but the verify is doubling/inversion-bound and
-      Karatsuba caps at ~3–4%, so crossing 10 ms needs an exotic lever — a
-      hand-written asm multiply (gated on the upstream cyrius `asm`-block
-      global-symbol pseudo), a batched-affine GLV endomorphism, or a redesigned
-      doubling, none scoped. **Revisit only if a consumer surfaces a hard latency
-      requirement.** Lever analysis preserved in
-      [ADR 0006](../adr/0006-park-ec-scalarmul-10ms-target.md) + the 3.7
-      closed-cycle summary.
+- [ ] **EC scalar-mult ≤ 10 ms — DECISION NEEDED: the target is now met.**
+      **Changed at 3.12.2 and awaiting Robert's call.** ADR 0006 closed this
+      2026-06-16 as "not reachable with current approaches", naming a hand-written
+      asm multiply as an exotic lever *"gated on the upstream cyrius `asm`-block
+      global-symbol pseudo"*. **That gate turned out not to exist** for a leaf
+      function — `param_load` + raw opcode bytes is enough, and a plain `MUL r/m64`
+      needs neither MULX nor ADX. 3.12.2 shipped it (`src/mul64.cyr`) and
+      `ecdsa_p256_verify` measures **9.732 ms**, against 10.539 ms on the same host
+      at the same pin — **below the 10 ms target**.
+      **ADR 0006 was deliberately NOT closed by that**: the crossing is narrow
+      (~7 %) and single-host, and the disposition was Robert's decision, so it
+      should not be inherited from a performance side-effect. Open question is
+      therefore: *declare the target met, re-measure on a second host first, or
+      set a new one?* See [ADR 0008](../adr/0008-native-asm-multiply-and-public-modexp.md).
+      Remaining unexplored levers if a new target is set: a full `asm{}` CIOS inner
+      loop, a batched-affine GLV endomorphism, or a redesigned doubling.
 
 - [ ] **Switch hand-rolled JSON serializers to `#derive(Serialize)`** once
       cyrius's `#derive(Serialize)` supports cstring-pointer fields.
@@ -76,12 +80,60 @@ are done; see the **3.9** closed-cycle entry below.
       ever reaches the comb AND the deployment goes multi-tenant (neither holds
       for AGNOS). Kept parked, not dropped.
 
-- [ ] **CLMUL-assisted GHASH** — gated on the cyrius `asm`-block
-      global-symbol pseudo (filed upstream:
-      [`asm-block-global-symbol-pseudo`](https://github.com/MacCracken/cyrius/blob/main/docs/development/issues/2026-05-21-asm-block-global-symbol-pseudo.md)).
-      AES-GCM 1 KB sits ~700 µs after AES-NI; GHASH (bit-by-bit
-      GF(2^128) multiply) now dominates. PCLMULQDQ/VPCLMULQDQ closes the
-      gap, same byte-encoding pattern as the SHA-NI/AES-NI dispatchers.
+- [ ] **CLMUL-assisted GHASH** — **the gate is weaker than recorded; re-scope.**
+      This was parked as "gated on the cyrius `asm`-block global-symbol pseudo"
+      ([filed upstream](https://github.com/MacCracken/cyrius/blob/main/docs/development/issues/2026-05-21-asm-block-global-symbol-pseudo.md)).
+      3.12.2's `src/mul64.cyr` showed a leaf `asm{}` block needs no such pseudo, so
+      the question is now whether *GHASH specifically* needs global-symbol access
+      (it may, for a precomputed H-table — unlike a leaf multiply, which needs
+      none). Not yet investigated. AES-GCM 1 KB still sits ~690 µs after AES-NI,
+      with GHASH (bit-by-bit GF(2^128) multiply) dominating; PCLMULQDQ/VPCLMULQDQ
+      closes the gap, same byte-encoding pattern as the SHA-NI/AES-NI dispatchers.
+      **Unlike the multiply, PCLMULQDQ IS an optional ISA extension**, so it needs
+      the full CPUID probe + self-test + dispatch machinery that `mul64.cyr` was
+      able to skip.
+
+**Opened by 3.12.2** (named here so they are not buried in a CHANGELOG entry)
+
+- [ ] **UEFI Secure Boot firmware-interop gate** — boot a sigil-signed EFI under
+      OVMF with AGNOS-owned PK/KEK/db enrolled. The *only* remaining item from the
+      now-archived
+      [`authenticode-pe-signing`](issues/archive/2026-07-03-authenticode-pe-signing.md)
+      issue (P1–P4 all shipped: 3.10.0, 3.11.1, 3.12.2). Needs key-enrollment
+      tooling not present on the dev host; sigil-side work is complete and
+      openssl-validated. **Moved here from the issue file so it survives archival.**
+- [ ] **`benches/history.csv` has no 3.10 / 3.11 rows.** Those runs were never
+      recorded, and fabricating them would corrupt the history, so the gap is left
+      honest. 3.12.2 rows are present. Fill forward only.
+- [ ] **Two standing `cyrlint` findings, both pre-3.12.2 and both left as-is.**
+      Recorded here because 3.12.2 verified they predate it (identical output
+      at HEAD), not because they were introduced. Neither is an error.
+      (a) `src/mldsa_ntt.cyr:41` exceeds 120 characters — cosmetic.
+      (b) `src/secureboot_core.cyr:46, :92, :572` use a raw `sys_open` with
+      literal flags where `io.cyr`'s portable `xopen` / `file_open` wrappers
+      are preferred on agnos-bound paths. That one is a genuine portability
+      item — agnos's `sys_open` is `(name, namelen, flags)`, so the raw form
+      is Linux-shaped — but it touches live Secure Boot syscall paths, so it
+      wants its own bite with its own test, not a drive-by edit.
+      *(3.12.2 did clear a third finding: an untracked-deferral false positive
+      in `src/crypto_scratch.cyr` where "not yet allocated" described a
+      sentinel value; reworded rather than `#skip-lint`-suppressed.)*
+- [ ] **`src/efi_sigdb.cyr` is bundled but not included by `src/lib.cyr`.**
+      Found during 3.12.2's module-count recount: `cyrius.cyml [lib].modules`
+      has **65** entries while `src/lib.cyr` has **64** `include "src/…"` lines,
+      and the difference is `efi_sigdb.cyr` (shipped 3.11.1). So it reaches
+      every `dist/` consumer but is absent from the `programs/smoke.cyr` build
+      surface — meaning nothing in CI compiles it via the `src/lib.cyr` path.
+      Adding the include would change what the smoke build links, so it is
+      **Robert's call**, not a silent fix; the asymmetry is documented in the
+      `cyrius.cyml` comment for now. (`dist/sigil-authenticode.cyr` does bundle
+      it, and `tests/tcyr/efi_sigdb.tcyr` covers it, so this is a build-surface
+      gap rather than an untested-code gap.)
+- [ ] **A full `asm{}` CIOS inner loop** for `_bn_mont_mul` — would remove the
+      per-product call overhead and the `_bn_m64` memory round-trip that 3.12.2's
+      leaf multiply still pays. Deliberately not scoped in 3.12.2: substantially
+      larger audit surface on the most correctness-critical loop in the library,
+      for a fraction of the remaining win. Only if a consumer needs it.
 
 **Possible future surfaces** (consumer-demand-gated)
 
@@ -89,7 +141,11 @@ are done; see the **3.9** closed-cycle entry below.
       AGNOS consumer needs key agreement. (ML-DSA-65 PQC sign ships
       default-on since 3.7.6.)
 
-**Open audit findings — NONE.** The audit floor was **cleared at 3.7.3**
+**Open audit findings — NONE.** 3.12.2's audit found 1 HIGH (the
+`authenticode_pe_sign` pad-in-hash defect), 1 LOW and 4 hardenings — **all fixed
+in the same release**, none carried forward. See
+[`docs/audit/2026-07-30-3.12.2-asm-multiply-authenticode-verify-audit.md`](../audit/2026-07-30-3.12.2-asm-multiply-authenticode-verify-audit.md).
+The audit floor was **cleared at 3.7.3**
 (4 genuine per-call-drift LOWs resolved via the `_into` caller-scratch
 API; 4 reclassified as correct init-once singletons). See state.md
 "Audit floor".
@@ -99,6 +155,24 @@ API; 4 reclassified as correct init-once singletons). See state.md
 Per-version detail in [CHANGELOG.md](../../CHANGELOG.md); per-cycle
 audits in [`docs/audit/`](../audit/).
 
+- **3.12 — password hashing, then the perf + Authenticode-verify cycle.**
+  3.12.0 BLAKE2b (RFC 7693) + Argon2id/i/d (RFC 9106), verified against the RFC
+  9106 §5 vectors and OpenSSL 3.6's providers. 3.12.1 moved the crypto-bank
+  thread-local slot onto cyrius's slot allocator. **3.12.2** landed the native
+  `asm{}` 64×64→128 multiply (`src/mul64.cyr`, [ADR 0008](../adr/0008-native-asm-multiply-and-public-modexp.md),
+  [note 002](../architecture/002-native-asm-multiply.md)), the public-exponent
+  `bn_mont_modexp_pub`, Authenticode **verification** + the P-256 signer (closing
+  P4), and a HIGH-severity fix to `authenticode_pe_sign`'s hash range. RSA verify
+  2.78×, RSA sign 1.70×, Ed25519 verify 1.25×; `ecdsa_p256_verify` crossed below
+  ADR 0006's parked 10 ms. Toolchain 6.4.65 → 6.5.3.
+- **3.11 — UEFI Secure Boot enrollment.** `src/efi_sigdb.cyr`:
+  `efi_signature_list_from_cert` (byte-identical to efitools'
+  `cert-to-efi-sig-list`) + `efi_auth_from_esl` / `efi_time`, i.e. P3 of the
+  Authenticode arc.
+- **3.10 — native UEFI Authenticode PE signing.** `src/authenticode.cyr`: a DER
+  encoder, PKCS#7 `SignedData`, `SpcIndirectDataContent`, the PE Authenticode
+  hash, and the attribute-cert-table embed — the sovereign `sbsign`. P1 + P2 of
+  the Authenticode arc.
 - [`3.0-scope.md`](3.0-scope.md) — 3.0 cycle.
 - [`3.2-scope.md`](3.2-scope.md) / [`3.2-tee-arc.md`](3.2-tee-arc.md) —
   3.2.0 + the 3.2.x TEE attestation sub-arc.

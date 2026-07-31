@@ -25,6 +25,7 @@ include "lib/keccak.cyr"
 # Ed25519 stack (for hybrid verification test).
 include "lib/thread_local.cyr"
 include "src/crypto_scratch.cyr"
+include "src/mul64.cyr"
 include "src/types.cyr"
 include "src/error.cyr"
 include "lib/random.cyr"

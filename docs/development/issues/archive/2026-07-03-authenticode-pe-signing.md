@@ -13,14 +13,37 @@ external Linux tooling** and signs the wrong artifact class — so a sovereign U
 boot binary can only be signed by non-sovereign external tools (`sbsign`).
 **Not a release blocker:** Secure Boot is post-v1.0 in gnoboot's roadmap.
 
-**Status (2026-07-03): P1 + P2 RESOLVED in sigil 3.10.0.** `src/authenticode.cyr`
-lands the DER encoder + `authenticode_pe_hash` (P1) and `authenticode_pkcs7_sign` +
-`authenticode_pe_sign` (P2). Validated end-to-end against openssl on a real gnoboot
-`BOOTX64.EFI` (`openssl pkcs7 -print_certs` / `asn1parse` / `dgst -sha256 -verify` →
-`Verified OK`); regression-locked by `tests/tcyr/authenticode.tcyr`. The remaining
-firmware-interop gate (boot the signed EFI under OVMF Secure Boot with AGNOS-owned
-PK/KEK/db enrolled) needs key-enrollment tooling not present on this host. **P3**
-(`.esl`/`.auth` enrollment) and **P4** (`authenticode_pe_verify`) are still open.
+**Status (2026-07-30): RESOLVED — all four phases shipped.**
+
+- **P1 + P2 — sigil 3.10.0.** `src/authenticode.cyr` landed the DER encoder +
+  `authenticode_pe_hash` (P1) and `authenticode_pkcs7_sign` + `authenticode_pe_sign`
+  (P2). Validated end-to-end against openssl on a real gnoboot `BOOTX64.EFI`
+  (`openssl pkcs7 -print_certs` / `asn1parse` / `dgst -sha256 -verify` →
+  `Verified OK`).
+- **P3 — sigil 3.11.1.** `src/efi_sigdb.cyr`: `efi_signature_list_from_cert`
+  (byte-identical to efitools' `cert-to-efi-sig-list`) + `efi_auth_from_esl`.
+  *(This issue's status block said P3 was open until 3.12.2; that was stale.)*
+- **P4 — sigil 3.12.2.** BOTH halves: `authenticode_pe_verify` /
+  `authenticode_pe_verify_chain` (+ `_ex` diagnostic variants) and
+  `authenticode_pe_hash_signed`; and the ECDSA P-256 signer variant
+  (`authenticode_pe_sign_p256` / `authenticode_pkcs7_sign_p256`). The verifier
+  accepts sigil's own output *and* third-party binaries (CMS `signedAttrs` with the
+  `0xA0` → `0x31` re-tag, and `sha256WithRSAEncryption`).
+  `tests/tcyr/authenticode.tcyr` 5 → 53 assertions.
+
+**A defect in P2 was found while building P4 and is fixed in 3.12.2:**
+`authenticode_pe_sign` hashed `pe[0, pe_len)` but wrote the certificate table at the
+8-byte-aligned `cert_start`, so for any `pe_len` not a multiple of 8 the signature
+covered a different byte range than firmware recomputes — a structurally valid
+signature on an image firmware would **reject**. Aligned inputs (everything gnoboot
+signs) are unaffected and byte-identical. Filed as F1/HIGH in
+[`docs/audit/2026-07-30-3.12.2-asm-multiply-authenticode-verify-audit.md`](../../audit/2026-07-30-3.12.2-asm-multiply-authenticode-verify-audit.md),
+regression-locked by a mutation-proven 253-byte round-trip test.
+
+**Still open, and NOT closed by this issue** — the firmware-interop gate: boot a
+signed EFI under OVMF Secure Boot with AGNOS-owned PK/KEK/db enrolled. That needs
+hardware/tooling not present on this host and is tracked in
+[`docs/development/roadmap.md`](../roadmap.md), not here.
 
 ## What sigil ALREADY has (reuse, do NOT rebuild)
 
@@ -88,9 +111,11 @@ surface warrants its own file), sitting on `rsa.cyr` + `x509.cyr` + `der_*` +
 - **P2 ✅ (sigil 3.10.0)** — `authenticode_pe_sign` (attribute-cert-table embed).
   **Unblocks gnoboot** — openssl-validated; OVMF Secure Boot firmware-interop still
   pending key-enrollment tooling.
-- **P3** — `efi_sig_list_*` enrollment artifacts (agnova self-provisioning).
-- **P4 (optional)** — `authenticode_pe_verify` (gnoboot-verifies-kernel) + ECDSA-P256
-  signer variant (sigil has `ecdsa_p256.cyr` already) for firmware that prefers it.
+- **P3 ✅ (sigil 3.11.1)** — `efi_signature_list_from_cert` + `efi_auth_from_esl`
+  enrollment artifacts (agnova self-provisioning), in `src/efi_sigdb.cyr`.
+- **P4 ✅ (sigil 3.12.2)** — `authenticode_pe_verify` (gnoboot-verifies-kernel),
+  plus `authenticode_pe_verify_chain` for a CA-holding UEFI `db`, plus the
+  ECDSA-P256 signer variant. Both halves shipped, not just the verify half.
 
 ## Open decisions
 
@@ -99,8 +124,10 @@ surface warrants its own file), sitting on `rsa.cyr` + `x509.cyr` + `der_*` +
   the native UEFI path). Recommend **separate** — different artifact class, native
   vs wrapper.
 - RSA-2048 default vs ECDSA-P256 option (firmware support varies; RSA-2048 universal).
-- Do P4 (verify) in the same arc? The RSA-verify + PE-hash code is shared with sign,
-  so it's cheap to include and closes the full firmware→gnoboot→kernel chain.
+- ~~Do P4 (verify) in the same arc?~~ **Resolved 2026-07-30: yes, both halves, in
+  3.12.2.** The shared RSA-verify + PE-hash code did make it cheap, as predicted —
+  though the PE hash needed a *signed*-image variant (`authenticode_pe_hash_signed`),
+  because the existing one hashes to EOF and so would have swallowed the signature.
 
 ## Non-goals
 

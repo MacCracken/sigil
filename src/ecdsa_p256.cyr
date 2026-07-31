@@ -1692,3 +1692,32 @@ fn ecdsa_p256_verify_der(pk, msg, msg_len, sig_der, sig_der_len): i64 {
     memset(rsb, 0, 64);
     return rc;
 }
+
+# As `ecdsa_p256_verify_der`, but over a PRE-COMPUTED digest rather than a
+# message. Added 3.12.2 for Authenticode PKCS#7 verification, where the
+# signed content is a discontiguous re-encoding (the CMS signedAttrs SET,
+# hashed with a substituted tag byte) that is never materialised as a
+# contiguous message. `digest`/`digest_len` are the already-hashed bytes;
+# `sig_der` is the DER SEQUENCE { r INTEGER, s INTEGER } as it appears in a
+# SignerInfo's encryptedDigest. Returns 1 iff valid, else 0.
+#
+# Same banked r||s scratch discipline as the sibling above (quirk #1 / #9):
+# a plain banked `var`, per-lane wiped before return.
+fn _ecdsa_p256_verify_digest_der(pk, digest, digest_len, sig_der, sig_der_len): i64 {
+    if (sig_der_len < 8) { return 0; }
+    if ((load8(sig_der) & 0xFF) != 0x30) { return 0; }
+    var seq_len = load8(sig_der + 1) & 0xFF;
+    if (seq_len >= 0x80) { return 0; }   # short-form length only
+    if (2 + seq_len > sig_der_len) { return 0; }
+
+    var bk = cbank();
+    var raw_dsig[4096];   var rdb = &raw_dsig + bk * 64;   # 64 * SIGIL_CRYPTO_BANKS
+    var off = _ecdsa_der_int(sig_der, 2, sig_der_len, rdb);
+    if (off < 0) { memset(rdb, 0, 64); return 0; }
+    off = _ecdsa_der_int(sig_der, off, sig_der_len, rdb + 32);
+    if (off < 0) { memset(rdb, 0, 64); return 0; }
+
+    var rc = _ecdsa_p256_verify_digest(pk, digest, digest_len, rdb);
+    memset(rdb, 0, 64);
+    return rc;
+}

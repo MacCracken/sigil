@@ -25,6 +25,7 @@ include "lib/chrono.cyr"
 
 include "lib/thread_local.cyr"
 include "src/crypto_scratch.cyr"
+include "src/mul64.cyr"
 include "src/types.cyr"
 include "src/error.cyr"
 include "lib/random.cyr"

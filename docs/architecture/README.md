@@ -33,16 +33,25 @@ deep-dives on individual invariants.
   corollary that `secret var` *arrays* race too. The most grep-hit invariant
   in `src/`. Cross-links ADR 0004 / 0007.
 
+- [`002-native-asm-multiply.md`](002-native-asm-multiply.md) —
+  **written.** The `asm{}` 64×64→128 multiply (`src/mul64.cyr`, 3.12.2)
+  under every big-integer engine: why it has NO runtime dispatch (unlike
+  SHA-NI / AES-NI), its register/clobber contract, why `_nmul64_hi`
+  returns a scalar rather than writing through a pointer, and the
+  toolchain dependency the test suite gates. Cross-links ADR 0008 and
+  note 001.
+
 *The remaining cross-cutting constraints from CLAUDE.md "Known Cyrius Compiler
 Quirks" become numbered notes the first time a reader hits one from grep
-instead of from CLAUDE.md. Candidates for next extraction:*
+instead of from CLAUDE.md. Candidates for next extraction (renumbered at
+3.12.2 when 002 was claimed — these were reserved but never written):*
 
-- `002-preprocessor-output-cap.md` — quirk #8, the cap that
+- `003-preprocessor-output-cap.md` — quirk #8, the cap that
   motivated ADR 0002.
-- `003-stdlib-thread-safety-floor.md` — quirk #7, the
+- `004-stdlib-thread-safety-floor.md` — quirk #7, the
   alloc/hashmap/vec thread-safety floor that motivates 3.5's
   caller-scratch architecture.
-- `004-fixup-cap-and-init-block-sizes.md` — quirk #5, the
+- `005-fixup-cap-and-init-block-sizes.md` — quirk #5, the
   16384-entry cap that explains the AES-GCM S-box decode-from-
   hex pattern.
 

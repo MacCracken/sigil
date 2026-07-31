@@ -64,30 +64,22 @@ fn u256_store_le(dst, src): i64 {
 fn _u256_mul_full_schoolbook(out, a, b): i64 {
     memset(out, 0, 64);
     var sbit = 1 << 63;
-    var mask32 = 0xFFFFFFFF;
     var i = 0;
     while (i < 4) {
         var carry = 0;
         var j = 0;
         while (j < 4) {
-            # Inlined 64×64 → 128-bit multiply.
+            # 64×64 → 128-bit multiply. 3.12.2: the low half is cyrius's
+            # own wrapping `*` (identical for signed and unsigned operands
+            # in two's complement) and the high half is one native `MUL`
+            # (`_nmul64_hi`, src/mul64.cyr). The scalar-return form is
+            # deliberate — this fn is thread-safe by having NO static
+            # scratch, and a pointer-form result would need a `var lo[8]`,
+            # which is a function-scope static global (quirk #1).
             var av = load64(a + i * 8);
             var bv = load64(b + j * 8);
-            var aL = av & mask32;
-            var aH = (av >> 32) & mask32;
-            var bL = bv & mask32;
-            var bH = (bv >> 32) & mask32;
-            var ll = aL * bL;
-            var lh = aL * bH;
-            var hl = aH * bL;
-            var hh = aH * bH;
-            var mid = lh + hl;
-            var mid_carry = 0;
-            if ((mid ^ sbit) < (lh ^ sbit)) { mid_carry = 1; }
-            var m_lo = ll + (mid << 32);
-            var lo_carry = 0;
-            if ((m_lo ^ sbit) < (ll ^ sbit)) { lo_carry = 1; }
-            var m_hi = hh + (mid >> 32) + (mid_carry << 32) + lo_carry;
+            var m_lo = av * bv;
+            var m_hi = _nmul64_hi(av, bv);
 
             var k = i + j;
             var prev = load64(out + k * 8);
@@ -119,7 +111,6 @@ fn _u256_mul_full_schoolbook(out, a, b): i64 {
 fn _u256k_mul128(out, a, b): i64 {
     memset(out, 0, 32);
     var sbit = 1 << 63;
-    var mask32 = 0xFFFFFFFF;
     var i = 0;
     while (i < 2) {
         var carry = 0;
@@ -127,16 +118,8 @@ fn _u256k_mul128(out, a, b): i64 {
         while (j < 2) {
             var av = load64(a + i * 8);
             var bv = load64(b + j * 8);
-            var aL = av & mask32; var aH = (av >> 32) & mask32;
-            var bL = bv & mask32; var bH = (bv >> 32) & mask32;
-            var ll = aL * bL; var lh = aL * bH; var hl = aH * bL; var hh = aH * bH;
-            var mid = lh + hl;
-            var mid_carry = 0;
-            if ((mid ^ sbit) < (lh ^ sbit)) { mid_carry = 1; }
-            var m_lo = ll + (mid << 32);
-            var lo_carry = 0;
-            if ((m_lo ^ sbit) < (ll ^ sbit)) { lo_carry = 1; }
-            var m_hi = hh + (mid >> 32) + (mid_carry << 32) + lo_carry;
+            var m_lo = av * bv;                  # low 64: wrapping `*` (3.12.2)
+            var m_hi = _nmul64_hi(av, bv);       # high 64: native MUL
             var k = i + j;
             var prev = load64(out + k * 8);
             var s1 = prev + m_lo;
@@ -164,7 +147,6 @@ fn _u256k_mul128(out, a, b): i64 {
 # `_u256_mul_full_schoolbook` (bigint.tcyr).
 fn u256_mul_full(out, a, b): i64 {
     var sbit = 1 << 63;
-    var mask32 = 0xFFFFFFFF;
 
     # z0 = aL·bL → out[0..3];  z2 = aH·bH → out[4..7].
     # (out now holds z0 + z2·2^256 — the result minus the middle term.)
@@ -193,30 +175,14 @@ fn u256_mul_full(out, a, b): i64 {
     tl1 = tl1c;
 
     # m = (sl0,sl1) × (tl0,tl1) → m0..m3 (2×2 schoolbook, inline).
-    var vL = sl0 & mask32; var vH = (sl0 >> 32) & mask32;
-    var wL = tl0 & mask32; var wH = (tl0 >> 32) & mask32;
-    var ll = vL * wL; var lh = vL * wH; var hl = vH * wL; var hh = vH * wH;
-    var md = lh + hl; var mc = 0; if ((md ^ sbit) < (lh ^ sbit)) { mc = 1; }
-    var p00lo = ll + (md << 32); var lc = 0; if ((p00lo ^ sbit) < (ll ^ sbit)) { lc = 1; }
-    var p00hi = hh + (md >> 32) + (mc << 32) + lc;
-
-    vL = sl0 & mask32; vH = (sl0 >> 32) & mask32; wL = tl1 & mask32; wH = (tl1 >> 32) & mask32;
-    ll = vL * wL; lh = vL * wH; hl = vH * wL; hh = vH * wH;
-    md = lh + hl; mc = 0; if ((md ^ sbit) < (lh ^ sbit)) { mc = 1; }
-    var p01lo = ll + (md << 32); lc = 0; if ((p01lo ^ sbit) < (ll ^ sbit)) { lc = 1; }
-    var p01hi = hh + (md >> 32) + (mc << 32) + lc;
-
-    vL = sl1 & mask32; vH = (sl1 >> 32) & mask32; wL = tl0 & mask32; wH = (tl0 >> 32) & mask32;
-    ll = vL * wL; lh = vL * wH; hl = vH * wL; hh = vH * wH;
-    md = lh + hl; mc = 0; if ((md ^ sbit) < (lh ^ sbit)) { mc = 1; }
-    var p10lo = ll + (md << 32); lc = 0; if ((p10lo ^ sbit) < (ll ^ sbit)) { lc = 1; }
-    var p10hi = hh + (md >> 32) + (mc << 32) + lc;
-
-    vL = sl1 & mask32; vH = (sl1 >> 32) & mask32; wL = tl1 & mask32; wH = (tl1 >> 32) & mask32;
-    ll = vL * wL; lh = vL * wH; hl = vH * wL; hh = vH * wH;
-    md = lh + hl; mc = 0; if ((md ^ sbit) < (lh ^ sbit)) { mc = 1; }
-    var p11lo = ll + (md << 32); lc = 0; if ((p11lo ^ sbit) < (ll ^ sbit)) { lc = 1; }
-    var p11hi = hh + (md >> 32) + (mc << 32) + lc;
+    # 3.12.2: each product is cyrius's wrapping `*` for the low half and one
+    # native `MUL` for the high half (`_nmul64_hi`, src/mul64.cyr), replacing
+    # four 32×32 multiplies + two carry-fixup branches apiece. Scalar-return
+    # form keeps this fn static-scratch-free for the batch-verify path.
+    var p00lo = sl0 * tl0; var p00hi = _nmul64_hi(sl0, tl0);
+    var p01lo = sl0 * tl1; var p01hi = _nmul64_hi(sl0, tl1);
+    var p10lo = sl1 * tl0; var p10hi = _nmul64_hi(sl1, tl0);
+    var p11lo = sl1 * tl1; var p11hi = _nmul64_hi(sl1, tl1);
 
     var m0 = p00lo;
     var t = p00hi + p01lo; var cm = 0; if ((t ^ sbit) < (p00hi ^ sbit)) { cm = 1; }

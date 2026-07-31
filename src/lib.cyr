@@ -69,6 +69,13 @@ include "src/random.cyr"
 # Per-thread crypto scratch banks (3.6) — must precede every banked
 # crypto module (sha_ni onward) since they call `cbank()`.
 include "src/crypto_scratch.cyr"
+# Native 64x64 -> 128 multiply (3.12.2) — must precede every big-integer
+# engine that uses it: bigint_ext (u256, Ed25519 / P-256), ecdsa_p384
+# (u384), and bignum (RSA). No banked state of its own, so it only needs
+# to come before its callers.
+#ifndef _SIGIL_MUL64_INCLUDED
+include "src/mul64.cyr"
+#endif
 #ifndef _SIGIL_SHA_NI_INCLUDED
 include "src/sha_ni.cyr"
 #endif

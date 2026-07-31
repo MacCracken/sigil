@@ -4,6 +4,7 @@ alloc
 freelist
 string
 bayan
+tagged
 process
 ct
 thread

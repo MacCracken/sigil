@@ -26,6 +26,7 @@ include "lib/chrono.cyr"
 include "lib/ct.cyr"
 include "lib/thread_local.cyr"
 include "src/crypto_scratch.cyr"
+include "src/mul64.cyr"
 include "src/types.cyr"
 include "src/error.cyr"
 include "lib/random.cyr"
@@ -37,6 +38,10 @@ include "src/sha384.cyr"
 include "src/bigint_ext.cyr"
 include "src/ed25519.cyr"
 include "src/ecdsa_p256.cyr"
+include "src/hmac.cyr"
+include "src/hmac_sha384.cyr"
+include "src/ecdsa_p384.cyr"
+include "src/ecdsa_sign.cyr"
 include "src/x509.cyr"
 include "src/bignum.cyr"
 include "src/rsa.cyr"
@@ -109,6 +114,339 @@ fn main() {
     authenticode_pe_hash(&pe, 256, &out);
     var pe_exp = hex_decode("86516a30e1c04065c5420af4f825390d23f6554dc0aa06871dc9ec58950a073e", 64);
     assert_eq(ct_eq_bytes(&out, pe_exp, 32), 1, "Authenticode PE hash matches KAT");
+
+
+    # ============================================================
+    # Authenticode VERIFY (3.12.2) — P4.
+    # ============================================================
+    # Every case below signs a synthetic PE with a throwaway key and then
+    # judges the result. The signed blob is the ONLY input to the verifier,
+    # so each negative case is a one-byte (or one-field) mutation of a blob
+    # that verifies — which is what makes the assertions meaningful: they
+    # isolate exactly one check each.
+    test_group("Authenticode verify");
+
+    var AC_KEY_HEX = "308204bd020100300d06092a864886f70d0101010500048204a7308204a30201000282010100b83374f47407cffcecf5314d291cd1abb388a42edf932a8355c91a93aaee5d51a8db60b0ec215a05b298d36b58155a316c6b5b09f0a77230dccd5661eca20cb3b483190fa7836e6d782c5c5cfbea1457337c1825c09688c711ea335688157bcbd0a6536eb3958166985ca7bb030b68bbc8707a91091ef7e95ad69a02fcc6159763ad9edce3938ba80c95bbf4e3d0dd01e17bc01bc30c1ad5bfe32f92600e3e6ff8a12e8c6ff5a273f0a197ec33e634443fcc092ec1f212e9da0aa588427a499df5a05cf5fcba9ddfa3f4e1a2e04710720b4c2863857ef7eaf5f60f895693914b7b01fa538299a71ddcd37b3363ad919ed45dc86528f304c99dd936eee207f7810203010001028201001320009a2afbeeabe79c73a07bcecab445a13fcec016e3189ccd130dd6f705c8673c53d73ac521b82ab974661650ad3b297322122fa2eb17c8ad273566a0d2a9cbe9baade5ea1f0a8daa2972dc130b469c895b667c0f05278a24236d6e16b0f251f91afb88f8d2652917a1b0a899c4278f21a290317ebe25c3f1392f6b3853e065272be7b1b262ce7c1fefa3c1fe1bca4415ce2f25ba462c41692fb428fb200f75d5c06f23cb979f914aae9ecce7b25ad9a0dcf868dc2d8865f0aca1910476cadbb04019e5aca3271323cfa34c60944c10803379f5b614e0bd95e5cf01de34ca0edf118c077994b49a0594158f14732d0aca8e5f05b80f2306e0124904dca25302818100f488ed6a96d69169d5f4b1d36aedcfa1c0b8ac93b2bbffffcf4baa837de1381749ca062a9ea40436a511224499cd844d4baee8a022b0d34cf265383e23e0cdecd3838adf42a524752d86672d01f4eb08c39bb87b1137c4f16a5c8f3a9e56bfe9a64b570dd291a9109878e325d88072b3dc56611d1e0448c23419309076e79d2f02818100c0d65c9370e8acef30ccf4187e8dd8a24a8ebbd60529303dd95cc4b87a2d6fe4659506d3c43c83e10c800a7374e83390b279510ab4d3f0facf90b6965620f2ec59ebc4ef2cf63c4f3b634b4c03622105da2e0ef31cefccab02ab2664e42c16c42b509c0b8aafe4b007de965ad03b3cff3f99f457bf1eef14391506af69d76a4f0281802c01a0483850f0e64cfcb62bc7e8781f31e18a1d226336d4c0676b8e324f1f9b014a7c059b7b04cf18b196ab25ca986e989a277ef9ff3c67728fc8a9562794a774010e32d37988b015bb4442134212320791b4876137da175ffebc3fde52da42a00c9ae3ffeafab3e3dc8d74381c15884cb4b6d1589f88c07a43b63ba94a513d0281806e785f007826532b93a15614d22b2077988ebc3c97284962a52ae7e766d6b0caff06a8aa9838b2b4321d07dfac917938e3856c4fddd7acad824b3cce52f8fd3139323fd764c28b3a38a361776258cce235633d5d38ae876950560be0b07631749ffbc5e936c21d185ae9c0e8b571ba37df8faad2b9c256e416ef5cad10cd3f3102818100be2f4408f8a2826a1493340a6d7038efcbbf2bf35b1670ffb53a28107cc3c5d00c48e446139abd01dbbaf7889f89076348a52e6207b08715642316e1838dbd87dbb1a5e64381b369818c45c3b4e1458c6b3ffb4399ed4e6f6b8ad2dc63a89920e107dd13e51cb6a13752e5fcec4e3f9b081f8895653f8e666ec89934da02d7c0";
+    var AC_KEY_HEX_N = 2434;
+    var AC_CERT_HEX = "3082033830820220a00302010202145bf073ffd3b6147f912c5851588669ce8f77f921300d06092a864886f70d01010b050030253123302106035504030c1a536967696c2041757468656e7469636f64652054657374206462301e170d3236303733313033353930385a170d3436303732363033353930385a30253123302106035504030c1a536967696c2041757468656e7469636f6465205465737420646230820122300d06092a864886f70d01010105000382010f003082010a0282010100b83374f47407cffcecf5314d291cd1abb388a42edf932a8355c91a93aaee5d51a8db60b0ec215a05b298d36b58155a316c6b5b09f0a77230dccd5661eca20cb3b483190fa7836e6d782c5c5cfbea1457337c1825c09688c711ea335688157bcbd0a6536eb3958166985ca7bb030b68bbc8707a91091ef7e95ad69a02fcc6159763ad9edce3938ba80c95bbf4e3d0dd01e17bc01bc30c1ad5bfe32f92600e3e6ff8a12e8c6ff5a273f0a197ec33e634443fcc092ec1f212e9da0aa588427a499df5a05cf5fcba9ddfa3f4e1a2e04710720b4c2863857ef7eaf5f60f895693914b7b01fa538299a71ddcd37b3363ad919ed45dc86528f304c99dd936eee207f7810203010001a360305e301d0603551d0e04160414e42c72ba7cf99b5996468bf97b06d1d658ee0a14301f0603551d23041830168014e42c72ba7cf99b5996468bf97b06d1d658ee0a14300c0603551d130101ff04023000300e0603551d0f0101ff040403020780300d06092a864886f70d01010b05000382010100145b0aa825b4f0759e57dd6e65b0d3cd56d2b25fa27e90d1f7749aa38a70e5f78520c566b42bac0791c896e9099a31223d8e2e8b0b24cd5333ac52223cd87579f73215f1a8598328685b3f51260a132c954d86e8951cb5d099b5dc8ea58394e4fe67942a4ee71f79c590e329e8349a12492e4f05ef191740433d68bbb0d8c99ee7789b8e693150da5a6a4520a705a502f01bb8c4de64d63bac896fe5b6ae4ea88893b29a654802766c1ce0795d8996cb2d063cd55ab41030ad30721bc152b5a78cf28cd3ddfe77a316ed4e1afbb3d7406c2e76a4f1e00c15103ee9a43937723974d41f2a9d9f35271909f54ee65080b35d4dd47a883eed194efadf20ea87ebef";
+    var AC_CERT_HEX_N = 1656;
+    var AC_EC_SCALAR_HEX = "8d41b0af1b1c286e252c5bdcc5106623f81302edf3662383a25939b2534a61a8";
+    var AC_EC_SCALAR_HEX_N = 64;
+    var AC_EC_CERT_HEX = "308201b83082015ea00302010202142d8c1ce23573b814afb2bad85cc481614e9c85e9300a06082a8648ce3d040302302b3129302706035504030c20536967696c2041757468656e7469636f646520502d3235362054657374206462301e170d3236303733313033353931385a170d3436303732363033353931385a302b3129302706035504030c20536967696c2041757468656e7469636f646520502d32353620546573742064623059301306072a8648ce3d020106082a8648ce3d030107034200040fb5a98b3d2a18f66b0f7a6c5963cc6166cc11ae199b33cb004146e899ee33e15e58bf71eebf68b941e230fdd440356bf3a2d47c08ac5e7ba3ee667112e7317ea360305e301d0603551d0e04160414ca04c994792e807e266133a6e9b202ab77cf51d8301f0603551d23041830168014ca04c994792e807e266133a6e9b202ab77cf51d8300c0603551d130101ff04023000300e0603551d0f0101ff040403020780300a06082a8648ce3d04030203480030450221008914d3935849e3b38d551c6b92477958827634696b551b96841c8040b007172c02205ab11e61660d9f4180e035e830298173eb6a5665f664d22cbe98db33c15bcc9b";
+    var AC_EC_CERT_HEX_N = 888;
+    var AC_LEAF_KEY_HEX = "308204bc020100300d06092a864886f70d0101010500048204a6308204a20201000282010100a9ad898f3f8bf66e3e08e9609215d1e58f0b1d96422e932cca68a176cae0d738fb4b743a466bae645dc17a883d0485795c9b1f83b40601995a27918c2fde11f3fbb1239eddc785e5dba3cdf4f937eae11775e9c282f92a8a19b8740512b3c5ce31f89ec5ba857c4f2c4c7cc771ebbb93d122e8199e1517e22f7147f89e0c1238fa847c5d6300e7af8954b6c529adb8f7fb97066c657e57be2ce06fa5bea12124b483f396c0d313b18e62dbebcab1e4dce4e22b408fd5215fa89641d614ddd3a262ed53fe31c46a606b44242d5d0083bb10228cc0e55fcab14147e147929fce5cfae67505e4024b1dfe45830e0a6b6598b3048f9ea1cfce6236c0e066c5d6b0890203010001028201001e87d573e34f0b9b2809e1f648aae8eee9976a2e367fdb67088f9d97faa6cccb19ba68b230a82103b9b3fdd884442b411c56e42b8649bb616ccda85c85636baf0f477f1d8f91de67aee6f140e653f7ad2353c9e9403855bd6e25d8a86e064f6e0be34cac4ee4c46a9991b4b50d6c497eee375df478139b0dcd94104b6da2c5e75437e707a304b9ba8c80bcd2f7614e120156e935a61156ad17352bb25a02d2b547f6528d1a01df55c543ebee35cef885da0dd248445808c01987785cbd732cbbc87c4919452cfaa60d5883db9b47a7288dbd4c5dbc44b38fbbbc67eb5784329e84e495c87685ed08e128b8b078a76a5b07969b36bfd20582d1958017251ac68502818100d3309dbb8220756d2992200426205eb450960c28d6a1b83cf2c65f30c9e49cebc5f0319ca848b84a5eb1e2652e68243602119820af13236a5a91f4c7977ffec4ee83c93281a62e727d6f50446010ee3358dd0b456b4bd550462b3efe2fa05e106d0feafa663511f927f468b31526d9e5ed4a7a2a442c193fcf5138e9a28b76fd02818100cdae13a531861d50f0fa378b4089c6ef08035eb600b7419bd585e129b68238fcab4400dbf4f2e6a7492f3f4e9e0ae87c95812eb0c74d7b76231f961bdc788905010c59296edda307f131dfd20448c2e4744be6fb9b5ecf5cafd7d6f13b8a5fdae539df04dba88302166241a937b60d4979267739966305f76f216be4dc2d237d0281806a36491dc4940e7a982da56c70c056e0d8a69df6ebfae96dbdab86b442d577161cb6703d19657949edd608c65a5085e5a3a4b59dba6f25a0976c506f11028e5efc95cada5bd9f8021c939f0ac445bf86936a980091b5d1d24d77f27663fd83513f8881e4ed0243c7cb106097b04b99cac94c6ba45624d78dfff6196967163d0102818012defee47037cae6cb4559e547e59c40002f36f861f66e699adcaebd0206ceadb81504332a35431e6423969e62f7c33ef304a84105f840f4a4e25806746306c753c24b47f6e914f53c9703df240f7cfa330567cafc0565e72e27128c8d96f39684e39b67b9b3ab597cae4531fe6f90a6861c16624d3f06a41e2925da18ad778d0281800f7f0e2b5a830463e72aa46b490da147221cf9e13eb0ee3e564a2fdeb25e2b50a87d502f4f5493fba54ab48af72ddcf9a6d500c834f2f7f09cafa7af7a58761da0fce9f0d14d6f995fda209261920c3991ade343619a523cca7632573b24902011a71b80c8ceccb24353c1ac33f73370477a59fc1d80da52a74302756c22ea23";
+    var AC_LEAF_KEY_HEX_N = 2432;
+    var AC_LEAF_CERT_HEX = "3082033c30820224a00302010202143e60416d4b4a1100a9059d822abf4198706f3fd8300d06092a864886f70d01010b050030253123302106035504030c1a536967696c2041757468656e7469636f64652054657374204341301e170d3236303733313033353935395a170d3436303732363033353935395a30293127302506035504030c1e536967696c2041757468656e7469636f64652054657374207369676e657230820122300d06092a864886f70d01010105000382010f003082010a0282010100a9ad898f3f8bf66e3e08e9609215d1e58f0b1d96422e932cca68a176cae0d738fb4b743a466bae645dc17a883d0485795c9b1f83b40601995a27918c2fde11f3fbb1239eddc785e5dba3cdf4f937eae11775e9c282f92a8a19b8740512b3c5ce31f89ec5ba857c4f2c4c7cc771ebbb93d122e8199e1517e22f7147f89e0c1238fa847c5d6300e7af8954b6c529adb8f7fb97066c657e57be2ce06fa5bea12124b483f396c0d313b18e62dbebcab1e4dce4e22b408fd5215fa89641d614ddd3a262ed53fe31c46a606b44242d5d0083bb10228cc0e55fcab14147e147929fce5cfae67505e4024b1dfe45830e0a6b6598b3048f9ea1cfce6236c0e066c5d6b0890203010001a360305e300c0603551d130101ff04023000300e0603551d0f0101ff040403020780301d0603551d0e041604142992014b1499fc00bc8001157d6e4ca74c4bbc31301f0603551d230418301680149afc0d416d406e7dc8fd2ca56bf94258b7dfd34d300d06092a864886f70d01010b050003820101005e754fde1d61800787942096982118f822e2e3ac59981815dfb8162b2c6b4a34b614d3aa1635e4f4b075795112c2fdd823bfdea3ae60b64dad6d411450f0263caf18fe823ff36963d361dae7dad90ca8463c3202696ca39f40219e2e1525bcd0de9210e84feb752af24d1b49319315cdb44fbdeac22078a34dc4f76f2a819d5d436418f1baac246c87ca6a128ff556c80cd1891e130ee719675299db17f16cd6b4e0447b819214d337854ea1ca5402affe80a7b4ea17208e2c5bdc3a90b65391d249dc370ed9b3367ff470cf01bc172c1d4ea0244e157e1016c705c570b856373807194b93028f5b584c89f1d8f555da8904a47fdaac0fedd7a30a4116fe130f";
+    var AC_LEAF_CERT_HEX_N = 1664;
+    var AC_CA_CERT_HEX = "3082033e30820226a00302010202144e0c00f3a9ce81ecdb6e66a67136bf38b68a7324300d06092a864886f70d01010b050030253123302106035504030c1a536967696c2041757468656e7469636f64652054657374204341301e170d3236303733313033353935395a170d3436303732363033353935395a30253123302106035504030c1a536967696c2041757468656e7469636f6465205465737420434130820122300d06092a864886f70d01010105000382010f003082010a0282010100acd07363d2d88ce9b5bf071a734fee8d604417ad8ecb959b0454280e5aa44d64e7845949e1690a9ae5680a8df8534d8483c4001553cf89ad00f792fbd5fa80ae5a3623a27212b197f231810c0d8bcd90c7bc29160b04557e8272108e729df085a3aea09fbe7f5b8b78b18848c2dd8171da8cee50163207f9ff26e40606b8dc6ec9a9ce2a0408c03dd556f77260e5cef249b103fcee8027791673b7d284c3401681018f76835c6eb761bac04f1f95d944843937affe55c5c9aece678b469732896b6747dc180d369eeb73b00d9ccd63891ade1df4c6dcc7aa99f1f2afbd478b0fc41b2c89793034a50a900efbed777a2384966aeb988c92f633cfd67b6947535d0203010001a3663064301d0603551d0e041604149afc0d416d406e7dc8fd2ca56bf94258b7dfd34d301f0603551d230418301680149afc0d416d406e7dc8fd2ca56bf94258b7dfd34d30120603551d130101ff040830060101ff020100300e0603551d0f0101ff040403020106300d06092a864886f70d01010b05000382010100093713af7f60a370dc02cc3dc6fb640775de45ca2f5f3327e2797afa9c80b3f4872108c963c143842e03b36c31e76f02855b4333b953698a3e78881c4725c86bf341099d0d14ab819cfd9181872be621a00c70700707834ed4a9a58bb27b577c4d4e0bd9614397a0620a574a84742a24887cd7cadd4c00ee32c8c6d1254136475374cf8962663ea2fa60f23bc88fd9725e95cb6791d65fea4834ebcfc53e7f2a90fc803a18d1be62765880c261bd77bcf06239d31396c02cb49519872c741ee096857ada45da1c31152070ef73162f8de9ee98b7535243809ce73d78ae5a49e3b6dcc18615a3a45e20eabf667ece00ae312a2ddc9f487ba32f1c48aa06840f6f";
+    var AC_CA_CERT_HEX_N = 1668;
+
+    var ac_key_der  = hex_decode(AC_KEY_HEX, AC_KEY_HEX_N);
+    var ac_cert     = hex_decode(AC_CERT_HEX, AC_CERT_HEX_N);
+    var ac_cert_len = AC_CERT_HEX_N / 2;
+    var ac_key = alloc(2384);
+    assert_eq(rsa_privkey_from_der(ac_key_der, AC_KEY_HEX_N / 2, ac_key) >= 0, 1,
+        "verify fixture: RSA private key parses");
+
+    # Sign the same synthetic 256-byte PE the hash KAT above uses.
+    var sgn = alloc(8192);
+    var sgn_len = 0;
+    assert_eq(authenticode_pe_sign(&pe, 256, ac_key, ac_cert, ac_cert_len,
+                                   sgn, &sgn_len), 0, "sign the synthetic PE");
+
+    # ---- positive ------------------------------------------------
+    var rsn = 0 - 1;
+    assert_eq(authenticode_pe_verify_ex(sgn, sgn_len, ac_cert, ac_cert_len, 0, &rsn), 1,
+        "signed PE verifies against its own db cert");
+    assert_eq(rsn, AC_VOK, "reason is AC_VOK");
+
+    # `authenticode_pe_hash_signed` over the SIGNED image must reproduce the
+    # digest `authenticode_pe_hash` took of the UNSIGNED image — that identity
+    # is the whole basis of the scheme.
+    var h_uns[32]; var h_sgn[32];
+    authenticode_pe_hash(&pe, 256, &h_uns);
+    assert_eq(authenticode_pe_hash_signed(sgn, sgn_len, &h_sgn), 0, "hash_signed parses");
+    assert_eq(ct_eq_bytes(&h_uns, &h_sgn, 32), 1,
+        "hash_signed(signed) == hash(unsigned)");
+
+    # A CheckSum edit is inside a SKIP region, so it must NOT break the
+    # signature — this proves the skip arithmetic is actually applied on the
+    # verify side and not merely on the sign side.
+    var cks_save = load8(sgn + 0x98);
+    store8(sgn + 0x98, cks_save ^ 0xFF);
+    assert_eq(authenticode_pe_verify(sgn, sgn_len, ac_cert, ac_cert_len, 0), 1,
+        "CheckSum byte is skipped — still verifies");
+    store8(sgn + 0x98, cks_save);
+
+    # ---- the 3.12.2 pad-in-hash fix ------------------------------
+    # A PE whose length is NOT a multiple of 8 gets zero-padded up to the
+    # 8-byte-aligned cert-table start. The Authenticode spec hashes that pad;
+    # through 3.12.1 the signer did not, so the signature covered a different
+    # span than any spec verifier recomputes. This case is the regression
+    # lock: it fails on a signer that excludes the pad.
+    var pe253[253];
+    var q = 0;
+    while (q < 253) { store8(&pe253 + q, q); q = q + 1; }
+    store8(&pe253 + 0x3c, 0x40); store8(&pe253 + 0x3d, 0);
+    store8(&pe253 + 0x3e, 0);    store8(&pe253 + 0x3f, 0);
+    store8(&pe253 + 0x40, 0x50); store8(&pe253 + 0x41, 0x45);
+    store8(&pe253 + 0x42, 0);    store8(&pe253 + 0x43, 0);
+    store8(&pe253 + 0x58, 0x0b); store8(&pe253 + 0x59, 0x02);
+    var q2 = 0;
+    while (q2 < 8) { store8(&pe253 + 0xE8 + q2, 0); q2 = q2 + 1; }
+
+    var sgn253 = alloc(8192);
+    var sgn253_len = 0;
+    assert_eq(authenticode_pe_sign(&pe253, 253, ac_key, ac_cert, ac_cert_len,
+                                   sgn253, &sgn253_len), 0, "sign an unaligned (253-byte) PE");
+    assert_eq(authenticode_pe_verify(sgn253, sgn253_len, ac_cert, ac_cert_len, 0), 1,
+        "unaligned PE round-trips (pad IS inside the hash — 3.12.2 fix)");
+
+    # ---- negative: image / digest binding ------------------------
+    var b_save = load8(sgn + 0x50);
+    store8(sgn + 0x50, b_save ^ 0x01);
+    rsn = 0 - 1;
+    assert_eq(authenticode_pe_verify_ex(sgn, sgn_len, ac_cert, ac_cert_len, 0, &rsn), 0,
+        "tampered image body rejected");
+    assert_eq(rsn, AC_VERR_IMAGE_HASH, "  reason AC_VERR_IMAGE_HASH");
+    store8(sgn + 0x50, b_save);
+
+    # ---- negative: certificate-table framing ---------------------
+    var secdir = 0xE8;
+    var tab_off = _pe_rd32(sgn, secdir);
+    var tab_size = _pe_rd32(sgn, secdir + 4);
+
+    _wr32(sgn, secdir, tab_off + 1);                 # unaligned table offset
+    rsn = 0 - 1;
+    assert_eq(authenticode_pe_verify_ex(sgn, sgn_len, ac_cert, ac_cert_len, 0, &rsn), 0,
+        "unaligned cert-table offset rejected");
+    assert_eq(rsn, AC_VERR_CERTTAB, "  reason AC_VERR_CERTTAB");
+
+    _wr32(sgn, secdir, sgn_len + 4096);              # table past EOF
+    assert_eq(authenticode_pe_verify(sgn, sgn_len, ac_cert, ac_cert_len, 0), 0,
+        "cert table past EOF rejected");
+
+    _wr32(sgn, secdir, 0xFFFFFFF0);                  # near-2^32 offset
+    assert_eq(authenticode_pe_verify(sgn, sgn_len, ac_cert, ac_cert_len, 0), 0,
+        "near-2^32 cert-table offset rejected (no wrap)");
+    _wr32(sgn, secdir, tab_off);
+
+    _wr32(sgn, secdir + 4, 8);                       # size below dwLength
+    assert_eq(authenticode_pe_verify(sgn, sgn_len, ac_cert, ac_cert_len, 0), 0,
+        "cert-table size below dwLength rejected");
+    _wr32(sgn, secdir + 4, tab_size);
+
+    # ---- negative: WIN_CERTIFICATE header ------------------------
+    var dwlen_save = _pe_rd32(sgn, tab_off);
+    _wr16(sgn, tab_off + 6, 0x0001);                 # WIN_CERT_TYPE_X509
+    rsn = 0 - 1;
+    assert_eq(authenticode_pe_verify_ex(sgn, sgn_len, ac_cert, ac_cert_len, 0, &rsn), 0,
+        "wrong wCertificateType rejected");
+    assert_eq(rsn, AC_VERR_WINCERT, "  reason AC_VERR_WINCERT");
+    _wr16(sgn, tab_off + 6, 0x0002);
+
+    _wr16(sgn, tab_off + 4, 0x0100);                 # wrong revision
+    assert_eq(authenticode_pe_verify(sgn, sgn_len, ac_cert, ac_cert_len, 0), 0,
+        "wrong wRevision rejected");
+    _wr16(sgn, tab_off + 4, 0x0200);
+
+    _wr32(sgn, tab_off, 4);                          # dwLength below the header
+    assert_eq(authenticode_pe_verify(sgn, sgn_len, ac_cert, ac_cert_len, 0), 0,
+        "dwLength < 9 rejected");
+    _wr32(sgn, tab_off, dwlen_save);
+
+    # ---- negative: unsigned / truncated / malformed PE -----------
+    rsn = 0 - 1;
+    assert_eq(authenticode_pe_verify_ex(&pe, 256, ac_cert, ac_cert_len, 0, &rsn), 0,
+        "unsigned image rejected");
+    assert_eq(rsn, AC_VERR_NO_SIG, "  reason AC_VERR_NO_SIG");
+
+    rsn = 0 - 1;
+    assert_eq(authenticode_pe_verify_ex(sgn, 0x20, ac_cert, ac_cert_len, 0, &rsn), 0,
+        "pe_len below the DOS header rejected (no OOB read)");
+    assert_eq(rsn, AC_VERR_PE, "  reason AC_VERR_PE");
+
+    assert_eq(authenticode_pe_verify(sgn, tab_off + 4, ac_cert, ac_cert_len, 0), 0,
+        "truncated inside the cert table rejected");
+
+    var lf_save = _pe_rd32(sgn, 0x3C);
+    _wr32(sgn, 0x3C, sgn_len);                       # e_lfanew past EOF
+    assert_eq(authenticode_pe_verify(sgn, sgn_len, ac_cert, ac_cert_len, 0), 0,
+        "e_lfanew past EOF rejected");
+    _wr32(sgn, 0x3C, 0x10);                          # e_lfanew inside the DOS stub
+    assert_eq(authenticode_pe_verify(sgn, sgn_len, ac_cert, ac_cert_len, 0), 0,
+        "e_lfanew inside the DOS header rejected");
+    _wr32(sgn, 0x3C, lf_save);
+
+    var mg_save = _pe_rd16(sgn, 0x58);
+    _wr16(sgn, 0x58, 0x0107);                        # unknown optional-header magic
+    assert_eq(authenticode_pe_verify(sgn, sgn_len, ac_cert, ac_cert_len, 0), 0,
+        "unknown optional-header magic rejected (3.12.2 allow-list)");
+    _wr16(sgn, 0x58, mg_save);
+
+    var nrva_save = _pe_rd32(sgn, 0x58 + 108);
+    _wr32(sgn, 0x58 + 108, 3);                       # NumberOfRvaAndSizes < 5
+    assert_eq(authenticode_pe_verify(sgn, sgn_len, ac_cert, ac_cert_len, 0), 0,
+        "NumberOfRvaAndSizes < 5 rejected (3.12.2)");
+    _wr32(sgn, 0x58 + 108, nrva_save);
+
+    # ---- negative: PKCS#7 / signature ----------------------------
+    var p7_off = tab_off + 8;
+    var ci_save = load8(sgn + p7_off);
+    store8(sgn + p7_off, 0x31);                      # ContentInfo not a SEQUENCE
+    rsn = 0 - 1;
+    assert_eq(authenticode_pe_verify_ex(sgn, sgn_len, ac_cert, ac_cert_len, 0, &rsn), 0,
+        "malformed ContentInfo rejected");
+    assert_eq(rsn, AC_VERR_PKCS7, "  reason AC_VERR_PKCS7");
+    store8(sgn + p7_off, ci_save);
+
+    # Flip the last byte of the blob — inside the RSA signature, which the
+    # sign path places last in the SignerInfo.
+    var last = tab_off + dwlen_save - 1;
+    var l_save = load8(sgn + last);
+    store8(sgn + last, l_save ^ 0x01);
+    rsn = 0 - 1;
+    assert_eq(authenticode_pe_verify_ex(sgn, sgn_len, ac_cert, ac_cert_len, 0, &rsn), 0,
+        "tampered signature rejected");
+    assert_eq(rsn, AC_VERR_SIGNATURE, "  reason AC_VERR_SIGNATURE");
+    store8(sgn + last, l_save);
+
+    # ---- negative: trust ----------------------------------------
+    var other_cert = hex_decode(AC_CA_CERT_HEX, AC_CA_CERT_HEX_N);
+    rsn = 0 - 1;
+    assert_eq(authenticode_pe_verify_ex(sgn, sgn_len, other_cert,
+                                        AC_CA_CERT_HEX_N / 2, 0, &rsn), 0,
+        "valid image, WRONG trust anchor rejected");
+    assert_eq(rsn, AC_VERR_TRUST, "  reason AC_VERR_TRUST");
+
+    # Still verifies against the right anchor after all that mutation —
+    # proves every restore above was complete.
+    assert_eq(authenticode_pe_verify(sgn, sgn_len, ac_cert, ac_cert_len, 0), 1,
+        "blob restored intact after the negative sweep");
+
+    # ============================================================
+    # Chain-mode verify: db holds a CA, signer is a leaf under it.
+    # ============================================================
+    test_group("Authenticode verify — chain mode");
+
+    var lf_key_der = hex_decode(AC_LEAF_KEY_HEX, AC_LEAF_KEY_HEX_N);
+    var lf_cert    = hex_decode(AC_LEAF_CERT_HEX, AC_LEAF_CERT_HEX_N);
+    var lf_cert_len = AC_LEAF_CERT_HEX_N / 2;
+    var ca_cert    = hex_decode(AC_CA_CERT_HEX, AC_CA_CERT_HEX_N);
+    var ca_cert_len = AC_CA_CERT_HEX_N / 2;
+    var lf_key = alloc(2384);
+    assert_eq(rsa_privkey_from_der(lf_key_der, AC_LEAF_KEY_HEX_N / 2, lf_key) >= 0, 1,
+        "chain fixture: leaf private key parses");
+
+    var csgn = alloc(8192);
+    var csgn_len = 0;
+    assert_eq(authenticode_pe_sign(&pe, 256, lf_key, lf_cert, lf_cert_len,
+                                   csgn, &csgn_len), 0, "sign with the leaf key");
+    assert_eq(authenticode_pe_verify_chain(csgn, csgn_len, ca_cert, ca_cert_len, 0), 1,
+        "leaf-signed PE verifies to the CA anchor");
+    # Anchor-equality must REJECT it — the signer is the leaf, not the CA.
+    assert_eq(authenticode_pe_verify(csgn, csgn_len, ca_cert, ca_cert_len, 0), 0,
+        "anchor-equality rejects a leaf signed under the CA");
+    # And the CA must not vouch for the unrelated self-signed db cert.
+    assert_eq(authenticode_pe_verify_chain(sgn, sgn_len, ca_cert, ca_cert_len, 0), 0,
+        "chain mode rejects a signer outside the CA");
+
+    # ============================================================
+    # ECDSA P-256 signer variant (3.12.2) — the other half of P4.
+    # ============================================================
+    test_group("Authenticode P-256 signer");
+
+    var ec_scalar = hex_decode(AC_EC_SCALAR_HEX, AC_EC_SCALAR_HEX_N);
+    var ec_cert   = hex_decode(AC_EC_CERT_HEX, AC_EC_CERT_HEX_N);
+    var ec_cert_len = AC_EC_CERT_HEX_N / 2;
+
+    var esgn = alloc(8192);
+    var esgn_len = 0;
+    assert_eq(authenticode_pe_sign_p256(&pe, 256, ec_scalar, ec_cert, ec_cert_len,
+                                        esgn, &esgn_len), 0, "P-256 sign the synthetic PE");
+    rsn = 0 - 1;
+    assert_eq(authenticode_pe_verify_ex(esgn, esgn_len, ec_cert, ec_cert_len, 0, &rsn), 1,
+        "P-256 signed PE verifies");
+    assert_eq(rsn, AC_VOK, "  reason AC_VOK");
+
+    var eb_save = load8(esgn + 0x50);
+    store8(esgn + 0x50, eb_save ^ 0x01);
+    assert_eq(authenticode_pe_verify(esgn, esgn_len, ec_cert, ec_cert_len, 0), 0,
+        "P-256: tampered image body rejected");
+    store8(esgn + 0x50, eb_save);
+
+    var etab = _pe_rd32(esgn, secdir);
+    var edw = _pe_rd32(esgn, etab);
+    var elast = etab + edw - 1;
+    var el_save = load8(esgn + elast);
+    store8(esgn + elast, el_save ^ 0x01);
+    assert_eq(authenticode_pe_verify(esgn, esgn_len, ec_cert, ec_cert_len, 0), 0,
+        "P-256: tampered signature rejected");
+    store8(esgn + elast, el_save);
+
+    # Cross-algorithm: the RSA anchor must not validate the P-256 image.
+    assert_eq(authenticode_pe_verify(esgn, esgn_len, ac_cert, ac_cert_len, 0), 0,
+        "P-256 image rejected under the RSA anchor");
+    assert_eq(authenticode_pe_verify(esgn, esgn_len, ec_cert, ec_cert_len, 0), 1,
+        "P-256 blob restored intact");
+
+
+    # ============================================================
+    # Third-party shape: CMS signedAttrs + sha256WithRSAEncryption
+    # ============================================================
+    # sigil's own signer emits NO signedAttrs and a bare `rsaEncryption`
+    # AlgId. Microsoft's and osslsigncode's do the opposite, and that is
+    # the shape the verifier must also accept. This blob is built by an
+    # INDEPENDENT implementation over the same synthetic PE — a Python DER
+    # writer + `cryptography` RSA sign, committed as
+    # tests/data/authenticode/gen_signedattrs_fixture.py so this blob is
+    # reproducible rather than opaque —
+    # so it tests the parser against something sigil did not produce:
+    #   * signedAttrs present, so the signature covers DER(SET OF
+    #     Attribute) — the [0] IMPLICIT span with tag 0xA0 re-encoded as
+    #     0x31, length bytes untouched (RFC 5652 §5.4);
+    #   * contentType + messageDigest attributes present and bound;
+    #   * digestEncryptionAlgorithm is sha256WithRSAEncryption, not the
+    #     bare rsaEncryption sigil emits.
+    # Without the re-tag handled exactly right this fails to verify; with
+    # it handled loosely, N-2/N-3 below would still pass, which is why
+    # both a positive and two targeted negatives are here.
+    test_group("Authenticode verify — third-party signedAttrs shape");
+
+    var ATTRS_HEX = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b40000000504500004445464748494a4b4c4d4e4f50515253545556570b025a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e700010000a8050000f0f1f2f3f4f5f6f7f8f9fafbfcfdfeffa2050000000202003082059606092a864886f70d010702a082058730820583020101310f300d060960864801650304020105003073060a2b060104018237020104a0653063302e060a2b06010401823702010f3020a21e801c003c003c003c004f00620073006f006c006500740065003e003e003e3031300d06096086480165030402010500042086516a30e1c04065c5420af4f825390d23f6554dc0aa06871dc9ec58950a073ea082033c3082033830820220a00302010202145bf073ffd3b6147f912c5851588669ce8f77f921300d06092a864886f70d01010b050030253123302106035504030c1a536967696c2041757468656e7469636f64652054657374206462301e170d3236303733313033353930385a170d3436303732363033353930385a30253123302106035504030c1a536967696c2041757468656e7469636f6465205465737420646230820122300d06092a864886f70d01010105000382010f003082010a0282010100b83374f47407cffcecf5314d291cd1abb388a42edf932a8355c91a93aaee5d51a8db60b0ec215a05b298d36b58155a316c6b5b09f0a77230dccd5661eca20cb3b483190fa7836e6d782c5c5cfbea1457337c1825c09688c711ea335688157bcbd0a6536eb3958166985ca7bb030b68bbc8707a91091ef7e95ad69a02fcc6159763ad9edce3938ba80c95bbf4e3d0dd01e17bc01bc30c1ad5bfe32f92600e3e6ff8a12e8c6ff5a273f0a197ec33e634443fcc092ec1f212e9da0aa588427a499df5a05cf5fcba9ddfa3f4e1a2e04710720b4c2863857ef7eaf5f60f895693914b7b01fa538299a71ddcd37b3363ad919ed45dc86528f304c99dd936eee207f7810203010001a360305e301d0603551d0e04160414e42c72ba7cf99b5996468bf97b06d1d658ee0a14301f0603551d23041830168014e42c72ba7cf99b5996468bf97b06d1d658ee0a14300c0603551d130101ff04023000300e0603551d0f0101ff040403020780300d06092a864886f70d01010b05000382010100145b0aa825b4f0759e57dd6e65b0d3cd56d2b25fa27e90d1f7749aa38a70e5f78520c566b42bac0791c896e9099a31223d8e2e8b0b24cd5333ac52223cd87579f73215f1a8598328685b3f51260a132c954d86e8951cb5d099b5dc8ea58394e4fe67942a4ee71f79c590e329e8349a12492e4f05ef191740433d68bbb0d8c99ee7789b8e693150da5a6a4520a705a502f01bb8c4de64d63bac896fe5b6ae4ea88893b29a654802766c1ce0795d8996cb2d063cd55ab41030ad30721bc152b5a78cf28cd3ddfe77a316ed4e1afbb3d7406c2e76a4f1e00c15103ee9a43937723974d41f2a9d9f35271909f54ee65080b35d4dd47a883eed194efadf20ea87ebef318201b6308201b2020101303d30253123302106035504030c1a536967696c2041757468656e7469636f6465205465737420646202145bf073ffd3b6147f912c5851588669ce8f77f921300d06096086480165030402010500a04c301906092a864886f70d010903310c060a2b060104018237020104302f06092a864886f70d01090431220420e3459d4a59624d484c2d470316ca43fa34a6a8ea3d2ce8bacb2dc00795bef6d7300d06092a864886f70d01010b0500048201000ec92a394b4811b55f3d1cfad3aa761035f00ec4ffd08716fdd518158e94d40fb338fb5a151554599f0782b874a37cffd08381e01176cc4794758416bb90b0763769d8d15cc97ea995d5b40231da0e03806245b6dfde76c124cbe43d828a6455a254c4d1cb98cb711a39fc382045df9caaa6c0ea5bbcf6723a5e3c8430ec74afa2e7c66b996b7a38cfd4f4b2306fef72b009073d38f1f9761297172c56526368f57f18fdce2b9772fad56e4d25f8c46eba261c2330a65e30cbce026a4a6083bce88e8a1e9f40a0c3f103b751902720f9f97ae77a6ebe1bf96b3c1f7193a518d180de809c2ec3964a1232b8c8fe05bd1541ffd6ae5073211d8298167ea8dc6c0e000000000000";
+    var at_pe = hex_decode(ATTRS_HEX, 3408);
+    var at_len = 3408 / 2;
+
+    rsn = 0 - 1;
+    assert_eq(authenticode_pe_verify_ex(at_pe, at_len, ac_cert, ac_cert_len, 0, &rsn), 1,
+        "signedAttrs + sha256WithRSAEncryption binary verifies");
+    assert_eq(rsn, AC_VOK, "  reason AC_VOK");
+
+    # Tamper the image body: the signedAttrs messageDigest binds the
+    # SpcIndirectData, which binds the image hash — so this must fail at
+    # the image-hash step, not later.
+    var at_b = load8(at_pe + 0x50);
+    store8(at_pe + 0x50, at_b ^ 0x01);
+    rsn = 0 - 1;
+    assert_eq(authenticode_pe_verify_ex(at_pe, at_len, ac_cert, ac_cert_len, 0, &rsn), 0,
+        "signedAttrs: tampered image body rejected");
+    assert_eq(rsn, AC_VERR_IMAGE_HASH, "  reason AC_VERR_IMAGE_HASH");
+    store8(at_pe + 0x50, at_b);
+
+    # Tamper the LAST byte (inside the RSA signature over the attrs).
+    var at_tab = _pe_rd32(at_pe, secdir);
+    var at_dw = _pe_rd32(at_pe, at_tab);
+    var at_last = at_tab + at_dw - 1;
+    var at_l = load8(at_pe + at_last);
+    store8(at_pe + at_last, at_l ^ 0x01);
+    rsn = 0 - 1;
+    assert_eq(authenticode_pe_verify_ex(at_pe, at_len, ac_cert, ac_cert_len, 0, &rsn), 0,
+        "signedAttrs: tampered signature rejected");
+    assert_eq(rsn, AC_VERR_SIGNATURE, "  reason AC_VERR_SIGNATURE");
+    store8(at_pe + at_last, at_l);
+
+    assert_eq(authenticode_pe_verify(at_pe, at_len, ac_cert, ac_cert_len, 0), 1,
+        "signedAttrs blob restored intact");
 
     return assert_summary();
 }
