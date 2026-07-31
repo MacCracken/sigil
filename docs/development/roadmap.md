@@ -105,30 +105,19 @@ are done; see the **3.9** closed-cycle entry below.
 - [ ] **`benches/history.csv` has no 3.10 / 3.11 rows.** Those runs were never
       recorded, and fabricating them would corrupt the history, so the gap is left
       honest. 3.12.2 rows are present. Fill forward only.
-- [ ] **Two standing `cyrlint` findings, both pre-3.12.2 and both left as-is.**
-      Recorded here because 3.12.2 verified they predate it (identical output
-      at HEAD), not because they were introduced. Neither is an error.
-      (a) `src/mldsa_ntt.cyr:41` exceeds 120 characters — cosmetic.
-      (b) `src/secureboot_core.cyr:46, :92, :572` use a raw `sys_open` with
-      literal flags where `io.cyr`'s portable `xopen` / `file_open` wrappers
-      are preferred on agnos-bound paths. That one is a genuine portability
-      item — agnos's `sys_open` is `(name, namelen, flags)`, so the raw form
-      is Linux-shaped — but it touches live Secure Boot syscall paths, so it
-      wants its own bite with its own test, not a drive-by edit.
-      *(3.12.2 did clear a third finding: an untracked-deferral false positive
-      in `src/crypto_scratch.cyr` where "not yet allocated" described a
-      sentinel value; reworded rather than `#skip-lint`-suppressed.)*
-- [ ] **`src/efi_sigdb.cyr` is bundled but not included by `src/lib.cyr`.**
-      Found during 3.12.2's module-count recount: `cyrius.cyml [lib].modules`
-      has **65** entries while `src/lib.cyr` has **64** `include "src/…"` lines,
-      and the difference is `efi_sigdb.cyr` (shipped 3.11.1). So it reaches
-      every `dist/` consumer but is absent from the `programs/smoke.cyr` build
-      surface — meaning nothing in CI compiles it via the `src/lib.cyr` path.
-      Adding the include would change what the smoke build links, so it is
-      **Robert's call**, not a silent fix; the asymmetry is documented in the
-      `cyrius.cyml` comment for now. (`dist/sigil-authenticode.cyr` does bundle
-      it, and `tests/tcyr/efi_sigdb.tcyr` covers it, so this is a build-surface
-      gap rather than an untested-code gap.)
+- [ ] **One standing `cyrlint` line-length warning, deliberately exempted.**
+      `src/mldsa_ntt.cyr:41` exceeds 120 characters — it is the 2048-char
+      `_mldsa_zetas_hex` NTT twiddle-factor constant, and
+      `.github/workflows/ci.yml` carves it out by name alongside
+      `src/aes_gcm.cyr`'s FIPS 197 S-box. The CI comment states the exit
+      condition: drop the carve-out and add an inline allow **when cyrius
+      cyrlint gains a per-line `# cyrlint: allow line-length` annotation**.
+      Until then, splitting the literal would be strictly worse. Not a defect.
+      *(3.12.2 cleared the other two: the three raw `sys_open` sites in
+      `src/secureboot_core.cyr` now go through `io.cyr`'s namelen-bridged
+      `xopen` / `file_exists`, and an untracked-deferral false positive in
+      `src/crypto_scratch.cyr` — "not yet allocated" describing a sentinel —
+      was reworded rather than `#skip-lint`-suppressed.)*
 - [ ] **A full `asm{}` CIOS inner loop** for `_bn_mont_mul` — would remove the
       per-product call overhead and the `_bn_m64` memory round-trip that 3.12.2's
       leaf multiply still pays. Deliberately not scoped in 3.12.2: substantially

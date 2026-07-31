@@ -189,12 +189,43 @@ backlog item is updated to say so. See ADR 0008.
   `SECURITY.md`'s supported window stopped at 3.11.x, `benches/history.csv` had no rows since
   3.9.6, and `docs/sources.md` had no Authenticode / CMS / UEFI citations at all.
 
+### Fixed — portability and build-surface repairs
+
+- **`src/secureboot_core.cyr` no longer hand-rolls `sys_open`.** Three sites used the
+  Linux-shaped `sys_open(path, 0, 0)`. agnos's `sys_open` is **length-carrying** —
+  `(name, namelen, flags)` — so on that target the flags word lands in `namelen`, i.e. a
+  zero-length name: a silent ABI miscompile with no diagnostic. The EFI-variable read now
+  uses `io.cyr`'s namelen-bridged `xopen` (+ `file_close`), and the two directory probes use
+  `file_exists`, which is what they were open-then-closing to emulate. Behaviour on Linux is
+  unchanged (verified: `file_exists` returns 1 for `/sys/firmware/efi` and
+  `/sys/firmware/efi/efivars` on an EFI host, 0 for a nonexistent path). This clears the
+  `cyrlint` `xsys` notes; the one remaining lint warning is the `mldsa_ntt.cyr` NTT-constant
+  line length, which CI exempts by name.
+- **`src/efi_sigdb.cyr` is now included by `src/lib.cyr`.** It had been listed in
+  `cyrius.cyml [lib].modules` but never included, so every `dist/` consumer got it while the
+  `programs/smoke.cyr` build surface did not — nothing compiled it through that path. The two
+  lists are now both **65 entries** and must stay in step.
+- **`cyrius.cyml` comment hygiene, with a trap documented.** `distlib` scans a `modules`
+  array for quoted strings **without skipping `#` comments**, so a double-quoted phrase in a
+  comment inside the array is parsed as a module path and fails the build with
+  `module not found`. The rule is now stated inline where it bites.
+- **CI's distlib drift gate was missing `argon2`.** The per-profile loop in
+  `.github/workflows/ci.yml` listed twelve profiles; `[lib.argon2]` shipped at 3.12.0 and was
+  never added, so `dist/sigil-argon2.cyr` went three releases **with no staleness gate at
+  all** — it could have drifted from `src/` silently. Added, the echo corrected to thirteen,
+  and the loop now carries a note that it must track `[lib.*]` in `cyrius.cyml`. Verified: the
+  loop and the manifest now list the same thirteen profiles, and all fourteen bundles
+  regenerate byte-identically.
+
 ### Still open (named, not buried)
 
 - **`ecdsa_p256_verify` ≤ 10 ms** — now measured below the target; ADR 0006's disposition
   awaits an explicit decision.
 - The 3.10 / 3.11 gap in `benches/history.csv` is **real and unfilled** — those runs were
   never recorded, and fabricating them would corrupt the history.
+- One `cyrlint` line-length warning remains, on `mldsa_ntt.cyr`'s 2048-char NTT twiddle
+  constant. CI exempts it by name; the exit condition is a per-line cyrlint allow annotation,
+  not a source change.
 
 Suite: **1661 assertions, 0 failed** across 64 `tests/tcyr/` files (was 1587); fuzz **24, 0
 failed** across 3 `fuzz/*.fcyr` files.

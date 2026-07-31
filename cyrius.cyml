@@ -32,13 +32,14 @@ defines = ["SIGIL_SMOKE"]
 # into `dist/sigil.cyr`. Order matches src/lib.cyr's includes —
 # each module may reference symbols defined earlier.
 #
-# NOTE (verified 3.12.2): this list is **65 entries while src/lib.cyr has
-# 64 includes**, and that is not drift. `src/efi_sigdb.cyr` (UEFI
-# signature-list / .esl / .auth enrollment, shipped 3.11.1) is bundled
-# into dist but is NOT included by src/lib.cyr, so it is absent from the
-# `programs/smoke.cyr` build surface. Adding it to src/lib.cyr would
-# change what the smoke build links and is Robert's call — flagged in
-# docs/development/roadmap.md, not decided here.
+# INVARIANT (restored 3.12.2): this list and `src/lib.cyr`'s `include`
+# directives must have the SAME entries, in the same order — 65 each.
+# They had diverged: `src/efi_sigdb.cyr` (UEFI signature-list / .esl /
+# .auth enrollment, shipped 3.11.1) was listed here but never included
+# by src/lib.cyr, so every dist/ consumer got it while the
+# `programs/smoke.cyr` build surface did not — nothing compiled it
+# through that path. The include was added at 3.12.2; keep the two in
+# step when adding a module.
 #
 # The bundle must be self-contained (Cyrius 5.2.1's distlib
 # compile-checks the result). As of 3.8.1 the trust stack is fully
@@ -129,8 +130,11 @@ modules = [
     "src/audit.cyr",
     # Trust wrappers over the cores (bundled at 3.9.0 — P2). Mirrors the
     # src/lib.cyr wrapper block: after audit.cyr, before verify.cyr.
-    # (Deliberately not citing line numbers — they rot on every include
-    # added above them, and the previous "lines 149-152" had already.)
+    # No line numbers here on purpose — they rot on every include added
+    # above them, and the previous ones had. NOTE: `distlib` scans this
+    # array for quoted strings WITHOUT skipping `#` comments, so a
+    # double-quoted phrase in a comment inside the array is parsed as a
+    # module path and fails the build. Keep comment prose unquoted.
     "src/tpm.cyr",
     "src/ima.cyr",
     "src/secureboot.cyr",

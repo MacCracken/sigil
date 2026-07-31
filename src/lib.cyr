@@ -128,7 +128,17 @@ include "src/privkey.cyr"
 # src/bignum.cyr (modexp) + sha256/sha384. Verify-only (public data);
 # sign + PSS are later 3.6.x bites.
 include "src/rsa.cyr"
+# Native UEFI Authenticode PE signing AND verification (the sovereign
+# sbsign / sbverify), plus the EFI signature-list + signed-variable
+# enrollment artifacts that provision the keys it signs against.
+#
+# efi_sigdb was bundle-only until 3.12.2: `cyrius.cyml [lib].modules`
+# listed it (so every dist/ consumer got it) while src/lib.cyr did not,
+# leaving it out of the programs/smoke.cyr build surface — nothing
+# compiled it through this path. Included here now so the two lists
+# agree and the smoke build links what the bundle ships.
 include "src/authenticode.cyr"
+include "src/efi_sigdb.cyr"
 include "src/sgx.cyr"
 include "src/sev_snp.cyr"
 include "src/tdx.cyr"

@@ -2074,12 +2074,17 @@ fn secureboot_read_efi_variable(path): i64 {
         return err_invalid_argument("efi variable path is empty");
     }
 
-    # Open the file
-    var fd = sys_open(path, 0, 0);  # O_RDONLY = 0
+    # Open the file. Use io.cyr's `xopen`, NOT a raw `sys_open`: agnos's
+    # sys_open is LENGTH-CARRYING — `(name, namelen, flags)` — so the
+    # Linux-shaped `sys_open(path, 0, 0)` this used through 3.12.2 puts
+    # the flags word in `namelen`, i.e. a zero-length name. That is a
+    # silent ABI miscompile off Linux (no ud2, no diagnostic), which is
+    # exactly what the cyrlint `xsys` rule flags. `xopen` bridges it.
+    var fd = xopen(path, 0);        # O_RDONLY
     if (fd < 0) {
         return err_io(0 - fd, "failed to open efi variable");
     }
-    defer { sys_close(fd); }
+    defer { file_close(fd); }
 
     # Read up to 256 bytes (EFI variables are typically small)
     var buf = alloc(256);
@@ -2119,13 +2124,14 @@ fn secureboot_efi_var_size(data): i64 {
 # Detect the current Secure Boot state.
 # Returns Result: Ok(SecureBootState) or Err.
 fn secureboot_detect_state(): i64 {
-    # Check if EFI is available
+    # Check if EFI is available. `file_exists` (io.cyr) rather than a raw
+    # sys_open for the same namelen-bridging reason as above — the probe
+    # is an existence test, and open-then-close was only ever standing in
+    # for one.
     var efi_dir = "/sys/firmware/efi";
-    var fd = sys_open(efi_dir, 0, 0);
-    if (fd < 0) {
+    if (file_exists(efi_dir) == 0) {
         return Ok(SB_NOT_SUPPORTED);
     }
-    sys_close(fd);
 
     # Try reading SecureBoot EFI variable
     var sb_path = "/sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c";
@@ -2601,11 +2607,9 @@ fn secureboot_efi_var_new(name, size): i64 {
 # Returns Result: Ok(vec_of_efi_vars) or Err.
 fn secureboot_list_efi_variables(): i64 {
     var efivars_dir = "/sys/firmware/efi/efivars";
-    var fd = sys_open(efivars_dir, 0, 0);
-    if (fd < 0) {
-        return err_io(0 - fd, "EFI variables directory not found; is this a UEFI system?");
+    if (file_exists(efivars_dir) == 0) {
+        return err_io(ENOENT, "EFI variables directory not found; is this a UEFI system?");
     }
-    sys_close(fd);
 
     # Read directory listing via ls
     var args = vec_new();
@@ -25845,4 +25849,1562 @@ fn _alog_write_int(dst, val): i64 {
     var len = 23 - pos;
     memcpy(dst, _alog_int_buf + pos, len);
     return len;
+}
+
+# --- tpm.cyr ---
+
+# tpm.cyr — TPM 2.0 integration (thin wrapper over agnosys 0.98.0)
+#
+# Sigil owns the trust-decision policy; agnosys owns the tpm2-tools
+# shell-out. This module exposes a narrow, Result-free surface to the
+# rest of sigil:
+#   - `tpm_available()`    — detect /dev/tpm{rm,}0
+#   - `pcr_measurement_*`  — sigil's PCR baseline struct
+#   - `tpm_seal_data()`    — seal a secret to current PCR state
+#   - `tpm_unseal_data()`  — unseal (PCR-gated)
+#   - `tpm_random()`       — kernel CSPRNG via sigil's entropy boundary
+#
+# All entry points check `tpm_available()` first and return 0 / error
+# on absence, so this module is safe to call on hosts without a TPM
+# (tests, CI, dev laptops without tpm2-tools installed).
+
+# ================================================================
+# PcrMeasurement (24 bytes) — sigil-side baseline, unchanged
+# ================================================================
+# Layout:
+#   +0   index           (i64, PCR index 0-23)
+#   +8   expected_digest (C-string ptr, hex)
+#   +16  actual_digest   (C-string ptr, hex, 0 = unread)
+
+fn pcr_measurement_new(index, expected_digest): i64 {
+    var m = fl_alloc(24);
+    store64(m, index);
+    store64(m + 8, expected_digest);
+    store64(m + 16, 0);
+    return m;
+}
+
+# pcr_index getter removed in 2.6.0 (no read path). `index` is still
+# written at construction because AttestationResult iteration may
+# eventually consume it — the field stays, only the accessor is dead.
+fn pcr_expected(m): i64 { return load64(m + 8); }
+fn pcr_actual(m): i64 { return load64(m + 16); }
+fn pcr_set_actual(m, v): i64 { store64(m + 16, v); return m; }
+
+# ================================================================
+# AttestationResult (16 bytes)
+# ================================================================
+# Layout:
+#   +0   passed          (i64, 0 or 1)
+#   +8   measurements    (vec of PcrMeasurement)
+#
+# Dropped in 2.6.0: quote_signature field + accessors. Quote
+# signatures are not produced by this module (would come from a
+# future tpm_quote wrapper) and were never consumed.
+
+fn attestation_result_new(passed): i64 {
+    var r = fl_alloc(16);
+    store64(r, passed);
+    store64(r + 8, vec_new());
+    return r;
+}
+
+fn attest_measurements(r): i64 { return load64(r + 8); }
+
+# ================================================================
+# TPM availability — delegates to agnosys tpm_detect().
+# agnosys uses SYS_ACCESS on /dev/tpmrm0 then /dev/tpm0.
+# ================================================================
+
+fn tpm_available(): i64 {
+    return tpm_detect();
+}
+
+# ================================================================
+# Sealing — delegates to agnosys tpm_seal / tpm_unseal.
+#
+# tpm_seal_data(data, data_len, pcr_indices, output_dir):
+#   data/data_len:  secret bytes (≤ 2048, TPM_SEAL_MAX_BYTES)
+#   pcr_indices:    vec of i64 PCR indices (SHA-256 bank, policy-fixed)
+#   output_dir:     directory for tpm2_create outputs (sealed.ctx etc.)
+# Returns sealed-handle pointer on success, 0 on any failure.
+#
+# tpm_unseal_data(sealed, buf, buf_len):
+#   Returns bytes-written on success, 0 on failure.
+# ================================================================
+
+fn tpm_seal_data(data, data_len, pcr_indices, output_dir): i64 {
+    if (tpm_available() == 0) { return 0; }
+    var res = tpm_seal(TPM_SHA256, pcr_indices, data, data_len, output_dir);
+    if (is_err_result(res) == 1) { return 0; }
+    return result_unwrap(res);
+}
+
+fn tpm_unseal_data(sealed, buf, buf_len): i64 {
+    if (tpm_available() == 0) { return 0; }
+    var res = tpm_unseal(sealed, buf, buf_len);
+    if (is_err_result(res) == 1) { return 0; }
+    return result_unwrap(res);
+}
+
+# ================================================================
+# Random bytes via the kernel CSPRNG (sigil's single entropy boundary).
+#
+# We deliberately do NOT route this through agnosys `tpm_get_random`
+# even when a TPM is present: that path shells out to
+# `/usr/bin/tpm2_getrandom`, which requires tpm2-tools installed and
+# adds a subprocess per key gen. Instead this funnels through
+# `_sigil_random_fill` (src/random.cyr → stdlib `random_bytes`), the same
+# per-target CSPRNG every other sigil draw uses (getrandom on Linux/AGNOS,
+# getentropy on macOS, ProcessPrng on Windows) — getrandom(2)-backed and
+# cryptographically adequate for Ed25519 scalar generation. Routing here
+# too (3.7.15) keeps the "single entropy boundary" invariant whole and
+# removes the prior direct `/dev/urandom` open (non-functional on Windows).
+# If a use case ever needs *hardware*-sourced entropy specifically (audit,
+# remote attestation), a dedicated `tpm_hw_random` can be added later.
+#
+# Caller MUST treat any return value < count as entropy failure (this
+# returns `count` on success / 0 on failure — fail-closed, no weak fallback).
+# ================================================================
+
+fn tpm_random(buf, count): i64 {
+    if (count <= 0) { return 0; }
+    if (_sigil_random_fill(buf, count) != 0) { return 0; }
+    return count;
+}
+
+# --- ima.cyr ---
+
+# ima.cyr — Linux IMA (Integrity Measurement Architecture) integration.
+# Thin wrapper over agnosys ima_* functions.
+#
+# Sigil-facing surface:
+#   - `sigil_ima_available()`          — IMA active on this host?
+#   - `sigil_ima_measurement_count()`  — number of kernel measurements
+#   - `sigil_ima_policy_loaded()`      — is an IMA policy installed?
+#   - `sigil_ima_snapshot()`           — aggregate (active, count, policy) struct
+#
+# All calls are safe on hosts without IMA — they return 0 counts and
+# active=0 rather than failing. This mirrors the TPM module's
+# runtime-detection posture.
+
+# ================================================================
+# ImaSnapshot (24 bytes) — sigil-side summary of agnosys ima_status
+# ================================================================
+# Layout:
+#   +0   active           (i64, 0 or 1)
+#   +8   measurement_cnt  (i64)
+#   +16  policy_loaded    (i64, 0 or 1)
+
+fn sigil_ima_snapshot_new(active, count, policy): i64 {
+    var s = fl_alloc(24);
+    store64(s, active);
+    store64(s + 8, count);
+    store64(s + 16, policy);
+    return s;
+}
+
+fn sigil_ima_active(s): i64 { return load64(s); }
+fn sigil_ima_count(s): i64 { return load64(s + 8); }
+fn sigil_ima_policy(s): i64 { return load64(s + 16); }
+
+# ================================================================
+# sigil_ima_snapshot — query current kernel IMA state
+#
+# Delegates to agnosys `ima_get_status()`, unwraps the Result, and
+# returns a sigil-native snapshot. On a host without IMA mounted at
+# /sys/kernel/security/ima, agnosys returns Ok(inactive); we pass
+# that through.
+# ================================================================
+
+fn sigil_ima_snapshot(): i64 {
+    var res = ima_get_status();
+    if (is_err_result(res) == 1) {
+        return sigil_ima_snapshot_new(0, 0, 0);
+    }
+    var ag = result_unwrap(res);
+    return sigil_ima_snapshot_new(
+    ima_status_active(ag),
+    ima_status_measurement_count(ag),
+    ima_status_policy_loaded(ag)
+    );
+}
+
+# Convenience predicates — avoid allocating a snapshot when the
+# caller only wants one field.
+
+fn sigil_ima_available(): i64 {
+    var s = sigil_ima_snapshot();
+    var v = sigil_ima_active(s);
+    fl_free(s);
+    return v;
+}
+
+fn sigil_ima_measurement_count(): i64 {
+    var s = sigil_ima_snapshot();
+    var v = sigil_ima_count(s);
+    fl_free(s);
+    return v;
+}
+
+fn sigil_ima_policy_loaded(): i64 {
+    var s = sigil_ima_snapshot();
+    var v = sigil_ima_policy(s);
+    fl_free(s);
+    return v;
+}
+
+# --- secureboot.cyr ---
+
+# secureboot.cyr — UEFI Secure Boot state for sigil trust policy.
+# Thin wrapper over agnosys secureboot_* functions.
+#
+# Sigil-facing surface:
+#   - `sigil_sb_state()`       — returns the SB state enum (agnosys value)
+#   - `sigil_sb_enforcing()`   — 1 iff state == SB_ENABLED
+#   - `sigil_sb_state_name()`  — static C-string: "enabled"/"disabled"/…
+#
+# Used by policy enforcement: a trust policy may require
+# sigil_sb_enforcing() == 1 before admitting an artifact as
+# TRUST_SYSTEM_CORE. Non-EFI hosts report "not_supported" (pass-through
+# from agnosys).
+
+# ================================================================
+# sigil_sb_state — query current Secure Boot state.
+# Returns the agnosys-defined SB_* constant. On hosts without EFI or
+# where mokutil fails, this is SB_NOT_SUPPORTED.
+# ================================================================
+
+fn sigil_sb_state(): i64 {
+    var res = secureboot_detect_state();
+    if (is_err_result(res) == 1) {
+        return SB_NOT_SUPPORTED;
+    }
+    return result_unwrap(res);
+}
+
+# 1 iff Secure Boot is actively enforcing (SB_ENABLED).
+# SB_SETUP_MODE (keys can still be enrolled) and SB_DISABLED both
+# return 0 — sigil must not treat either as a trusted boot chain.
+fn sigil_sb_enforcing(): i64 {
+    return secureboot_is_enforcing(sigil_sb_state());
+}
+
+# Human-readable state (static C-string, do not free).
+fn sigil_sb_state_name(): i64 {
+    return secureboot_state_str(sigil_sb_state());
+}
+
+# --- certpin.cyr ---
+
+# certpin.cyr — certificate-pin trust primitive (thin wrapper over
+# agnosys certpin_*). Same pattern as src/tpm.cyr, src/ima.cyr,
+# src/secureboot.cyr: sigil owns the policy surface, agnosys owns
+# the wire format and constant-time primitives.
+#
+# Sigil-facing API:
+#   - `sigil_cert_pin_status(host, actual_pin, pin_set, at)` —
+#     returns a raw CERTPIN_* constant. Use when callers need to
+#     distinguish mismatch from "no pin configured".
+#   - `sigil_cert_pin_check(host, actual_pin, pin_set)` —
+#     convenience predicate. 1 iff CERTPIN_VALID using now() as the
+#     timestamp. Use in the hot path (per-connection verification).
+#   - `sigil_cert_pin_status_name(status)` — static-C-string name
+#     ("valid"/"mismatch"/"expired"/"no_pin"/"unknown") for logs
+#     and audit messages.
+#   - `sigil_cert_pin_compute(cert_path)` — compute the SPKI
+#     SHA-256 pin (base64) for a PEM cert on disk. Shells out via
+#     agnosys; returns 0 on any agnosys error so callers don't have
+#     to unwrap Result types.
+
+# Convert agnosys' CERTPIN_* enum to a stable human-readable name.
+# The enum values are the trust decision; the names are advisory
+# (logs, audit events) and must NOT be parsed back into enum by
+# callers — use the enum directly.
+fn sigil_cert_pin_status_name(status): i64 {
+    if (status == CERTPIN_VALID) { return "valid"; }
+    if (status == CERTPIN_MISMATCH) { return "mismatch"; }
+    if (status == CERTPIN_EXPIRED) { return "expired"; }
+    if (status == CERTPIN_NO_PIN_CONFIGURED) { return "no_pin"; }
+    return "unknown";
+}
+
+# Raw status: returns a CERTPIN_* constant from agnosys.
+# `at` is a unix timestamp; pass 0 to skip the expiry check
+# (useful for tests). Constant-time comparison happens inside
+# agnosys' certpin_ct_streq; sigil does not add a second compare.
+fn sigil_cert_pin_status(host, actual_pin, pin_set, at): i64 {
+    return certpin_verify_pin(host, actual_pin, pin_set, at);
+}
+
+# Fast predicate for the hot path: 1 if pinned and matching at
+# current wall-clock time, else 0. Does NOT distinguish MISMATCH
+# from NO_PIN_CONFIGURED — use sigil_cert_pin_status when the
+# caller needs to report "no pin was set for this host" separately
+# from "pin mismatch" (e.g. for a first-use-trust policy).
+fn sigil_cert_pin_check(host, actual_pin, pin_set): i64 {
+    var s = certpin_verify_pin(host, actual_pin, pin_set, clock_epoch_secs());
+    if (s == CERTPIN_VALID) { return 1; }
+    return 0;
+}
+
+# Compute the base64(SHA-256(SPKI)) pin for a PEM cert on disk.
+# Returns a fresh C-string on success, or 0 on any agnosys error
+# (bad path, openssl missing, cert malformed). Callers must null-
+# check. Shells out via agnosys' openssl pipeline — not on the hot
+# path; intended for pin-set construction at config time.
+fn sigil_cert_pin_compute(cert_path): i64 {
+    var res = certpin_compute_spki_pin(cert_path);
+    if (is_err_result(res) == 1) { return 0; }
+    return result_unwrap(res);
+}
+
+# --- verify.cyr ---
+
+# verify.cyr — SigilVerifier: the main trust engine
+# Combines signing, keyring, integrity, revocation, key pinning, audit.
+
+# ================================================================
+# VerifyScratch (3.2.0) — pre-allocated per-worker scratch
+# ================================================================
+# Lifts every allocation out of the verify hot path so the parallel
+# `sv_verify_batch` workers can fan out without touching the bump
+# allocator / freelist / vec-grow paths (CLAUDE.md quirk #7 —
+# alloc, vec, hashmap are NOT thread-safe under cyrius). All
+# per-artifact state lives in one 768-byte block; workers receive
+# their slot and reset state via `_verify_scratch_reset` per call.
+#
+# Layout:
+#   +0    hash_buf[72]        SHA-256 hex digest (64 chars + NUL + 7 pad)
+#   +72   pk_bytes[40]        Ed25519 decoded public key (32 + 8 pad)
+#   +112  artifact[48]        TrustedArtifact inline
+#   +160  vr_slot[32]         VerificationResult inline
+#   +192  checks_pool[192]    8 × 24 TrustCheck slots
+#   +384  check_idx (8)       next free check slot
+#   +392  vec_hdr (24)        vec struct { data, len=0, cap=16 }
+#   +416  vec_data[128]       16 × i64 (pre-allocated cap, never grows)
+#   +544  sha256_ctx[144]     SHA-256 streaming context
+#   +688  reserved/pad to 768
+#
+# Cap of 8 TrustCheck slots: `sv_verify_artifact` today emits up
+# to 7 checks per call (file_readable, trust_store, signature,
+# revocation, key_pin, allowed_type, policy). 8 slots gives one
+# slot of headroom for future check additions; past 8 the slot-
+# overflow guard pins `vr.passed = 0` and skips the vec_push
+# rather than corrupting adjacent scratch memory.
+
+var _VSC_HASH       = 0;
+var _VSC_PK         = 72;
+var _VSC_ARTIFACT   = 112;
+var _VSC_VR         = 160;
+var _VSC_CHECKS     = 192;
+var _VSC_CHECK_IDX  = 384;
+var _VSC_VEC_HDR    = 392;
+var _VSC_VEC_DATA   = 416;
+var _VSC_SHA_CTX    = 544;
+var _VSC_SIZE       = 768;
+var _VSC_MAX_CHECKS = 8;
+
+fn verify_scratch_new(): i64 {
+    var s = fl_alloc(_VSC_SIZE);
+    # Wire the inline vec_hdr to the inline vec_data.
+    store64(s + _VSC_VEC_HDR + 0, s + _VSC_VEC_DATA);   # data ptr
+    store64(s + _VSC_VEC_HDR + 8, 0);                    # len
+    store64(s + _VSC_VEC_HDR + 16, 16);                  # cap (fixed)
+    return s;
+}
+
+fn _verify_scratch_reset(s): i64 {
+    store64(s + _VSC_CHECK_IDX, 0);
+    store64(s + _VSC_VEC_HDR + 8, 0);   # vec.len = 0
+    return 0;
+}
+
+# Acquire the next TrustCheck slot from the pool and write the 3
+# fields in-place. Returns the slot pointer (24-byte block, same
+# shape as `trust_check_new`'s output). On overflow (more than
+# `_VSC_MAX_CHECKS` calls per artifact), pins the caller's
+# verification_result to passed=0 and returns 0; the caller's
+# `_vresult_add_check_scratch` short-circuits on a 0 slot so the
+# `vec_push` is skipped — no scratch corruption.
+fn _trust_check_slot(s, name, passed, detail): i64 {
+    var idx = load64(s + _VSC_CHECK_IDX);
+    if (idx >= _VSC_MAX_CHECKS) {
+        # Slot overflow — pin vr.passed to 0 as a degraded-result
+        # indicator. Real fix is to grow `_VSC_MAX_CHECKS`; this
+        # branch should never fire under the existing 7-check
+        # ceiling but exists so a future check addition can't
+        # corrupt adjacent scratch memory.
+        store64(s + _VSC_VR + 8, 0);
+        return 0;
+    }
+    var slot = s + _VSC_CHECKS + idx * 24;
+    store64(slot + 0, name);
+    store64(slot + 8, passed);
+    store64(slot + 16, detail);
+    store64(s + _VSC_CHECK_IDX, idx + 1);
+    return slot;
+}
+
+# Scratch-side equivalent of `vresult_add_check(vr, trust_check_new(...))`.
+# Skips the vec_push if `_trust_check_slot` returned 0 (overflow).
+fn _vresult_add_check_scratch(s, name, passed, detail): i64 {
+    var slot = _trust_check_slot(s, name, passed, detail);
+    if (slot != 0) {
+        # vec_push into the pre-allocated cap-16 vec — guaranteed
+        # not to grow (we cap usage at _VSC_MAX_CHECKS=6 < 16), so
+        # this never touches the allocator.
+        vec_push(s + _VSC_VEC_HDR, slot);
+    }
+    return 0;
+}
+
+# ================================================================
+# KeyPin (16 bytes)
+# ================================================================
+# Layout:
+#   +0   key_id       (C-string ptr)
+#   +8   path_prefix  (C-string ptr)
+
+fn key_pin_new(key_id, path_prefix): i64 {
+    var kp = fl_alloc(16);
+    store64(kp, key_id);
+    store64(kp + 8, path_prefix);
+    return kp;
+}
+
+fn kpin_key_id(kp): i64 { return load64(kp); }
+fn kpin_prefix(kp): i64 { return load64(kp + 8); }
+
+# ================================================================
+# ComplianceReport (56 bytes)
+# ================================================================
+# Layout:
+#   +0   total            (i64)
+#   +8   compliant_count  (i64)
+#   +16  compliant        (vec)
+#   +24  below_minimum    (vec)
+#   +32  unsigned_list    (vec)
+#   +40  revoked_list     (vec)
+#   +48  pin_violations   (vec)
+
+fn compliance_report_new(): i64 {
+    var cr = fl_alloc(56);
+    store64(cr, 0);
+    store64(cr + 8, 0);
+    store64(cr + 16, vec_new());
+    store64(cr + 24, vec_new());
+    store64(cr + 32, vec_new());
+    store64(cr + 40, vec_new());
+    store64(cr + 48, vec_new());
+    return cr;
+}
+
+fn creport_total(cr): i64 { return load64(cr); }
+fn creport_compliant_count(cr): i64 { return load64(cr + 8); }
+fn creport_is_compliant(cr): i64 {
+    if (load64(cr + 8) == load64(cr)) { return 1; }
+    return 0;
+}
+fn creport_violation_count(cr): i64 {
+    return load64(cr) - load64(cr + 8);
+}
+
+# ================================================================
+# SigilVerifier (56 bytes)
+# ================================================================
+# Layout:
+#   +0   keyring       (PublisherKeyring ptr)
+#   +8   policy        (TrustPolicy ptr)
+#   +16  revocations   (RevocationList ptr)
+#   +24  integrity     (IntegrityVerifier ptr)
+#   +32  trust_store   (hashmap: content_hash -> TrustedArtifact)
+#   +40  key_pins      (vec of KeyPin)
+#   +48  audit_log     (AuditLog ptr)
+
+fn sigil_verifier_new(keyring, policy): i64 {
+    var sv = fl_alloc(56);
+    store64(sv, keyring);
+    store64(sv + 8, policy);
+    store64(sv + 16, revocation_list_new());
+    store64(sv + 24, integrity_verifier_new(integrity_policy_new()));
+    store64(sv + 32, map_new());
+    store64(sv + 40, vec_new());
+    store64(sv + 48, audit_log_new());
+    return sv;
+}
+
+fn sv_keyring(sv): i64 { return load64(sv); }
+fn sv_policy(sv): i64 { return load64(sv + 8); }
+fn sv_revocations(sv): i64 { return load64(sv + 16); }
+fn sv_integrity(sv): i64 { return load64(sv + 24); }
+fn sv_trust_store(sv): i64 { return load64(sv + 32); }
+fn sv_key_pins(sv): i64 { return load64(sv + 40); }
+fn sv_audit_log(sv): i64 { return load64(sv + 48); }
+
+# ================================================================
+# Key pin management
+# ================================================================
+
+fn sv_add_key_pin(sv, pin): i64 {
+    vec_push(load64(sv + 40), pin);
+    return sv;
+}
+
+fn sv_remove_key_pins(sv, path_prefix): i64 {
+    var pins = load64(sv + 40);
+    var plen = vec_len(pins);
+    var removed = 0;
+    var i = plen - 1;
+    while (i >= 0) {
+        var pin = vec_get(pins, i);
+        if (streq(kpin_prefix(pin), path_prefix) == 1) {
+            vec_remove(pins, i);
+            removed = removed + 1;
+        }
+        i = i - 1;
+    }
+    return removed;
+}
+
+# Check if key is authorized for path (no pin = any key OK)
+fn _sv_key_authorized(sv, path, signer_key_id): i64 {
+    var pins = load64(sv + 40);
+    var plen = vec_len(pins);
+    var has_matching_pin = 0;
+    var path_len = 0;
+    if (path != 0) { path_len = strlen(path); }
+    var i = 0;
+    while (i < plen) {
+        var pin = vec_get(pins, i);
+        var prefix = kpin_prefix(pin);
+        var plen2 = strlen(prefix);
+        # Guard against OOB read: memeq reads plen2 bytes from path,
+        # so path must be at least that long.
+        if (path_len >= plen2) {
+            if (memeq(path, prefix, plen2) == 1) {
+                has_matching_pin = 1;
+                if (signer_key_id != 0) {
+                    if (streq(kpin_key_id(pin), signer_key_id) == 1) {
+                        return 1;
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+    if (has_matching_pin == 0) { return 1; }
+    return 0;
+}
+
+# ================================================================
+# Register artifacts in trust store
+# ================================================================
+
+fn sv_register_trusted(sv, artifact): i64 {
+    # Downgrade SystemCore to Verified (only register_system_core allows SystemCore)
+    if (artifact_trust_level(artifact) == TRUST_SYSTEM_CORE) {
+        artifact_set_trust_level(artifact, TRUST_VERIFIED);
+    }
+    var chash = artifact_content_hash(artifact);
+    map_set(load64(sv + 32), chash, artifact);
+    return sv;
+}
+
+fn sv_register_system_core(sv, artifact): i64 {
+    artifact_set_trust_level(artifact, TRUST_SYSTEM_CORE);
+    var chash = artifact_content_hash(artifact);
+    map_set(load64(sv + 32), chash, artifact);
+    return sv;
+}
+
+# ================================================================
+# Sign an artifact and register it
+# ================================================================
+
+fn sv_sign_artifact(sv, path, secret_key, key_id, artifact_type): i64 {
+    var chash = hash_file(path);
+    if (chash == 0) { return 0; }
+
+    var sig = sign_data(chash, strlen(chash), secret_key);
+    var artifact = trusted_artifact_new(path, artifact_type, chash);
+    artifact_set_signature(artifact, sig);
+    artifact_set_signer(artifact, key_id);
+    artifact_set_trust_level(artifact, TRUST_VERIFIED);
+
+    map_set(load64(sv + 32), chash, artifact);
+
+    # Audit
+    var ae = audit_artifact_signed(path, artifact_type, key_id, chash);
+    alog_record(load64(sv + 48), ae);
+
+    return artifact;
+}
+
+# ================================================================
+# Verify an artifact
+# ================================================================
+
+# Public API (3.2.0): thin wrapper that allocates a fresh
+# VerifyScratch and delegates to `sv_verify_artifact_into`. Same
+# return contract as the pre-3.2.0 path (vr ptr, caller does not
+# free), but the internal hot path no longer paths through
+# `fl_alloc(24)` × ~6, `fl_alloc(48)`, `fl_alloc(32)`, `vec_new()`,
+# `alloc(65)`, `alloc(32)` per call — those all land in the
+# single 768-byte scratch instead. The new `_into` variant is
+# the canonical implementation; this wrapper is for downstream
+# code that wants a one-shot "verify and forget the scratch" API.
+#
+# **Deprecation note (4.0 target):** the heap-allocating
+# `verification_result_new` / `trusted_artifact_new` /
+# `trust_check_new` constructors will be removed in 4.0 in favour
+# of in-place scratch-slot writes. Downstream code that currently
+# constructs `TrustCheck` / `TrustedArtifact` / `VerificationResult`
+# directly should migrate to the `_init`-into-slot pattern. See
+# `docs/development/roadmap.md` § "Towards v4.0".
+fn sv_verify_artifact(sv, path, artifact_type): i64 {
+    var s = verify_scratch_new();
+    var vr = sv_verify_artifact_into(sv, path, artifact_type, s);
+    # Audit lives on the wrapper so `_into` stays alloc-free for
+    # the parallel-batch path. Single-threaded callers (this one)
+    # incur no contention.
+    var a = vresult_artifact(vr);
+    var ae = audit_artifact_verified(path, artifact_type,
+                                     artifact_trust_level(a),
+                                     vresult_passed(vr),
+                                     artifact_content_hash(a));
+    alog_record(load64(sv + 48), ae);
+    return vr;
+}
+
+# Alloc-free verify orchestrator (3.2.0). Runs the full check
+# chain (file_readable, trust_store, signature, revocation,
+# key_pin, allowed_type, policy) writing every intermediate
+# struct into the caller-provided `scratch` block (see
+# VerifyScratch layout above). Returns a pointer to the populated
+# `verification_result` slot (scratch + _VSC_VR); same accessor
+# contract as the heap-allocated vr from the pre-3.2.0 path.
+#
+# Thread-safety: the body does not touch `alloc`, `fl_alloc`,
+# `vec_new`, or `vec` grow paths. It reads `map_get(trust_store)`,
+# which is safe under concurrent fan-out if and only if the trust
+# store is not mutated during the batch — `sv_verify_batch`
+# documents and relies on that contract.
+fn sv_verify_artifact_into(sv, path, artifact_type, scratch): i64 {
+    _verify_scratch_reset(scratch);
+    var policy = load64(sv + 8);
+
+    # 1. Hash the file directly into the scratch hex slot.
+    var hash_ok = hash_file_into(path, scratch + _VSC_HASH, scratch + _VSC_SHA_CTX);
+    if (hash_ok == 0) {
+        # File unreadable — build a minimal vr in scratch with
+        # empty content hash and passed=0. Mirrors the pre-3.2.0
+        # error-path shape so callers see the same struct surface.
+        store64(scratch + _VSC_ARTIFACT + 0,  path);
+        store64(scratch + _VSC_ARTIFACT + 8,  artifact_type);
+        store64(scratch + _VSC_ARTIFACT + 16, "");
+        store64(scratch + _VSC_ARTIFACT + 24, 0);
+        store64(scratch + _VSC_ARTIFACT + 32, 0);
+        store64(scratch + _VSC_ARTIFACT + 40, TRUST_UNVERIFIED);
+        store64(scratch + _VSC_VR + 0,  scratch + _VSC_ARTIFACT);
+        store64(scratch + _VSC_VR + 8,  0);
+        store64(scratch + _VSC_VR + 16, scratch + _VSC_VEC_HDR);
+        store64(scratch + _VSC_VR + 24, clock_epoch_secs());
+        return scratch + _VSC_VR;
+    }
+    var chash = scratch + _VSC_HASH;   # 64-char hex C-string + NUL
+
+    var trust_level = TRUST_UNVERIFIED;
+
+    # 2. Build TrustedArtifact in-place.
+    store64(scratch + _VSC_ARTIFACT + 0,  path);
+    store64(scratch + _VSC_ARTIFACT + 8,  artifact_type);
+    store64(scratch + _VSC_ARTIFACT + 16, chash);
+    store64(scratch + _VSC_ARTIFACT + 24, 0);
+    store64(scratch + _VSC_ARTIFACT + 32, 0);
+    store64(scratch + _VSC_ARTIFACT + 40, TRUST_UNVERIFIED);
+
+    # 3. Build VerificationResult in-place. checks field points at
+    #    the inline cap-16 vec_hdr — vec_push never grows it.
+    store64(scratch + _VSC_VR + 0,  scratch + _VSC_ARTIFACT);
+    store64(scratch + _VSC_VR + 8,  1);
+    store64(scratch + _VSC_VR + 16, scratch + _VSC_VEC_HDR);
+    store64(scratch + _VSC_VR + 24, clock_epoch_secs());
+    var vr = scratch + _VSC_VR;
+
+    # Check: file readable
+    _vresult_add_check_scratch(scratch, "file_readable", 1, "File read successfully");
+
+    # Check: trust store lookup. `map_get` is read-only — concurrent
+    # workers in `sv_verify_batch` rely on the documented contract
+    # that no thread calls `map_set` on the trust store during a
+    # batch. Safe for the open-addressing scan; mutation would
+    # corrupt slots mid-probe.
+    var store = load64(sv + 32);
+    var stored = map_get(store, chash);
+    if (stored != 0) {
+        trust_level = artifact_trust_level(stored);
+        _vresult_add_check_scratch(scratch, "trust_store", 1, "Found in trust store");
+    } else {
+        _vresult_add_check_scratch(scratch, "trust_store", 0, "Not in trust store");
+    }
+
+    # Check: signature verification
+    if (stored != 0) {
+        var sig = artifact_signature(stored);
+        var signer = artifact_signer_key_id(stored);
+        if (sig != 0) {
+            if (signer != 0) {
+                var kr = load64(sv);
+                var kv = keyring_get_current(kr, signer);
+                if (kv != 0) {
+                    var pk = kv_public_key_hex(kv);
+                    if (pk != 0) {
+                        if (strlen(pk) != 64) {
+                            trust_level = TRUST_UNVERIFIED;
+                            _vresult_add_check_scratch(scratch, "signature", 0, "Public key hex wrong length");
+                        } else {
+                            # Decode pk hex into the scratch pk_bytes slot (no alloc).
+                            var pk_ok = hex_decode_into(pk, 64, scratch + _VSC_PK);
+                            if (pk_ok == 0) {
+                                trust_level = TRUST_UNVERIFIED;
+                                _vresult_add_check_scratch(scratch, "signature", 0, "Public key hex invalid");
+                            } else {
+                                var valid = verify_data(chash, strlen(chash), sig, scratch + _VSC_PK);
+                                if (valid == 1) {
+                                    if (trust_level_rank(trust_level) < trust_level_rank(TRUST_VERIFIED)) {
+                                        trust_level = TRUST_VERIFIED;
+                                    }
+                                    _vresult_add_check_scratch(scratch, "signature", 1, "Signature valid");
+                                } else {
+                                    trust_level = TRUST_UNVERIFIED;
+                                    _vresult_add_check_scratch(scratch, "signature", 0, "Signature invalid");
+                                }
+                            }
+                        }
+                    } else {
+                        _vresult_add_check_scratch(scratch, "signature", 0, "No public key for verification");
+                    }
+                } else {
+                    _vresult_add_check_scratch(scratch, "signature", 0, "Signer key not in keyring");
+                }
+            } else {
+                _vresult_add_check_scratch(scratch, "signature", 0, "No signer key ID");
+            }
+        } else {
+            _vresult_add_check_scratch(scratch, "signature", 0, "No signature");
+        }
+    } else {
+        _vresult_add_check_scratch(scratch, "signature", 0, "Not in trust store");
+    }
+
+    # Check: revocation
+    var rl = load64(sv + 16);
+    var key_revoked = 0;
+    var hash_revoked = rl_is_artifact_revoked(rl, chash);
+    if (stored != 0) {
+        var signer_r = artifact_signer_key_id(stored);
+        if (signer_r != 0) {
+            key_revoked = rl_is_key_revoked(rl, signer_r);
+        }
+    }
+    if (key_revoked == 1) {
+        trust_level = TRUST_REVOKED;
+        _vresult_add_check_scratch(scratch, "revocation", 0, "Signer key revoked");
+    } elif (hash_revoked == 1) {
+        trust_level = TRUST_REVOKED;
+        _vresult_add_check_scratch(scratch, "revocation", 0, "Content hash revoked");
+    } else {
+        _vresult_add_check_scratch(scratch, "revocation", 1, "Not revoked");
+    }
+
+    # Check: key pinning
+    if (stored != 0) {
+        var signer_p = artifact_signer_key_id(stored);
+        var authorized = _sv_key_authorized(sv, path, signer_p);
+        if (authorized == 1) {
+            _vresult_add_check_scratch(scratch, "key_pin", 1, "Key authorized");
+        } else {
+            _vresult_add_check_scratch(scratch, "key_pin", 0, "Key not authorized for path");
+            trust_level = TRUST_UNVERIFIED;
+        }
+    }
+
+    # Check: allowed-artifact-type
+    if (stored != 0) {
+        var signer_atype = artifact_signer_key_id(stored);
+        if (signer_atype != 0) {
+            var kra = load64(sv);
+            var kva = keyring_get_current(kra, signer_atype);
+            if (kva != 0) {
+                if (kv_is_type_allowed(kva, artifact_type) == 1) {
+                    _vresult_add_check_scratch(scratch, "allowed_type", 1, "Key authorized for artifact type");
+                } else {
+                    _vresult_add_check_scratch(scratch, "allowed_type", 0, "Key not authorized for artifact type");
+                    trust_level = TRUST_UNVERIFIED;
+                }
+            }
+        }
+    }
+
+    # Check: policy compliance
+    var min_trust = policy_min_trust(policy);
+    var enforcement = policy_enforcement(policy);
+    var meets_min = trust_level_ge(trust_level, min_trust);
+    if (meets_min == 1) {
+        _vresult_add_check_scratch(scratch, "policy", 1, "Meets minimum trust level");
+    } else {
+        if (enforcement == ENFORCE_STRICT) {
+            _vresult_add_check_scratch(scratch, "policy", 0, "Below minimum trust level");
+            vresult_set_passed(vr, 0);
+        } elif (enforcement == ENFORCE_PERMISSIVE) {
+            _vresult_add_check_scratch(scratch, "policy", 0, "Below minimum (permissive)");
+        } else {
+            _vresult_add_check_scratch(scratch, "policy", 0, "Below minimum (audit only)");
+        }
+    }
+
+    artifact_set_trust_level(scratch + _VSC_ARTIFACT, trust_level);
+
+    # NOTE: audit is intentionally NOT emitted here. The 3.2.0
+    # alloc-free contract requires zero allocator activity in the
+    # worker body. `audit_artifact_verified` allocates the event
+    # struct + `alog_record` may grow the audit log's vec — both
+    # would race against concurrent workers. Audit is emitted by
+    # the caller:
+    #   - `sv_verify_artifact` (wrapper) runs audit after `_into`
+    #     returns, on the same thread, no contention.
+    #   - `sv_verify_batch` runs audit on the main thread after
+    #     `thread_join`, serially walking the result slots.
+    return vr;
+}
+
+# ================================================================
+# Convenience: verify agent binary
+# ================================================================
+
+fn sv_verify_agent(sv, path): i64 {
+    var policy = load64(sv + 8);
+    var vr = sv_verify_artifact(sv, path, ARTIFACT_AGENT_BINARY);
+
+    # Additional check: unsigned agents
+    if (policy_allow_unsigned(policy) == 0) {
+        var checks = vresult_checks(vr);
+        var clen = vec_len(checks);
+        var has_sig = 0;
+        var i = 0;
+        while (i < clen) {
+            var tc = vec_get(checks, i);
+            if (streq(check_name(tc), "signature") == 1) {
+                if (check_passed(tc) == 1) { has_sig = 1; }
+            }
+            i = i + 1;
+        }
+        if (has_sig == 0) {
+            vresult_add_check(vr, trust_check_new("unsigned_agent", 0, "Unsigned agents not allowed"));
+            vresult_set_passed(vr, 0);
+        }
+    }
+    return vr;
+}
+
+# ================================================================
+# sv_verify_package(sv, path, expected_hash)
+#
+# Package-specific verification path. Calls sv_verify_artifact with
+# ARTIFACT_PACKAGE, then — if `expected_hash` is non-zero — layers
+# a constant-time content-hash match. A hash mismatch marks the
+# whole result as failed. Mirrors the Rust `verify_package(path,
+# Option<expected_hash>)` signature (pass 0 as expected_hash for
+# "no expected hash").
+#
+# The Rust version had an early-exit when policy.verify_on_install
+# was false; that gate is no longer needed — verify_on_install has
+# been a user-set policy knob for several releases and consumers
+# (argonaut/ark) enforce it themselves before calling in.
+# ================================================================
+
+fn sv_verify_package(sv, path, expected_hash): i64 {
+    var vr = sv_verify_artifact(sv, path, ARTIFACT_PACKAGE);
+    if (expected_hash == 0) { return vr; }
+
+    var artifact = vresult_artifact(vr);
+    var actual = artifact_content_hash(artifact);
+    var matches = 0;
+    if (actual != 0) {
+        if (ct_eq_bytes_lens(actual, strlen(actual), expected_hash, strlen(expected_hash)) == 1) {
+            matches = 1;
+        }
+    }
+    if (matches == 1) {
+        vresult_add_check(vr, trust_check_new("expected_hash", 1, "Content hash matches expected"));
+    } else {
+        vresult_add_check(vr, trust_check_new("expected_hash", 0, "Hash mismatch"));
+        vresult_set_passed(vr, 0);
+    }
+    return vr;
+}
+
+# ================================================================
+# Revocation management
+# ================================================================
+
+fn sv_add_revocation(sv, entry): i64 {
+    var rl = load64(sv + 16);
+    var result = rl_add(rl, entry);
+    if (result == SIGIL_ERR_NONE) {
+        var ae = audit_revocation_added(rev_key_id(entry), rev_content_hash(entry), rev_reason(entry));
+        alog_record(load64(sv + 48), ae);
+    }
+    return result;
+}
+
+fn sv_check_revocation(sv, key_id, content_hash): i64 {
+    var rl = load64(sv + 16);
+    if (key_id != 0) {
+        if (rl_is_key_revoked(rl, key_id) == 1) { return 1; }
+    }
+    if (content_hash != 0) {
+        if (rl_is_artifact_revoked(rl, content_hash) == 1) { return 1; }
+    }
+    return 0;
+}
+
+fn sv_revocation_count(sv): i64 {
+    return rl_len(load64(sv + 16));
+}
+
+# ================================================================
+# Trust store queries
+# ================================================================
+
+fn sv_trust_level_for(sv, content_hash): i64 {
+    var store = load64(sv + 32);
+    var artifact = map_get(store, content_hash);
+    if (artifact == 0) { return TRUST_UNVERIFIED; }
+    return artifact_trust_level(artifact);
+}
+
+fn sv_stats(sv): i64 {
+    var store = load64(sv + 32);
+    var s = sigil_stats_new();
+    var keys = map_keys(store);
+    var total = vec_len(keys);
+    store64(s, total);
+    var verified = 0;
+    var revoked = 0;
+    var i = 0;
+    while (i < total) {
+        var chash = vec_get(keys, i);
+        var artifact = map_get(store, chash);
+        var tl = artifact_trust_level(artifact);
+        if (trust_level_ge(tl, TRUST_VERIFIED) == 1) { verified = verified + 1; }
+        if (tl == TRUST_REVOKED) { revoked = revoked + 1; }
+        i = i + 1;
+    }
+    store64(s + 8, verified);
+    store64(s + 16, revoked);
+    return s;
+}
+
+# ================================================================
+# Boot chain verification
+# ================================================================
+
+# ================================================================
+# Compliance report
+# ================================================================
+
+fn sv_compliance_report(sv): i64 {
+    var cr = compliance_report_new();
+    var store = load64(sv + 32);
+    var policy = load64(sv + 8);
+    var min_trust = policy_min_trust(policy);
+    var keys = map_keys(store);
+    var total = vec_len(keys);
+    store64(cr, total);
+
+    var compliant = 0;
+    var i = 0;
+    while (i < total) {
+        var chash = vec_get(keys, i);
+        var artifact = map_get(store, chash);
+        var tl = artifact_trust_level(artifact);
+        var path = artifact_path(artifact);
+
+        if (tl == TRUST_REVOKED) {
+            vec_push(load64(cr + 40), artifact);
+        } elif (trust_level_ge(tl, min_trust) == 0) {
+            vec_push(load64(cr + 24), artifact);
+        } else {
+            # Check key pin
+            var signer = artifact_signer_key_id(artifact);
+            if (_sv_key_authorized(sv, path, signer) == 0) {
+                vec_push(load64(cr + 48), artifact);
+            } else {
+                if (artifact_signature(artifact) == 0) {
+                    if (policy_allow_unsigned(policy) == 0) {
+                        vec_push(load64(cr + 32), artifact);
+                    } else {
+                        vec_push(load64(cr + 16), artifact);
+                        compliant = compliant + 1;
+                    }
+                } else {
+                    vec_push(load64(cr + 16), artifact);
+                    compliant = compliant + 1;
+                }
+            }
+        }
+        i = i + 1;
+    }
+    store64(cr + 8, compliant);
+    return cr;
+}
+
+# ================================================================
+# Trust store snapshot and diff
+# ================================================================
+
+# Snapshot entry (16 bytes): trust-level + path frozen at snapshot time.
+# Previously the snapshot mapped chash → artifact_ptr, but since the
+# same pointer was still mutable in the live store, a trust-level
+# change was invisible to a subsequent diff. Snapshotting a level
+# plus path byvalue gives a real before/after view.
+
+fn _snap_entry_new(trust_level, path): i64 {
+    var se = fl_alloc(16);
+    store64(se, trust_level);
+    store64(se + 8, path);
+    return se;
+}
+
+fn snap_entry_trust_level(se): i64 { return load64(se); }
+fn snap_entry_path(se): i64 { return load64(se + 8); }
+
+fn sv_snapshot_trust_store(sv): i64 {
+    var store = load64(sv + 32);
+    var keys = map_keys(store);
+    var snap = map_new();
+    var klen = vec_len(keys);
+    var i = 0;
+    while (i < klen) {
+        var chash = vec_get(keys, i);
+        var artifact = map_get(store, chash);
+        map_set(snap, chash, _snap_entry_new(
+        artifact_trust_level(artifact),
+        artifact_path(artifact)
+        ));
+        i = i + 1;
+    }
+    return snap;
+}
+
+# ================================================================
+# ArtifactChange (32 bytes) — Rust-style diff record
+# ================================================================
+# Layout:
+#   +0   content_hash  (C-string ptr)
+#   +8   path          (C-string ptr)
+#   +16  old_trust_level (i64; -1 = none / this is a newly added artifact)
+#   +24  new_trust_level (i64; -1 = none / this artifact was removed)
+#
+# For a "changed" record, both old and new are set and differ.
+# For "added", old = -1. For "removed", new = -1.
+
+fn artifact_change_new(content_hash, path, old_tl, new_tl): i64 {
+    var ac = fl_alloc(32);
+    store64(ac, content_hash);
+    store64(ac + 8, path);
+    store64(ac + 16, old_tl);
+    store64(ac + 24, new_tl);
+    return ac;
+}
+
+fn ac_content_hash(ac): i64 { return load64(ac); }
+fn ac_path(ac): i64 { return load64(ac + 8); }
+fn ac_old_trust_level(ac): i64 { return load64(ac + 16); }
+fn ac_new_trust_level(ac): i64 { return load64(ac + 24); }
+
+# TrustStoreDiff (24 bytes): added, removed, changed (all vecs of ArtifactChange ptrs).
+# BREAKING vs 2.4.x: vecs previously held raw TrustedArtifact pointers;
+# they now hold ArtifactChange records so callers can see both sides
+# of a trust-level transition, not just the current side.
+fn trust_store_diff_new(): i64 {
+    var d = fl_alloc(24);
+    store64(d, vec_new());     # added   (ArtifactChange where old_tl = -1)
+    store64(d + 8, vec_new()); # removed (ArtifactChange where new_tl = -1)
+    store64(d + 16, vec_new()); # changed (both sides set, old != new)
+    return d;
+}
+
+fn tsdiff_added(d): i64 { return load64(d); }
+fn tsdiff_removed(d): i64 { return load64(d + 8); }
+fn tsdiff_changed(d): i64 { return load64(d + 16); }
+fn tsdiff_is_empty(d): i64 {
+    if (vec_len(load64(d)) == 0) {
+        if (vec_len(load64(d + 8)) == 0) {
+            if (vec_len(load64(d + 16)) == 0) { return 1; }
+        }
+    }
+    return 0;
+}
+
+fn sv_diff_trust_store(sv, old_snap): i64 {
+    var diff = trust_store_diff_new();
+    var store = load64(sv + 32);
+    var current_keys = map_keys(store);
+    var old_keys = map_keys(old_snap);
+
+    # Find added and changed
+    var cklen = vec_len(current_keys);
+    var i = 0;
+    while (i < cklen) {
+        var chash = vec_get(current_keys, i);
+        var old_snap_entry = map_get(old_snap, chash);
+        var new_art = map_get(store, chash);
+        if (old_snap_entry == 0) {
+            var ac = artifact_change_new(
+            chash,
+            artifact_path(new_art),
+            0 - 1,
+            artifact_trust_level(new_art)
+            );
+            vec_push(load64(diff), ac);
+        } else {
+            var old_tl = snap_entry_trust_level(old_snap_entry);
+            var new_tl = artifact_trust_level(new_art);
+            if (old_tl != new_tl) {
+                var ac = artifact_change_new(
+                chash,
+                artifact_path(new_art),
+                old_tl,
+                new_tl
+                );
+                vec_push(load64(diff + 16), ac);
+            }
+        }
+        i = i + 1;
+    }
+
+    # Find removed
+    var oklen = vec_len(old_keys);
+    i = 0;
+    while (i < oklen) {
+        var chash = vec_get(old_keys, i);
+        if (map_get(store, chash) == 0) {
+            var old_snap_entry = map_get(old_snap, chash);
+            var ac = artifact_change_new(
+            chash,
+            snap_entry_path(old_snap_entry),
+            snap_entry_trust_level(old_snap_entry),
+            0 - 1
+            );
+            vec_push(load64(diff + 8), ac);
+        }
+        i = i + 1;
+    }
+    return diff;
+}
+
+# ================================================================
+# Trust store persistence
+# ================================================================
+
+# ================================================================
+# sv_load_trust_store(sv, path) — inverse of sv_save_trust_store
+#
+# Reads the JSON array written by sv_save_trust_store and installs
+# every {hash, path, type, trust} record into the verifier's trust
+# store. Returns the number of artifacts loaded, or 0 on IO/parse
+# failure.
+#
+# Signatures and signer_key_id are NOT persisted by the save path —
+# the serialized form is an inventory of trusted artifacts, not a
+# re-verifiable archive. Loaded artifacts come back with signature
+# = 0, signer = 0, trust level preserved. A subsequent
+# sv_verify_artifact call will treat them as present-but-unsigned.
+#
+# `_rj_parse_string` is reused from policy.cyr — same compilation
+# unit, handles the same escape set (\" \\ \n \r \t \b \f \u00XX)
+# as json_write_escaped in trust.cyr.
+# ================================================================
+
+fn sv_load_trust_store(sv, path): i64 {
+    var buf = alloc(65536);
+    var n = file_read_all(path, buf, 65536);
+    if (n <= 0) { return 0; }
+    var store = load64(sv + 32);
+
+    var pos = 0;
+    # Skip to first '{'
+    while (pos < n) {
+        if ((load8(buf + pos) & 0xFF) == 123) { break; }
+        pos = pos + 1;
+    }
+
+    var loaded = 0;
+    while (pos < n) {
+        if ((load8(buf + pos) & 0xFF) != 123) { break; }
+        pos = pos + 1;
+
+        var hash = 0;
+        var apath = 0;
+        var atype = ARTIFACT_AGENT_BINARY;   # default; overwritten when the JSON object provides "type"
+        var trust = TRUST_UNVERIFIED;
+
+        while (pos < n) {
+            var c = load8(buf + pos) & 0xFF;
+            if (c == 125) { pos = pos + 1; break; }
+            if (c != 34) { pos = pos + 1; }
+            else {
+                pos = _rj_parse_string(buf, pos, n);
+                var k = _rj_out_ptr;
+                if (k == 0) { break; }
+                # Skip to colon
+                while (pos < n) {
+                    if ((load8(buf + pos) & 0xFF) == 58) { pos = pos + 1; break; }
+                    pos = pos + 1;
+                }
+                # Skip whitespace
+                while (pos < n) {
+                    var ws = load8(buf + pos) & 0xFF;
+                    if (ws == 32) { pos = pos + 1; }
+                    elif (ws == 9) { pos = pos + 1; }
+                    else { break; }
+                }
+                if (pos >= n) { break; }
+                var vc = load8(buf + pos) & 0xFF;
+                if (vc == 34) {
+                    pos = _rj_parse_string(buf, pos, n);
+                    var v = _rj_out_ptr;
+                    if (streq(k, "hash") == 1) { hash = v; }
+                    elif (streq(k, "path") == 1) { apath = v; }
+                } else {
+                    var vs = pos;
+                    while (pos < n) {
+                        var vcc = load8(buf + pos) & 0xFF;
+                        if (vcc == 44) { break; }
+                        if (vcc == 125) { break; }
+                        if (vcc == 32) { break; }
+                        pos = pos + 1;
+                    }
+                    var vlen = pos - vs;
+                    var intv = 0;
+                    var ii = 0;
+                    while (ii < vlen) {
+                        var ch = load8(buf + vs + ii) & 0xFF;
+                        if (ch >= 48) { if (ch <= 57) { intv = intv * 10 + (ch - 48); } }
+                        ii = ii + 1;
+                    }
+                    if (streq(k, "type") == 1) { atype = intv; }
+                    elif (streq(k, "trust") == 1) { trust = intv; }
+                }
+            }
+        }
+
+        if (hash != 0) {
+            var art = trusted_artifact_new(apath, atype, hash);
+            artifact_set_trust_level(art, trust);
+            map_set(store, hash, art);
+            loaded = loaded + 1;
+        }
+
+        # Scan to next '{' or ']'
+        while (pos < n) {
+            var c2 = load8(buf + pos) & 0xFF;
+            if (c2 == 123) { break; }
+            if (c2 == 93) { break; }
+            pos = pos + 1;
+        }
+        if (pos < n) {
+            if ((load8(buf + pos) & 0xFF) == 93) { break; }
+        }
+    }
+    return loaded;
+}
+
+fn sv_save_trust_store(sv, path): i64 {
+    var store = load64(sv + 32);
+    var keys = map_keys(store);
+    var klen = vec_len(keys);
+    var fd = file_open(path, 577, 420);
+    if (fd < 0) { return SIGIL_ERR_IO; }
+    file_write(fd, "[", 1);
+    var i = 0;
+    var nbuf[24];
+    while (i < klen) {
+        var chash = vec_get(keys, i);
+        var art = map_get(store, chash);
+        if (i > 0) { file_write(fd, ",", 1); }
+        file_write(fd, "{\"hash\":\"", 9);
+        json_write_escaped(fd, chash, strlen(chash));
+        file_write(fd, "\",\"path\":\"", 10);
+        var ap = artifact_path(art);
+        json_write_escaped(fd, ap, strlen(ap));
+        file_write(fd, "\",\"type\":", 9);
+        # fmt_int prints to stdout — use fmt_int_buf for file output.
+        memset(&nbuf, 0, 24);
+        var nlen = fmt_int_buf(artifact_type(art), &nbuf);
+        file_write(fd, &nbuf, nlen);
+        file_write(fd, ",\"trust\":", 9);
+        memset(&nbuf, 0, 24);
+        nlen = fmt_int_buf(artifact_trust_level(art), &nbuf);
+        file_write(fd, &nbuf, nlen);
+        file_write(fd, "}", 1);
+        i = i + 1;
+    }
+    file_write(fd, "]", 1);
+    file_close(fd);
+    return SIGIL_ERR_NONE;
+}
+
+# ================================================================
+# Batch verification
+# ================================================================
+# `sv_verify_batch` fans out across `_SIGIL_BATCH_WORKERS` threads
+# at `count >= _SIGIL_BATCH_PARALLEL_THRESHOLD`; below the
+# threshold it runs serial inline. The 5.5.x-era
+# `-D SIGIL_BATCH_PARALLEL` cmdline gate was dropped in 3.0 once
+# cyrius 5.5.37 raised the fixup-table cap (quirk #5) — the
+# parallel path is now the default and the test +bench files
+# (`tests/tcyr/batch_parallel.tcyr`, `tests/bcyr/batch_parallel.bcyr`)
+# exercise it without a build flag.
+#
+# Threading safety contract (mutex-free since 3.6):
+# - 3.0 serialised the whole `sv_verify_artifact` call inside a
+#   batch mutex because the call chain hit `alloc` / `vec_push` /
+#   `fl_alloc` / `vec_new`, none of which are thread-safe under
+#   cyrius (CLAUDE.md quirk #7). The mutex covered the dominant
+#   `ed25519_verify` + `sha256_transform` work, so the parallel
+#   path gave throughput parity with serial — no real speedup.
+# - 3.2.0 lifted all per-artifact allocs out of the worker:
+#   `sv_verify_artifact_into(sv, path, type, scratch)` runs
+#   alloc-free against a pre-allocated `VerifyScratch` pool.
+#   Workers do not touch `alloc` / `fl_alloc` / `vec_new` /
+#   `vec_grow`. The batch mutex still wrapped each artifact
+#   because the crypto modules used module-global working state.
+# - 3.3 confirmed (`tests/tcyr/var_array_semantics.tcyr`, cyrius
+#   parse_fn.cyr) that **`var X[N]` inside a function is a static
+#   function-scope global**, NOT a stack-local (CLAUDE.md quirk
+#   #1) — so the crypto primitives' transient working arrays are
+#   shared across threads. That was the sole remaining reason for
+#   the mutex, which remained in place until there was a way to give
+#   each worker its own working state.
+# - 3.6 drops the mutex. cyrius 6.0.52 shipped thread-local storage
+#   (lib/thread_local.cyr); src/crypto_scratch.cyr uses it to give
+#   each worker a private *bank* (lane) of every racing crypto
+#   array (sha256/sha512 schedules, the SHA-NI block scratch, and
+#   the Ed25519 field/group/verify temporaries). Each worker calls
+#   `crypto_bank_set` once at entry; the primitives slice their
+#   working buffers by `cbank()`. ge_identity was also made
+#   alloc-free (it called u256_from → alloc). With disjoint banks
+#   and no worker-side alloc, the inner verify is data-race-free
+#   and runs fully parallel. See src/crypto_scratch.cyr.
+# - `map_get` on the trust store is the only worker-side access
+#   to a shared container. Safe under the documented contract
+#   that no thread calls `map_set` on the trust store during a
+#   batch — open-addressing reads are stable on unmutated
+#   storage. The integration test populates the store before
+#   fan-out and never mutates during; downstream callers must
+#   do the same.
+# - Audit emission lifts to the main thread post-join.
+
+var _SIGIL_BATCH_PARALLEL_THRESHOLD = 4;
+var _SIGIL_BATCH_WORKERS = 4;
+
+# Worker entry (3.2.0 alloc-free). arg is a 48-byte packed record:
+#   +0   sv
+#   +8   artifacts (packed path/type buffer base)
+#   +16  start_idx
+#   +24  end_idx
+#   +32  result_slots (base of `count * 8` pointer array)
+#   +40  scratch_base (base of `count * _VSC_SIZE` scratch pool)
+fn _batch_worker(arg): i64 {
+    var sv = load64(arg);
+    var artifacts = load64(arg + 8);
+    var start = load64(arg + 16);
+    var end = load64(arg + 24);
+    var slots = load64(arg + 32);
+    var scratch_base = load64(arg + 40);
+    # Per-thread crypto bank (3.6): claim this worker's lane in the
+    # banked crypto scratch (src/crypto_scratch.cyr) so sha*/ed25519/
+    # fp_* never collide with sibling workers. thread_create's
+    # CLONE_SETTLS already installed a zeroed TLS block; we only write
+    # the bank index into the slot. This is what lets the inner
+    # `sv_verify_artifact_into` run mutex-free.
+    crypto_bank_set(load64(arg + 48));
+    var i = start;
+    while (i < end) {
+        var path = load64(artifacts + i * 16);
+        var atype = load64(artifacts + i * 16 + 8);
+        # Each artifact gets its own scratch slot (indexed by global
+        # artifact index, not worker idx). Workers never share
+        # scratch, and per-artifact scratches are not reused, so
+        # the returned `vr` ptr stays valid for the full batch
+        # lifetime — same address-stability contract as the
+        # pre-3.2.0 fl_alloc'd vrs.
+        var my_scratch = scratch_base + i * _VSC_SIZE;
+        var vr = sv_verify_artifact_into(sv, path, atype, my_scratch);
+        store64(slots + i * 8, vr);
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn sv_verify_batch(sv, artifacts, count): i64 {
+    if (count >= _SIGIL_BATCH_PARALLEL_THRESHOLD) {
+        # Pre-warm crypto module init on the main thread so the lazy
+        # `_*_inited` guards don't race across workers, and any
+        # init-time `alloc` (curve constants, K-tables, the fixed-base
+        # comb) happens single-threaded (CLAUDE.md quirk #7:
+        # alloc/fl_alloc are not thread-safe). Each guard short-
+        # circuits after first call.
+        ed25519_init();
+        sha256_global_init();
+        sha512_global_init();
+        # Warm the SHA-NI CPUID probe + self-test so the cache and
+        # the K-table allocation happen on the main thread.
+        sha_ni_available();
+        # Install the main thread's TLS block so the banked crypto
+        # scratch (src/crypto_scratch.cyr) is well-defined here and in
+        # any serial fallback. Workers get their own block via
+        # CLONE_SETTLS. This — plus the per-worker bank assignment
+        # below — replaces the 3.2-era `_sigil_batch_mutex` that used
+        # to serialise every artifact (dropped in 3.6).
+        crypto_tls_main_init();
+        var workers = _SIGIL_BATCH_WORKERS;
+        if (count < workers) { workers = count; }
+        # Each worker needs a distinct crypto bank (1..workers); bank 0
+        # is reserved for the main/serial path. Clamp so the bank index
+        # can never exceed the scratch width (defence in depth — the
+        # default 4 workers sit well inside SIGIL_CRYPTO_BANKS = 8).
+        if (workers > SIGIL_CRYPTO_BANKS - 1) { workers = SIGIL_CRYPTO_BANKS - 1; }
+
+        # Pre-allocate everything on main thread before spawn —
+        # stdlib `alloc` / `fl_alloc` is not thread-safe (CLAUDE.md
+        # quirk #7). The scratch_pool is `count * _VSC_SIZE` bytes
+        # (one scratch per artifact, not per worker, so each vr
+        # ptr stays stable for the whole batch). For count=64 →
+        # 48 KB; count=1024 → 768 KB. Memory cost vs. the 3.0
+        # heap-allocated path is comparable — same per-artifact
+        # struct surface, just in one contiguous block.
+        var slots = alloc(count * 8);
+        var args = alloc(workers * 56);   # 7 slots: +48 = crypto bank
+        var ts = alloc(workers * 8);
+        var scratch_pool = alloc(count * _VSC_SIZE);
+        var pi = 0;
+        while (pi < count) {
+            # Wire each scratch's inline vec_hdr to its inline
+            # vec_data. Per-call `_verify_scratch_reset` only zeros
+            # len / check_idx; this one-time wire-up happens here
+            # before spawn so workers never touch shared init code.
+            var s = scratch_pool + pi * _VSC_SIZE;
+            store64(s + _VSC_VEC_HDR + 0, s + _VSC_VEC_DATA);
+            store64(s + _VSC_VEC_HDR + 8, 0);
+            store64(s + _VSC_VEC_HDR + 16, 16);
+            pi = pi + 1;
+        }
+
+        var per = count / workers;
+        if ((count % workers) != 0) { per = per + 1; }
+
+        var wi = 0;
+        while (wi < workers) {
+            var pstart = wi * per;
+            var pend = pstart + per;
+            if (pend > count) { pend = count; }
+            var a = args + wi * 56;
+            store64(a, sv);
+            store64(a + 8, artifacts);
+            store64(a + 16, pstart);
+            store64(a + 24, pend);
+            store64(a + 32, slots);
+            store64(a + 40, scratch_pool);
+            store64(a + 48, wi + 1);   # crypto bank (1..workers; bank 0 = main)
+            store64(ts + wi * 8, thread_create(&_batch_worker, a));
+            wi = wi + 1;
+        }
+
+        wi = 0;
+        while (wi < workers) {
+            thread_join(load64(ts + wi * 8));
+            wi = wi + 1;
+        }
+
+        # Emit audit records serially on the main thread now that
+        # all workers have completed. The audit log's allocations
+        # never race because we're back to a single-threaded
+        # context. Matches the `sv_verify_artifact` wrapper's
+        # audit-after-verify shape.
+        var ai = 0;
+        while (ai < count) {
+            var avr = load64(slots + ai * 8);
+            var apath = load64(artifacts + ai * 16);
+            var aatype = load64(artifacts + ai * 16 + 8);
+            var aart = vresult_artifact(avr);
+            var ae_b = audit_artifact_verified(apath, aatype,
+                                               artifact_trust_level(aart),
+                                               vresult_passed(avr),
+                                               artifact_content_hash(aart));
+            alog_record(load64(sv + 48), ae_b);
+            ai = ai + 1;
+        }
+
+        var presults = vec_new();
+        var pri = 0;
+        while (pri < count) {
+            vec_push(presults, load64(slots + pri * 8));
+            pri = pri + 1;
+        }
+        return presults;
+    }
+
+    # Serial path — taken when `count < _SIGIL_BATCH_PARALLEL_THRESHOLD`.
+    var results = vec_new();
+    var i = 0;
+    while (i < count) {
+        var path = load64(artifacts + i * 16);
+        var atype = load64(artifacts + i * 16 + 8);
+        var vr = sv_verify_artifact(sv, path, atype);
+        vec_push(results, vr);
+        i = i + 1;
+    }
+    return results;
+}
+
+# ================================================================
+# Boot chain verification
+# ================================================================
+
+fn sv_verify_boot_chain(sv, components): i64 {
+    var policy = load64(sv + 8);
+    if (policy_verify_on_boot(policy) == 0) {
+        return integrity_report_new();
+    }
+
+    var iv = load64(sv + 24);
+    var ipol = integrity_policy_new();
+
+    var clen = vec_len(components);
+    var i = 0;
+    while (i < clen) {
+        var path = vec_get(components, i);
+        var store = load64(sv + 32);
+        # Look for artifact by path in trust store
+        var keys = map_keys(store);
+        var klen = vec_len(keys);
+        var j = 0;
+        while (j < klen) {
+            var chash = vec_get(keys, j);
+            var artifact = map_get(store, chash);
+            if (streq(artifact_path(artifact), path) == 1) {
+                ipolicy_add(ipol, path, chash);
+            }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+
+    iv_set_policy(iv, ipol);
+    return iv_verify_all(iv);
 }

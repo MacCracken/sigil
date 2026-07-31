@@ -42,12 +42,17 @@ fn secureboot_read_efi_variable(path): i64 {
         return err_invalid_argument("efi variable path is empty");
     }
 
-    # Open the file
-    var fd = sys_open(path, 0, 0);  # O_RDONLY = 0
+    # Open the file. Use io.cyr's `xopen`, NOT a raw `sys_open`: agnos's
+    # sys_open is LENGTH-CARRYING — `(name, namelen, flags)` — so the
+    # Linux-shaped `sys_open(path, 0, 0)` this used through 3.12.2 puts
+    # the flags word in `namelen`, i.e. a zero-length name. That is a
+    # silent ABI miscompile off Linux (no ud2, no diagnostic), which is
+    # exactly what the cyrlint `xsys` rule flags. `xopen` bridges it.
+    var fd = xopen(path, 0);        # O_RDONLY
     if (fd < 0) {
         return err_io(0 - fd, "failed to open efi variable");
     }
-    defer { sys_close(fd); }
+    defer { file_close(fd); }
 
     # Read up to 256 bytes (EFI variables are typically small)
     var buf = alloc(256);
@@ -87,13 +92,14 @@ fn secureboot_efi_var_size(data): i64 {
 # Detect the current Secure Boot state.
 # Returns Result: Ok(SecureBootState) or Err.
 fn secureboot_detect_state(): i64 {
-    # Check if EFI is available
+    # Check if EFI is available. `file_exists` (io.cyr) rather than a raw
+    # sys_open for the same namelen-bridging reason as above — the probe
+    # is an existence test, and open-then-close was only ever standing in
+    # for one.
     var efi_dir = "/sys/firmware/efi";
-    var fd = sys_open(efi_dir, 0, 0);
-    if (fd < 0) {
+    if (file_exists(efi_dir) == 0) {
         return Ok(SB_NOT_SUPPORTED);
     }
-    sys_close(fd);
 
     # Try reading SecureBoot EFI variable
     var sb_path = "/sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c";
@@ -569,11 +575,9 @@ fn secureboot_efi_var_new(name, size): i64 {
 # Returns Result: Ok(vec_of_efi_vars) or Err.
 fn secureboot_list_efi_variables(): i64 {
     var efivars_dir = "/sys/firmware/efi/efivars";
-    var fd = sys_open(efivars_dir, 0, 0);
-    if (fd < 0) {
-        return err_io(0 - fd, "EFI variables directory not found; is this a UEFI system?");
+    if (file_exists(efivars_dir) == 0) {
+        return err_io(ENOENT, "EFI variables directory not found; is this a UEFI system?");
     }
-    sys_close(fd);
 
     # Read directory listing via ls
     var args = vec_new();
