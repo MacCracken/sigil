@@ -7,6 +7,109 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.12.3] — 2026-08-08
+
+### Security — the banked RSA verify lane accepted forged signatures
+
+- **`src/rsa.cyr`: `rsa_pkcs1v15_verify_sha256` could return 1 for an INVALID
+  signature.** Not a corrupted-scratch DoS — a genuine authentication bypass.
+
+  `_rsa_pkcs1v15_check` ended with **both operands of its decision** in the same
+  lane-indexed file-scope global:
+
+  ```
+  var rem  = &_rsa_em + bk * 512;          # recovered EM, from the signature
+  var rexp = &_rsa_expected + bk * 512;    # expected EM, from the digest
+  ...
+  return ct_eq_bytes(rem, rexp, n_len);
+  ```
+
+  A colliding thread that left a *consistent* valid pair there made the next
+  thread's compare succeed on bytes that were never its own. Nothing downstream
+  caught it: `ct_eq_bytes` is a plain OR-accumulating XOR with no structural
+  gate, and `_rsa_recover_em` performs no PKCS#1 structural validation — that
+  one comparison was the entire decision.
+
+  **Collisions are structural, not a load threshold.** `cbank()` assigns
+  `(atomic_fetch_add(&_crypto_next_bank, 1) % 63) + 1` and **never releases a
+  lane** — no decrement exists — so the ceiling is **63 lifetime
+  crypto-touching threads**, not 63 concurrent ones.
+
+  Reported by agnosai (100 sandhi pool workers over 63 lanes) and measured
+  there: **888 of 400,000 forged signatures accepted** (~1 in 450), and 281,965
+  of 400,000 valid ones rejected. Reproduced three times independently by
+  reviewers each trying to refute it (888 / 1674 / 314).
+
+  ⚠ **Pinning every thread to one lane shows zero false accepts** and near-total
+  false rejects, which reads as fail-closed and is wrong — extreme contention
+  corrupts the lane so continuously that no clean snapshot survives to match
+  against. The bypass lives in the low-multiplicity regime a real pool produces.
+
+### Fixed — the premise that forced banking was eight releases stale
+
+- **`CLAUDE.md` quirk #1 ("function-scope `var X[N]` arrays are static
+  globals") is superseded.** It was confirmed under cycc **6.0.52**; **cyrius
+  6.3.15 flipped array locals to the stack** (`_STACK_ARRAYS = 1`,
+  `src/frontend/parse.cyr:287`) and sigil never revisited it.
+
+  Re-probed under 6.5.11: an array inside the **122,880-byte** per-fn budget
+  (`src/frontend/parse_decl.cyr:89`) is per-call and per-thread — non-tail
+  recursion gives four frames 576 B apart, two threads land ~2 MB apart. Past
+  the budget it does become shared, and the compiler emits `note: oversized
+  array local kept in shared global (not per-thread)`.
+
+  The v1.5 verify workspace is now function-scope: `_rsa_recover_em` 3×512 =
+  1,536 B, `_rsa_pkcs1v15_check` 2×512 = 1,024 B, the two verify digest
+  wrappers 88 B — 1.3%, 0.8% and 0.07% of the budget. `_rsa_n`, `_rsa_s`,
+  `_rsa_m` and `_rsa_expected` are **deleted**.
+
+### Known residuals — still banked, still 63-lane-capped
+
+Both were attempted and **reverted**: they regressed tests for reasons not yet
+understood, and a half-understood change to a crypto path is worse than a
+documented one. Neither is a bypass on its own — the accept required *both*
+compare operands shared, and both are now private, so anything else corrupting
+yields a mismatch (fail-closed).
+
+- **`_rsa_em` in `_rsa_pss_verify`** — localising it fails all four PSS tests
+  with the surrounding logic unchanged. Ruled out: zero-initialisation,
+  `cbank()` ordering, and callee-clobbers-caller (probed). **PSS still carries
+  the ceiling**, and `tls_native_hs13.cyr` routes TLS 1.3 CertificateVerify
+  through it.
+- **`_rsa_hash` / `_rsa_di` in the two sign wrappers** — localising all four
+  digest wrappers broke the sign KATs; localising only the two verify wrappers
+  is green and is what shipped.
+
+⚠ **The bignum engine is the remaining blocker, and it was measured.** Staging
+this release into agnosai and removing its serialising mutex — two threads
+pinned to one lane, 2,000 verifications each — gives:
+
+| | result |
+|---|---|
+| forged signatures accepted | **0** ✅ bypass closed |
+| valid signatures verified | **1 of 2,000** ❌ |
+
+So 3.12.3 turns a **fail-open auth bypass** into a **fail-closed DoS**. Real
+progress in kind, not yet a fix. The cause is outside `rsa.cyr`:
+`_rsa_recover_em` calls `bn_mont_modexp_pub`, and the engine's scratch
+(`_bn_mont_*`, `_bn_exp_*`, `_bn_inv_*`) is still file-scope and lane-banked, so
+two threads on one lane corrupt each other's modexp and the compare rightly
+rejects. **Consumers must keep serialising until that lands** — agnosai does.
+
+Fixing the engine fixes RSA, PSS, ECDSA and Ed25519 at once and is almost
+certainly the right place to fix it rather than module by module. 62 file-scope
+banked globals remain in total. At minimum, `cbank()` should fail closed past
+lane 63 rather than silently aliasing.
+
+### Changed
+
+- Toolchain pin `6.5.10` → **`6.5.11`**, by the three-step
+  (`deps --no-lock` → `lib sync --full` → `deps --lock`) with `lib/` diffed
+  against the snapshot: 100 files, zero content differences.
+
+64/64 suites pass; `rsa.tcyr` 38/38 (baseline confirmed 38/38 before the change,
+so the reverted regressions were genuinely introduced and genuinely backed out).
+
 ## [3.12.2] — 2026-07-30
 
 ### Security — `authenticode_pe_sign` hashed the wrong byte range for unaligned images

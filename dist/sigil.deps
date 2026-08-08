@@ -23,3 +23,4 @@ ct
 keccak
 thread
 thread_local
+bench
