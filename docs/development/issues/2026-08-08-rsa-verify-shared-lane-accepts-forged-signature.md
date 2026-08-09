@@ -1,10 +1,33 @@
 # RSA verify's banked lane accepted forged signatures — v1.5 fixed in 3.12.3, PSS and sign residuals open
 
-**Status:** 🟡 **PARTIALLY RESOLVED in 3.12.3.** The PKCS#1 v1.5 verify bypass is
-closed. Two residuals remain banked and still carry the 63-lane ceiling — PSS
-verify and the two sign digest wrappers — because localising them regressed
-tests for reasons not yet understood (see *Residuals*).
-**Placement:** 3.12.3 for the v1.5 half. Residuals unpinned — 3.x line, security.
+**Status:** ✅ **RESOLVED for the whole VERIFY surface in 3.12.6** (v1.5 in 3.12.3,
+bignum engine 3.12.4-3.12.5, PSS + the sign digest wrappers 3.12.6). Nothing on a
+verify path is banked any more; both `rsa.tcyr` (38/38) and the pinned-lane
+`rsa_lane_race.tcyr` (4/4, mutation-verified) are green. What remains open is the
+*wider scope* section below — the sign/blind/CRT workspace (banked **by design**,
+secret residue + per-lane wipe) and `cbank()` failing closed past lane 63.
+
+⚠ **PSS was carrying the SAME BYPASS, not merely a DoS.** Measured at 3.12.5 on
+the pinned-lane harness: **1 of 800 forged PSS signatures ACCEPTED**, 791/800
+valid ones verified. The residual described below as "regressed tests for reasons
+not yet understood" was therefore an open authentication bypass for three
+releases, and the sentence itself is what kept it open.
+
+⚠ **THE CAUSE WAS NEVER IN SIGIL — it was cyrius, fixed in 6.5.14.** Every buffer
+that resisted localisation sat in a fn ending `return <helper>(...ptr-into-this-
+frame...)` with **exactly six arguments**; cycc's tail-call epilogue frees the
+frame before jumping, and cycc declines TCO above 6 args. That arity threshold is
+the entire reason 3.12.3's verify wrappers (10 args) localised cleanly while
+their sign twins (6 args) "broke the KATs" — **the arity was the variable, not the
+buffer**. cycc's own guard for this fired only on a `&` spelled literally in the
+argument list, so `var rh = &hbuf; ... return f(rh)` walked past it.
+3.12.3's note that "callee-clobbers-caller was ruled out" came from a probe
+window over the buffer's first 8 bytes; the corruption was at offset 223.
+**A probe that cannot see the defect is not evidence of absence.**
+sigil >= 3.12.6 therefore REQUIRES cyrius >= 6.5.14 (pinned in `cyrius.cyml`).
+
+**Placement:** 3.12.3 v1.5 · 3.12.4-.5 bignum · 3.12.6 PSS + sign wrappers.
+Wider-scope items unpinned — 3.x line, security.
 **Discovered:** 2026-08-08 by agnosai, chasing a *different* (benign) compiler
 note during its Rust→Cyrius port.
 **Severity:** **Critical** — authentication bypass for any consumer verifying

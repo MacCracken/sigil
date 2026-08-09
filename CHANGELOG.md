@@ -7,6 +7,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.12.6] — 2026-08-08
+
+### Fixed — RSA-PSS verify had the SAME authentication bypass 3.12.3 fixed for v1.5
+
+**Requires cyrius >= 6.5.14** (`cyrius.cyml` pins it). The whole PSS workspace — 14
+buffers across `_rsa_pss_verify`, `_rsa_emsa_pss_verify`, `_rsa_mgf1` and `_rsa_pss_sign`
+— is now function-scope, so it is per-call and therefore per-thread. `_rsa_em`,
+`_rsa_hash`, `_rsa_di`, `_pss_*` and `_mgf_*` are deleted: **12 banked globals,
+196,096 B (191.5 KiB) of `.bss`**, replaced by 4,664 B of stack per call.
+
+Measured on the pinned-lane harness (both threads `crypto_bank_set(1)`):
+
+| PSS verify | valid verified | forged accepted |
+|---|--:|--:|
+| 3.12.5 (banked) | 791 / 800 | **1** |
+| **3.12.6** | **800 / 800** | **0** |
+
+A forged PSS signature verifying is the same class of defect agnosai reported against
+PKCS#1 v1.5 in 3.12.2 (888 of 400,000). PSS carried it three releases longer **because
+the fix kept "failing" and the failure was read as sigil's bug** — 3.12.3, 3.12.4 and
+3.12.5 each shipped a comment in `rsa.cyr` saying localisation "regressed tests, cause not
+understood", and the shared lanes that comment justified were the bypass.
+
+### The cause was never in sigil — cyrius 6.5.14
+
+Every buffer that resisted localisation sat in a function ending
+`return <helper>(... pointer-into-this-frame ...)` with **exactly six arguments**. That is
+cycc's tail-call path, whose epilogue frees the frame *before* jumping, so the callee read
+a released frame. cycc already declines TCO above 6 args — which is the entire reason
+3.12.3's verify wrappers (10 args) localised cleanly while their sign twins (6 args)
+"broke the KATs". **The arity was the variable, not the buffer.** cycc's own guard for
+this (v5.8.16 §8) fired only on a `&` spelled literally in the arg list, so
+`var rh = &hbuf; ... return f(rh)` walked past it. Fixed in cyrius 6.5.14.
+
+Three release notes recorded a symptom-shaped theory ("callee clobbers caller was ruled
+out") that was never tested against the compiler. The probe that settled it was two
+addresses: a callee local sat *above* every caller local, which only happens if the
+caller's frame is already gone.
+
+### Changed — the two PKCS#1 v1.5 SIGN wrappers localised too
+
+`rsa_pkcs1v15_sign_sha256` / `_sha384` held their digest and DigestInfo in banked
+`_rsa_hash` / `_rsa_di` for the same reason (6-arg tail call into `_rsa_pkcs1v15_sign`).
+Both are now stack locals, 88 B each. The sign **core** (`_rsa_sign_*`, `_rsa_blind_*`,
+`_rsa_crt_*`) stays banked-and-wiped by design — it carries the secret-exponent residue —
+so concurrent same-lane *signing* keeps the 63-lane ceiling. Only verify is now
+ceiling-free.
+
+### Added — PSS coverage in `tests/tcyr/rsa_lane_race.tcyr`
+
+Two more pinned-lane threads over PSS verify, same invariant: a valid signature always
+verifies, a forged one never does. **Mutation-verified** — re-banking the PSS workspace
+turns it red (1 forged accepted, 791/800 valid).
+
+⚠ **Sensitivity, stated honestly:** this pair detects a shared workspace *in aggregate*.
+Re-banking one buffer alone (tried `db`; tried the MGF1 block) leaves it green at 800/800,
+because a single narrow window rarely collides in 1,600 verifies. Read it as "the PSS
+workspace is private", not as per-buffer coverage.
+
 ## [3.12.5] — 2026-08-08
 
 ### Fixed — `bn_mod`, the last shared buffer on the public verify path
