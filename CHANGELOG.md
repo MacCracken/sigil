@@ -7,6 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.12.4] — 2026-08-08
+
+### Fixed — the bignum engine's banked scratch, which 3.12.3 named as its blocker
+
+3.12.3 closed the v1.5 verify bypass and left a **fail-closed DoS**: two threads on one
+`cbank()` lane gave 0 forged accepted but only **1 of 2,000 VALID** signatures verified,
+because `_rsa_recover_em` → `bn_mont_modexp_pub` ran on scratch that was still file-scope
+and lane-banked. That scratch is now **stack locals**:
+
+- `_bn_mont_mul` — the CIOS accumulator (`t`, 528 B) and `_nmul64`'s lo||hi slot (`m64`).
+  Both are zeroed-at-entry, consumed-before-`out` scratch; neither ever needed a lane.
+- `bn_mont_modexp_pub` — `r2src` / `r2` / `one` / `basem` / `res`.
+
+The PUBLIC verify path now shares **no mutable state between threads**: no lane to collide
+on, and no 63-lifetime-thread ceiling.
+
+⭐ **The root cause was a cyrius quirk that had been fixed for eight releases.** The banking
+existed for quirk #1 — "function-scope `var X[N]` arrays are static globals", confirmed
+under cycc 6.0.52. cyrius **6.3.15** routed array locals to per-thread STACK slots
+(`_STACK_ARRAYS = 1`) and sigil never revisited it. Re-verified directly on cycc 6.5.12:
+two real threads writing distinct sentinels into their own `var buf[64]` read back
+111111 / 222222 — no collision. The workaround had outlived the defect, and the workaround
+is what shipped the bypass.
+
+### Verification — and what is NOT claimed
+
+**64/64 suites pass**, `rsa.tcyr` **38/38** (the 3.12.3 baseline), on cycc 6.5.12.
+
+⚠ **I did not independently reproduce the 2-threads-on-1-lane measurement.** Three harness
+attempts failed to create the collision — instrumenting the last one showed the two workers
+landed on lanes **0 and 1**, never the same lane, so the test would have passed against the
+unfixed code and proved nothing. It is recorded here rather than quietly dropped, because a
+green test that cannot fail is worse than no test. The agnosai measurement was taken with
+that consumer's serialising mutex removed; reproducing it needs the counter to wrap while an
+earlier thread is still live, which this harness did not achieve.
+
+So the claim is: **the shared mutable state is gone from the public path and every suite
+passes** — not "the DoS is measured fixed". Consumers should re-run the agnosai staging
+before dropping their serialising mutex.
+
+### Known residuals — unchanged from 3.12.3
+
+- `_rsa_em` in `_rsa_pss_verify` still banked (localising it fails all four PSS tests, cause
+  not understood). **PSS still carries the ceiling**, and `tls_native_hs13.cyr` routes TLS
+  1.3 CertificateVerify through it.
+- `_rsa_hash` / `_rsa_di` in the two sign wrappers still banked.
+- `_bn_mont_modexp` (the SECRET ladder) still banked — its per-lane scrub is tied to the
+  lane model. Only the public path moved here.
+- `cbank()` still aliases silently past lane 63 rather than failing closed.
+
 ## [3.12.3] — 2026-08-08
 
 ### Security — the banked RSA verify lane accepted forged signatures
