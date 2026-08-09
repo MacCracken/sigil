@@ -598,8 +598,9 @@ fn _rsa_scrub_sign_lanes(): i64 {
     memset(&_bn_inv_v  + bk * 512, 0, 512);
     memset(&_bn_inv_x1 + bk * 512, 0, 512);
     memset(&_bn_inv_x2 + bk * 512, 0, 512);
-    memset(&_bn_modrem + bk * 520, 0, 520);
-    memset(&_bn_modn1  + bk * 520, 0, 520);
+    # 3.12.5: _bn_modrem/_bn_modn1 are stack locals in bn_mod now and self-scrub on
+    # return, so these two memsets targeted a dead global. Deleted rather than left
+    # pointing at nothing — a scrub that wipes memory nobody uses reads as coverage.
     return 0;
 }
 

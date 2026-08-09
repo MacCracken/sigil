@@ -7,6 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.12.5] — 2026-08-08
+
+### Fixed — `bn_mod`, the last shared buffer on the public verify path
+
+The measured remainder after 3.12.4. `bn_mont_modexp_pub` calls `bn_mod` for the R^2
+setup (`bignum.cyr:661`/`:740`), so a localised Montgomery ladder still reached banked
+lanes there. `_bn_modrem` / `_bn_modn1` are now stack locals.
+
+Measured on the pinned-lane harness (both threads `crypto_bank_set(1)`):
+
+| sigil | valid verified | forged accepted |
+|---|--:|--:|
+| 3.12.2 | 1 / 2,000 | **888** |
+| 3.12.3 | 1 / 2,000 | 0 |
+| 3.12.4 | 712 / 2,000 | 0 |
+| **3.12.5** | **800 / 800** | **0** |
+
+⚠ **Not a copy-paste of the earlier localisations.** `bn_mod` also sees SECRET operands
+on the CRT sign path (`rsa.cyr:538`/`:539`/`:547`), and `_rsa_scrub_sign_lanes` wiped the
+shared lane on the sign return. Moving to stack locals would have made that scrub a no-op
+on a dead global while leaving the residue live on the stack — so **the buffers zero
+themselves before returning**, which is strictly better: it wipes exactly this call's data
+rather than a whole lane, and cannot miss a lane a sibling is using. The two now-dangling
+`memset`s in `rsa.cyr` are **deleted** rather than left pointing at nothing; a scrub that
+wipes memory nobody uses reads as coverage.
+
+### Added — `tests/tcyr/rsa_lane_race.tcyr`, and why the earlier attempts were vacuous
+
+Both threads pin to lane 1 via `crypto_bank_set(1)`, reproducing by construction the
+aliasing that >63 lifetime crypto threads reach by wrap. **Mutation-verified**: reverting
+`bn_mod` to the 3.12.4 banked lanes gives **405 of 800** valid verified and the gate goes
+red; 3.12.5 gives 800/800.
+
+⛔ **3.12.4 recorded three failed harness attempts — this is why.** They waited for the
+lane counter to WRAP, and the workers landed on lanes 0 and 1, never colliding. A test that
+cannot collide passes against the unfixed code and proves nothing. Pinning is the trick,
+and the shape is borrowed from `agnosai/tests/server_auth_lane_race.tcyr`.
+
+**65/65 suites pass** (64 + the new gate), `rsa.tcyr` 38/38.
+
+### Still open
+
+PSS (`_rsa_em` in `_rsa_pss_verify`) is **NOT** fixed and remains banked. Localising it
+still fails all four PSS tests. New evidence, recorded in the issue rather than guessed at:
+the failure is **size-dependent** — `rembuf[256]` and `[1024]` leave the probe window
+intact while `[512]` shows the caller's buffer altered across the `_rsa_mgf1` call, with a
+banked control on the same probe reading clean. That points at cyrius stack-slot layout
+rather than sigil logic, so it is not fixed here. **3.12.3's claim that
+callee-clobbers-caller was "ruled out" is disproven** — something is altering that buffer.
+
+The secret ladder, the two sign wrappers, and `cbank()`'s silent aliasing past lane 63 are
+also unchanged.
+
 ## [3.12.4] — 2026-08-08
 
 ### Fixed — the bignum engine's banked scratch, which 3.12.3 named as its blocker

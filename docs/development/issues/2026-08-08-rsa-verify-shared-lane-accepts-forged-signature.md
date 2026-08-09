@@ -166,6 +166,52 @@ of work — the engine is shared by every asymmetric primitive in the library, s
 fixing it there fixes RSA, PSS, ECDSA and Ed25519 at once, and is very likely
 the right place to fix it rather than module by module.
 
+### 4. `bn_mod` — measured against 3.12.4, still shared
+
+3.12.4 localised `_bn_mont_*` and asked consumers to re-run the agnosai staging
+before dropping their mutex. Re-run, same harness, two threads pinned to lane 1
+with `crypto_bank_set(1)`, 2,000 verifications each:
+
+| sigil | valid verified (of 2,000) | forged accepted |
+|---|---|---|
+| 3.12.2 | 1 | **888** |
+| 3.12.3 | 1 | 0 |
+| **3.12.4** | **712** | 0 |
+
+Substantial progress — 99.95% failure down to 64% — but **not closed**, so
+**agnosai's mutex stays**.
+
+The remaining shared state is `bn_mod` (`src/bignum.cyr:313-317`):
+
+```
+fn bn_mod(rem, x, x_limbs, modulus, m_limbs): i64 {
+    var bk = cbank();
+    var modrem = &_bn_modrem + bk * 520;   # this thread's lane (PUBLIC)
+    var modn1  = &_bn_modn1  + bk * 520;
+```
+
+`bn_mont_modexp_pub` calls `bn_mod` at `:661` and `:740` for the R² setup, so
+the public verify path still reaches a banked lane. Both buffers are 520 B —
+1,040 B against the 122,880 B frame budget, so localising them is the same
+one-line change as the rest.
+
+⚠ **One caveat that makes this more than a copy-paste.** `bn_mod` is also called
+on **secret** operands by the CRT sign path (`rsa.cyr:538`, `:539`, `:547`), and
+`rsa.cyr:601` currently scrubs the shared lane with
+`memset(&_bn_modrem + bk * 520, 0, 520)`. Moving the buffers to stack locals
+makes that scrub a no-op on a dead global and leaves the secret residue
+unscrubbed on the stack. The local must therefore zero itself before returning —
+which is strictly better, since it scrubs only this call's data rather than a
+whole lane — and `rsa.cyr:601` should then be deleted rather than left pointing
+at nothing.
+
+**On the harness.** 3.12.4 records that three attempts failed to create a
+collision because the workers landed on lanes 0 and 1. Forcing it is the trick:
+have *both* threads call `cbank()` and then `crypto_bank_set(1)` as their first
+act, which puts them on one lane deterministically instead of waiting for the
+counter to wrap. `agnosai/tests/server_auth_lane_race.tcyr` does exactly that
+and is mutation-verified.
+
 ## Wider scope, not addressed here
 
 A brace-depth scan finds **62 file-scope banked globals**. Beyond RSA verify:

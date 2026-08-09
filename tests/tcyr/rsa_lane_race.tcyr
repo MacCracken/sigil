@@ -1,0 +1,97 @@
+# rsa_lane_race.tcyr — 3.12.5. The RSA verify path is correct under LANE ALIASING.
+#
+# WHY THIS EXISTS. `cbank()` hands out 63 lanes and never releases one, so any tree
+# with more than 63 lifetime crypto-touching threads has colliding pairs. The banked
+# verify workspace then let a sibling corrupt this thread's operands. 3.12.2 accepted
+# 888 of 400,000 FORGED signatures; 3.12.3 closed that but verified only 1 of 2,000
+# VALID ones; 3.12.4 localised the Montgomery scratch and reached 712 of 2,000.
+# 3.12.5 localises the last shared buffer (`bn_mod`).
+#
+# ⚠ DETERMINISTIC, NOT A RACE TEST. Both threads pin to lane 1 with
+# `crypto_bank_set(1)`, reproducing by construction the aliasing that 100 workers over
+# 63 lanes reach by wrap. Three earlier harness attempts failed precisely because they
+# waited for the counter to wrap and the workers landed on lanes 0 and 1 — a test that
+# cannot collide proves nothing. The gate is an invariant that must hold under EVERY
+# interleaving: a valid signature ALWAYS verifies, a forged one NEVER does.
+# Shape borrowed from agnosai/tests/server_auth_lane_race.tcyr.
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/string.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fmt.cyr"
+include "lib/bayan.cyr"
+include "lib/sakshi.cyr"
+include "lib/chrono.cyr"
+include "lib/ct.cyr"
+include "lib/thread_local.cyr"
+include "src/crypto_scratch.cyr"
+include "src/mul64.cyr"
+include "src/types.cyr"
+include "src/error.cyr"
+include "lib/random.cyr"
+include "src/random.cyr"
+include "src/sha256.cyr"
+include "src/hex.cyr"
+include "src/sha512.cyr"
+include "src/sha384.cyr"
+include "src/bigint_ext.cyr"
+include "src/ed25519.cyr"
+include "src/ecdsa_p256.cyr"
+include "src/x509.cyr"
+include "src/bignum.cyr"
+include "src/rsa.cyr"
+include "lib/thread.cyr"
+
+
+var _n = 0; var _e = 0; var _msg = 0; var _good = 0; var _forged = 0;
+var _iters = 400;
+var _okA = 0; var _badA = 0;
+var _okB = 0; var _badB = 0;
+
+fn _wA(arg): i64 {
+    cbank();
+    crypto_bank_set(1);                      # pin: same lane as _wB
+    var i = 0;
+    while (i < _iters) {
+        if (rsa_pkcs1v15_verify_sha256(_n, 256, _e, 3, _msg, 33, _good, 256) == 1) { _okA = _okA + 1; }
+        if (rsa_pkcs1v15_verify_sha256(_n, 256, _e, 3, _msg, 33, _forged, 256) == 1) { _badA = _badA + 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+fn _wB(arg): i64 {
+    cbank();
+    crypto_bank_set(1);                      # pin: same lane as _wA
+    var i = 0;
+    while (i < _iters) {
+        if (rsa_pkcs1v15_verify_sha256(_n, 256, _e, 3, _msg, 33, _good, 256) == 1) { _okB = _okB + 1; }
+        if (rsa_pkcs1v15_verify_sha256(_n, 256, _e, 3, _msg, 33, _forged, 256) == 1) { _badB = _badB + 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn main(): i64 {
+    alloc_init();
+    _n = hex_decode("bd61200b4b717e9153324c43ba3079b49275d4e3b3c1b88833a25d20c9e664d39c9185df74a506e5ab7c8f77cfad648a5a3c4652a483b79a28c02bb8108e8c2bc331baf18cdf9e8957cf79d031d42368439ccd2711cedf640f68d5a9aa77cc2c580973857ef867652c22f89400f0f5ed6f25bfca78c5728ef64eed549f321dddfe5bded13a0a0ed6d683361cacbfd1b1fe6647fb439d61ca1357b524d316b5c6a76c1666ea6aa6c0728d9469782af0aba3b3023106545b44dee0abbc9bafe37e0626af5277f78d21304a8fd60dc09b2e9ce0e68439db90ba430496e0f4987927e645e8004af2aa5fa93731eb3317f041023e92857f3d0801e9c7eeebd19e5649", 512);
+    _e = hex_decode("010001", 6);
+    _msg = hex_decode("736967696c2052534120504b435323312076312e35204b4154206d657373616765", 66);
+    _good = hex_decode("1deecf28b83e745e556f3d3799d17707f5e4960bcc5dbeeb2cb2ac586bbc51dac76ea3d1579915fd1b1640d73f7a657059ef17325c4e0aa7c69acece7ce64b8ad74c8dc2b564b806f6b8ee3969d0ddbe7d41fbba2761f10f97e9d589bfe55720a0221ddfed24815be862ee6e6907395e88737c43b0c731ced78bf3512b4c5c421e00d1fa1389ae9983adf8e7115f19223f409885c79e7895ba7daffb89bcb5111c8045391d2c374ede6da84297d12b8dea99f79a0d502b80f806a5e0dce5b17b4dfef7971204d85ad040941ece7f77f46c6d4a8bd8df5211c1fd48e95f7eb6748ead5867c0bc8e0e2e521810c7dc788aec537362d3cfbfd79d37e5aa5159ce0a", 512);
+    _forged = hex_decode("1deecf28b83e745e556f3d3799d17707f5e4960bcc5dbeeb2cb2ac586bbc51dac76ea3d1579915fd1b1640d73f7a657059ef17325c4e0aa7c69acece7ce64b8ad74c8dc2b564b806f6b8ee3969d0ddbe7d41fbba2761f10f97e9d589bfe55720a0221ddfed24815be862ee6e6907395e88737c43b0c731ced78bf3512b4c5c421e00d1fa1389ae9983adf8e7115f19223f409885c79e7895ba7daffb89bcb5111c8045391d2c374ede6da84297d12b8dea99f79a0d502b80f806a5e0dce5b17b4dfef7971204d85ad040941ece7f77f46c6d4a8bd8df5211c1fd48e95f7eb6748ead5867c0bc8e0e2e521810c7dc788aec537362d3cfbfd79d37e5aa5159ce0b", 512);
+
+    test_group("RSA verify under lane aliasing (both threads pinned to lane 1)");
+    var ta = thread_create(&_wA, 0);
+    var tb = thread_create(&_wB, 0);
+    thread_join(ta); thread_join(tb);
+
+    assert_eq(_badA + _badB, 0, "NO forged signature ever verified");
+    assert_eq(_okA + _okB, 800, "EVERY valid signature verified (3.12.3: 1/2000, .4: 712/2000)");
+
+    var r = assert_summary();
+    return r;
+}
