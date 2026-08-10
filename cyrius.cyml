@@ -5,7 +5,7 @@ description = "Sigil — system-wide trust verification for AGNOS. Ed25519, SHA-
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/sigil"
 language = "cyrius"
-cyrius = "6.5.14"
+cyrius = "6.5.17"
 
 [build]
 entry = "programs/smoke.cyr"
@@ -384,15 +384,25 @@ modules = [
 # ships no lib/json.cyr / lib/bigint.cyr. sigil rolls its own json_write_escaped
 # (src/trust.cyr) so it never needed stdlib-json; its u256_* big-integer arithmetic
 # now comes from bayan, which re-exports the legacy u256_* names via compat aliases.
-stdlib = ["syscalls", "alloc", "freelist", "assert", "str", "string", "vec", "hashmap", "io", "fmt", "result", "fnptr", "bayan", "chrono", "tagged", "process", "fs", "bench", "slice"]
+stdlib = ["syscalls", "alloc", "freelist", "assert", "str", "string", "vec", "hashmap", "io", "fmt", "result", "fnptr", "bayan", "chrono", "tagged", "process", "fs", "bench", "slice", "sakshi"]
 
-# Sakshi is not yet folded into the Cyrius stdlib distribution (2.0.0 pending).
-# Pin to the published tag via git until the toolchain vendors it.
-[deps.sakshi]
-git = "https://github.com/MacCracken/sakshi.git"
-tag = "2.4.8"
-modules = ["dist/sakshi.cyr"]
-
+# sakshi moved from `[deps.sakshi]` into `[deps].stdlib` at the 6.5.17 pin.
+#
+# The git dep's own comment said "pin to the published tag until the toolchain
+# vendors it" — the toolchain now does: 6.5.17's snapshot ships sakshi 2.4.10.
+# sigil's `src/` references **no** sakshi symbol at all (only
+# `tests/tcyr/x509_offdiag.tcyr` does, for `sakshi_set_level`), so the git dep
+# was provisioning a module nothing in the library used.
+#
+# ⚠ Keeping it would have been actively harmful to consumers, not merely
+# redundant. `cyrius deps` overlays a git dep's resolution on top of the
+# toolchain snapshot, so **every project depending on sigil had its
+# `lib/sakshi.cyr` silently downgraded to whatever tag sat here** — undoing its
+# own `lib sync --full` on the next build, with an unnamed "1 bundled lib(s)
+# differ" warning as the only signal and `deps --verify` unable to catch it
+# because the lock is written from disk. kavach hit exactly that and recorded it
+# as a known residual it could not fix from its own side. Dropping the dep
+# removes the overlay for every consumer at once.
 # (agnosys dep dropped — sigil internalized the trust primitives it needs
 # (certpin/tpm/ima/secureboot/dmverity/luks + their sys_error/sys_util support)
 # as src/*_core.cyr + sys_error.cyr/sys_util.cyr. Part of the agnosys→agnodrm

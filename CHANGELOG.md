@@ -7,6 +7,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.12.7] — 2026-08-10 — toolchain + deps; the sakshi git dep was downgrading every consumer
+
+Maintenance only: **no `src/` file changed**, `dist/sigil.cyr`'s body and
+`dist/sigil.deps` both regenerate **byte-identical**, and the full audit is green.
+
+### Changed
+
+- **Toolchain pin 6.5.14 → 6.5.17.**
+
+- **`sakshi` moved from `[deps.sakshi]` into `[deps].stdlib`, at 2.4.10.** The git dep's
+  own comment said to pin it "until the toolchain vendors it" — 6.5.17's snapshot ships
+  sakshi 2.4.10, so that condition is met. sigil's `src/` references **no** sakshi symbol
+  at all (only `tests/tcyr/x509_offdiag.tcyr` does, for `sakshi_set_level`), and
+  `dist/sigil.cyr` contains zero, so the dep was provisioning a module the library never
+  used.
+
+  ⚠ **Keeping it was actively harmful to consumers, not merely redundant.** `cyrius deps`
+  overlays a git dep's resolution on top of the toolchain snapshot, so **every project
+  depending on sigil had its `lib/sakshi.cyr` silently downgraded to whatever tag sat
+  here** — 2.4.8 — undoing its own `cyrius lib sync --full` on the very next build. The
+  only signal was an unnamed "1 bundled lib(s) differ" shadow warning, and
+  `deps --verify` cannot catch it because the lock is written *from disk* and records the
+  downgraded file's hash.
+
+  kavach hit exactly this and could not fix it from its own side: adding a defensive
+  `[deps.sakshi]` to *its* manifest — the workaround agnosai and majra use — makes
+  `distlib` reclassify sakshi out of the **stdlib leaves**, dropping it from
+  `dist/kavach.deps` so a clean-room consumer fails with undefined `sakshi_*` symbols.
+  Safe for a binary, unsafe for a library that publishes a bundle. Removing the dep here
+  clears it for every sigil consumer at once, which is where the fix always belonged.
+
+### Verified
+
+- `scripts/check.sh` — **70 checks, 0 failures** (compile, `tests/tcyr`, `tests/bcyr`),
+  plus all three `fuzz/*.fcyr` targets clean.
+- `tests/tcyr` — **1,730 assertions, 0 failures**.
+- `cyrius distlib` exits 0; `dist/sigil.deps` unchanged and `dist/sigil.cyr` unchanged
+  apart from its version header.
+- doc / vet / deny clean; `lib/sakshi.cyr` now holds at 2.4.10 **through a build**, with
+  no shadow warning.
+
+### Known residual
+
+- 15 files under `src/` are `cyrius fmt --check` dirty. Pre-existing and untouched by this
+  release — no `src/` file changed — and `scripts/check.sh` does not gate on fmt. Most are
+  the multi-line-string-literal reindent filed as
+  `cyrius/docs/development/issues/2026-08-09-cyrius-fmt-reindents-inside-multi-line-string-literals.md`,
+  where accepting fmt's output would edit the contents of string literals.
+
 ## [3.12.6] — 2026-08-08
 
 ### Fixed — RSA-PSS verify had the SAME authentication bypass 3.12.3 fixed for v1.5
