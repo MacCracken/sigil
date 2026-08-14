@@ -12,11 +12,11 @@
 
 | Field | Value |
 |---|---|
-| Current version | **3.12.8** (`VERSION`) |
+| Current version | **3.12.9** (`VERSION`) |
 | Cyrius toolchain pin | **6.5.21** (`cyrius.cyml [package].cyrius`) |
 | Dependencies | **Zero git deps.** sakshi **2.4.10** and bayan **1.4.1** both arrive with the toolchain snapshot (sakshi moved from `[deps.sakshi]` into `[deps].stdlib` at 3.12.7); their only machine-visible trace is the `lib/sakshi.cyr` / `lib/bayan.cyr` hashes in `cyrius.lock`. agnosys dropped at 3.8.1 (trust primitives internalized). |
 | Last release date | 2026-08-14 |
-| Last release audit | [`2026-08-14-3.12.8-err-namespace-toolchain-audit.md`](../audit/2026-08-14-3.12.8-err-namespace-toolchain-audit.md) (scoped maintenance pass: `err_*` → `sigil_err_*` namespace rename + toolchain 6.5.21; quirk #1 cumulative-stack-budget re-probe across all of `src/` — **no findings, audit floor stays empty**). ⚠ **The audit practice lapsed for 3.12.3–3.12.7** — five releases filed no report, including 3.12.6, which fixed an authentication bypass. This release's audit does not cover that range. Prior full audit: [`2026-07-30-3.12.2-asm-multiply-authenticode-verify-audit.md`](../audit/2026-07-30-3.12.2-asm-multiply-authenticode-verify-audit.md) (native asm multiply, public-exponent modexp, Authenticode verify — **F1 HIGH** `authenticode_pe_sign` hashed the wrong byte range for unaligned images (fixed, mutation-proven regression test), F2 LOW SHA-256 ctx leak on the PE-hash path (fixed), F3 four PE-header hardenings, F4/F5 INFO. All fixed in-cycle; **audit floor stays empty**). Prior: `2026-06-29-3.9.7-ecdsa-bignum-banking-audit.md`. |
+| Last release audit | [`2026-08-14-3.12.9-rsa-sign-debanking-audit.md`](../audit/2026-08-14-3.12.9-rsa-sign-debanking-audit.md) (RSA sign/blind/CRT + bignum de-banking, per-call secret scrub, `cbank()` exhaustion detection — **no findings; audit floor stays empty**). Same-day prior: [`2026-08-14-3.12.8-err-namespace-toolchain-audit.md`](../audit/2026-08-14-3.12.8-err-namespace-toolchain-audit.md) (`err_*` → `sigil_err_*` rename + toolchain 6.5.21). ⚠ **The audit practice lapsed for 3.12.3–3.12.7** — five releases filed no report, including 3.12.6, which fixed an authentication bypass; neither of today's audits covers that range. Prior full audit: [`2026-07-30-3.12.2-asm-multiply-authenticode-verify-audit.md`](../audit/2026-07-30-3.12.2-asm-multiply-authenticode-verify-audit.md). |
 
 > ⚠️ **State drift note — updated 2026-07-30 (3.12.2).** The volatile fields
 > above are now hand-corrected and current at **3.12.2**. They had drifted
@@ -39,9 +39,9 @@
 
 | Metric | Value |
 |---|---|
-| `.tcyr` test files | **65** (`ls tests/tcyr/*.tcyr`) @3.12.8 (64 → 65 across 3.12.3–3.12.7) |
-| Total assertions | **1665** / 0 failures @3.12.8 across all 65 files. Measured two independent ways — `scripts/check.sh` and CLAUDE.md's canonical `for t in tests/tcyr/*.tcyr; do cyrius test "$t"; done` loop — which agree exactly. ⚠ 3.12.7's CHANGELOG claimed **1,730**; that number reproduces under neither method and no test was removed. Treat **1665** as the measured figure. |
-| Fuzz harnesses | 3 (`fuzz/*.fcyr`) — `fuzz_ed25519` (11), `fuzz_integrity` (6), `fuzz_revocation` (7): **24 / 0 failures @3.12.8**. |
+| `.tcyr` test files | **65** (`ls tests/tcyr/*.tcyr`) @3.12.9 (64 → 65 across 3.12.3–3.12.7; 3.12.9 added groups to two existing files) |
+| Total assertions | **1672** / 0 failures @3.12.9 across all 65 files (+7 at 3.12.9: RSA sign lane-race 3, cbank exhaustion 4). Measured two independent ways — `scripts/check.sh` and CLAUDE.md's canonical `for t in tests/tcyr/*.tcyr; do cyrius test "$t"; done` loop — which agree exactly. ⚠ 3.12.7's CHANGELOG claimed **1,730**; that number reproduces under neither method and no test was removed. Treat **1665** as the measured figure at 3.12.8, **1672** at 3.12.9. |
+| Fuzz harnesses | 3 (`fuzz/*.fcyr`) — `fuzz_ed25519` (11), `fuzz_integrity` (6), `fuzz_revocation` (7): **24 / 0 failures @3.12.9**. |
 | Benchmark suite | `benches/` — `history.csv`; RSA via `tests/bcyr/rsa.bcyr`, P-256/P-384 verify via `tests/bcyr/ecdsa_p256.bcyr` / `ecdsa_p384.bcyr` |
 
 > Counting note (revised @3.12.0): the 3 `*_verify_full.tcyr` tests

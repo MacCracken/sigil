@@ -6,7 +6,20 @@ type: state
 
 # Documentation Health — sigil
 
-> **Last refresh**: 2026-08-14 (**3.12.8 — `err_*` → `sigil_err_*`
+> **Last refresh**: 2026-08-14 (**3.12.9 — RSA sign de-banking**: the sign /
+> blind / CRT workspace (23 globals) and the whole bignum engine (17 more) are
+> now function-scope stack locals, closing the last two wider-scope items of the
+> 2026-08-08 forged-signature issue, which is **CLOSED**. The Bellcore
+> verify-after-sign guard had both compare operands in one shared lane — the
+> same shape as the v1.5 verify bypass. Secret zeroization moved per-lane →
+> per-call. New `crypto_banks_exhausted()` / `crypto_banks_claimed()` make lane
+> exhaustion detectable. Static data **10,779,648 → 785,408 B (−92.7%)**, which
+> surfaced a new invariant: a module-level `var X[N]` costs **8N** bytes, not N
+> — [note 003](architecture/003-global-arrays-are-eight-bytes-per-element.md).
+> Suite **1,672 / 0 across 65 files**; fuzz 3/3; no perf change. Header rows
+> only — the per-file Tier tables were **not** re-inventoried.)
+>
+> **Prior refresh**: 2026-08-14 (**3.12.8 — `err_*` → `sigil_err_*`
 > namespace rename + toolchain 6.5.21**: the 14 bare error constructors in
 > `src/sys_error.cyr` are now `sigil_err_*` across 124 call sites in 9
 > files — name-only, no behavioural change, but **breaking** for any
@@ -58,7 +71,7 @@ type: state
 > were retired in favour of those sources.
 >
 > **Headline changes since the last full row-refresh (3.4.1 inventory):**
-> - **Version `3.12.8`**, cyrius pin **`6.5.21`** (was 3.5.4 / 6.0.3 at
+> - **Version `3.12.9`**, cyrius pin **`6.5.21`** (was 3.5.4 / 6.0.3 at
 >   the 3.4.1 inventory). Deps: **ZERO git deps** — sakshi moved from
 >   `[deps.sakshi]` into `[deps].stdlib` at 3.12.7, so **sakshi `2.4.10`**
 >   and **bayan `1.4.1`** now both arrive with the toolchain snapshot and
@@ -89,8 +102,8 @@ type: state
 >   **no per-cycle audit doc for 3.10.0 → 3.12.1** — the 3.12.2 audit is
 >   the first since 2026-06-29, so the floor for those six releases was
 >   never independently re-verified. See Tier 4.
-> - **65 `.tcyr` files (`ls tests/tcyr/*.tcyr`) / 1665 assertions**, 0
->   failures @3.12.8 (was ~1178 at the 3.4.1 inventory), confirmed by two
+> - **65 `.tcyr` files (`ls tests/tcyr/*.tcyr`) / 1672 assertions**, 0
+>   failures @3.12.9 (was ~1178 at the 3.4.1 inventory), confirmed by two
 >   independent counting methods that agree exactly. ⚠ 3.12.7's CHANGELOG
 >   claimed **1,730**, which reproduces under neither method — see the
 >   roadmap item. Fuzz: **24 / 0** across
@@ -120,6 +133,8 @@ type: state
 > - **`docs/architecture/` numbered notes are no longer empty** — `001`
 >   (`var X[N]` static semantics + banked crypto scratch) and `002` (the
 >   native `asm{}` 64×64→128 multiply, 3.12.2) both exist.
+> - **`docs/architecture/` runs 001 → 003** (003 = the 8N global-array
+>   sizing rule, 3.12.9).
 > - **ADRs run 0001 → 0008**; `0008` (native asm multiply + the
 >   public-exponent modexp) was accepted 2026-07-30.
 > - **CHANGELOG / roadmap / state.md / sources.md are all current through

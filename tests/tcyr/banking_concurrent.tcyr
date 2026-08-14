@@ -93,6 +93,14 @@ fn _ae_worker(arg): i64 {
     return 0;
 }
 
+# Auto-assigning worker for the lane-exhaustion group: claims a lane by
+# calling cbank() WITHOUT a prior crypto_bank_set, which is the only path
+# that advances `_crypto_next_bank`. Touches no banked buffer.
+fn _bc_lane_worker(arg): i64 {
+    cbank();
+    return 0;
+}
+
 fn main() {
     alloc_init();
     crypto_tls_main_init();
@@ -208,6 +216,38 @@ fn main() {
     assert_eq(tag_bad, 0, "8 concurrent AEAD workers (banks 1-8) tags match serial");
     assert_eq(rec_bad, 0, "8 concurrent AEAD workers decrypt-recover original plaintext");
     assert_eq(drc_bad, 0, "8 concurrent AEAD workers decrypt OK (tag verified)");
+
+    # ---- Lane-exhaustion detection (3.12.9) ----
+    # ⚠ MUST BE THE LAST GROUP IN THIS FILE. It deliberately drives the lane
+    # counter past `SIGIL_CRYPTO_BANKS - 1`, after which lanes alias by
+    # construction — any banked assertion added below this point would be
+    # racing on purpose.
+    #
+    # `_crypto_next_bank` advances only on AUTO-assignment (a thread whose
+    # first `cbank()` runs without a prior `crypto_bank_set`), so the workers
+    # above — which all pin explicitly — may have left it at 0. Measure the
+    # delta rather than assuming a starting point.
+    test_group("cbank() lane exhaustion is detectable (3.12.9)");
+    var claimed0 = crypto_banks_claimed();
+    assert_eq(crypto_banks_exhausted(), 0, "not exhausted before crossing the lane count");
+
+    # Spawn enough auto-assigning threads to take the counter past the last
+    # unique lane. +2 for margin so the assertion does not sit on the boundary.
+    var need = (SIGIL_CRYPTO_BANKS - 1) - claimed0 + 2;
+    var eths = alloc(need * 8);
+    i = 0;
+    while (i < need) { store64(eths + i * 8, thread_create(&_bc_lane_worker, 0)); i = i + 1; }
+    i = 0;
+    while (i < need) { thread_join(load64(eths + i * 8)); i = i + 1; }
+
+    assert_eq(crypto_banks_exhausted(), 1, "exhaustion flag set once lanes alias");
+    var claimed1 = crypto_banks_claimed();
+    var grew = 0;
+    if (claimed1 >= SIGIL_CRYPTO_BANKS - 1) { grew = 1; }
+    assert_eq(grew, 1, "claimed counter passed the 63-lane bound");
+    # Sticky: a later single-threaded call must not clear it.
+    cbank();
+    assert_eq(crypto_banks_exhausted(), 1, "flag is sticky, never cleared");
 
     return assert_summary();
 }

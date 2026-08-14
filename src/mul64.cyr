@@ -43,7 +43,8 @@
 # TWO ENTRY POINTS, AND WHY
 # -------------------------
 # `_nmul64` returns both halves through caller pointers. That suits bignum.cyr,
-# whose CIOS loop already owns a banked 16-byte lo||hi slot (`_bn_m64`).
+# whose CIOS loop owns a 16-byte lo||hi slot as a stack local (3.12.9;
+# it was the banked `_bn_m64` through 3.12.8).
 #
 # `_nmul64_hi` returns ONLY the high half, in rax. Its callers pair it with a
 # plain `a * b` for the low half — cyrius's `*` on i64 is a wrapping multiply,

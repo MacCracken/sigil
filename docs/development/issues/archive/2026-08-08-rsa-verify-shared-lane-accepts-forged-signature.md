@@ -1,11 +1,60 @@
-# RSA verify's banked lane accepted forged signatures — v1.5 fixed in 3.12.3, PSS and sign residuals open
+# RSA verify's banked lane accepted forged signatures — CLOSED at 3.12.9
 
-**Status:** ✅ **RESOLVED for the whole VERIFY surface in 3.12.6** (v1.5 in 3.12.3,
-bignum engine 3.12.4-3.12.5, PSS + the sign digest wrappers 3.12.6). Nothing on a
-verify path is banked any more; both `rsa.tcyr` (38/38) and the pinned-lane
-`rsa_lane_race.tcyr` (4/4, mutation-verified) are green. What remains open is the
-*wider scope* section below — the sign/blind/CRT workspace (banked **by design**,
-secret residue + per-lane wipe) and `cbank()` failing closed past lane 63.
+**Status:** ✅ **CLOSED — 3.12.9 finished the wider scope.** The verify surface
+was resolved at 3.12.6 (v1.5 in 3.12.3, bignum engine 3.12.4-3.12.5, PSS + the
+sign digest wrappers 3.12.6). **3.12.9 closed the two remaining items:**
+
+1. **The sign / blind / CRT workspace is no longer banked.** All 23 globals
+   (`_rsa_sign_*`, `_rsa_blind_*`, `_rsa_crt_*`) are function-scope stack
+   locals, as is the whole bignum engine — `_bn_mont_*`, `_bn_exp_*`,
+   `_bn_inv_*`, `_bn_m64`, plus the already-dead `_bn_modrem` / `_bn_modn1`.
+   **Nothing in `rsa.cyr` or `bignum.cyr` uses a `cbank()` lane any more.**
+   Secret residue is wiped per CALL (`_rsa_sign_scrub`, `_rsa_crt_scrub`,
+   `_bn_mont_scrub`, `_bn_inv_scrub`) instead of per lane — tighter, and with
+   no sibling lane to clobber. **The smoke build's static data fell
+   10,779,648 → 785,408 B — 9,994,240 B (9.53 MiB) removed, −92.7%**,
+   A/B-measured on the same command (bignum 4,751,360 B, RSA 5,242,880 B).
+
+   ⚠ The saving is 8x the declared array sizes because a **module-level**
+   `var X[N]` allocates N eight-byte slots (8N bytes), unlike a function-local
+   `var X[N]`, which is N bytes — CLAUDE.md quirk #3 covers only the local
+   case. Probe-verified under cycc 6.5.21. Every banked global in the tree
+   therefore costs 8x what its `N * SIGIL_CRYPTO_BANKS` comment implies.
+
+   ⚠ **"Banked by design" understated the risk.** The Bellcore
+   verify-after-sign guard compared `_rsa_sign_chk` against `_rsa_sign_m`
+   **with both operands in one shared lane** — structurally the same defect as
+   the v1.5 verify bypass this issue was filed for, and it would have waved
+   through the faulty signature the guard exists to catch.
+
+2. **`cbank()` exhaustion is now detectable.** `crypto_banks_exhausted()`
+   returns 1, stickily, once the lane counter passes `SIGIL_CRYPTO_BANKS - 1`
+   — i.e. once at least two threads share a lane; `crypto_banks_claimed()`
+   exposes the raw counter for pool sizing. This is the "at minimum, a
+   consumer should be able to detect that it has crossed the line" ask below.
+   It **detects** rather than prevents: a hard abort was considered and
+   rejected as too severe a failure mode for a library. Since the asymmetric
+   stack no longer uses lanes at all, exhaustion can no longer affect a
+   signature verdict — what remains banked is symmetric/EC scratch, where a
+   collision is a corrupted digest or failed handshake, not a forged accept.
+
+**Coverage.** `tests/tcyr/rsa_lane_race.tcyr` gained a **sign** group (7/7,
+was 4/4): two threads pinned to lane 1 sign concurrently, and since PKCS#1 v1.5
+is deterministic every one of the 80 signatures must be byte-identical to the
+KAT. **Mutation-proven** — re-banking `sm`/`schk` alone yields 1 corrupted
+signature of 80 and 79/80 matches, the same 1-in-N shape as the original
+report. `banking_concurrent.tcyr` gained a lane-exhaustion group (9/9, was 5/5).
+Suite 1,672 / 0 across 65 files. No perf change: RSA-2048 verify 1.174 ms,
+CRT sign 41.278 ms, both within noise of 3.12.8.
+
+**The consumer workaround can go.** agnosai's serialising mutex
+(`_agnosai_auth_rsa_verify_locked`) was already removable at 3.12.6 for verify;
+with the sign path localised too there is no remaining reason to serialise any
+RSA operation.
+
+---
+
+*Original report and the intermediate 3.12.3–3.12.6 analysis follow unchanged.*
 
 ⚠ **PSS was carrying the SAME BYPASS, not merely a DoS.** Measured at 3.12.5 on
 the pinned-lane harness: **1 of 800 forged PSS signatures ACCEPTED**, 791/800

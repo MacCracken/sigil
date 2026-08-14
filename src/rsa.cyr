@@ -11,7 +11,7 @@
 #     (see src/bignum.cyr header / src/crypto_scratch.cyr) so concurrent
 #     RSA callers can't race it — verify banks are PUBLIC (no wipe); the
 #     sign / blind / CRT banks carry the secret-exponent residue and are
-#     per-lane wiped on the sign return (`_rsa_scrub_sign_lanes`, quirk #9).
+#     per-CALL wiped on the sign return (`_rsa_sign_scrub`, quirk #9). [3.12.9]
 # RSA *signing* (private exponent) shipped in 3.6.4 — it adds blinding +
 # a constant-time ladder (`bn_mont_modexp` + CRT); it does NOT reuse the
 # non-CT `bn_modexp`.
@@ -87,10 +87,27 @@
 # cyrius 6.5.14; this file REQUIRES >= 6.5.14, which cyrius.cyml pins.
 # See CHANGELOG [3.12.6] and cyrius CHANGELOG [6.5.14].
 #
-# The SIGN workspace (`_rsa_sign_*`, `_rsa_blind_*`, `_rsa_crt_*`, further down)
-# stays banked by design — it carries the secret-exponent residue and is
-# per-lane wiped on the sign return (quirk #9 / ADR 0004 — plain `var`, never
-# `secret var`) — but it inherits the same 63-lane ceiling.
+# ⛔ 3.12.9: THE SIGN WORKSPACE IS LOCALISED TOO — NOTHING IN THIS FILE IS
+# BANKED ANY MORE. `_rsa_sign_*`, `_rsa_blind_*` and `_rsa_crt_*` were 23
+# globals kept banked "by design" (secret residue + per-lane wipe), which
+# also meant they inherited the 63-lane ceiling. That framing understated
+# the risk: the Bellcore verify-after-sign guard compared `_rsa_sign_chk`
+# against `_rsa_sign_m` with BOTH operands in one shared lane — structurally
+# the same defect as the v1.5 verify bypass above, and it would have waved
+# through the faulty signature the guard exists to catch.
+#
+# Now function-scope, adding to the list above:
+#   `_rsa_raw_sign`        10 buffers  5,632 B   (4.6% of budget)
+#   `_rsa_crt_modexp`      11 buffers  3,328 B   (2.7%)
+#   `_rsa_gen_blind`       rand          512 B   (0.4%)
+#   `_rsa_pkcs1v15_sign`   em            512 B   (0.4%)
+#
+# Secret residue is still zeroized, per CALL rather than per lane
+# (`_rsa_sign_scrub` / `_rsa_crt_scrub`; bignum's `bn_modinv` and
+# `bn_mont_modexp` wipe their own). Covered by the sign half of
+# `tests/tcyr/rsa_lane_race.tcyr`, which is mutation-proven: re-banking
+# `sm`/`schk` yields 1 corrupted signature of 80 and 79/80 KAT matches.
+# DO NOT RE-BANK ANY OF IT.
 
 # PKCS#1 v1.5 DigestInfo prefixes (RFC 8017 §9.2 note 1): the DER
 # `SEQUENCE { SEQUENCE { OID, NULL }, OCTET STRING <hash> }` header that
@@ -444,33 +461,29 @@ fn rsa_privkey_from_der(der, der_len, key): i64 {
 # guards the CRT fault surface). `_rsa_sign_*` / `_rsa_blind_*` /
 # `_rsa_crt_*` hold message/signature-derived values; the secret is `d`
 # (and p, q, dp, dq) inside `key` (caller zeroizes).
-# SIGN workspace, banked across `cbank()` lanes (quirk #1). `_rsa_sign_m`
-# carries m^d (the secret-exponent residue) and `_rsa_sign_s` the raw
-# signature pre-serialization; banked SECRET, per-lane wiped on the sign
-# return (`_rsa_scrub_sign_lanes`, quirk #9 / ADR 0004 — plain `var`,
-# never `secret var`). `_rsa_sign_em` (the public encoded message) and
-# `_rsa_sign_n` (public modulus) / `_rsa_sign_chk` (s^e, public) are
-# banked for race-freedom and wiped with the rest as a single surface.
-var _rsa_sign_em[32768];    # 512 * SIGIL_CRYPTO_BANKS
-var _rsa_sign_m[32768];     # 512 * SIGIL_CRYPTO_BANKS  (m^d — secret residue)
-var _rsa_sign_s[32768];     # 512 * SIGIL_CRYPTO_BANKS  (raw signature)
-var _rsa_sign_chk[32768];   # 512 * SIGIL_CRYPTO_BANKS
-var _rsa_sign_n[32768];     # 512 * SIGIL_CRYPTO_BANKS  (modulus, little-endian limbs)
-
-# Base-blinding scratch (3.6.4). The blinding factor r is a fresh
-# per-signature random; blinding decorrelates the secret-exponent
-# modexp's timing/power from the key (DPA / timing-correlation
-# defense). The final signature is unchanged (deterministic v1.5).
-# Banked across `cbank()` lanes (quirk #1). r / r^-1 / the blinded
-# signature (m*r^e)^d carry secret-correlated material; banked SECRET,
-# per-lane wiped on the sign return (`_rsa_scrub_sign_lanes`, quirk #9).
-var _rsa_blind_rand[32768]; # 512  * SIGIL_CRYPTO_BANKS  raw CSPRNG bytes
-var _rsa_blind_r[32768];    # 512  * SIGIL_CRYPTO_BANKS  r in [1, n)
-var _rsa_blind_rinv[32768]; # 512  * SIGIL_CRYPTO_BANKS  r^-1 mod n
-var _rsa_blind_re[32768];   # 512  * SIGIL_CRYPTO_BANKS  r^e mod n
-var _rsa_blind_mb[32768];   # 512  * SIGIL_CRYPTO_BANKS  blinded m * r^e mod n
-var _rsa_blind_sb[32768];   # 512  * SIGIL_CRYPTO_BANKS  blinded (m*r^e)^d mod n
-var _rsa_blind_prod[65536]; # 1024 * SIGIL_CRYPTO_BANKS  2*limbs multiply scratch
+# ⛔ 3.12.9: THE SIGN PATH HOLDS NO BANKED SCRATCH ANY MORE.
+#
+# The sign / blind / CRT workspace was 23 file-scope globals banked across
+# `cbank()` lanes — the last banked state in the library's asymmetric
+# stack, and the last of the wider-scope items from the 2026-08-08 forged
+# -signature issue. All 23 are now stack locals in the function that uses
+# them, so a concurrent signer shares nothing and there is no
+# 63-lifetime-thread ceiling on signing.
+#
+# **This was not merely a DoS surface.** The Bellcore verify-after-sign
+# guard compared `_rsa_sign_chk` against `_rsa_sign_m` with BOTH operands
+# in the same shared lane — structurally the same "both operands of the
+# decision in one shared object" shape as the v1.5 verify bypass that
+# 3.12.3 fixed, where a colliding thread that left a consistent pair
+# behind made the compare succeed on bytes that were never its own. Here
+# that would wave through a faulty signature the guard exists to catch.
+#
+# Secret residue is still zeroized, but per CALL: each function wipes its
+# own frame before returning (`_rsa_sign_scrub`, `_rsa_crt_scrub`, and
+# `bn_modinv` / `bn_mont_modexp`'s own scrubs in bignum.cyr). That is
+# strictly tighter than the old whole-lane memset — it clears exactly this
+# signature's data and cannot reach a sibling worker's in-flight lane,
+# which the per-lane version could when two threads aliased.
 
 # Generate a fresh blinding pair (r, r^-1 mod n) with r in [1, n) and
 # invertible. Draws entropy via sigil's fail-closed CSPRNG boundary
@@ -478,38 +491,51 @@ var _rsa_blind_prod[65536]; # 1024 * SIGIL_CRYPTO_BANKS  2*limbs multiply scratc
 # Returns 0 on success, -1 if no entropy or no invertible r within a few
 # tries (effectively never).
 fn _rsa_gen_blind(r_out, rinv_out, n_bn, nlen, limbs): i64 {
-    var rand = &_rsa_blind_rand + cbank() * 512;   # this thread's lane (SECRET)
+    # 3.12.9: stack local, not a `cbank()` lane. Raw CSPRNG bytes for the
+    # blinding factor — secret-correlated, so wiped on every return path.
+    var randbuf[512];
+    var rand = &randbuf;
     var tries = 0;
     var ok = 0;
     while (ok == 0) {
-        if (tries >= 16) { return 0 - 1; }
+        if (tries >= 16) { memset(rand, 0, 512); return 0 - 1; }
         tries = tries + 1;
-        if (_sigil_random_fill(rand, nlen) != 0) { return 0 - 1; }
+        if (_sigil_random_fill(rand, nlen) != 0) { memset(rand, 0, 512); return 0 - 1; }
         bn_from_be(r_out, limbs, rand, nlen);
         bn_mod(r_out, r_out, limbs, n_bn, limbs);          # r in [0, n)
         if (bn_is_zero(r_out, limbs) == 0) {
             if (bn_modinv(rinv_out, r_out, n_bn, limbs) == 0) { ok = 1; }
         }
     }
+    memset(rand, 0, 512);
     return 0;
 }
 
 # CRT exponentiation scratch (3.6.4). Half-width (RSA-4096 prime side).
-# Banked across `cbank()` lanes (quirk #1). p / q / qinv (secret key
-# components) and s1 / s2 / mp / mq / h (the mod-p,q residues mp^dp /
-# mq^dq) are SECRET; banked plain `var`, per-lane wiped on the sign
-# return (`_rsa_scrub_sign_lanes`, quirk #9 / ADR 0004).
-var _rsa_crt_p[16384];      # 256 * SIGIL_CRYPTO_BANKS
-var _rsa_crt_q[16384];      # 256 * SIGIL_CRYPTO_BANKS
-var _rsa_crt_qinv[16384];   # 256 * SIGIL_CRYPTO_BANKS
-var _rsa_crt_mp[16384];     # 256 * SIGIL_CRYPTO_BANKS
-var _rsa_crt_mq[16384];     # 256 * SIGIL_CRYPTO_BANKS
-var _rsa_crt_s1[16384];     # 256 * SIGIL_CRYPTO_BANKS  (mp^dp mod p)
-var _rsa_crt_s2[16384];     # 256 * SIGIL_CRYPTO_BANKS  (mq^dq mod q)
-var _rsa_crt_s2full[32768]; # 512 * SIGIL_CRYPTO_BANKS
-var _rsa_crt_h[16384];      # 256 * SIGIL_CRYPTO_BANKS
-var _rsa_crt_prod[32768];   # 512 * SIGIL_CRYPTO_BANKS
-var _rsa_crt_qh[32768];     # 512 * SIGIL_CRYPTO_BANKS
+# 3.12.9: stack locals inside `_rsa_crt_modexp`, wiped per call by
+# `_rsa_crt_scrub`. p / q / qinv are secret KEY components and
+# s1 / s2 / mp / mq / h the mod-p,q residues (mp^dp / mq^dq) — the most
+# sensitive buffers on the sign path, and previously the ones a lane
+# collision could have leaked into a sibling signature.
+
+# Wipe `_rsa_crt_modexp`'s eleven working buffers. Fixed declared widths,
+# not `hl`-derived: the half-limb count follows from the public modulus
+# size, but a fixed-width wipe keeps zeroization independent of it and
+# costs nothing against two half-width modexps.
+fn _rsa_crt_scrub(cp, cq, cqinv, cmp_, cmq, cs1, cs2, cs2f, ch, cprod, cqh): i64 {
+    memset(cp,    0, 256);
+    memset(cq,    0, 256);
+    memset(cqinv, 0, 256);
+    memset(cmp_,  0, 256);
+    memset(cmq,   0, 256);
+    memset(cs1,   0, 256);
+    memset(cs2,   0, 256);
+    memset(cs2f,  0, 512);
+    memset(ch,    0, 256);
+    memset(cprod, 0, 512);
+    memset(cqh,   0, 512);
+    return 0;
+}
 
 # sb_out = mb^d mod n via the CRT (Garner): sign mod p and mod q with
 # the constant-time Montgomery ladder, then recombine — ~4× faster
@@ -523,18 +549,25 @@ fn _rsa_crt_modexp(key, mb, sb_out, limbs): i64 {
     if (qlen == 0) { return 0 - 1; }
     var hl = limbs / 2;                 # half-width limbs (n_limbs is even)
 
-    var bk = cbank();                   # this thread's lane (SECRET)
-    var cp     = &_rsa_crt_p      + bk * 256;
-    var cq     = &_rsa_crt_q      + bk * 256;
-    var cqinv  = &_rsa_crt_qinv   + bk * 256;
-    var cmp    = &_rsa_crt_mp     + bk * 256;
-    var cmq    = &_rsa_crt_mq     + bk * 256;
-    var cs1    = &_rsa_crt_s1     + bk * 256;
-    var cs2    = &_rsa_crt_s2     + bk * 256;
-    var cs2f   = &_rsa_crt_s2full + bk * 512;
-    var ch     = &_rsa_crt_h      + bk * 256;
-    var cprod  = &_rsa_crt_prod   + bk * 512;
-    var cqh    = &_rsa_crt_qh     + bk * 512;
+    # 3.12.9: stack locals, not `cbank()` lanes. 3,328 B against the
+    # 122,880 B per-fn budget. All eleven are SECRET (p/q/qinv are key
+    # material; the rest are mod-p,q residues) and are wiped by
+    # `_rsa_crt_scrub` before every return.
+    var cpbuf[256];    var cqbuf[256];    var cqinvbuf[256];
+    var cmpbuf[256];   var cmqbuf[256];   var cs1buf[256];
+    var cs2buf[256];   var cs2fbuf[512];  var chbuf[256];
+    var cprodbuf[512]; var cqhbuf[512];
+    var cp     = &cpbuf;
+    var cq     = &cqbuf;
+    var cqinv  = &cqinvbuf;
+    var cmp    = &cmpbuf;
+    var cmq    = &cmqbuf;
+    var cs1    = &cs1buf;
+    var cs2    = &cs2buf;
+    var cs2f   = &cs2fbuf;
+    var ch     = &chbuf;
+    var cprod  = &cprodbuf;
+    var cqh    = &cqhbuf;
 
     bn_from_be(cp, hl, key + RSAK_P, plen);
     bn_from_be(cq, hl, key + RSAK_Q, qlen);
@@ -558,55 +591,35 @@ fn _rsa_crt_modexp(key, mb, sb_out, limbs): i64 {
     bn_copy(cs2f, cs2, hl);
     bn_copy(sb_out, cqh, limbs);
     bn_add_assign(sb_out, cs2f, limbs);
+    _rsa_crt_scrub(cp, cq, cqinv, cmp, cmq, cs1, cs2, cs2f, ch, cprod, cqh);
     return 0;
 }
 
-# Per-lane secret zeroization of every banked RSA-sign scratch buffer
-# (CLAUDE.md quirk #9 / ADR 0004). The sign / blind / CRT banks are plain
-# `var` banked across `cbank()` lanes (never `secret var`, whose whole-
-# array wipe would clobber a sibling worker's live lane), so this scrubs
-# ONLY the calling worker's lane. Also wipes the bignum engine's SECRET
-# `_bn_inv_*` (modinv residue from the blinding factor) and its public
-# `_bn_modrem` / `_bn_modn1` reduction lanes — CLOSING the pre-3.9.7 gap
-# where the RSA sign path left secret-exponent residue in process-global
-# scratch (the `_bn_mont_*` lanes are self-wiped by bn_mont_modexp). Called
-# on EVERY return of `_rsa_raw_sign`.
-fn _rsa_scrub_sign_lanes(): i64 {
-    var bk = cbank();
-    # rsa.cyr sign workspace
-    memset(&_rsa_sign_em  + bk * 512, 0, 512);
-    memset(&_rsa_sign_m   + bk * 512, 0, 512);
-    memset(&_rsa_sign_s   + bk * 512, 0, 512);
-    memset(&_rsa_sign_chk + bk * 512, 0, 512);
-    memset(&_rsa_sign_n   + bk * 512, 0, 512);
-    # base-blinding workspace
-    memset(&_rsa_blind_rand + bk * 512,  0, 512);
-    memset(&_rsa_blind_r    + bk * 512,  0, 512);
-    memset(&_rsa_blind_rinv + bk * 512,  0, 512);
-    memset(&_rsa_blind_re   + bk * 512,  0, 512);
-    memset(&_rsa_blind_mb   + bk * 512,  0, 512);
-    memset(&_rsa_blind_sb   + bk * 512,  0, 512);
-    memset(&_rsa_blind_prod + bk * 1024, 0, 1024);
-    # CRT workspace
-    memset(&_rsa_crt_p      + bk * 256, 0, 256);
-    memset(&_rsa_crt_q      + bk * 256, 0, 256);
-    memset(&_rsa_crt_qinv   + bk * 256, 0, 256);
-    memset(&_rsa_crt_mp     + bk * 256, 0, 256);
-    memset(&_rsa_crt_mq     + bk * 256, 0, 256);
-    memset(&_rsa_crt_s1     + bk * 256, 0, 256);
-    memset(&_rsa_crt_s2     + bk * 256, 0, 256);
-    memset(&_rsa_crt_s2full + bk * 512, 0, 512);
-    memset(&_rsa_crt_h      + bk * 256, 0, 256);
-    memset(&_rsa_crt_prod   + bk * 512, 0, 512);
-    memset(&_rsa_crt_qh     + bk * 512, 0, 512);
-    # bignum engine lanes touched by the sign path (residue-gap close)
-    memset(&_bn_inv_u  + bk * 512, 0, 512);
-    memset(&_bn_inv_v  + bk * 512, 0, 512);
-    memset(&_bn_inv_x1 + bk * 512, 0, 512);
-    memset(&_bn_inv_x2 + bk * 512, 0, 512);
-    # 3.12.5: _bn_modrem/_bn_modn1 are stack locals in bn_mod now and self-scrub on
-    # return, so these two memsets targeted a dead global. Deleted rather than left
-    # pointing at nothing — a scrub that wipes memory nobody uses reads as coverage.
+# Per-CALL secret zeroization of `_rsa_raw_sign`'s workspace (CLAUDE.md
+# quirk #9 / ADR 0004). Every buffer is a stack local of the calling
+# frame, so this wipes exactly this signature's data.
+#
+# 3.12.9 replaced `_rsa_scrub_sign_lanes()`, which memset the caller's
+# `cbank()` lane of 23 file-scope globals plus the bignum engine's
+# `_bn_inv_*` lanes. Those globals are gone. The per-lane version had a
+# hazard of its own: when two threads aliased a lane it would zero a
+# sibling's in-flight secret residue mid-sign. The bignum residues are now
+# self-wiped by `bn_modinv` and `bn_mont_modexp` in their own frames, so
+# there is nothing left here to reach across.
+#
+# Widths are the declared buffer sizes, not `limbs`-derived, so the wipe
+# is complete for any key size. Called on EVERY return of `_rsa_raw_sign`.
+fn _rsa_sign_scrub(sm, sn, ss, schk, br, brinv, bre, bmb, bsb, bprod): i64 {
+    memset(sm,    0, 512);
+    memset(sn,    0, 512);
+    memset(ss,    0, 512);
+    memset(schk,  0, 512);
+    memset(br,    0, 512);
+    memset(brinv, 0, 512);
+    memset(bre,   0, 512);
+    memset(bmb,   0, 512);
+    memset(bsb,   0, 512);
+    memset(bprod, 0, 1024);
     return 0;
 }
 
@@ -625,17 +638,24 @@ fn _rsa_raw_sign(key, em, sig_out): i64 {
     var dlen = load64(key + RSAK_DLEN);
     var elen = load64(key + RSAK_ELEN);
 
-    var bk = cbank();                       # this thread's lane (SECRET)
-    var sm   = &_rsa_sign_m   + bk * 512;
-    var sn   = &_rsa_sign_n   + bk * 512;
-    var ss   = &_rsa_sign_s   + bk * 512;
-    var schk = &_rsa_sign_chk + bk * 512;
-    var br   = &_rsa_blind_r    + bk * 512;
-    var brinv = &_rsa_blind_rinv + bk * 512;
-    var bre  = &_rsa_blind_re   + bk * 512;
-    var bmb  = &_rsa_blind_mb   + bk * 512;
-    var bsb  = &_rsa_blind_sb   + bk * 512;
-    var bprod = &_rsa_blind_prod + bk * 1024;
+    # 3.12.9: stack locals, not `cbank()` lanes. 5,632 B against the
+    # 122,880 B per-fn budget. Critically, `schk` and `sm` — the two
+    # operands of the Bellcore verify-after-sign compare below — are now
+    # in THIS frame, so no sibling thread can plant a matching pair the
+    # way a shared lane allowed.
+    var smbuf[512];    var snbuf[512];    var ssbuf[512];   var schkbuf[512];
+    var brbuf[512];    var brinvbuf[512]; var brebuf[512];
+    var bmbbuf[512];   var bsbbuf[512];   var bprodbuf[1024];
+    var sm   = &smbuf;
+    var sn   = &snbuf;
+    var ss   = &ssbuf;
+    var schk = &schkbuf;
+    var br    = &brbuf;
+    var brinv = &brinvbuf;
+    var bre   = &brebuf;
+    var bmb   = &bmbbuf;
+    var bsb   = &bsbbuf;
+    var bprod = &bprodbuf;
 
     # m = OS2IP(EM); n as a bignum.
     bn_from_be(sm, limbs, em, nlen);
@@ -644,7 +664,10 @@ fn _rsa_raw_sign(key, em, sig_out): i64 {
     # Base blinding: fresh random r, mb = m * r^e mod n  (r^e via the
     # public-exponent modexp). Decorrelates the secret modexp from the
     # key; the final s is unchanged.
-    if (_rsa_gen_blind(br, brinv, sn, nlen, limbs) < 0) { _rsa_scrub_sign_lanes(); return 0 - 1; }
+    if (_rsa_gen_blind(br, brinv, sn, nlen, limbs) < 0) {
+        _rsa_sign_scrub(sm, sn, ss, schk, br, brinv, bre, bmb, bsb, bprod);
+        return 0 - 1;
+    }
     # r^e mod n: PUBLIC exponent e over the blinding base r. The `_pub`
     # schedule (3.12.2) branches on the exponent only, and e is public —
     # r never steers control flow, so blinding is not weakened. (The
@@ -669,12 +692,12 @@ fn _rsa_raw_sign(key, em, sig_out): i64 {
     bn_mont_modexp_pub(schk, ss, key + RSAK_E, elen, sn, limbs);
     if (bn_cmp(schk, sm, limbs) != 0) {
         bn_zero(ss, limbs);   # discard a faulty signature
-        _rsa_scrub_sign_lanes();
+        _rsa_sign_scrub(sm, sn, ss, schk, br, brinv, bre, bmb, bsb, bprod);
         return 0 - 1;
     }
 
     bn_to_be(sig_out, nlen, ss, limbs);
-    _rsa_scrub_sign_lanes();        # wipe this lane's secret residue (quirk #9)
+    _rsa_sign_scrub(sm, sn, ss, schk, br, brinv, bre, bmb, bsb, bprod);
     return nlen;
 }
 
@@ -685,12 +708,20 @@ fn _rsa_pkcs1v15_sign(key, prefix, prefix_len, hash, hash_len, sig_out): i64 {
     var nlen = load64(key + RSAK_NLEN);
     if (nlen > 512) { return 0 - 1; }
 
-    # EM = EMSA-PKCS1-v1.5(hash); sign via the shared RSASP1 core. `em` is
-    # public (the encoded message), banked for race-freedom; `_rsa_raw_sign`
-    # wipes this lane along with the rest of the sign scratch on return.
-    var sem = &_rsa_sign_em + cbank() * 512;
-    if (_rsa_emsa_encode(sem, nlen, prefix, prefix_len, hash, hash_len) < 0) { return 0 - 1; }
-    return _rsa_raw_sign(key, sem, sig_out);
+    # EM = EMSA-PKCS1-v1.5(hash); sign via the shared RSASP1 core.
+    # 3.12.9: stack local, not a `cbank()` lane. `em` is public (the encoded
+    # message) but shared it still let two signers interleave bytes into one
+    # buffer, so a colliding thread could sign the wrong message. Wiped here
+    # rather than by `_rsa_raw_sign`, which no longer sees this buffer.
+    var sembuf[512];
+    var sem = &sembuf;
+    if (_rsa_emsa_encode(sem, nlen, prefix, prefix_len, hash, hash_len) < 0) {
+        memset(sem, 0, 512);
+        return 0 - 1;
+    }
+    var rc = _rsa_raw_sign(key, sem, sig_out);
+    memset(sem, 0, 512);
+    return rc;
 }
 
 # Sign SHA-256(msg) with RSASSA-PKCS1-v1.5. `key` is an RSAK struct

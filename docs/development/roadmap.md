@@ -124,6 +124,31 @@ are done; see the **3.9** closed-cycle entry below.
       larger audit surface on the most correctness-critical loop in the library,
       for a fraction of the remaining win. Only if a consumer needs it.
 
+**Opened by 3.12.9** (named here so they are not buried in a CHANGELOG entry)
+
+- [ ] **Retire `cbank()` entirely — the symmetric/EC scratch is still banked.**
+      3.12.9 localised the whole asymmetric stack (RSA sign+verify, PSS, bignum),
+      so nothing on a signature path uses a lane. What remains is **188 `cbank()`
+      sites across 28 files**: sha256/512/384, hmac, hmac-sha384, hkdf,
+      hkdf-sha384, aes-gcm, chacha20, poly1305, chacha20poly1305, ecdsa-p256,
+      ecdsa-p384, ecdsa-sign, ed25519, x25519, bigint_ext, argon2, blake2b,
+      tls12_prf, authenticode, sha_ni, trust, verify.
+      Localising them would **remove the 63-lifetime-thread ceiling from the
+      library outright**, make `crypto_banks_exhausted()` (added 3.12.9) moot,
+      and reclaim most of the remaining 785,408 B of static data — each banked
+      global costs 8× its declared size, see
+      [note 003](../architecture/003-global-arrays-are-eight-bytes-per-element.md).
+      Exposure is lower than RSA's was (a collision corrupts a digest or fails a
+      handshake — fail-closed, not a forged accept), so this is correctness and
+      footprint work, not an open vulnerability. Large; wants bites per module
+      with a race-detector per bite, following 3.12.9's mutation-proven pattern.
+- [ ] **Re-cost every remaining banked global against note 003.** A module-level
+      `var X[N]` allocates **8N** bytes, so every `# N * SIGIL_CRYPTO_BANKS`
+      comment in `src/` understates its global 8×. The 3.9.6 note that widening
+      banks 8 → 64 cost "~14 MB (lazy zero-pages; informational)" was numerically
+      right for a reason nobody had identified. Worth one sweep to correct the
+      comments so the next sizing decision starts from true numbers.
+
 **Opened by 3.12.8** (named here so they are not buried in a CHANGELOG entry)
 
 - [ ] **Catch-up audit for 3.12.3 → 3.12.7 — five releases filed no audit report.**

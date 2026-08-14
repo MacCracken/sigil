@@ -7,6 +7,106 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.12.9] — 2026-08-14 — the RSA sign path is no longer banked; 9.53 MiB of `.bss` goes with it
+
+Closes the two wider-scope items left open by the 2026-08-08 forged-signature
+issue. **Nothing in `rsa.cyr` or `bignum.cyr` uses a `cbank()` lane any more.**
+
+### Security
+
+- **The RSA sign / blind / CRT workspace is localised — 23 banked globals gone.**
+  `_rsa_sign_*` (5), `_rsa_blind_*` (7) and `_rsa_crt_*` (11) are now
+  function-scope stack locals in `_rsa_raw_sign` (5,632 B), `_rsa_crt_modexp`
+  (3,328 B), `_rsa_gen_blind` (512 B) and `_rsa_pkcs1v15_sign` (512 B) — each a
+  few percent of the 122,880 B per-fn budget.
+
+  ⚠ **"Banked by design" understated this.** The Bellcore verify-after-sign
+  guard ran `bn_cmp(schk, sm, limbs)` with **both operands in the same shared
+  lane** — structurally identical to the v1.5 verify bypass fixed in 3.12.3,
+  where a colliding thread leaving a consistent pair behind made the compare
+  succeed on bytes that were never its own. Here that would wave through
+  precisely the faulty signature the guard exists to catch.
+
+- **The bignum engine is localised too — 17 more banked globals gone.**
+  `_bn_mont_t/_r2/_r2src/_base/_res/_tmp/_one` (→ `bn_mont_modexp`),
+  `_bn_exp_result/_prod/_base` (→ `bn_modexp`), `_bn_inv_u/_v/_x1/_x2`
+  (→ `bn_modinv`), `_bn_m64` (→ `bn_mul`), and `_bn_modrem`/`_bn_modn1`, which
+  had been **dead since 3.12.5** localised `bn_mod` but were never deleted.
+
+- **Secret zeroization is now per CALL, not per lane.** `_rsa_sign_scrub`,
+  `_rsa_crt_scrub`, `_bn_mont_scrub` and `_bn_inv_scrub` wipe the calling
+  frame's own buffers. This is strictly tighter than the whole-lane memset it
+  replaces — and removes a hazard of its own, since the per-lane version would
+  zero a *sibling's* in-flight secret residue mid-sign whenever two threads
+  aliased a lane.
+
+- **`cbank()` lane exhaustion is detectable.** New `crypto_banks_exhausted()`
+  returns 1, stickily and monotonically, once the lane counter passes
+  `SIGIL_CRYPTO_BANKS - 1` — i.e. once at least two threads share a lane;
+  `crypto_banks_claimed()` exposes the raw counter for pool sizing. This
+  answers the issue's "at minimum, a consumer should be able to detect that it
+  has crossed the line". It **detects rather than prevents**: a hard abort was
+  considered and rejected as too severe a failure mode for a library to impose.
+
+  Scope, so a `1` is not misread as an incident: the asymmetric stack no longer
+  uses lanes at all, so exhaustion cannot affect a signature verdict. What
+  still banks is symmetric/EC scratch (sha2, hmac, hkdf, aes-gcm,
+  chacha20-poly1305, ecdsa, ed25519, x25519), where a collision is a corrupted
+  digest or a failed handshake — fail-closed noise, not a forged accept.
+
+### Changed
+
+- **Static data: 10,779,648 → 785,408 bytes — 9,994,240 B (9.53 MiB) removed,
+  −92.7%.** A/B-measured on the same `cyrius build programs/smoke.cyr` command,
+  with only these four `src/` files swapped.
+
+  ⚠ **The saving is 8× the declared array sizes, and that is the interesting
+  part.** A **module-level** `var X[N]` allocates N *eight-byte slots* = 8N
+  bytes, whereas a **function-local** `var X[N]` really is N bytes — CLAUDE.md
+  quirk #3 documents only the local case. Probe-verified under cycc 6.5.21
+  (`var G[20000]` → 160,000 B of static data), and confirmed independently by
+  the codebase itself: the 40 deleted declarations sum to 1,249,280 declared
+  units, and 1,249,280 × 8 = 9,994,240 — exactly the measured reduction. **Every
+  remaining banked global in the tree costs 8× what its
+  `# N * SIGIL_CRYPTO_BANKS` comment implies.**
+
+### Added
+
+- **`tests/tcyr/rsa_lane_race.tcyr` — a sign group (7 assertions, was 4).** Two
+  threads pin to lane 1 with `crypto_bank_set(1)` and sign concurrently. Because
+  PKCS#1 v1.5 signing is **deterministic**, the only correct outcome is 80
+  byte-identical signatures matching the KAT — base blinding draws a fresh `r`
+  per signature but the unblinded result is unchanged, so any difference is
+  corruption, not entropy.
+
+  **Mutation-proven**, as this issue's own history demands ("a probe that cannot
+  see the defect is not evidence of absence"): re-banking `sm`/`schk` alone
+  makes it report **1 corrupted signature of 80 and 79/80 KAT matches** — the
+  same 1-in-N shape as the original 888-of-400,000 report.
+
+- **`tests/tcyr/banking_concurrent.tcyr` — a lane-exhaustion group (9, was 5).**
+  Asserts the flag is clear beforehand, trips once enough auto-assigning threads
+  cross the lane count, and is sticky afterwards. Runs **last** by construction:
+  it deliberately drives lanes into aliasing, so no banked assertion may follow.
+
+### Verified
+
+- `scripts/check.sh` — **70 checks, 0 failures**; `tests/tcyr` **1,672
+  assertions / 0 failures across 65 files** (1,665 → +3 sign race, +4
+  exhaustion). `fuzz/*.fcyr` **3/3**.
+- **No performance change.** RSA-2048 verify **1.174 ms** (3.12.8: 1.178),
+  CRT sign **41.278 ms** (41.276), `bn_mont_modexp_pub` 1.165 ms — all within
+  run-to-run noise, on the same host and pin.
+- `cyrlint` on all four changed `src/` files — 0 warnings, 0 untracked
+  deferrals. `cyrius doc --check dist/sigil.cyr` — 0 undocumented.
+  `cyrius distlib --all` — 14 bundles at v3.12.9.
+
+### Fixed
+
+- `docs/development/issues/archive/2026-08-08-rsa-verify-shared-lane-accepts-forged-signature.md`
+  is **CLOSED**. The consumer-side workaround it tracks (agnosai's serialising
+  mutex around RSA verify) has no remaining justification.
+
 ## [3.12.8] — 2026-08-14 — toolchain 6.5.21; the bare `err_*` namespace was already colliding in kavach
 
 Toolchain + deps refresh, plus one **breaking rename**: the 14 bare `err_*` error
