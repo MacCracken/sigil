@@ -6,13 +6,81 @@ shipped").
 
 ## Outstanding work
 
-The only open items — all parked / gated or verification-only. The 3.6 TLS arc,
+**One scheduled cycle — [3.13.0, retire `cbank()`](#planned--3130--retire-cbank)
+— plus parked / gated / verification-only items.** The 3.6 TLS arc,
 the 3.7 perf cycle, and the 3.8 / 3.9 thread-safety + decomposition cycles have
 all shipped — see "Closed cycles" below + [CHANGELOG](../../CHANGELOG.md).
 **As of 3.9.7 every reachable concurrent crypto path is race-free**
 ([ADR 0007](../adr/0007-auto-banking-for-concurrent-tls.md)) — the
 concurrent-TLS-handshake crash (3.9.6) and the full thread-safety banking (3.9.7)
-are done; see the **3.9** closed-cycle entry below.
+are done; see the **3.9** closed-cycle entry below. **3.12.3–3.12.9 then went
+further and took the whole asymmetric stack off banking altogether**, after two
+authentication bypasses traced to shared lanes; 3.13.0 finishes that for the
+symmetric/EC scratch.
+
+### Planned — 3.13.0 — retire `cbank()`
+
+**Status: scheduled, not started. Assigned the 3.13.0 minor; date TBD.**
+
+3.12.9 localised the whole **asymmetric** stack — RSA sign + verify, PSS, and the
+bignum engine — so no signature path uses a lane any more. This cycle finishes
+the job on the **symmetric and EC** scratch and then deletes the mechanism.
+
+**Scope: 188 `cbank()` sites across 28 files.**
+
+| Group | Modules |
+|---|---|
+| Hashing | `sha256`, `sha512`, `sha384`, `sha_ni`, `blake2b` |
+| MAC / KDF | `hmac`, `hmac_sha384`, `hkdf`, `hkdf_sha384`, `tls12_prf`, `argon2` |
+| AEAD | `aes_gcm`, `chacha20`, `poly1305`, `chacha20poly1305` |
+| EC | `ecdsa_p256`, `ecdsa_p384`, `ecdsa_sign`, `ed25519`, `x25519`, `bigint_ext` |
+| Consumers | `authenticode`, `trust`, `verify` |
+| Mechanism | `crypto_scratch` (deleted last) |
+
+**Why it is worth a minor bump**
+
+- **Removes the 63-lifetime-thread ceiling from the library outright.** That
+  bound is structural, not a load threshold: `_crypto_next_bank` has no
+  decrement, so a lane is held for a thread's life and a server that creates and
+  retires workers crosses it while running only a handful of operations at once.
+- **Retires `crypto_banks_exhausted()` / `crypto_banks_claimed()`** (added 3.12.9
+  as the detection half) — with no lanes there is nothing to exhaust. Removing a
+  public API is why this is a **minor**, not a patch.
+- **Reclaims most of the remaining 785,408 B of static data.** Every banked
+  global costs **8×** its declared size — see
+  [note 003](../architecture/003-global-arrays-are-eight-bytes-per-element.md).
+  RSA + bignum alone gave back 9.53 MiB.
+- **Deletes a whole class of defect.** Both authentication bypasses in the 3.12.x
+  line (v1.5 at 3.12.3, PSS at 3.12.6) and the near-miss on the Bellcore guard at
+  3.12.9 were the same shape: two operands of one decision sharing a lane. No
+  lanes, no shape.
+
+**Method — do not shortcut this**
+
+- **Bites per module, never a sweep.** Each bite: localise → run that module's
+  `.tcyr` → add or extend a pinned-lane race detector → **mutation-prove it**
+  (re-bank one buffer, confirm the test goes red) → move on. This is the pattern
+  3.12.9 used on the sign path and it is the only reason the Bellcore hazard was
+  caught rather than assumed absent.
+- **Check the 122,880 B per-fn cumulative stack budget on every bite.** If the
+  compiler emits `note: oversized array local kept in shared global`, that
+  buffer did *not* localise — that note is the only reliable signal (quirk #1).
+  The EC modules are the risk here: `ecdsa_p256` alone has ~100 buffers.
+- **Preserve zeroization semantics.** Per-lane wipes become per-call wipes on
+  every return path, at declared buffer width. Watch for scrub functions left
+  pointing at deleted globals — 3.12.5 shipped exactly that with
+  `_bn_modrem`/`_bn_modn1` and it went unnoticed for four releases.
+- **`crypto_scratch.cyr` goes last**, once nothing references it.
+
+**Prerequisite:** CLAUDE.md's closeout pass runs before any minor bump and ships
+as the **last 3.12.x patch** — full suite, benchmark baseline vs
+`benches/history.csv`, dead-code audit, stale-comment sweep, security re-scan,
+downstream check, docs sync, clean build.
+
+**Not a vulnerability.** Exposure is materially lower than RSA's was: a lane
+collision in symmetric/EC scratch yields a corrupted digest or a failed
+handshake — fail-closed noise, not a forged accept. This is correctness,
+footprint and API-surface work, and it is scheduled rather than urgent.
 
 **Verification follow-up**
 
@@ -61,14 +129,16 @@ are done; see the **3.9** closed-cycle entry below.
       hand-rolled path and re-`#derive` the type when the toolchain gains it.
       Gated on cyrius. Re-check on each toolchain bump.
 
-- [ ] **Retire the per-thread bank-indexing workaround** if cyrius gains
-      a native thread-local *array* qualifier (`threadlocal var X[N]`).
-      The 3.6 bank scheme (`src/crypto_scratch.cyr`) exists only because
-      `var X[N]` is a static function-scope global and cyrius TLS is
-      slot-based. If a true thread-local array qualifier lands, collapse
-      the `[N*8]` banks back to `var X[N]` and drop the module. Check on
-      each toolchain bump. *(6.0.62 added real per-thread TLS slots — not
-      arrays — so this stays gated.)*
+- [x] ~~**Retire the per-thread bank-indexing workaround** if cyrius gains a
+      native thread-local *array* qualifier (`threadlocal var X[N]`).~~
+      **SUPERSEDED — no longer gated on anything.** This was parked because the
+      3.6 bank scheme "exists only because `var X[N]` is a static function-scope
+      global". **That premise is false as of cyrius 6.3.15**, which routed array
+      locals to per-thread stack slots — a plain function-local array is already
+      the thread-local array this item was waiting for, as 3.12.3–3.12.9 proved
+      across the entire asymmetric stack. No `threadlocal` qualifier is needed.
+      Folded into **[3.13.0](#planned--3130--retire-cbank)**, which retires
+      `cbank()` and deletes `src/crypto_scratch.cyr` outright.
 
 - [ ] **Scatter-store for the fixed-base comb** (cache-timing) — **parked;
       currently MOOT.** Would distribute the comb's affine entries (64 B since
@@ -124,30 +194,8 @@ are done; see the **3.9** closed-cycle entry below.
       larger audit surface on the most correctness-critical loop in the library,
       for a fraction of the remaining win. Only if a consumer needs it.
 
-**Opened by 3.12.9** (named here so they are not buried in a CHANGELOG entry)
-
-- [ ] **Retire `cbank()` entirely — the symmetric/EC scratch is still banked.**
-      3.12.9 localised the whole asymmetric stack (RSA sign+verify, PSS, bignum),
-      so nothing on a signature path uses a lane. What remains is **188 `cbank()`
-      sites across 28 files**: sha256/512/384, hmac, hmac-sha384, hkdf,
-      hkdf-sha384, aes-gcm, chacha20, poly1305, chacha20poly1305, ecdsa-p256,
-      ecdsa-p384, ecdsa-sign, ed25519, x25519, bigint_ext, argon2, blake2b,
-      tls12_prf, authenticode, sha_ni, trust, verify.
-      Localising them would **remove the 63-lifetime-thread ceiling from the
-      library outright**, make `crypto_banks_exhausted()` (added 3.12.9) moot,
-      and reclaim most of the remaining 785,408 B of static data — each banked
-      global costs 8× its declared size, see
-      [note 003](../architecture/003-global-arrays-are-eight-bytes-per-element.md).
-      Exposure is lower than RSA's was (a collision corrupts a digest or fails a
-      handshake — fail-closed, not a forged accept), so this is correctness and
-      footprint work, not an open vulnerability. Large; wants bites per module
-      with a race-detector per bite, following 3.12.9's mutation-proven pattern.
-- [ ] **Re-cost every remaining banked global against note 003.** A module-level
-      `var X[N]` allocates **8N** bytes, so every `# N * SIGIL_CRYPTO_BANKS`
-      comment in `src/` understates its global 8×. The 3.9.6 note that widening
-      banks 8 → 64 cost "~14 MB (lazy zero-pages; informational)" was numerically
-      right for a reason nobody had identified. Worth one sweep to correct the
-      comments so the next sizing decision starts from true numbers.
+**Opened by 3.12.9** — the `cbank()` retirement is scheduled as its own cycle;
+see **[Planned — 3.13.0](#planned--3130--retire-cbank)** above.
 
 **Opened by 3.12.8** (named here so they are not buried in a CHANGELOG entry)
 
