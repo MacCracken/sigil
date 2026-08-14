@@ -38,7 +38,7 @@ are done; see the **3.9** closed-cycle entry below.
 **Backlog — gated / parked** (open, but not actionable until the gate lifts)
 
 - [ ] **EC scalar-mult ≤ 10 ms — DECISION NEEDED: the target is now met.**
-      **Changed at 3.12.2 and awaiting Robert's call.** ADR 0006 closed this
+      **Changed at 3.12.2 and awaiting the maintainer's call.** ADR 0006 closed this
       2026-06-16 as "not reachable with current approaches", naming a hand-written
       asm multiply as an exotic lever *"gated on the upstream cyrius `asm`-block
       global-symbol pseudo"*. **That gate turned out not to exist** for a leaf
@@ -47,7 +47,7 @@ are done; see the **3.9** closed-cycle entry below.
       `ecdsa_p256_verify` measures **9.732 ms**, against 10.539 ms on the same host
       at the same pin — **below the 10 ms target**.
       **ADR 0006 was deliberately NOT closed by that**: the crossing is narrow
-      (~7 %) and single-host, and the disposition was Robert's decision, so it
+      (~7 %) and single-host, and the disposition was the maintainer's decision, so it
       should not be inherited from a performance side-effect. Open question is
       therefore: *declare the target met, re-measure on a second host first, or
       set a new one?* See [ADR 0008](../adr/0008-native-asm-multiply-and-public-modexp.md).
@@ -123,6 +123,31 @@ are done; see the **3.9** closed-cycle entry below.
       leaf multiply still pays. Deliberately not scoped in 3.12.2: substantially
       larger audit surface on the most correctness-critical loop in the library,
       for a fraction of the remaining win. Only if a consumer needs it.
+
+**Opened by 3.12.8** (named here so they are not buried in a CHANGELOG entry)
+
+- [ ] **Catch-up audit for 3.12.3 → 3.12.7 — five releases filed no audit report.**
+      CLAUDE.md § "Security Hardening (before release)" is unconditional, and the
+      lapse spans **3.12.6, which fixed an RSA-PSS authentication bypass**.
+      3.12.8's audit
+      ([`2026-08-14-3.12.8-err-namespace-toolchain-audit.md`](../audit/2026-08-14-3.12.8-err-namespace-toolchain-audit.md))
+      re-established the practice but **explicitly does not cover that range**.
+      Whether to run a retroactive pass is not decided here.
+- [ ] **`cyrius.lock` no longer self-refreshes — sigil has zero git deps.**
+      `cmd_deps_lock()` (cyrius `cbt/deps.cyr:1916`) writes the lock only when
+      `cyrius deps` actually copied a dep. Since sakshi moved into
+      `[deps].stdlib` at 3.12.7 nothing is ever copied, so the lock silently
+      drifts against `lib/` on every toolchain bump and must be hand-refreshed
+      (as it was at 3.12.8: 10 of 107 hashes). For a trust-verification library
+      a tamper-detection record that stops tracking its own inputs deserves an
+      upstream fix in cyrius — either lock-on-`lib sync`, or lock the resolved
+      stdlib snapshot. Not actioned; the fix could land in cyrius `cbt/deps.cyr` or as a sigil-side check.
+- [ ] **3.12.7's CHANGELOG assertion count (1,730) does not reproduce.**
+      Measured at 3.12.8 two independent ways — `scripts/check.sh` and CLAUDE.md's
+      canonical per-file `cyrius test` loop — both give **1,665 across 65 files**,
+      and no test was removed. Recorded so the number is not silently carried
+      forward; worth one pass to confirm nothing regressed at 3.12.3–3.12.7
+      rather than being miscounted.
 
 **Possible future surfaces** (consumer-demand-gated)
 

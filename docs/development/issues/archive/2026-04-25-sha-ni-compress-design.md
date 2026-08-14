@@ -311,7 +311,7 @@ Allocate by `sub rsp, 64`, align to 16 (ABI keeps rsp 16-aligned at function ent
 
 | Bite | Gate | Pass criterion |
 |------|------|----------------|
-| A | This doc | Robert signs off |
+| A | This doc | the maintainer signs off |
 | B | `cyrius test tests/tcyr/sha_ni.tcyr` | All assertions pass with stub still returning -1; cross-path test gated on probe and currently a no-op |
 | B | `cyrius test` (full suite) | All existing tests still pass |
 | C | `cyrius test tests/tcyr/sha_ni.tcyr` | Stub-contract flips to 0; FIPS vectors AND cross-path test pass; on a SHA-NI-less host the cross-path test skips cleanly |

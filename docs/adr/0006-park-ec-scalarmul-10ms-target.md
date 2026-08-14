@@ -14,13 +14,13 @@
 > as not reachable.**
 >
 > This ADR is deliberately **not** superseded. The crossing is narrow (~7 %)
-> and single-host, and closing the target is Robert's call — the same call
+> and single-host, and closing the target is the maintainer's call — the same call
 > that parked it — not something to inherit from a performance side-effect.
 > What has changed is the *premise*, not the disposition. See
 > [ADR 0008](0008-native-asm-multiply-and-public-modexp.md); the roadmap
 > backlog item is updated to match.
 
-> **Decided 2026-06-16 (Robert): option A — close the ≤ 10 ms target as
+> **Decided 2026-06-16 (maintainer): option A — close the ≤ 10 ms target as
 > "not reachable with current approaches."** Option B (exotic-lever
 > investigation) is **not dropped** — it is parked to the roadmap
 > backlog as a named, possible-future item, explicitly *not a current

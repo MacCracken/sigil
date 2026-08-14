@@ -208,31 +208,31 @@ fn certpin_verify_pin(host, actual_pin, pin_set, current_time): i64 {
 #           openssl enc -base64
 fn certpin_compute_spki_pin(cert_path): i64 {
     if (cert_path == 0) {
-        return err_invalid_argument("cert_path is null");
+        return sigil_err_invalid_argument("cert_path is null");
     }
     if (strlen(cert_path) == 0) {
-        return err_invalid_argument("cert_path is empty");
+        return sigil_err_invalid_argument("cert_path is empty");
     }
 
     # Validate cert_path does not contain shell-injection characters
     var vlen = strlen(cert_path);
     if (vlen == 0) {
-        return err_invalid_argument("cert_path is empty");
+        return sigil_err_invalid_argument("cert_path is empty");
     }
     if (vlen > 896) {
-        return err_invalid_argument("cert_path too long");
+        return sigil_err_invalid_argument("cert_path too long");
     }
     var vi = 0;
     while (vi < vlen) {
         var vc = load8(cert_path + vi);
         if (vc == 39) {  # single quote
-            return err_invalid_argument("cert_path contains single quote");
+            return sigil_err_invalid_argument("cert_path contains single quote");
         }
         if (vc == 10) {  # newline
-            return err_invalid_argument("cert_path contains newline");
+            return sigil_err_invalid_argument("cert_path contains newline");
         }
         if (vc == 0) {  # null byte (shouldn't reach here, but defensive)
-            return err_invalid_argument("cert_path contains null byte");
+            return sigil_err_invalid_argument("cert_path contains null byte");
         }
         vi = vi + 1;
     }
@@ -288,7 +288,7 @@ fn certpin_compute_spki_pin(cert_path): i64 {
 
     var total = payload(res);
     if (total <= 0) {
-        return err_unknown("openssl pipeline returned empty output");
+        return sigil_err_unknown("openssl pipeline returned empty output");
     }
     store8(outbuf + total, 0);  # NUL-terminate (run_capture writes raw bytes)
 

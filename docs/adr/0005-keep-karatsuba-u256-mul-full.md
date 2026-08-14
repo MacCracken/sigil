@@ -31,7 +31,7 @@ schoolbook implementation, renamed `_u256_mul_full_schoolbook`, as a
 permanent differential KAT oracle** (200 random + 14 edge cases in
 `tests/tcyr/ecdsa_p256.tcyr` cross-check the two byte-for-byte).
 
-Robert's call: small efficiencies are real wins here; a measured,
+the maintainer's call: small efficiencies are real wins here; a measured,
 test-guarded 3–4% on a hot verify path is kept, not reverted.
 
 ## Consequences

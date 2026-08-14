@@ -6,7 +6,21 @@ type: state
 
 # Documentation Health — sigil
 
-> **Last refresh**: 2026-07-30 (**3.12.2 — native `asm{}` multiply +
+> **Last refresh**: 2026-08-14 (**3.12.8 — `err_*` → `sigil_err_*`
+> namespace rename + toolchain 6.5.21**: the 14 bare error constructors in
+> `src/sys_error.cyr` are now `sigil_err_*` across 124 call sites in 9
+> files — name-only, no behavioural change, but **breaking** for any
+> consumer that calls them. Motivated by a live collision, not style:
+> kavach pins `[deps.sigil]` *and* defines the same 14 bare names in its
+> own `src/sys_error.cyr`, for 14 duplicate definitions in one link.
+> Toolchain pin 6.5.17 → 6.5.21, `lib/` re-synced (107 files byte-identical
+> to the snapshot), `cyrius.lock` hand-refreshed (10 hashes). Suite
+> **1,665 / 0 across 65 files**; fuzz 3/3; doc-check 0 undocumented; audit
+> floor stays **empty**. This refresh updated the header rows only — the
+> per-file Tier tables below were **not** re-inventoried. Prior refresh
+> prose follows.)
+>
+> **Prior refresh**: 2026-07-30 (**3.12.2 — native `asm{}` multiply +
 > public-exponent modexp + Authenticode verify**: new `src/mul64.cyr`
 > puts the 64×64→128 unsigned multiply in an x86-64 `asm{}` block
 > (`MUL r/m64`, no CPUID probe — it's baseline x86-64; portable
@@ -44,15 +58,29 @@ type: state
 > were retired in favour of those sources.
 >
 > **Headline changes since the last full row-refresh (3.4.1 inventory):**
-> - **Version `3.12.2`**, cyrius pin **`6.5.3`** (was 3.5.4 / 6.0.3 at
->   the 3.4.1 inventory). Deps: **sakshi 2.4.7 ONLY** — **agnosys was
->   DROPPED at 3.8.1** (its trust primitives were internalized as
->   `src/*_core.cyr` + `src/sys_error.cyr` / `src/sys_util.cyr`);
->   `cyrius.cyml [deps]` no longer references agnosys. **bayan `1.3.0`**
->   is a **stdlib module** (`[deps].stdlib`), not a `[deps.*]` pin — its
->   only machine-visible trace is the `lib/bayan.cyr` hash in
->   `cyrius.lock`, so it is deliberately absent from the dependency
->   tables in README / state.md.
+> - **Version `3.12.8`**, cyrius pin **`6.5.21`** (was 3.5.4 / 6.0.3 at
+>   the 3.4.1 inventory). Deps: **ZERO git deps** — sakshi moved from
+>   `[deps.sakshi]` into `[deps].stdlib` at 3.12.7, so **sakshi `2.4.10`**
+>   and **bayan `1.4.1`** now both arrive with the toolchain snapshot and
+>   their only machine-visible trace is the `lib/sakshi.cyr` /
+>   `lib/bayan.cyr` hashes in `cyrius.lock` — deliberately absent from the
+>   dependency tables in README / state.md. **agnosys was DROPPED at
+>   3.8.1** (its trust primitives were internalized as `src/*_core.cyr` +
+>   `src/sys_error.cyr` / `src/sys_util.cyr`); `cyrius.cyml [deps]` no
+>   longer references agnosys. **3.12.8 renamed the 14 bare `err_*`
+>   constructors in `src/sys_error.cyr` to `sigil_err_*`** — a breaking
+>   but name-only change, motivated by a live 14-way duplicate-symbol
+>   collision in kavach.
+> - **Audit floor: EMPTY** as of the 2026-08-14 3.12.8 audit
+>   ([`2026-08-14-3.12.8-err-namespace-toolchain-audit.md`](audit/2026-08-14-3.12.8-err-namespace-toolchain-audit.md)),
+>   a **scoped** maintenance pass (rename blast-radius, toolchain/lock
+>   integrity, and a full-tree quirk #1 cumulative-stack-budget re-probe)
+>   that found nothing. **Gap, named plainly and now WIDER than the note
+>   below records:** on top of 3.10.0 → 3.12.1, releases **3.12.3 →
+>   3.12.7 also filed no audit doc** — including **3.12.6, which fixed an
+>   RSA-PSS authentication bypass**. The 3.12.8 audit explicitly does not
+>   cover that range; a catch-up pass is tracked in the roadmap as
+>   the maintainer's call. Historical detail follows.
 > - **Audit floor: EMPTY** as of the 2026-07-30 3.12.2 audit — every
 >   finding of that cycle was resolved in-cycle (F1 HIGH signer
 >   pad-in-hash + F2 LOW `authenticode_pe_hash` allocator leak both
@@ -61,8 +89,11 @@ type: state
 >   **no per-cycle audit doc for 3.10.0 → 3.12.1** — the 3.12.2 audit is
 >   the first since 2026-06-29, so the floor for those six releases was
 >   never independently re-verified. See Tier 4.
-> - **64 `.tcyr` files (`ls tests/tcyr/*.tcyr`) / 1661 assertions**, 0
->   failures (was ~1178 at the 3.4.1 inventory). Fuzz: **24 / 0** across
+> - **65 `.tcyr` files (`ls tests/tcyr/*.tcyr`) / 1665 assertions**, 0
+>   failures @3.12.8 (was ~1178 at the 3.4.1 inventory), confirmed by two
+>   independent counting methods that agree exactly. ⚠ 3.12.7's CHANGELOG
+>   claimed **1,730**, which reproduces under neither method — see the
+>   roadmap item. Fuzz: **24 / 0** across
 >   3 `fuzz/*.fcyr` files (`fuzz_ed25519` 11, `fuzz_integrity` 6,
 >   `fuzz_revocation` 7). **The old assertion-count caveat is DEAD —
 >   do not re-add it.** Through 3.11.x this file said the 3
@@ -98,7 +129,7 @@ type: state
 >   both issues open through 3.12.1 closed at 3.12.2. Two items stay
 >   open and are named here so they don't get buried: ADR 0006's parked
 >   **"≤ 10 ms"** target, which 3.12.2 measured at 9.732 ms and which
->   the roadmap now carries as **DECISION NEEDED** (Robert's call —
+>   the roadmap now carries as **DECISION NEEDED** (the maintainer's call —
 >   declare met, re-measure on a second host, or set a new target), and
 >   the **release post-hook state-drift**, now on its third recorded
 >   occurrence.
@@ -215,7 +246,7 @@ citation index for every crypto primitive.
 | `0003-bump-alloc-drift-acceptable-until-3-6.md` | 2026-05-27 | 🔵 Resolved | The batched-closure target it tracked is **done**: the audit floor was cleared at 3.7.3 (4 LOWs resolved via the `_into` API, 4 reclassified as correct init-once). Confirm the ADR body carries a Resolved/Superseded marker. |
 | `0004-per-lane-zeroization-for-banked-crypto-arrays.md` | 2026-06-16 | ✅ Fresh | The 3.8.0 rule: banked secret scratch is plain `var` + a per-lane `memset`, **never** `secret var` (a whole-array wipe on scope exit clobbers a sibling worker's live lane). |
 | `0005-keep-karatsuba-u256-mul-full.md` | 2026-06-16 | ✅ Fresh | Keeps the 3.7.17 Karatsuba `u256_mul_full` with schoolbook retained as oracle. Still accurate at 3.12.2 — `mul64.cyr` replaces the *limb* multiply underneath Karatsuba, not the Karatsuba decomposition itself. |
-| `0006-park-ec-scalarmul-10ms-target.md` | 2026-06-16 | 🟡 Needs revisit | Parked the "EC scalar-mult ≤ 10 ms" target as *not reachable with current approaches* at a ~10.9 ms floor, with exotic levers (asm / alt-representation) sent to the Backlog. **3.12.2 took one of those exotic levers (the native `asm{}` multiply) and measured `ecdsa_p256_verify` at 9.732 ms — under the target.** The ADR needs a Superseded/Revisited marker and the roadmap's parked item needs re-opening or closing-as-met; that is Robert's call, not a doc edit. |
+| `0006-park-ec-scalarmul-10ms-target.md` | 2026-06-16 | 🟡 Needs revisit | Parked the "EC scalar-mult ≤ 10 ms" target as *not reachable with current approaches* at a ~10.9 ms floor, with exotic levers (asm / alt-representation) sent to the Backlog. **3.12.2 took one of those exotic levers (the native `asm{}` multiply) and measured `ecdsa_p256_verify` at 9.732 ms — under the target.** The ADR needs a Superseded/Revisited marker and the roadmap's parked item needs re-opening or closing-as-met; that is the maintainer's call, not a doc edit. |
 | `0007-auto-banking-for-concurrent-tls.md` | 2026-06-29 | ✅ Fresh | The 3.9.6 decision: `cbank()` auto-assigns a per-thread lane on first use (atomic counter → lanes 1..63, bank 0 = main), `SIGIL_CRYPTO_BANKS` 8→64, no consumer `crypto_bank_set` call. |
 | `0008-native-asm-multiply-and-public-modexp.md` | 2026-07-30 | ✅ Fresh | New this cycle (written by the operator). Accepted 2026-07-30: why a hand-written `MUL r/m64` earns its keep on the hottest path, and why a deliberately non-constant-time `bn_mont_modexp_pub` is safe when reachability from a secret exponent is proven. **Link check**: its context block points at `../development/issues/archive/2026-07-30-rsa-verify-uses-secret-exponent-ladder.md` — a **dangling link until that issue is moved into `archive/`** (see Tier 6). |
 
@@ -303,8 +334,8 @@ reserved for the first cycle of a day.
 
 | File | Last touched | Status | Notes |
 |---|---|---|---|
-| `roadmap.md` | 2026-07-30 | ✅ Fresh | **Through 3.12.2**: "Closed cycles" now carries the **3.12** entry (3.12.0 BLAKE2b + Argon2, 3.12.1 bank-slot move, 3.12.2 native asm multiply + public-exponent modexp + Authenticode verify) alongside 3.6–3.11. Open items are named, not buried — the headline one is **"EC scalar-mult ≤ 10 ms — DECISION NEEDED: the target is now met"**: ADR 0006 parked it as unreachable, 3.12.2's `src/mul64.cyr` measured `ecdsa_p256_verify` at 9.732 ms, and the ADR was **deliberately left open** because a ~7 % single-host crossing is Robert's call, not a perf side-effect. **Opened by 3.12.2**: the UEFI firmware-interop gate (last item of the now-archived authenticode issue, moved here so it survives archival), the **missing 3.10 / 3.11 rows in `benches/history.csv`** (left honest — fill forward only), and a full `asm{}` CIOS inner loop (unscoped by choice). Carried backlog: TDX/SGX in-quote PCK chain walk, retire-bank-indexing, scatter-store, CLMUL-GHASH, ML-KEM-768, `#derive(Serialize)` completeness, Windows-entropy `cass` ProcessPrng confirmation, retire-`sysinfo.cyr`. **Open audit findings — NONE.** |
-| `state.md` | 2026-07-30 | ✅ Fresh | Live state snapshot — bumped every release. **Through 3.12.2**: version / pin `6.5.3` / sakshi `2.4.7` + bayan `1.3.0`-as-stdlib-module, last release audit = the 2026-07-30 3.12.2 audit, test surface **1661 / 0 across 64 files**. Its **Counting note (revised @3.12.0)** is the authoritative one — the `*_verify_full` summaries no longer drop under a pipe, so the grep-sum already includes those 44 and they must **not** be added back; this file (doc-health) carried the opposite claim from 3.12.0 until the 2026-07-30 refresh and was the wrong one. Standing open item, escalated this cycle: the ⚠️ **state-drift note** now records the **third** occurrence of the release post-hook failing to bump the volatile fields (3.9.0–3.9.5, 3.9.6–3.11.0, 3.12.0–3.12.1 — at one point three different versions asserted in one section). Per CLAUDE.md ("if the hook doesn't, fix the hook — don't hand-maintain state") the hook fix stays flagged for Robert. |
+| `roadmap.md` | 2026-07-30 | ✅ Fresh | **Through 3.12.2**: "Closed cycles" now carries the **3.12** entry (3.12.0 BLAKE2b + Argon2, 3.12.1 bank-slot move, 3.12.2 native asm multiply + public-exponent modexp + Authenticode verify) alongside 3.6–3.11. Open items are named, not buried — the headline one is **"EC scalar-mult ≤ 10 ms — DECISION NEEDED: the target is now met"**: ADR 0006 parked it as unreachable, 3.12.2's `src/mul64.cyr` measured `ecdsa_p256_verify` at 9.732 ms, and the ADR was **deliberately left open** because a ~7 % single-host crossing is the maintainer's call, not a perf side-effect. **Opened by 3.12.2**: the UEFI firmware-interop gate (last item of the now-archived authenticode issue, moved here so it survives archival), the **missing 3.10 / 3.11 rows in `benches/history.csv`** (left honest — fill forward only), and a full `asm{}` CIOS inner loop (unscoped by choice). Carried backlog: TDX/SGX in-quote PCK chain walk, retire-bank-indexing, scatter-store, CLMUL-GHASH, ML-KEM-768, `#derive(Serialize)` completeness, Windows-entropy `cass` ProcessPrng confirmation, retire-`sysinfo.cyr`. **Open audit findings — NONE.** |
+| `state.md` | 2026-07-30 | ✅ Fresh | Live state snapshot — bumped every release. **Through 3.12.2**: version / pin `6.5.3` / sakshi `2.4.7` + bayan `1.3.0`-as-stdlib-module, last release audit = the 2026-07-30 3.12.2 audit, test surface **1661 / 0 across 64 files**. Its **Counting note (revised @3.12.0)** is the authoritative one — the `*_verify_full` summaries no longer drop under a pipe, so the grep-sum already includes those 44 and they must **not** be added back; this file (doc-health) carried the opposite claim from 3.12.0 until the 2026-07-30 refresh and was the wrong one. Standing open item, escalated this cycle: the ⚠️ **state-drift note** now records the **third** occurrence of the release post-hook failing to bump the volatile fields (3.9.0–3.9.5, 3.9.6–3.11.0, 3.12.0–3.12.1 — at one point three different versions asserted in one section). Per CLAUDE.md ("if the hook doesn't, fix the hook — don't hand-maintain state") the hook fix stays flagged for the maintainer. |
 | `3.0-handoff-2026-04-22.md` | 2026-04-22 | 📦 Archive | Frozen by design — closed-cycle handoff doc. |
 | `3.0-scope.md` | (closed) | 📦 Archive | Frozen by design — closed-cycle scope doc. |
 | `3.2-scope.md` | (closed) | 📦 Archive | Frozen by design — closed-cycle scope doc. |
@@ -416,7 +447,7 @@ cadence doesn't justify them:
   grows past ~60 files"; the tree now stands at **82 markdown files, 75
   of them under `docs/`** (38 of those are dated audit artifacts). README
   + the CLAUDE.md Docs pointer block still cover the landing surface, so
-  this is flagged for Robert rather than actioned — either an index gets
+  this is flagged for the maintainer rather than actioned — either an index gets
   written or the threshold gets restated.
 - `docs/articles/` — N/A. Sigil is a library, not a
   narrative-owning project.

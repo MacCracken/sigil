@@ -3,7 +3,7 @@
 **Status**: Accepted
 **Date**: 2026-07-30
 
-> Decided 2026-07-30 (Robert), during the 3.12.2 cycle, in response to the
+> Decided 2026-07-30 (maintainer), during the 3.12.2 cycle, in response to the
 > agnosai consumer report
 > [`2026-07-30-rsa-verify-uses-secret-exponent-ladder`](../development/issues/archive/2026-07-30-rsa-verify-uses-secret-exponent-ladder.md).
 
@@ -80,7 +80,7 @@ is not free, and 2.5× is the price.
 **3. Reopen ADR 0006's ≤ 10 ms question — but do not silently close it.**
 `ecdsa_p256_verify` measured **9.808 ms** after this work, against 10.539 ms
 on the same host at the same toolchain pin. That is below the parked target.
-ADR 0006 is **not** superseded by this ADR: its disposition was Robert's
+ADR 0006 is **not** superseded by this ADR: its disposition was the maintainer's
 call, the crossing is narrow (7 %) and single-host, and "the target is met"
 deserves its own deliberate decision rather than being inherited from a
 performance side-effect. What this ADR records is that **the premise changed**

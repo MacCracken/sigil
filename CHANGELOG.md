@@ -7,6 +7,120 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.12.8] — 2026-08-14 — toolchain 6.5.21; the bare `err_*` namespace was already colliding in kavach
+
+Toolchain + deps refresh, plus one **breaking rename**: the 14 bare `err_*` error
+constructors are now `sigil_err_*`. No behavioural change — every rename is
+name-only, and the bodies, signatures, packing and errno mapping are untouched.
+
+### Breaking
+
+- **The 14 bare `err_*` constructors in `src/sys_error.cyr` are now `sigil_err_*`.**
+  124 call sites across 9 `src/` files updated in the same pass; zero bare `err_*`
+  identifiers remain under `src/` or in any `dist/` bundle.
+
+  | Was | Now |
+  |---|---|
+  | `err_syscall_failed_nr` | `sigil_err_syscall_failed_nr` |
+  | `err_permission_denied_nr` | `sigil_err_permission_denied_nr` |
+  | `err_would_block` | `sigil_err_would_block` |
+  | `err_invalid_argument_nr` | `sigil_err_invalid_argument_nr` |
+  | `err_not_supported_nr` | `sigil_err_not_supported_nr` |
+  | `err_syscall_failed` | `sigil_err_syscall_failed` |
+  | `err_invalid_argument` | `sigil_err_invalid_argument` |
+  | `err_permission_denied` | `sigil_err_permission_denied` |
+  | `err_module_not_loaded` | `sigil_err_module_not_loaded` |
+  | `err_not_supported` | `sigil_err_not_supported` |
+  | `err_unknown` | `sigil_err_unknown` |
+  | `err_io` | `sigil_err_io` |
+  | `err_from_errno` | `sigil_err_from_errno` |
+  | `err_from_syscall_ret` | `sigil_err_from_syscall_ret` |
+
+  The names now match the `sigil_err` / `sigil_err_code` / `sigil_err_msg` /
+  `sigil_err_free` convention `src/error.cyr` has always used, and the
+  `SIGIL_ERR_*` kind constants that `sys_error.cyr` itself already declared.
+  (`syserr_*`, `wrap_syscall`, `is_syscall_err` and `result_print_err` are
+  unchanged — this release renames the `err_*` prefix only.)
+
+  ⚠ **This was not a hypothetical collision — it is live in kavach today.**
+  Two things changed underneath sigil since these names were internalised at
+  3.8.1: the toolchain snapshot now vendors sigil's own bundle as
+  `lib/sigil.cyr`, and consumers grew their own error layers. kavach pins
+  `[deps.sigil] tag = "3.12.7"`, so its `lib/sigil.cyr` defines all 14 bare
+  `err_*` — **and its own `src/sys_error.cyr` defines the same 14 names**, for
+  14 duplicate definitions in one link. `agnodrm`, `yukti`, `shabdakosh`,
+  `agnostik`, `shabda` and `aegis` each define bare `err_*` of their own and
+  would have hit the same wall the moment they took a sigil dep. Prefixing is
+  the only fix that scales: a library that publishes a bundle cannot own an
+  unprefixed name.
+
+  **Migration.** A consumer that *calls* sigil's constructors prefixes the call
+  (`err_invalid_argument(...)` → `sigil_err_invalid_argument(...)`). A consumer
+  that *defines its own* bare `err_*` — kavach, today — needs no edit at all:
+  the duplicate simply disappears, and its own definitions become unambiguous.
+
+### Changed
+
+- **Toolchain pin 6.5.17 → 6.5.21.**
+- **`lib/` re-synced to the 6.5.21 snapshot** — all 107 vendored `.cyr` files
+  now match the pinned snapshot byte-for-byte; the "`./lib/` shadows
+  version-pinned … sigil 3.12.6 (pinned: 3.12.7)" warning is gone.
+- **`cyrius.lock` hash-refreshed** (10 of 107 entries: `alloc`, `assert`,
+  `atomic`, `bench`, `fdlopen`, `freelist`, `patra`, `sandhi`, `sigil`,
+  `syscalls_windows`). Path set unchanged — a pure hash refresh.
+  `cyrius deps --verify`: **107 verified, 0 failed** (was 97/10 after the sync).
+
+  Worth recording for the next bump: with sakshi moved into `[deps].stdlib` at
+  3.12.7, sigil has **zero git deps**, and `cmd_deps_lock()` only fires when
+  `cyrius deps` actually copied something. So `cyrius deps` no longer refreshes
+  the lock at all, and it will silently drift on every future toolchain bump
+  until it is refreshed by hand as it was here.
+
+### Verified
+
+- `scripts/check.sh` — **70 checks, 0 failures** (65 `tests/tcyr` + 5
+  `tests/bcyr`).
+- `tests/tcyr` — **1,665 assertions, 0 failures across 65 files**, measured two
+  independent ways (`scripts/check.sh`, and CLAUDE.md's canonical
+  `for t in tests/tcyr/*.tcyr; do cyrius test "$t"; done` loop). All 65 files
+  emit their summary through a redirect — the pre-3.12.0 `*_verify_full`
+  tty-only counting caveat remains retired.
+  ⚠ 3.12.7's CHANGELOG claimed **1,730**; that figure does not reproduce under
+  either method at 3.12.7's own tree or this one, and no test was removed this
+  cycle (file count went 64 → 65 since 3.12.2, assertions 1,661 → 1,665).
+  **1,665 is the measured number; the 1,730 appears to have been miscounted.**
+- `fuzz/*.fcyr` — **3/3 clean** (`fuzz_ed25519` 11, `fuzz_integrity` 6,
+  `fuzz_revocation` 7 = 24 assertions, 0 failures).
+- `cyrlint` on all 9 changed files — 0 warnings, 0 untracked deferrals.
+- `cyrius doc --check dist/sigil.cyr` — **74 documented, 0 undocumented**.
+- `cyrius vet` — 0 untrusted, 0 missing. `cyrius deny` — 0 violations.
+- `cyrius distlib --all` — 14 bundles regenerated at v3.12.8.
+
+### Security
+
+- **Quirk #1 re-probe under 6.5.21 — clean, no action needed.** The smoke build
+  emits two `oversized array local kept in shared global (not per-thread)`
+  notes, which CLAUDE.md quirk #1 names as the only reliable signal that an
+  array local escaped the 122,880-byte per-fn stack budget. Both come from a
+  single function, `hash_file_into` (`src/trust.cyr:501-502`, `buf[262144]` +
+  `digest[2048]` = 264,192 B cumulative) — and **both are already correctly
+  banked** across `cbank()` lanes (4096 × 64 and 32 × 64). A cumulative-budget
+  scan over every function in `src/` found **no other** over-budget function,
+  so there is no unbanked shared-global array on any path. The notes are
+  pre-existing and identical under the old 6.5.17 pin; this is a confirmation,
+  not a regression.
+- The `err_*` → `sigil_err_*` rename touches no crypto path, no key material
+  and no comparison — `src/sys_error.cyr` and its callers are the trust-core
+  syscall/plumbing layer. Constant-time posture and zeroization are unchanged.
+
+### Known residual
+
+- 15 files under `src/` remain `cyrius fmt --check` dirty — pre-existing, and
+  mostly the multi-line-string-literal reindent filed as
+  `cyrius/docs/development/issues/2026-08-09-cyrius-fmt-reindents-inside-multi-line-string-literals.md`,
+  where accepting fmt's output would edit the contents of string literals.
+  `scripts/check.sh` does not gate on fmt.
+
 ## [3.12.7] — 2026-08-10 — toolchain + deps; the sakshi git dep was downgrading every consumer
 
 Maintenance only: **no `src/` file changed**, `dist/sigil.cyr`'s body and
@@ -475,7 +589,7 @@ not use the 64×64 limb multiply, and they did not move.
 **`ecdsa_p256_verify` at 9.732 ms is below the ≤ 10 ms target that
 [ADR 0006](docs/adr/0006-park-ec-scalarmul-10ms-target.md) parked as "not reachable with
 current approaches."** ADR 0006 is deliberately **not** superseded here: the crossing is
-narrow (7 %) and single-host, and closing that target is Robert's call, not a side-effect of a
+narrow (7 %) and single-host, and closing that target is the maintainer's call, not a side-effect of a
 performance change. What 3.12.2 records is that the *premise* changed — ADR 0006 named a
 hand-written asm multiply as an unavailable lever "gated on the cyrius `asm`-block
 global-symbol pseudo", and it turns out a leaf multiply needs no such pseudo. The roadmap

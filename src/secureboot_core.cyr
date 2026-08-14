@@ -36,10 +36,10 @@ enum SecureBootState {
 # Layout of returned struct: { attrs (4 bytes at +0), payload_byte at +4, total_size at +8 }
 fn secureboot_read_efi_variable(path): i64 {
     if (path == 0) {
-        return err_invalid_argument("efi variable path is null");
+        return sigil_err_invalid_argument("efi variable path is null");
     }
     if (strlen(path) == 0) {
-        return err_invalid_argument("efi variable path is empty");
+        return sigil_err_invalid_argument("efi variable path is empty");
     }
 
     # Open the file. Use io.cyr's `xopen`, NOT a raw `sys_open`: agnos's
@@ -50,7 +50,7 @@ fn secureboot_read_efi_variable(path): i64 {
     # exactly what the cyrlint `xsys` rule flags. `xopen` bridges it.
     var fd = xopen(path, 0);        # O_RDONLY
     if (fd < 0) {
-        return err_io(0 - fd, "failed to open efi variable");
+        return sigil_err_io(0 - fd, "failed to open efi variable");
     }
     defer { file_close(fd); }
 
@@ -60,11 +60,11 @@ fn secureboot_read_efi_variable(path): i64 {
     var nread = sys_read(fd, buf, 256);
 
     if (nread < 0) {
-        return err_io(0 - nread, "failed to read efi variable");
+        return sigil_err_io(0 - nread, "failed to read efi variable");
     }
 
     if (nread < 5) {
-        return err_invalid_argument("efi variable too short (need 4-byte header + payload)");
+        return sigil_err_invalid_argument("efi variable too short (need 4-byte header + payload)");
     }
 
     # Return the buffer with read count in a result struct
@@ -337,7 +337,7 @@ fn secureboot_list_enrolled_keys(): i64 {
     var outbuf = alloc(8192);
     var n = exec_capture(args, outbuf, 8191);
     if (n < 0) {
-        return err_io(0 - n, "mokutil --list-enrolled failed");
+        return sigil_err_io(0 - n, "mokutil --list-enrolled failed");
     }
     store8(outbuf + n, 0);
 
@@ -354,18 +354,18 @@ fn secureboot_list_enrolled_keys(): i64 {
 # Returns Result: Ok(0) or Err.
 fn secureboot_enroll_key(der_path): i64 {
     if (der_path == 0 || strlen(der_path) == 0) {
-        return err_invalid_argument("certificate path is empty");
+        return sigil_err_invalid_argument("certificate path is empty");
     }
 
     # Check file exists
     if (sys_access(der_path, 0) != 0) {
-        return err_invalid_argument("certificate file not found");
+        return sigil_err_invalid_argument("certificate file not found");
     }
 
     # Validate extension (basic check: last chars should be .der, .cer, .crt, or .pem)
     var plen = strlen(der_path);
     if (plen < 5) {
-        return err_invalid_argument("certificate path too short");
+        return sigil_err_invalid_argument("certificate path too short");
     }
 
     var args = vec_new();
@@ -377,7 +377,7 @@ fn secureboot_enroll_key(der_path): i64 {
     var n = exec_capture(args, &outbuf, 1023);
     var res = wrap_syscall(n);
     if (is_err_result(res) == 1) {
-        return err_io(0, "mokutil --import failed");
+        return sigil_err_io(0, "mokutil --import failed");
     }
 
     return Ok(0);
@@ -392,24 +392,24 @@ fn secureboot_enroll_key(der_path): i64 {
 # Returns Result: Ok(0) or Err.
 fn secureboot_sign_module(module_path, private_key, certificate): i64 {
     if (module_path == 0 || strlen(module_path) == 0) {
-        return err_invalid_argument("module path is empty");
+        return sigil_err_invalid_argument("module path is empty");
     }
     if (private_key == 0 || strlen(private_key) == 0) {
-        return err_invalid_argument("private key path is empty");
+        return sigil_err_invalid_argument("private key path is empty");
     }
     if (certificate == 0 || strlen(certificate) == 0) {
-        return err_invalid_argument("certificate path is empty");
+        return sigil_err_invalid_argument("certificate path is empty");
     }
 
     # Verify files exist
     if (sys_access(module_path, 0) != 0) {
-        return err_invalid_argument("module file not found");
+        return sigil_err_invalid_argument("module file not found");
     }
     if (sys_access(private_key, 0) != 0) {
-        return err_invalid_argument("private key file not found");
+        return sigil_err_invalid_argument("private key file not found");
     }
     if (sys_access(certificate, 0) != 0) {
-        return err_invalid_argument("certificate file not found");
+        return sigil_err_invalid_argument("certificate file not found");
     }
 
     # Try kmodsign first
@@ -432,7 +432,7 @@ fn secureboot_sign_module(module_path, private_key, certificate): i64 {
     var uts[392];
     var ures = agnosys_uname(&uts);
     if (is_err_result(ures) == 1) {
-        return err_io(0, "sign-file fallback: uname(2) failed");
+        return sigil_err_io(0, "sign-file fallback: uname(2) failed");
     }
     var release = uname_release(&uts);
     var rlen = strlen(release);
@@ -456,7 +456,7 @@ fn secureboot_sign_module(module_path, private_key, certificate): i64 {
         if (sys_access(p2, 0) == 0) { sign_file = p2; }
     }
     if (sign_file == 0) {
-        return err_io(0, "module signing: kmodsign missing and sign-file not found");
+        return sigil_err_io(0, "module signing: kmodsign missing and sign-file not found");
     }
     var args2 = vec_new();
     vec_push(args2, sign_file);
@@ -467,7 +467,7 @@ fn secureboot_sign_module(module_path, private_key, certificate): i64 {
 
     n = exec_capture(args2, &outbuf, 1023);
     if (n < 0) {
-        return err_io(0, "kernel module signing failed (kmodsign and sign-file both errored)");
+        return sigil_err_io(0, "kernel module signing failed (kmodsign and sign-file both errored)");
     }
 
     return Ok(0);
@@ -498,10 +498,10 @@ fn secureboot_sig_info_new(module_path, has_sig, signer, algo): i64 {
 # Returns Result: Ok(sig_info) or Err.
 fn secureboot_verify_module(module_path): i64 {
     if (module_path == 0 || strlen(module_path) == 0) {
-        return err_invalid_argument("module path is empty");
+        return sigil_err_invalid_argument("module path is empty");
     }
     if (sys_access(module_path, 0) != 0) {
-        return err_invalid_argument("module file not found");
+        return sigil_err_invalid_argument("module file not found");
     }
 
     var args = vec_new();
@@ -511,7 +511,7 @@ fn secureboot_verify_module(module_path): i64 {
     var outbuf = alloc(4096);
     var n = exec_capture(args, outbuf, 4095);
     if (n < 0) {
-        return err_io(0, "modinfo failed");
+        return sigil_err_io(0, "modinfo failed");
     }
     store8(outbuf + n, 0);
 
@@ -576,7 +576,7 @@ fn secureboot_efi_var_new(name, size): i64 {
 fn secureboot_list_efi_variables(): i64 {
     var efivars_dir = "/sys/firmware/efi/efivars";
     if (file_exists(efivars_dir) == 0) {
-        return err_io(ENOENT, "EFI variables directory not found; is this a UEFI system?");
+        return sigil_err_io(ENOENT, "EFI variables directory not found; is this a UEFI system?");
     }
 
     # Read directory listing via ls
@@ -587,7 +587,7 @@ fn secureboot_list_efi_variables(): i64 {
     var outbuf = alloc(16384);
     var n = exec_capture(args, outbuf, 16383);
     if (n < 0) {
-        return err_io(0 - n, "failed to list EFI variables");
+        return sigil_err_io(0 - n, "failed to list EFI variables");
     }
     store8(outbuf + n, 0);
 

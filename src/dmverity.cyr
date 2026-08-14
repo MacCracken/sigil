@@ -142,7 +142,7 @@ fn dmverity_validate_hex(s, label): i64 {
     var i = 0;
     while (i < slen) {
         if (dmverity_is_hex_char(load8(s + i)) == 0) {
-            return err_invalid_argument("hex string contains non-hex characters");
+            return sigil_err_invalid_argument("hex string contains non-hex characters");
         }
         i = i + 1;
     }
@@ -158,20 +158,20 @@ fn dmverity_is_name_char(ch): i64 {
 # Returns Ok(0) or Err.
 fn dmverity_validate_root_hash(hash, algorithm): i64 {
     if (strlen(hash) == 0) {
-        return err_invalid_argument("Root hash cannot be empty");
+        return sigil_err_invalid_argument("Root hash cannot be empty");
     }
 
     var expected_len = dmverity_hash_hex_len(algorithm);
     var actual_len = strlen(hash);
 
     if (actual_len != expected_len) {
-        return err_invalid_argument("Root hash length does not match algorithm");
+        return sigil_err_invalid_argument("Root hash length does not match algorithm");
     }
 
     var i = 0;
     while (i < actual_len) {
         if (dmverity_is_hex_char(load8(hash + i)) == 0) {
-            return err_invalid_argument("Root hash contains non-hex characters");
+            return sigil_err_invalid_argument("Root hash contains non-hex characters");
         }
         i = i + 1;
     }
@@ -185,16 +185,16 @@ fn dmverity_config_validate(config): i64 {
     var namelen = strlen(name);
 
     if (namelen == 0) {
-        return err_invalid_argument("Verity name cannot be empty");
+        return sigil_err_invalid_argument("Verity name cannot be empty");
     }
     if (namelen > VERITY_NAME_MAX_LEN) {
-        return err_invalid_argument("Verity name too long (max 128)");
+        return sigil_err_invalid_argument("Verity name too long (max 128)");
     }
 
     var i = 0;
     while (i < namelen) {
         if (dmverity_is_name_char(load8(name + i)) == 0) {
-            return err_invalid_argument("Verity name contains invalid characters");
+            return sigil_err_invalid_argument("Verity name contains invalid characters");
         }
         i = i + 1;
     }
@@ -202,12 +202,12 @@ fn dmverity_config_validate(config): i64 {
     # Block sizes must be powers of 2
     var dbs = dmverity_config_data_block_size(config);
     if (dbs == 0 || (dbs & (dbs - 1)) != 0) {
-        return err_invalid_argument("Data block size must be a power of 2");
+        return sigil_err_invalid_argument("Data block size must be a power of 2");
     }
 
     var hbs = dmverity_config_hash_block_size(config);
     if (hbs == 0 || (hbs & (hbs - 1)) != 0) {
-        return err_invalid_argument("Hash block size must be a power of 2");
+        return sigil_err_invalid_argument("Hash block size must be a power of 2");
     }
 
     # Validate root hash
@@ -248,7 +248,7 @@ fn dmverity_format(data_device, hash_device, algorithm, salt): i64 {
     # Verify data device exists
     var acc = sys_access(data_device, 0);
     if (acc < 0) {
-        return err_invalid_argument("Data device not found");
+        return sigil_err_invalid_argument("Data device not found");
     }
 
     var args = vec_new();
@@ -296,7 +296,7 @@ fn dmverity_format(data_device, hash_device, algorithm, salt): i64 {
     }
 
     if (found == 0) {
-        return err_unknown("Could not parse root hash from veritysetup output");
+        return sigil_err_unknown("Could not parse root hash from veritysetup output");
     }
 
     # Skip past "Root hash:" and whitespace
@@ -351,7 +351,7 @@ fn dmverity_open(config): i64 {
 # Returns Ok(0) or Err.
 fn dmverity_close(name): i64 {
     if (strlen(name) == 0) {
-        return err_invalid_argument("Verity name cannot be empty");
+        return sigil_err_invalid_argument("Verity name cannot be empty");
     }
 
     var args = vec_new();
@@ -366,7 +366,7 @@ fn dmverity_close(name): i64 {
 # Returns Ok(verity_status_ptr) or Err.
 fn dmverity_status(name): i64 {
     if (strlen(name) == 0) {
-        return err_invalid_argument("Verity name cannot be empty");
+        return sigil_err_invalid_argument("Verity name cannot be empty");
     }
 
     var args = vec_new();
@@ -449,20 +449,20 @@ fn dmverity_verify(data_device, hash_device, root_hash): i64 {
     # Validate inputs
     var acc1 = sys_access(data_device, 0);
     if (acc1 < 0) {
-        return err_invalid_argument("Data device not found");
+        return sigil_err_invalid_argument("Data device not found");
     }
     var acc2 = sys_access(hash_device, 0);
     if (acc2 < 0) {
-        return err_invalid_argument("Hash device not found");
+        return sigil_err_invalid_argument("Hash device not found");
     }
     if (strlen(root_hash) == 0) {
-        return err_invalid_argument("Invalid root hash");
+        return sigil_err_invalid_argument("Invalid root hash");
     }
     var rhlen = strlen(root_hash);
     var vi = 0;
     while (vi < rhlen) {
         if (dmverity_is_hex_char(load8(root_hash + vi)) == 0) {
-            return err_invalid_argument("Invalid root hash");
+            return sigil_err_invalid_argument("Invalid root hash");
         }
         vi = vi + 1;
     }

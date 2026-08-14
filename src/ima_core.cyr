@@ -115,15 +115,15 @@ fn ima_rule_validate(rule): i64 {
     if (fsuuid != 0) {
         var ulen = strlen(fsuuid);
         if (ulen == 0) {
-            return err_invalid_argument("fsuuid cannot be empty");
+            return sigil_err_invalid_argument("fsuuid cannot be empty");
         }
         if (ulen != 32) {
-            return err_invalid_argument("fsuuid must be 32 hex characters");
+            return sigil_err_invalid_argument("fsuuid must be 32 hex characters");
         }
         var i = 0;
         while (i < ulen) {
             if (ima_is_hex_char(load8(fsuuid + i)) == 0) {
-                return err_invalid_argument("fsuuid contains non-hex characters");
+                return sigil_err_invalid_argument("fsuuid contains non-hex characters");
             }
             i = i + 1;
         }
@@ -136,7 +136,7 @@ fn ima_rule_validate(rule): i64 {
         streq(mask, "MAY_WRITE") != 1 &&
         streq(mask, "MAY_EXEC") != 1 &&
         streq(mask, "MAY_APPEND") != 1) {
-            return err_invalid_argument(
+            return sigil_err_invalid_argument(
             "Invalid mask (expected MAY_READ/MAY_WRITE/MAY_EXEC/MAY_APPEND)");
         }
     }
@@ -440,7 +440,7 @@ fn ima_read_measurements(): i64 {
     var path = "/sys/kernel/security/ima/ascii_runtime_measurements";
     var fd = sys_open(path, O_RDONLY, 0);
     if (fd < 0) {
-        return err_io(0 - fd, "Failed to read IMA measurements");
+        return sigil_err_io(0 - fd, "Failed to read IMA measurements");
     }
     defer { sys_close(fd); }
 
@@ -462,7 +462,7 @@ fn ima_read_measurements(): i64 {
             total = total + n;
             if (total >= bufsize - 1) {
                 if (bufsize >= cap_max) {
-                    return err_io(0, "IMA measurement log exceeds 32MB cap");
+                    return sigil_err_io(0, "IMA measurement log exceeds 32MB cap");
                 }
                 var newsize = bufsize * 2;
                 if (newsize > cap_max) { newsize = cap_max; }
@@ -488,7 +488,7 @@ fn ima_read_measurements(): i64 {
 fn ima_write_policy(rules): i64 {
     var count = vec_len(rules);
     if (count == 0) {
-        return err_invalid_argument("IMA policy has no rules");
+        return sigil_err_invalid_argument("IMA policy has no rules");
     }
 
     # Validate all rules first
@@ -526,22 +526,22 @@ fn ima_write_policy(rules): i64 {
     var ppath = "/sys/kernel/security/ima/policy";
     var pacc = sys_access(ppath, 0);
     if (pacc < 0) {
-        return err_unknown("IMA policy file not found; is IMA enabled?");
+        return sigil_err_unknown("IMA policy file not found; is IMA enabled?");
     }
 
     var fd = sys_open(ppath, O_WRONLY, 0);
     if (fd < 0) {
         var errno = 0 - fd;
         if (errno == EACCES || errno == EPERM) {
-            return err_permission_denied("write ima policy");
+            return sigil_err_permission_denied("write ima policy");
         }
-        return err_io(errno, "Failed to write IMA policy");
+        return sigil_err_io(errno, "Failed to write IMA policy");
     }
     defer { sys_close(fd); }
 
     var wret = sys_write(fd, policy_buf, pos);
     if (wret < 0) {
-        return err_io(0 - wret, "Failed to write IMA policy");
+        return sigil_err_io(0 - wret, "Failed to write IMA policy");
     }
 
     return Ok(0);
@@ -557,7 +557,7 @@ fn ima_write_policy(rules): i64 {
 fn ima_verify_file_integrity(path): i64 {
     var acc = sys_access(path, 0);
     if (acc < 0) {
-        return err_invalid_argument("File not found");
+        return sigil_err_invalid_argument("File not found");
     }
 
     # Read security.ima xattr via getfattr
@@ -573,7 +573,7 @@ fn ima_verify_file_integrity(path): i64 {
     memset(&abuf, 0, 1024);
     var an = exec_capture(attr_args, &abuf, 1023);
     if (an <= 0) {
-        return err_unknown("File has no security.ima xattr or getfattr failed");
+        return sigil_err_unknown("File has no security.ima xattr or getfattr failed");
     }
     store8(&abuf + an, 0);
 
@@ -586,7 +586,7 @@ fn ima_verify_file_integrity(path): i64 {
     memset(&sbuf, 0, 256);
     var sn = exec_capture(sha_args, &sbuf, 255);
     if (sn <= 0) {
-        return err_unknown("sha256sum failed");
+        return sigil_err_unknown("sha256sum failed");
     }
     store8(&sbuf + sn, 0);
 

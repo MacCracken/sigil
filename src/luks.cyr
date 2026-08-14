@@ -135,10 +135,10 @@ fn luks_config_validate(config): i64 {
     var namelen = strlen(name);
 
     if (namelen == 0) {
-        return err_invalid_argument("LUKS volume name cannot be empty");
+        return sigil_err_invalid_argument("LUKS volume name cannot be empty");
     }
     if (namelen > LUKS_NAME_MAX_LEN) {
-        return err_invalid_argument("LUKS volume name too long (max 128)");
+        return sigil_err_invalid_argument("LUKS volume name too long (max 128)");
     }
 
     # Check name characters
@@ -146,22 +146,22 @@ fn luks_config_validate(config): i64 {
     while (i < namelen) {
         var ch = load8(name + i);
         if (luks_is_name_char(ch) == 0) {
-            return err_invalid_argument("LUKS volume name contains invalid characters");
+            return sigil_err_invalid_argument("LUKS volume name contains invalid characters");
         }
         i = i + 1;
     }
 
     var size = luks_config_size_mb(config);
     if (size < LUKS_MIN_SIZE_MB) {
-        return err_invalid_argument("LUKS volume must be at least 4 MB");
+        return sigil_err_invalid_argument("LUKS volume must be at least 4 MB");
     }
     if (size > LUKS_MAX_SIZE_MB) {
-        return err_invalid_argument("LUKS volume exceeds maximum size of 1 TB");
+        return sigil_err_invalid_argument("LUKS volume exceeds maximum size of 1 TB");
     }
 
     var key_bits = luks_config_key_size_bits(config);
     if (key_bits != 256 && key_bits != 512) {
-        return err_invalid_argument("Invalid key size (must be 256 or 512)");
+        return sigil_err_invalid_argument("Invalid key size (must be 256 or 512)");
     }
 
     # Cipher allowlist — audit F-2 (2026-04-26).
@@ -184,10 +184,10 @@ fn luks_config_validate(config): i64 {
 # The returned pointer points to `size` bytes of random data.
 fn luks_generate_key(size): i64 {
     if (size == 0) {
-        return err_invalid_argument("Key size must be > 0");
+        return sigil_err_invalid_argument("Key size must be > 0");
     }
     if (size > LUKS_KEY_MAX_BYTES) {
-        return err_invalid_argument("Key size too large (max 1024 bytes)");
+        return sigil_err_invalid_argument("Key size too large (max 1024 bytes)");
     }
 
     var buf = alloc(size);
@@ -198,7 +198,7 @@ fn luks_generate_key(size): i64 {
     # the raw SYS_* constant is undefined on PE (Windows), which blocked any PE
     # consumer of sigil (e.g. cyrsign) from compiling.
     if (_sigil_random_fill(buf, size) != 0) {
-        return err_syscall_failed(0, "getrandom failed");
+        return sigil_err_syscall_failed(0, "getrandom failed");
     }
 
     return Ok(buf);
@@ -262,21 +262,21 @@ fn _luks_contains_null_ci(s): i64 {
 # Rejects: empty strings, anything containing "null" (any case), any algo or
 # mode not on the allowlist. Returns Ok(0) or Err.
 fn luks_validate_cipher(algo, mode): i64 {
-    if (algo == 0) { return err_invalid_argument("LUKS cipher algo is null pointer"); }
-    if (mode == 0) { return err_invalid_argument("LUKS cipher mode is null pointer"); }
-    if (strlen(algo) == 0) { return err_invalid_argument("LUKS cipher algo is empty"); }
-    if (strlen(mode) == 0) { return err_invalid_argument("LUKS cipher mode is empty"); }
+    if (algo == 0) { return sigil_err_invalid_argument("LUKS cipher algo is null pointer"); }
+    if (mode == 0) { return sigil_err_invalid_argument("LUKS cipher mode is null pointer"); }
+    if (strlen(algo) == 0) { return sigil_err_invalid_argument("LUKS cipher algo is empty"); }
+    if (strlen(mode) == 0) { return sigil_err_invalid_argument("LUKS cipher mode is empty"); }
     if (_luks_contains_null_ci(algo) == 1) {
-        return err_invalid_argument("LUKS cipher algo contains forbidden token \"null\"");
+        return sigil_err_invalid_argument("LUKS cipher algo contains forbidden token \"null\"");
     }
     if (_luks_contains_null_ci(mode) == 1) {
-        return err_invalid_argument("LUKS cipher mode contains forbidden token \"null\"");
+        return sigil_err_invalid_argument("LUKS cipher mode contains forbidden token \"null\"");
     }
     if (_luks_algo_allowed(algo) == 0) {
-        return err_invalid_argument("LUKS cipher algo not on allowlist (aes/serpent/twofish/camellia)");
+        return sigil_err_invalid_argument("LUKS cipher algo not on allowlist (aes/serpent/twofish/camellia)");
     }
     if (_luks_mode_allowed(mode) == 0) {
-        return err_invalid_argument("LUKS cipher mode not on allowlist");
+        return sigil_err_invalid_argument("LUKS cipher mode not on allowlist");
     }
     return Ok(0);
 }
@@ -318,7 +318,7 @@ fn luks_keyfile_path(): i64 {
     # v3.9.2: portable entropy boundary (see the keygen note above) — a raw
     # getrandom syscall is undefined on PE (Windows).
     if (_sigil_random_fill(&rnd, 8) != 0) {
-        return err_syscall_failed(0, "getrandom for keyfile suffix");
+        return sigil_err_syscall_failed(0, "getrandom for keyfile suffix");
     }
     var prefix = "/tmp/.agnos-luks-";
     var prefix_len = strlen(prefix);
@@ -359,12 +359,12 @@ fn luks_write_keyfile(key_ptr, key_len): i64 {
     var open_flags = O_WRONLY | O_CREAT | O_TRUNC | O_EXCL | 131072;
     var fd = sys_open(keyfile, open_flags, 384);  # 0600
     if (fd < 0) {
-        return err_syscall_failed(0 - fd, "failed to create keyfile (O_EXCL|O_NOFOLLOW)");
+        return sigil_err_syscall_failed(0 - fd, "failed to create keyfile (O_EXCL|O_NOFOLLOW)");
     }
     defer { sys_close(fd); }
     var wret = sys_write(fd, key_ptr, key_len);
     if (wret < 0) {
-        return err_syscall_failed(0 - wret, "write keyfile failed");
+        return sigil_err_syscall_failed(0 - wret, "write keyfile failed");
     }
     return Ok(keyfile);
 }
@@ -541,7 +541,7 @@ fn luks_open(config, key_ptr, key_len): i64 {
 # Returns Ok(0) or Err.
 fn luks_close(name): i64 {
     if (strlen(name) == 0) {
-        return err_invalid_argument("Volume name cannot be empty");
+        return sigil_err_invalid_argument("Volume name cannot be empty");
     }
 
     # Check if /dev/mapper/<name> exists via sys_access

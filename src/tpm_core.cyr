@@ -172,7 +172,7 @@ fn tpm_detect(): i64 {
 fn tpm_read_pcr(bank, indices): i64 {
     var count = vec_len(indices);
     if (count == 0) {
-        return err_invalid_argument("Must specify at least one PCR index");
+        return sigil_err_invalid_argument("Must specify at least one PCR index");
     }
 
     # Validate indices
@@ -180,7 +180,7 @@ fn tpm_read_pcr(bank, indices): i64 {
     while (vi < count) {
         var idx = vec_get(indices, vi);
         if (idx > TPM_PCR_MAX) {
-            return err_invalid_argument("PCR index out of range (0-23)");
+            return sigil_err_invalid_argument("PCR index out of range (0-23)");
         }
         vi = vi + 1;
     }
@@ -291,10 +291,10 @@ fn tpm_read_pcr(bank, indices): i64 {
 # Extend a PCR in the given bank with a hash. Returns Result.
 fn tpm_extend_pcr(bank, index, hash): i64 {
     if (index > TPM_PCR_MAX) {
-        return err_invalid_argument("PCR index out of range (0-23)");
+        return sigil_err_invalid_argument("PCR index out of range (0-23)");
     }
     if (strlen(hash) == 0) {
-        return err_invalid_argument("Hash must be a non-empty hex string");
+        return sigil_err_invalid_argument("Hash must be a non-empty hex string");
     }
 
     # Validate hex
@@ -303,7 +303,7 @@ fn tpm_extend_pcr(bank, index, hash): i64 {
     while (hi < hlen) {
         var ch = load8(hash + hi);
         if (agnosys_is_hex_char(ch) == 0) {
-            return err_invalid_argument("Hash contains non-hex characters");
+            return sigil_err_invalid_argument("Hash contains non-hex characters");
         }
         hi = hi + 1;
     }
@@ -343,15 +343,15 @@ fn tpm_extend_pcr(bank, index, hash): i64 {
 # Seal data to the current PCR state; writes the sealed object. Returns Result.
 fn tpm_seal(bank, pcr_indices, data_ptr, data_len, output_dir): i64 {
     if (data_len == 0) {
-        return err_invalid_argument("Cannot seal empty data");
+        return sigil_err_invalid_argument("Cannot seal empty data");
     }
     if (data_len > TPM_SEAL_MAX_BYTES) {
-        return err_invalid_argument("Sealed data too large (max 2048 bytes)");
+        return sigil_err_invalid_argument("Sealed data too large (max 2048 bytes)");
     }
 
     var acc = sys_access(output_dir, 0);
     if (acc < 0) {
-        return err_invalid_argument("Output directory not found");
+        return sigil_err_invalid_argument("Output directory not found");
     }
 
     var pcr_sel = tpm_pcr_selection(bank, pcr_indices);
@@ -365,12 +365,12 @@ fn tpm_seal(bank, pcr_indices, data_ptr, data_len, output_dir): i64 {
 
     var ifd = sys_open(input_file, O_WRONLY | O_CREAT | O_TRUNC, 384);
     if (ifd < 0) {
-        return err_syscall_failed(0 - ifd, "failed to write seal input");
+        return sigil_err_syscall_failed(0 - ifd, "failed to write seal input");
     }
     defer { sys_close(ifd); }
     var wret = sys_write(ifd, data_ptr, data_len);
     if (wret < 0) {
-        return err_syscall_failed(0 - wret, "write failed");
+        return sigil_err_syscall_failed(0 - wret, "write failed");
     }
 
     # Build output file paths
@@ -444,7 +444,7 @@ fn tpm_unseal(sealed, buf, buflen): i64 {
 
     var acc = sys_access(ctx, 0);
     if (acc < 0) {
-        return err_invalid_argument("Sealed context file not found");
+        return sigil_err_invalid_argument("Sealed context file not found");
     }
 
     # Build policy arg: "pcr:<selection>"
@@ -475,10 +475,10 @@ fn tpm_unseal(sealed, buf, buflen): i64 {
 # Draw count random bytes from the TPM RNG into buf. Returns Result.
 fn tpm_get_random(buf, count): i64 {
     if (count == 0) {
-        return err_invalid_argument("Cannot request 0 random bytes");
+        return sigil_err_invalid_argument("Cannot request 0 random bytes");
     }
     if (count > TPM_RANDOM_MAX_BYTES) {
-        return err_invalid_argument("Cannot request more than 4096 bytes at once");
+        return sigil_err_invalid_argument("Cannot request more than 4096 bytes at once");
     }
 
     var cbuf[24];
@@ -539,7 +539,7 @@ fn tpm_get_random(buf, count): i64 {
 fn tpm_verify_measured_boot(expected): i64 {
     var count = vec_len(expected);
     if (count == 0) {
-        return err_invalid_argument("Baseline has no expected PCR values");
+        return sigil_err_invalid_argument("Baseline has no expected PCR values");
     }
 
     # Get bank from first entry
