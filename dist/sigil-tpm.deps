@@ -5,6 +5,7 @@ fmt
 alloc
 vec
 tagged
+syscalls
 process
 freelist
 str

@@ -7,7 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [3.12.10] — 2026-08-25 — the Argon2 working lane comes off the caller's arena; 352 KB of `.bss` goes with it
+## [3.12.10] — 2026-08-25 — toolchain 6.5.21 -> 6.5.35; the Argon2 working lane comes off the caller's arena
+
+### Changed — toolchain pin 6.5.21 -> 6.5.35 (14 releases)
+
+sigil was the only repo in the AGNOS pack front still on 6.5.21 — kybernet,
+argonaut, libro, agnostik and agnostic all pin **6.5.35**, which is also the
+newest release both installed and tagged upstream. A dep that builds and tests
+on a different compiler from the consumer that links it is a gate that proves
+nothing: the Argon2 arena work below was originally validated on 6.5.21 while
+kybernet compiles the same source on 6.5.35.
+
+Re-validated on 6.5.35 rather than assumed: `cyrius deps` resolves clean, the
+smoke build links, **all 14 distlib bundles were regenerated on the new
+toolchain**, and the full 65-file `tests/tcyr` suite passes — 1,681 assertions, 0 failures.
+No source change was needed for the bump — sigil declares no git dep blocks
+(stdlib-only, and `sakshi` is correctly a `[deps].stdlib` entry rather than a
+git pin, so the 6.5.20+ fold does not downgrade it), and it has no
+`cyrius fmt` gate to trip the 6.5.28 in-place-rewrite change. CI reads the pin
+straight out of `cyrius.cyml`, so it follows automatically.
+
+### The Argon2 working lane comes off the caller's arena; 352 KB of `.bss` goes with it
 
 Same shape as 3.12.9's RSA work, one module further on. `argon2_hash_into`
 held its per-call working state in a function-local `var SCR[352256]` — 5,504
@@ -109,7 +129,7 @@ fourteen are now at 3.12.10.
   for a caller that goes back to hand-sizing. The validation group gained the
   `p = 0` SIGFPE case, negative `p`, `m < 8p`, and both `p` ceilings. 20 -> 29
   assertions, all RFC 9106 official vectors and the OpenSSL cross-check
-  unchanged and passing; the full 66-file suite is green.
+  unchanged and passing; the full 65-file suite is green (1,681 assertions).
 
 ## [3.12.9] — 2026-08-14 — the RSA sign path is no longer banked; 9.53 MiB of `.bss` goes with it
 

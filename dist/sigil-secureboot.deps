@@ -4,6 +4,7 @@ alloc
 freelist
 string
 vec
+syscalls
 io
 fmt
 result
