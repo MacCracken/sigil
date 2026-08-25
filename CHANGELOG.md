@@ -7,6 +7,110 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.12.10] — 2026-08-25 — the Argon2 working lane comes off the caller's arena; 352 KB of `.bss` goes with it
+
+Same shape as 3.12.9's RSA work, one module further on. `argon2_hash_into`
+held its per-call working state in a function-local `var SCR[352256]` — 5,504
+bytes per lane x 64 `SIGIL_CRYPTO_BANKS` — and the compiler promotes a
+function-local array over the 122,880 B per-fn budget to a **shared global**.
+`.bss` is not code, so DCE cannot strip it: a binary that merely *linked* the
+argon2 profile paid the whole 352 KB whether it ever hashed a password or not.
+
+### Changed
+
+- **`argon2_mem_bytes(m_cost, parallelism)` now returns `m' blocks + _ARGON2_SCR_LANE`**
+  (5,504 bytes more than before), and `argon2_hash_into` takes its lane off the
+  **tail** of the caller-supplied arena rather than from the bank.
+
+  Measured on kybernet, a PID-1 consumer that links the profile for a single
+  emergency-shell password check. Both rows below merely *link* the module —
+  neither calls it — which is the point: DCE NOPs an unreachable function's code
+  and keeps its static arrays.
+
+  | build | bytes | `.bss` |
+  |---|---|---|
+  | without the argon2 profile | 1,448,600 | 121,632 |
+  | + profile, sigil 3.12.9 | 1,825,648 | 474,104 |
+  | + profile, sigil 3.12.10 | 1,473,384 | 121,840 |
+
+  **+377,048 bytes of binary and +352,472 of `.bss` become +24,784 and +208.**
+  93 % of the cost was one static that existed to make a function safe to call
+  concurrently — charged in full to consumers that call it once per boot, and to
+  consumers that never call it at all.
+
+  A side effect worth having: the lane is now per-CALL, so this path has no
+  `SIGIL_CRYPTO_BANKS` ceiling at all. Concurrency is bounded by how many
+  arenas the caller owns. `cbank()` is still used by `_argon2_h0`,
+  `_argon2_h_prime` and blake2b, whose scratch stays banked and stays under
+  the per-fn budget (so it is per-thread stack, not `.bss`).
+
+  ⚠ **This is a contract change for `*_into` callers who sized their arena by
+  hand.** An arena computed as `m_cost * 1024` is now 5,504 bytes short. Callers
+  that used `argon2_mem_bytes` — which is the documented way, and what
+  `argon2id`/`argon2i`/`argon2d` do internally — need no change.
+
+  Correctness is unaffected and was verified rather than assumed: the lane is
+  self-initialising (R and Q are fully written before being read, `zero_b` /
+  `input_b` / `addr_b` are explicitly `memset`, `h0` is fully written by
+  `blake2b_finalize`, and all 72 bytes of `ib` are written before use), so it
+  never depended on `.bss` zeroing. The two end-of-call wipes cover disjoint
+  regions under tail placement, and `m_prime * 1024` is 1024-aligned so the
+  lane inherits the arena's alignment.
+
+### Documentation
+
+- The module header now states plainly that `argon2id`/`argon2i`/`argon2d` are
+  **unsafe for PID 1**, and why it is not only a thread-safety matter:
+  `fl_alloc`'s large path stores through the raw `_fl_mmap` return without
+  checking it (`freelist.cyr:404-406`), and that return is a small negative
+  errno on failure — so on exhaustion it faults at `store64(-12, 0)` instead of
+  returning the `0` that `argon2id`'s own `if (mem == 0)` guard is written to
+  catch. That guard is dead code. `argon2id_into` over an `alloc()` arena is
+  the entry point that fails cleanly.
+
+### Fixed
+
+- **`argon2_mem_bytes(m, 0)` was a SIGFPE, and this release makes it the
+  mandatory first call.** `argon2_mem_blocks` computed
+  `m_cost / (ARGON2_SYNC_POINTS * parallelism)` with no guard — an unhandled
+  fatal signal, not an error code. That was survivable while the only callers
+  were `argon2id`/`argon2i`/`argon2d`, which validate `p` first. It stopped
+  being survivable here: the `*_into` idiom this release documents as mandatory
+  requires the caller to call `argon2_mem_bytes` to size the arena, strictly
+  **before** `argon2_hash_into`'s own `parallelism < 1` guard can run. The one
+  entry point every caller must pass through was the one with no guard, and in
+  a PID-1 consumer a SIGFPE is `Attempted to kill init!`.
+
+  `argon2_mem_blocks` now returns 0 for `parallelism < 1`, for
+  `parallelism > 2^24 - 1` (RFC 9106 §3.1), and for `m_cost < 8 * parallelism`.
+  0 propagates safely — `argon2_mem_bytes` returns the lane size alone and
+  `argon2_hash_into` rejects the parameters before touching the arena.
+
+- **The overflow twin, same line.** `8 * parallelism` wraps negative for
+  p >= 2^60, so `argon2_hash_into`'s `m_cost < (8 * parallelism)` floor check
+  would **pass** with a negative right-hand side, `m'` would be 0, and the
+  per-lane init loop would run `parallelism` times. Every write stayed in
+  bounds, so nothing faulted — it simply never returned. Now rejected at the
+  same ceiling.
+
+  Found by an adversarial review of the consumer, not by this repo's own tests.
+
+### Changed — all 14 distlib bundles regenerated
+
+Only `dist/sigil-argon2.cyr` was rebuilt initially, so `dist/sigil.cyr` and the
+other twelve profiles still carried the 3.12.9 Argon2 — a monolith whose header
+said 3.12.9 while `VERSION` said 3.12.10, still shipping `var SCR[352256]`. All
+fourteen are now at 3.12.10.
+
+### Tests
+
+- `tests/tcyr/argon2.tcyr` — the sizing group now pins `_ARGON2_SCR_LANE` and
+  asserts the arena contract at both m=32/p=4 and m=19456/p=1. It is the canary
+  for a caller that goes back to hand-sizing. The validation group gained the
+  `p = 0` SIGFPE case, negative `p`, `m < 8p`, and both `p` ceilings. 20 -> 29
+  assertions, all RFC 9106 official vectors and the OpenSSL cross-check
+  unchanged and passing; the full 66-file suite is green.
+
 ## [3.12.9] — 2026-08-14 — the RSA sign path is no longer banked; 9.53 MiB of `.bss` goes with it
 
 Closes the two wider-scope items left open by the 2026-08-08 forged-signature
