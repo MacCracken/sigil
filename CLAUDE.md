@@ -177,6 +177,10 @@ Most cc3-era workarounds documented in earlier sigil versions are now resolved u
 - **Tag filter**: release workflow triggers on semver-only tags. Non-numeric tags do not ship.
 - **Version-verify gate**: release asserts `VERSION == cyrius.cyml version == git tag` before building.
 - **State sync**: release post-hook bumps `docs/development/state.md`. If the hook doesn't, fix the hook — don't hand-maintain state.
+- **⚠ REGENERATE `dist/` LAST, AFTER `cyrius fmt` AND AFTER THE VERSION BUMP — AND REGENERATE ALL FOURTEEN.** Two ways to get a red CI here, both hit on the 3.12.11 cut:
+  1. **fmt after generating.** The bundles are produced from `src/` verbatim, so running `cyrius fmt` on a source file afterwards leaves every bundle containing that module stale by exactly the reformatted lines. CI regenerates and diffs, so it fails on a change that is invisible in `src/`. Order is: edit -> `cyrius fmt` -> bump `VERSION` -> regenerate.
+  2. **Every bundle carries a `# Version:` header, so a VERSION bump alone makes ALL THIRTEEN profiles stale**, not just the ones whose modules you touched. `cyrius distlib` regenerates only the monolith; each profile needs `cyrius distlib <prof>` of its own. Loop them individually — passing several names to one invocation does NOT regenerate them all.
+- **⚠ A new public fn in a bundled module needs a doc comment IMMEDIATELY above its `fn`.** `cyrius doc --check dist/sigil.cyr` requires 0 undocumented, and the association breaks if anything sits between the comment and the `fn` — an `enum`, a blank line, or a comment that documents a neighbouring wrapper instead. Both 3.12.11 additions tripped this.
 
 ## Docs
 

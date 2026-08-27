@@ -399,6 +399,13 @@ fn agnosys_run_capture(args, buf, buflen, errmsg): i64 {
 # "wait forever" — an unbounded exec is the defect this exists to remove.
 enum AgnosysCaptureLimits { AGNOSYS_CAPTURE_DEFAULT_TIMEOUT_MS = 10000; }
 
+# Run a subprocess under a wall-clock bound, capturing its stdout into `buf`.
+# Returns Ok(bytes_captured) only when the child exited 0 within `timeout_ms`;
+# Err(errmsg) on spawn failure, timeout (the child is SIGKILLed and reaped),
+# abnormal termination, or any non-zero exit. `timeout_ms <= 0` uses
+# AGNOSYS_CAPTURE_DEFAULT_TIMEOUT_MS rather than waiting forever. Unlike
+# `agnosys_run_capture` this never reports a tool that failed or never ran as a
+# successful capture of zero bytes. See the note above for why that matters.
 fn agnosys_run_capture_timeout(args, buf, buflen, timeout_ms, errmsg): i64 {
     var argc = vec_len(args);
     if (argc < 1) { return sigil_err_invalid_argument("empty argv"); }
@@ -1137,6 +1144,13 @@ fn tpm_read_pcr(bank, indices): i64 {
     return tpm_read_pcr_timeout(bank, indices, 0);
 }
 
+# Read the named PCRs from `bank` under a wall-clock bound on the tpm2-tools
+# invocation. `indices` is a vec of PCR index i64s (0-23); `timeout_ms <= 0`
+# takes the default bound rather than waiting forever. Returns
+# Ok(vec of tpm_pcr_value ptrs) or Err — including when the tool timed out,
+# could not be run, or exited non-zero, none of which are reported as a
+# successful read. Prefer this over `tpm_read_pcr` in a long-lived or
+# pre-reactor caller that owns a time budget.
 fn tpm_read_pcr_timeout(bank, indices, timeout_ms): i64 {
     var count = vec_len(indices);
     if (count == 0) {
@@ -1188,36 +1202,36 @@ fn tpm_read_pcr_timeout(bank, indices, timeout_ms): i64 {
         while (spos < outlen && found == 0) {
             var lstart = spos;
             while (lstart < outlen &&
-            (load8(outbuf + lstart) == 32 ||
-            load8(outbuf + lstart) == 9)) {
+              (load8(outbuf + lstart) == 32 ||
+                load8(outbuf + lstart) == 9)) {
                 lstart = lstart + 1;
             }
 
             if (lstart + idx_len <= outlen && memeq(outbuf + lstart, &idx_buf, idx_len) == 1) {
                 var after = lstart + idx_len;
                 if (after < outlen && (load8(outbuf + after) == 58 ||
-                (load8(outbuf + after) == 32 &&
-                after + 1 < outlen &&
-                load8(outbuf + after + 1) == 58))) {
+                    (load8(outbuf + after) == 32 &&
+                      after + 1 < outlen &&
+                      load8(outbuf + after + 1) == 58))) {
                     while (after < outlen && load8(outbuf + after) != 58) {
                         after = after + 1;
                     }
                     after = after + 1;
                     while (after < outlen &&
-                    (load8(outbuf + after) == 32 ||
-                    load8(outbuf + after) == 9)) {
+                      (load8(outbuf + after) == 32 ||
+                        load8(outbuf + after) == 9)) {
                         after = after + 1;
                     }
                     if (after + 1 < outlen &&
-                    load8(outbuf + after) == 48 &&
-                    load8(outbuf + after + 1) == 120) {
+                      load8(outbuf + after) == 48 &&
+                      load8(outbuf + after + 1) == 120) {
                         after = after + 2;
                     }
                     var hstart = after;
                     while (after < outlen &&
-                    load8(outbuf + after) != 10 &&
-                    load8(outbuf + after) != 0 &&
-                    load8(outbuf + after) != 32) {
+                      load8(outbuf + after) != 10 &&
+                      load8(outbuf + after) != 0 &&
+                      load8(outbuf + after) != 32) {
                         after = after + 1;
                     }
                     var hlen = after - hstart;

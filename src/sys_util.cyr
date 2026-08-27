@@ -100,6 +100,13 @@ fn agnosys_run_capture(args, buf, buflen, errmsg): i64 {
 # "wait forever" — an unbounded exec is the defect this exists to remove.
 enum AgnosysCaptureLimits { AGNOSYS_CAPTURE_DEFAULT_TIMEOUT_MS = 10000; }
 
+# Run a subprocess under a wall-clock bound, capturing its stdout into `buf`.
+# Returns Ok(bytes_captured) only when the child exited 0 within `timeout_ms`;
+# Err(errmsg) on spawn failure, timeout (the child is SIGKILLed and reaped),
+# abnormal termination, or any non-zero exit. `timeout_ms <= 0` uses
+# AGNOSYS_CAPTURE_DEFAULT_TIMEOUT_MS rather than waiting forever. Unlike
+# `agnosys_run_capture` this never reports a tool that failed or never ran as a
+# successful capture of zero bytes. See the note above for why that matters.
 fn agnosys_run_capture_timeout(args, buf, buflen, timeout_ms, errmsg): i64 {
     var argc = vec_len(args);
     if (argc < 1) { return sigil_err_invalid_argument("empty argv"); }

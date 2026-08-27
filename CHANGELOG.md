@@ -62,8 +62,28 @@ assertion and watching it fail. All 65 suites pass.
 
 ### Regenerated
 
-`dist/sigil-tpm.cyr` and `dist/sigil.cyr` — the only two bundles whose closure
-contains `sys_util.cyr` / `tpm_core.cyr`. The other eleven are byte-identical.
+All fourteen bundles. `dist/sigil-tpm.cyr` and `dist/sigil.cyr` are the only two
+whose closure contains `sys_util.cyr` / `tpm_core.cyr`, but every profile embeds a
+`# Version:` header, so the bump alone makes all thirteen stale — CI regenerates
+each one individually and diffs.
+
+⚠ The first cut of this release went red on exactly that, twice over, and both
+traps are now recorded in CLAUDE.md's CI/Release section:
+
+* **`cyrius fmt` ran AFTER the bundles were generated.** They are produced from
+  `src/` verbatim, so reformatting a source afterwards leaves every bundle
+  containing it stale by precisely the reformatted lines — a diff that is
+  invisible in `src/` and shows up only when CI regenerates. Correct order:
+  edit -> fmt -> bump VERSION -> regenerate.
+* **Doc coverage.** `cyrius doc --check dist/sigil.cyr` requires 0 undocumented
+  public fns, and the doc comment must sit **immediately** above its `fn`.
+  `agnosys_run_capture_timeout` had an `enum` between its comment block and the
+  function; `tpm_read_pcr_timeout` was preceded by the comment for the wrapper
+  above it. Both read as documented and neither was.
+
+Verified after fixing: regenerating every bundle a second time is byte-identical
+(so CI's regenerate-and-diff passes), `cyrius doc --check` reports 0 undocumented,
+lint is clean, the smoke binary runs, and all 65 suites pass.
 
 ## [3.12.10] — 2026-08-25 — toolchain 6.5.21 -> 6.5.35; the Argon2 working lane comes off the caller's arena
 

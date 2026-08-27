@@ -199,6 +199,13 @@ fn tpm_read_pcr(bank, indices): i64 {
     return tpm_read_pcr_timeout(bank, indices, 0);
 }
 
+# Read the named PCRs from `bank` under a wall-clock bound on the tpm2-tools
+# invocation. `indices` is a vec of PCR index i64s (0-23); `timeout_ms <= 0`
+# takes the default bound rather than waiting forever. Returns
+# Ok(vec of tpm_pcr_value ptrs) or Err — including when the tool timed out,
+# could not be run, or exited non-zero, none of which are reported as a
+# successful read. Prefer this over `tpm_read_pcr` in a long-lived or
+# pre-reactor caller that owns a time budget.
 fn tpm_read_pcr_timeout(bank, indices, timeout_ms): i64 {
     var count = vec_len(indices);
     if (count == 0) {
