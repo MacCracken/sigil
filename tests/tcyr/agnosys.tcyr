@@ -212,6 +212,52 @@ fn main() {
     var bogus_pin = sigil_cert_pin_compute("/tmp/sigil_does_not_exist_cert.pem");
     assert_eq(bogus_pin, 0, "missing cert returns 0");
 
+    # ⚠ 3.12.11 — kybernet audit MEDIUM-8: the capture is BOUNDED and its
+    # child's EXIT STATUS is checked.
+    #
+    # `agnosys_run_capture` delegates to the stdlib's `exec_capture`, which
+    # drains with a blocking read and reaps with an unbounded `waitpid` whose
+    # status it then DISCARDS. So a wedged tool blocked the caller forever, and
+    # a tool that was missing or exited non-zero came back as Ok(0) — which the
+    # PCR parser turns into a zero-filled bank, i.e. an attestation "pass" from
+    # a tool that never ran. In kybernet this runs at phase 6c, before the
+    # reactor, with every signal blocked.
+    test_group("bounded capture");
+    var cbuf = alloc(256);
+
+    # A child that outlives its bound must FAIL, and must fail near the bound
+    # rather than after the child finishes. `sleep 5` under 300 ms.
+    var slow = vec_new();
+    vec_push(slow, "/bin/sleep");
+    vec_push(slow, "5");
+    var t0 = clock_now_ms();
+    var slow_res = agnosys_run_capture_timeout(slow, cbuf, 255, 300, "slow");
+    var slow_ms = clock_now_ms() - t0;
+    assert_eq(is_err_result(slow_res), 1, "a child that outruns its bound is Err");
+    assert(slow_ms < 3000, "capture returned near its bound, not after the child exited");
+
+    # A NON-ZERO exit is an error, not Ok(0). This is the fail-open half:
+    # exec_capture discarded the status entirely.
+    var failing = vec_new();
+    vec_push(failing, "/bin/false");
+    assert_eq(is_err_result(agnosys_run_capture_timeout(failing, cbuf, 255, 5000, "false")), 1,
+      "a non-zero exit is Err, never Ok(0)");
+
+    # A binary that does not exist exits 127 in the child; that must also be an
+    # error rather than a successful capture of zero bytes.
+    var missing = vec_new();
+    vec_push(missing, "/nonexistent/sigil-probe");
+    assert_eq(is_err_result(agnosys_run_capture_timeout(missing, cbuf, 255, 5000, "missing")), 1,
+      "a missing binary is Err, never Ok(0)");
+
+    # And the ordinary path still works: stdout is captured and Ok'd.
+    var good = vec_new();
+    vec_push(good, "/bin/echo");
+    vec_push(good, "sigil");
+    var good_res = agnosys_run_capture_timeout(good, cbuf, 255, 5000, "echo");
+    assert_eq(is_err_result(good_res), 0, "a successful child returns Ok");
+    assert(payload(good_res) >= 5, "and its stdout was actually captured");
+
     return assert_summary();
 }
 

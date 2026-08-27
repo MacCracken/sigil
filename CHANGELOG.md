@@ -7,6 +7,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.12.11] — 2026-08-27 — the tpm2 capture is bounded, and its child's exit status is checked
+
+Found by kybernet's 2026-08-26 P(-1) audit (MEDIUM-8). kybernet is PID 1, and it
+calls `tpm_read_pcr` at boot phase 6c — before its event loop exists, with every
+signal blocked into a signalfd.
+
+### Fixed — `agnosys_run_capture` was unbounded AND failed open
+
+It delegates to the cyrius stdlib's `exec_capture`, which has two properties that
+are unremarkable in a CLI and wrong in an init system:
+
+1. **Unbounded.** The drain is a blocking `sys_read` loop and the reap is
+   `sys_waitpid(pid, &stbuf, 0)` — no WNOHANG, no deadline. A wedged tool blocks
+   the caller forever. For `tpm2_pcrread` that is an ordinary condition, not an
+   exotic one: `/dev/tpm0` held open by another consumer, a tabrmd/D-Bus TCTI
+   wait, or firmware in a bad state. In kybernet the board then looks dead with
+   `edge boot: reading PCRs` as its final console line — nothing reaping, nothing
+   servicing a watchdog, no service started, no signal deliverable.
+2. **Fails open.** `exec_capture` DISCARDS waitpid's status and returns the byte
+   count regardless, so a missing or failing tool comes back as `Ok(0)` — and
+   `tpm_read_pcr`'s parser then zero-fills every PCR it cannot find. An
+   attestation "pass" derived from a tool that never ran.
+
+New `agnosys_run_capture_timeout(args, buf, buflen, timeout_ms, errmsg)`, modelled
+on argonaut 1.13.2's `run_safe_cmd_timeout` after the same class of finding:
+non-blocking drain against a deadline, SIGKILL + reap on expiry, `waitpid`'s
+return checked **before** the status is read, and a non-zero exit returned as
+`Err`. `timeout_ms <= 0` takes the default rather than meaning "forever" — an
+unbounded exec is the thing being removed.
+
+`tpm_run_capture_timeout` and `tpm_read_pcr_timeout` thread a caller-supplied
+bound through; the existing `tpm_run_capture` / `tpm_read_pcr` arities are kept
+and are now bounded by the default instead of unbounded, so no caller breaks and
+none stays unbounded.
+
+⚠ One aggravator worth recording because it inverts the usual trust reasoning: in
+kybernet the PCR read runs **before** the dm-verity verify, so an attacker who
+has already tampered with the rootfs can plant a `tpm2_pcrread` that simply
+sleeps and wedge PID 1 before verification ever executes.
+
+`SYS_FCNTL` is used for the non-blocking drain via the stdlib's arch-dispatched
+enum (x86_64 72, aarch64 25), not a literal — and neither value collides with the
+aarch64 ESYSXLAT compat table, so it is correct on both targets.
+
+### Tests
+
+`tests/tcyr/agnosys.tcyr` gains a "bounded capture" group asserting all four
+arms: a child that outruns its bound is `Err` and returns near the bound rather
+than after the child exits; a non-zero exit is `Err`, never `Ok(0)`; a missing
+binary is `Err`; and an ordinary child still returns `Ok` with its stdout
+captured. Verified the group actually executes by deliberately breaking one
+assertion and watching it fail. All 65 suites pass.
+
+### Regenerated
+
+`dist/sigil-tpm.cyr` and `dist/sigil.cyr` — the only two bundles whose closure
+contains `sys_util.cyr` / `tpm_core.cyr`. The other eleven are byte-identical.
+
 ## [3.12.10] — 2026-08-25 — toolchain 6.5.21 -> 6.5.35; the Argon2 working lane comes off the caller's arena
 
 ### Changed — toolchain pin 6.5.21 -> 6.5.35 (14 releases)

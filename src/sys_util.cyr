@@ -68,6 +68,125 @@ fn agnosys_run_capture(args, buf, buflen, errmsg): i64 {
     return Ok(n);
 }
 
+# ⚠ BOUNDED, STATUS-CHECKED CAPTURE. 3.12.11 — kybernet audit MEDIUM-8.
+#
+# `agnosys_run_capture` above delegates to the cyrius stdlib's `exec_capture`,
+# which has two properties that are fine for a CLI and wrong for an init system:
+#
+#   1. IT IS UNBOUNDED. The drain is a blocking `sys_read` loop and the reap is
+#      `sys_waitpid(pid, &stbuf, 0)` with no WNOHANG and no deadline. A tool that
+#      wedges — /dev/tpm0 held open by another consumer, a tabrmd/D-Bus TCTI
+#      wait, a firmware TPM in a bad state — blocks the caller forever. kybernet
+#      calls this at phase 6c, BEFORE its event loop, so nothing reaps, nothing
+#      services a watchdog, no service has started, and every signal is blocked:
+#      the board looks dead with `edge boot: reading PCRs` as its last line.
+#   2. IT FAILS OPEN. `exec_capture` DISCARDS waitpid's status and returns the
+#      byte count regardless, so a tool that was missing or exited 127 comes
+#      back as `Ok(0)` — and sigil's PCR parser then zero-fills every PCR it
+#      could not find. An attestation "pass" derived from a tool that never ran.
+#
+# One aggravator worth recording, because it inverts the usual reasoning about
+# who is trusted: in kybernet the PCR read runs BEFORE the dm-verity verify, so
+# an attacker who has already tampered with the rootfs can plant a
+# `tpm2_pcrread` that simply sleeps and wedge PID 1 before verification ever
+# executes.
+#
+# This is modelled on argonaut 1.13.2's `run_safe_cmd_timeout`, which made the
+# same move for `run_safe_cmd` after the same class of finding.
+#
+# Returns Ok(bytes_captured) ONLY when the child exited 0 inside the deadline.
+# Err on: spawn failure, timeout (child SIGKILLed and reaped), abnormal exit, or
+# any non-zero status. `timeout_ms <= 0` means "use the default" rather than
+# "wait forever" — an unbounded exec is the defect this exists to remove.
+enum AgnosysCaptureLimits { AGNOSYS_CAPTURE_DEFAULT_TIMEOUT_MS = 10000; }
+
+fn agnosys_run_capture_timeout(args, buf, buflen, timeout_ms, errmsg): i64 {
+    var argc = vec_len(args);
+    if (argc < 1) { return sigil_err_invalid_argument("empty argv"); }
+
+    var tmo = timeout_ms;
+    if (tmo <= 0) { tmo = AGNOSYS_CAPTURE_DEFAULT_TIMEOUT_MS; }
+
+    var argv = alloc((argc + 1) * 8);
+    var avi = 0;
+    while (avi < argc) {
+        store64(argv + avi * 8, vec_get(args, avi));
+        avi = avi + 1;
+    }
+    store64(argv + argc * 8, 0);
+    var envp = alloc(8);
+    store64(envp, 0);
+
+    var pipefd[16];
+    if (sys_pipe(&pipefd) < 0) { return sigil_err_unknown(errmsg); }
+    var rfd = load32(&pipefd);
+    var wfd = load32(&pipefd + 4);
+
+    var pid = sys_fork();
+    if (pid < 0) { sys_close(rfd); sys_close(wfd); return sigil_err_unknown(errmsg); }
+    if (pid == 0) {
+        sys_close(rfd);
+        sys_dup2(wfd, 1);
+        sys_close(wfd);
+        var devnull = sys_open("/dev/null", 1, 0);   # O_WRONLY
+        if (devnull >= 0) { sys_dup2(devnull, 2); sys_close(devnull); }
+        sys_execve(vec_get(args, 0), argv, envp);
+        sys_exit(127);
+    }
+    sys_close(wfd);
+
+    # Non-blocking drain, so a child that produces nothing cannot pin us in
+    # read(2). SYS_FCNTL is an arch-dispatched stdlib enum (x86_64 72,
+    # aarch64 25), not a literal, so this satisfies the no-raw-syscall rule.
+    var fl = syscall(SYS_FCNTL, rfd, 3, 0);          # F_GETFL
+    syscall(SYS_FCNTL, rfd, 4, fl | 2048);           # F_SETFL |= O_NONBLOCK
+
+    var deadline = clock_now_ms() + tmo;
+    var total = 0;
+    var draining = 1;
+    var timed_out = 0;
+    while (draining == 1) {
+        if (clock_now_ms() > deadline) { timed_out = 1; draining = 0; }
+        elif (total >= buflen) { draining = 0; }
+        else {
+            var n = sys_read(rfd, buf + total, buflen - total);
+            if (n > 0) { total = total + n; }
+            elif (n == 0) { draining = 0; }              # EOF: child closed stdout
+            elif (n == 0 - 11) { sleep_ms(5); }          # EAGAIN: nothing yet
+            else { draining = 0; }                        # a real read error
+        }
+    }
+    sys_close(rfd);
+
+    var st[4];
+    if (timed_out == 1) {
+        sys_kill(pid, SIGKILL);
+        sys_waitpid(pid, &st, 0);     # lands: the child is killed
+        return sigil_err_unknown(errmsg);
+    }
+
+    # Bounded reap. ⚠ CHECK waitpid's RETURN BEFORE READING THE STATUS — a wait
+    # that did not land leaves the buffer holding whatever was there before,
+    # which is how `exec_capture` reports a child it never reaped as exit 0.
+    var reaped = 0;
+    while (clock_now_ms() <= deadline) {
+        var r = sys_waitpid(pid, &st, WNOHANG);
+        if (r > 0) { reaped = 1; break; }
+        if (r < 0) { break; }
+        sleep_ms(2);
+    }
+    if (reaped == 0) {
+        sys_kill(pid, SIGKILL);
+        sys_waitpid(pid, &st, 0);
+        return sigil_err_unknown(errmsg);
+    }
+
+    var status = load32(&st);
+    if (WIFEXITED(status) == 0) { return sigil_err_unknown(errmsg); }
+    if (WEXITSTATUS(status) != 0) { return sigil_err_unknown(errmsg); }
+    return Ok(total);
+}
+
 # Run a subprocess (cstr argv vec) and check for a zero exit code.
 # Returns Ok(0) or Err(errmsg) on non-zero exit / exec failure. Shared by
 # dmverity/luks/tpm `*_run_checked`.

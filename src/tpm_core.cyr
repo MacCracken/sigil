@@ -100,9 +100,30 @@ fn tpm_sealed_new(context_path, pcr_selection): i64 {
 # Helper: run tpm2-tools command
 # ================================================================
 
-# Run a tpm2 tool, capturing stdout into buf. Returns Result(len).
+# ⚠ BOUNDED AND STATUS-CHECKED SINCE 3.12.11 (kybernet audit MEDIUM-8).
+#
+# This used to call `agnosys_run_capture`, which delegates to the stdlib's
+# `exec_capture`: an unbounded blocking drain plus an unbounded `waitpid` whose
+# status is DISCARDED. Two consequences, both bad in an init system —
+#
+#   * a wedged TPM (device held open by another consumer, a tabrmd/D-Bus TCTI
+#     wait, bad firmware state) blocked the caller FOREVER. kybernet calls this
+#     at phase 6c, before its reactor exists, with all signals blocked;
+#   * a missing or failing tool came back as `Ok(0)`, and the PCR parser below
+#     then ZERO-FILLS every PCR it cannot find — an attestation pass derived
+#     from a tool that never ran.
+#
+# `timeout_ms <= 0` takes the default rather than meaning "forever"; callers
+# that know their own budget (kybernet passes the remaining `max_boot_ms`
+# slice) hand one in.
+fn tpm_run_capture_timeout(args, buf, buflen, timeout_ms): i64 {
+    return agnosys_run_capture_timeout(args, buf, buflen, timeout_ms,
+      "tpm2 tool execution failed or timed out");
+}
+
+# Back-compatible wrapper: bounded by the default rather than unbounded.
 fn tpm_run_capture(args, buf, buflen): i64 {
-    return agnosys_run_capture(args, buf, buflen, "tpm2 tool execution failed");
+    return tpm_run_capture_timeout(args, buf, buflen, 0);
 }
 
 # Run a tpm2 tool, checking exit status only. Returns Result.
@@ -169,7 +190,16 @@ fn tpm_detect(): i64 {
 # ================================================================
 
 # Read the named PCRs from the given bank. Returns Result.
+#
+# `tpm_read_pcr_timeout` is the form a long-lived or pre-reactor caller should
+# use — see tpm_run_capture_timeout's header. The two-argument form is kept so
+# existing callers do not break, and is now bounded by the default rather than
+# unbounded. 3.12.11.
 fn tpm_read_pcr(bank, indices): i64 {
+    return tpm_read_pcr_timeout(bank, indices, 0);
+}
+
+fn tpm_read_pcr_timeout(bank, indices, timeout_ms): i64 {
     var count = vec_len(indices);
     if (count == 0) {
         return sigil_err_invalid_argument("Must specify at least one PCR index");
@@ -193,7 +223,7 @@ fn tpm_read_pcr(bank, indices): i64 {
 
     var outbuf = alloc(4096);
     memset(outbuf, 0, 4096);
-    var cap_res = tpm_run_capture(args, outbuf, 4095);
+    var cap_res = tpm_run_capture_timeout(args, outbuf, 4095, timeout_ms);
     if (is_err_result(cap_res) == 1) { return cap_res; }
 
     store8(outbuf + payload(cap_res), 0);
@@ -220,36 +250,36 @@ fn tpm_read_pcr(bank, indices): i64 {
         while (spos < outlen && found == 0) {
             var lstart = spos;
             while (lstart < outlen &&
-            (load8(outbuf + lstart) == 32 ||
-            load8(outbuf + lstart) == 9)) {
+              (load8(outbuf + lstart) == 32 ||
+                load8(outbuf + lstart) == 9)) {
                 lstart = lstart + 1;
             }
 
             if (lstart + idx_len <= outlen && memeq(outbuf + lstart, &idx_buf, idx_len) == 1) {
                 var after = lstart + idx_len;
                 if (after < outlen && (load8(outbuf + after) == 58 ||
-                (load8(outbuf + after) == 32 &&
-                after + 1 < outlen &&
-                load8(outbuf + after + 1) == 58))) {
+                    (load8(outbuf + after) == 32 &&
+                      after + 1 < outlen &&
+                      load8(outbuf + after + 1) == 58))) {
                     while (after < outlen && load8(outbuf + after) != 58) {
                         after = after + 1;
                     }
                     after = after + 1;
                     while (after < outlen &&
-                    (load8(outbuf + after) == 32 ||
-                    load8(outbuf + after) == 9)) {
+                      (load8(outbuf + after) == 32 ||
+                        load8(outbuf + after) == 9)) {
                         after = after + 1;
                     }
                     if (after + 1 < outlen &&
-                    load8(outbuf + after) == 48 &&
-                    load8(outbuf + after + 1) == 120) {
+                      load8(outbuf + after) == 48 &&
+                      load8(outbuf + after + 1) == 120) {
                         after = after + 2;
                     }
                     var hstart = after;
                     while (after < outlen &&
-                    load8(outbuf + after) != 10 &&
-                    load8(outbuf + after) != 0 &&
-                    load8(outbuf + after) != 32) {
+                      load8(outbuf + after) != 10 &&
+                      load8(outbuf + after) != 0 &&
+                      load8(outbuf + after) != 32) {
                         after = after + 1;
                     }
                     var hlen = after - hstart;
