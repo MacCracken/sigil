@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.12.12] — 2026-08-27 — `agnosys_run_capture_timeout` no longer breaks every agnos build
+
+### Fixed
+
+- **`agnosys_run_capture_timeout` is guarded behind `#ifndef CYRIUS_TARGET_AGNOS`**, with an agnos arm
+  returning `sigil_err_not_supported("subprocess capture (no fork/execve on agnos)")` (`ENOSYS`).
+
+The helper added in 3.12.11 is pipe → `sys_fork` → `sys_dup2` → `sys_execve` → non-blocking drain →
+`sys_waitpid`. **agnos has none of those**: no fork, no execve, no three-argument `sys_waitpid`, no
+`SYS_FCNTL`, no `WNOHANG`. Ring 3 is reached through `spawn_path #43` — a spawn with no fork and no
+wait-with-status.
+
+⛔ **UNGUARDED, THIS BROKE THE BUILD OF EVERY AGNOS CONSUMER, NOT JUST THIS CALL.** Cyrius treats an
+undefined **variable** as a hard error regardless of reachability — unlike an undefined *function*,
+which is downgraded to a warning — so `SYS_FCNTL` and `WNOHANG` failed the entire compile:
+
+    error: lib/sigil.cyr:447: undefined variable 'SYS_FCNTL'
+    error: lib/sigil.cyr:470: 'sys_waitpid' expects 1 argument, got 3
+    error: lib/sigil.cyr:479: undefined variable 'WNOHANG'
+
+**aethersafha could not build its `--agnos` target at all**, and it presented as "the desktop is
+broken" four repos from the line that caused it. The compositor's own source was never at fault: a
+detached worktree at the same commit — where `../sigil` does not exist, so the toolchain snapshot is
+used — built successfully. `cyrius deps` prefers a sibling checkout, so the local 3.12.11 dist
+replaced the agnos-clean snapshot byte-for-byte.
+
+⚠ **The header comment was accurate and still misled.** It called `SYS_FCNTL` "an arch-dispatched
+stdlib enum (x86_64 72, aarch64 25), not a literal, so this satisfies the no-raw-syscall rule" —
+true, and about the wrong axis. **Arch-dispatched is not target-dispatched.** agnos is a target, not
+an architecture, and it has no `SYS_FCNTL` on either arch.
+
+⚠ **REFUSE, DO NOT SILENTLY SUCCEED.** `Ok(0)` on agnos would mean "the tool ran and produced no
+output" — exactly the lie 3.12.11 added this function to remove (see its note on `agnosys_run_capture`
+reporting a tool that never ran as a successful capture of zero bytes). `ENOSYS` says the feature is
+absent on this target rather than failing on it.
+
+### Testing
+
+Host suites unchanged and green. ⭐ **`cyrius build --agnos programs/smoke.cyr` now succeeds** —
+mutation-verified: deleting the guard reproduces all three errors exactly.
+
+⚠ The `tests/tcyr/agnosys.tcyr` cases for this helper are host-only, so they never exercised the agnos
+arm and could not have caught this. The gate that would have is **building the agnos target at all**.
+
 ## [3.12.11] — 2026-08-27 — the tpm2 capture is bounded, and its child's exit status is checked
 
 Found by kybernet's 2026-08-26 P(-1) audit (MEDIUM-8). kybernet is PID 1, and it
