@@ -258,6 +258,58 @@ fn main() {
     assert_eq(is_err_result(good_res), 0, "a successful child returns Ok");
     assert(payload(good_res) >= 5, "and its stdout was actually captured");
 
+    # ⚠ 3.12.13 — `agnosys_run_checked` and the capture helper are BOUNDED and
+    # STATUS-CHECKED too, not just `agnosys_run_capture`.
+    #
+    # `agnosys_run_checked` delegated to the stdlib's `exec_vec`, which kybernet's
+    # standing rule 17 forbids outright: it waits unbounded, and it discards
+    # waitpid's status before reading a STATIC stbuf, so a wait that does not land
+    # decodes as exit 0. Its callers are veritysetup, the tpm2 tools and
+    # cryptsetup — every security-relevant exec sigil makes. On
+    # `veritysetup verify` that is a verification which never ran, reported as
+    # verified.
+    test_group("bounded checked-run");
+
+    var ok_args = vec_new();
+    vec_push(ok_args, "/bin/true");
+    assert_eq(is_err_result(agnosys_run_checked_timeout(ok_args, 5000, "true")), 0,
+      "a zero exit is Ok");
+
+    var bad_args = vec_new();
+    vec_push(bad_args, "/bin/false");
+    assert_eq(is_err_result(agnosys_run_checked_timeout(bad_args, 5000, "false")), 1,
+      "a NON-zero exit is Err, never a silent success");
+
+    var gone_args = vec_new();
+    vec_push(gone_args, "/nonexistent/sigil-probe");
+    assert_eq(is_err_result(agnosys_run_checked_timeout(gone_args, 5000, "missing")), 1,
+      "a missing binary is Err");
+
+    # Bounded: a child that outruns its deadline fails, and fails near the bound
+    # rather than after the child exits.
+    var slow_args = vec_new();
+    vec_push(slow_args, "/bin/sleep");
+    vec_push(slow_args, "5");
+    var ct0 = clock_now_ms();
+    assert_eq(is_err_result(agnosys_run_checked_timeout(slow_args, 300, "slow")), 1,
+      "a child that outruns its bound is Err");
+    assert(clock_now_ms() - ct0 < 3000, "checked-run returns near its bound");
+
+    # `agnosys_capture_n` is the drop-in for the stdlib's exec_capture: same
+    # shape, but -1 on a tool that failed or never ran instead of a byte count
+    # for output that does not exist. Every converted call site tests n <= 0.
+    test_group("bounded capture_n");
+    var nbuf = alloc(256);
+    var echo_args = vec_new();
+    vec_push(echo_args, "/bin/echo");
+    vec_push(echo_args, "sigil");
+    assert(agnosys_capture_n(echo_args, nbuf, 255, 5000) >= 5,
+      "capture_n returns the byte count on success");
+    assert_eq(agnosys_capture_n(bad_args, nbuf, 255, 5000), 0 - 1,
+      "capture_n returns -1 for a non-zero exit, not 0 bytes");
+    assert_eq(agnosys_capture_n(gone_args, nbuf, 255, 5000), 0 - 1,
+      "capture_n returns -1 for a missing binary");
+
     return assert_summary();
 }
 

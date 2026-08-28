@@ -170,7 +170,7 @@ fn luks_config_validate(config): i64 {
     # zero confidentiality. Defense-in-depth against older cryptsetup
     # versions that lack the v2.8.1 partial mitigation.
     var cipher_res = luks_validate_cipher(luks_config_cipher_algo(config),
-    luks_config_cipher_mode(config));
+      luks_config_cipher_mode(config));
     if (is_err_result(cipher_res) == 1) { return cipher_res; }
 
     return Ok(0);
@@ -467,7 +467,10 @@ fn luks_format(config, key_ptr, key_len): i64 {
         vec_push(det_args, "/usr/sbin/losetup");
         vec_push(det_args, "-d");
         vec_push(det_args, loop_dev);
-        exec_vec(det_args);
+        # Best-effort cleanup, but BOUNDED — an unbounded wait on a detach that
+        # cannot complete would hang the error path of a function that is already
+        # failing. 3.12.13.
+        agnosys_run_checked_timeout(det_args, 0, "losetup -d failed");
         return cs_res;
     }
 
@@ -598,7 +601,11 @@ fn luks_mount(device, mount_point, filesystem): i64 {
     vec_push(mk_args, "/usr/bin/mkdir");
     vec_push(mk_args, "-p");
     vec_push(mk_args, mount_point);
-    exec_vec(mk_args);
+    # Bounded, like every other exec in this module (3.12.13). The result is
+    # deliberately not checked: `mkdir -p` on an existing directory is a success
+    # for our purposes, and the mount below is what actually has to work — but an
+    # unbounded wait here would hang before we ever got there.
+    agnosys_run_checked_timeout(mk_args, 0, "mkdir -p failed");
 
     var fs_str = luks_fs_as_str(filesystem);
 

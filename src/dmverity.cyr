@@ -376,7 +376,7 @@ fn dmverity_status(name): i64 {
 
     var outbuf[4096];
     memset(&outbuf, 0, 4096);
-    var n = exec_capture(args, &outbuf, 4095);
+    var n = agnosys_capture_n(args, &outbuf, 4095, 0);
     # F-9: defense-in-depth null-terminator (matches the
     # dmverity_format pattern; reserves byte 4095 for terminator).
     store8(&outbuf + 4095, 0);
@@ -474,8 +474,22 @@ fn dmverity_verify(data_device, hash_device, root_hash): i64 {
     vec_push(args, hash_device);
     vec_push(args, root_hash);
 
-    var rc = exec_vec(args);
-    return Ok(rc == 0);
+    # ⚠ BOUNDED AND FAIL-CLOSED. 3.12.13.
+    #
+    # This was `exec_vec`, which waits unbounded AND discards waitpid's status —
+    # so a `veritysetup verify` that never ran, or that the parent never reaped,
+    # decoded as exit 0 and this function returned Ok(TRUE). A verification that
+    # did not happen, reported as verified, on the one call whose entire purpose
+    # is to answer whether an image matches its pinned root hash.
+    #
+    # Both failure shapes now answer NOT VERIFIED: a non-zero exit (the image
+    # does not match) and a failure to run at all (missing tool, spawn failure,
+    # timeout). Collapsing them is right for a boolean predicate — "I could not
+    # establish that this matches" is not a pass — and a caller that needs to
+    # tell the two apart should be using a call that returns the reason.
+    var vr = agnosys_run_checked_timeout(args, 0, "veritysetup verify failed");
+    if (is_err_result(vr) == 1) { return Ok(0); }
+    return Ok(1);
 }
 
 # Check if dm-verity is supported on this system.
@@ -488,5 +502,7 @@ fn dmverity_supported(): i64 {
     var args = vec_new();
     vec_push(args, "/usr/sbin/veritysetup");
     vec_push(args, "--version");
-    return exec_vec(args) == 0;
+    # Bounded: a capability probe must never be the thing that hangs the caller.
+    # 3.12.13.
+    return is_err_result(agnosys_run_checked_timeout(args, 0, "veritysetup probe")) == 0;
 }

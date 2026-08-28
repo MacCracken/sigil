@@ -7,6 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.12.13] — 2026-08-27 — every exec in sigil is bounded and status-checked
+
+3.12.11 gave `agnosys_run_capture` a bounded, status-checked sibling and threaded it
+through the TPM path. This finishes the job: **no module outside `sys_util.cyr` calls
+the cyrius stdlib's `exec_vec` or `exec_capture` any more.** Suite 32 → 40 assertions
+in `tests/tcyr/agnosys.tcyr`; all 65 suites pass.
+
+Raised by kybernet's P(-1) audit, which lists this as a standing-rule-17 violation:
+"NEVER exec anything security-relevant through the stdlib's `exec_vec` /
+`exec_capture`". Both wait unbounded, and both discard `waitpid`'s return before
+reading a `stbuf` that is STATIC storage in cyrius — so a wait that does not land
+decodes status 0 as **success**.
+
+### Added
+
+- `agnosys_run_checked_timeout(args, timeout_ms, errmsg)` — bounded, status-checked
+  replacement for `exec_vec`. The child's stdout and stderr go to `/dev/null` rather
+  than a pipe, deliberately: a checked run does not want the output, and a pipe the
+  parent stops draining would hand a chatty tool EPIPE and turn a successful command
+  into a reported failure.
+- `agnosys_capture_n(args, buf, buflen, timeout_ms)` — a **drop-in** for
+  `exec_capture` with the same shape, returning the byte count, but **-1** when the
+  child timed out, could not be spawned, or exited non-zero. Every existing call site
+  already tested `n <= 0`, so converting turned a fail-OPEN read into a fail-CLOSED
+  one with no change at the call site.
+
+`agnosys_run_checked` now delegates to the bounded form, so it is bounded by default
+rather than unbounded, and its arity is unchanged.
+
+### Fixed — ⚠ `dmverity_verify` reported a verification that never ran as VERIFIED
+
+The worst of the converted sites. It was `var rc = exec_vec(args); return Ok(rc == 0);`
+— so a `veritysetup verify` that never ran, or that the parent never reaped, decoded
+as exit 0 and this returned **Ok(true)**, on the one call whose entire purpose is to
+answer whether an image matches its pinned root hash.
+
+Both failure shapes now answer NOT VERIFIED: a non-zero exit (the image does not
+match) and a failure to run at all. Collapsing them is correct for a boolean
+predicate — "I could not establish that this matches" is not a pass.
+
+### Converted
+
+`exec_vec` → bounded: `dmverity.cyr` (verify, and the `--version` capability probe),
+`luks.cyr` (the `losetup -d` cleanup on the failure path, and `mkdir -p` before
+mount), plus `agnosys_run_checked` itself.
+
+`exec_capture` → `agnosys_capture_n`: `dmverity.cyr` ×1, `ima_core.cyr` ×2,
+`secureboot_core.cyr` ×7.
+
+A bounded capability probe matters as much as a bounded verify: `dmverity_supported`
+runs `veritysetup --version`, and a probe must never be the thing that hangs its
+caller.
+
 ## [3.12.12] — 2026-08-27 — `agnosys_run_capture_timeout` no longer breaks every agnos build
 
 ### Fixed
