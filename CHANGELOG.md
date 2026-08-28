@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.12.14] — 2026-08-28 — the subprocess guard covers Windows too, not only agnos
+
+### Fixed — `agnosys_run_checked_timeout` had NO target guard at all
+
+⛔ **3.12.13 added this function — the release headlined "every exec in sigil is bounded and
+status-checked" — and shipped it unguarded, one release after 3.12.12 guarded its sibling.**
+The fix and the regression landed together: the agnos/Windows break simply moved to the new
+function. cyrius 6.5.36's `folds_agnos_parity` gate reported **11 of 11 folds broken on agnos**,
+every one of them this single root cause (`WNOHANG` undefined, `sys_waitpid` arity 1 not 3) —
+sigil is in the preamble of every fold, so one line took out the whole set.
+
+⚠ **The lesson is the one 3.12.12 already wrote down**: fork/exec is the exception, not the
+default. A new subprocess helper needs its target arms on the way in, not a release later.
+
+### Fixed — `agnosys_run_capture_timeout` broke every **Windows** build, the same way it broke agnos
+
+3.12.12 guarded this function behind `#ifndef CYRIUS_TARGET_AGNOS` because agnos has no
+fork/execve/fcntl. **The reasoning was never agnos-specific and the guard should not have been.**
+Windows has none of them either, and the cyrius PE peer (`lib/syscalls_windows.cyr`) does not
+define `SYS_FCNTL` at all — so by the exact mechanism 3.12.12's own note describes (cyrius treats
+an undefined **variable** as a hard error regardless of reachability, unlike an undefined
+function), this function failed the whole compile on PE.
+
+The blast radius repeated too: sigil is in mabda's and yukti's closure, so **their** Windows
+builds died as well, on a line neither repo contains. Found by cyrius 6.5.36's
+`pe_reloc_cap_full_stdlib` gate while folding 3.12.13 — the gate reported "PE build produced no
+binary" for mabda, yukti and sigil, and the cause was one unguarded `SYS_FCNTL`.
+
+Now `#ifdef CYRIUS_TARGET_WIN` returns `sigil_err_not_supported("subprocess capture (no
+fork/execve on windows)")` and the POSIX body is nested under both `#ifndef`s.
+
+⚠ **Guarding one target and stopping is what made this a second incident.** Any future target
+without fork/exec needs an arm here; the POSIX body is the exception, not the default.
+
 ## [3.12.13] — 2026-08-27 — every exec in sigil is bounded and status-checked
 
 3.12.11 gave `agnosys_run_capture` a bounded, status-checked sibling and threaded it
