@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.12.15] — 2026-09-04
+
+**Fixed**
+
+- `sigil_perror`'s `SIGIL_ERR_MODULE_NOT_LOADED` arm declared **25** bytes for a **26**-byte
+  literal (`src/sys_error.cyr:235`), so `"kernel module not loaded: "` printed without its
+  trailing space and ran straight into the message that follows it.
+
+  ⛔ **The class is worth carrying, not just the line.** Every `sys_write(fd, LITERAL, N)` here
+  carries a hand-written byte count — there is no `strlen` at the call site — so any edit to a
+  message that leaves the number alone silently truncates it or over-reads past it. cyrius found
+  **24** of these in its own `programs/` at v6.5.47 and now gates the pattern
+  (`tests/gates/frontend/write_literal_lengths.sh`); that gate is small, has no cyrius-specific
+  dependencies, and is worth porting here. A full scan of sigil found exactly this one — the
+  other 43 sites are correct.
+
+  ⚠ **The usual cause is a multi-byte character**: an em-dash is three bytes and one glyph, so a
+  count written by eye is short by two. This one was a trailing space, which is the other easy
+  one to miss.
+
+**Changed**
+
+- Toolchain pin **6.5.35 → 6.5.47**. ⚠ 6.5.35 sits inside the band carrying cyrius's v6.5.36
+  enum Critical (constants ≥ 2^62 read back as -1); cyrius 6.5.47 warns on pins in that range.
+- Vendored `lib/` refreshed against the 6.5.47 snapshot — **30 files** were stale, including
+  everything cyrius changed in 6.5.44–6.5.46 (`thread_local.cyr`, `sync_macos.cyr`, `thread*.cyr`,
+  `sys.cyr`, `io.cyr`). ⚠ `cyrius deps` refreshes only the declared `[deps].stdlib` closure, so
+  the ~30 transitively-present files outside it had drifted and had to be refreshed explicitly.
+- All **14** bundles regenerated (monolith + 13 profiles), each with its own `cyrius distlib`
+  call — passing several names to one invocation does not regenerate them all.
+
 ## [Unreleased]
 
 ## [3.12.14] — 2026-08-28 — the subprocess guard covers Windows too, not only agnos

@@ -11,3 +11,6 @@ process
 ct
 thread
 thread_local
+fmt
+vec
+str

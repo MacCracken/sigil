@@ -12,3 +12,5 @@ ct
 keccak
 thread
 thread_local
+fmt
+str
