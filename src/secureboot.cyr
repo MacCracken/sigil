@@ -18,11 +18,11 @@
 # ================================================================
 
 fn sigil_sb_state(): i64 {
-    var res = secureboot_detect_state();
-    if (is_err_result(res) == 1) {
+    var res_tag, res = secureboot_detect_state();
+    if (is_err_result(res_tag) == 1) {
         return SB_NOT_SUPPORTED;
     }
-    return result_unwrap(res);
+    return result_unwrap(res_tag, res);
 }
 
 # 1 iff Secure Boot is actively enforcing (SB_ENABLED).

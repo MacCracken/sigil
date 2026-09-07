@@ -80,16 +80,16 @@ fn tpm_available(): i64 {
 
 fn tpm_seal_data(data, data_len, pcr_indices, output_dir): i64 {
     if (tpm_available() == 0) { return 0; }
-    var res = tpm_seal(TPM_SHA256, pcr_indices, data, data_len, output_dir);
-    if (is_err_result(res) == 1) { return 0; }
-    return result_unwrap(res);
+    var res_tag, res = tpm_seal(TPM_SHA256, pcr_indices, data, data_len, output_dir);
+    if (is_err_result(res_tag) == 1) { return 0; }
+    return result_unwrap(res_tag, res);
 }
 
 fn tpm_unseal_data(sealed, buf, buf_len): i64 {
     if (tpm_available() == 0) { return 0; }
-    var res = tpm_unseal(sealed, buf, buf_len);
-    if (is_err_result(res) == 1) { return 0; }
-    return result_unwrap(res);
+    var res_tag, res = tpm_unseal(sealed, buf, buf_len);
+    if (is_err_result(res_tag) == 1) { return 0; }
+    return result_unwrap(res_tag, res);
 }
 
 # ================================================================

@@ -213,14 +213,14 @@ fn dmverity_config_validate(config): i64 {
     # Validate root hash
     var rh = dmverity_config_root_hash(config);
     var algo = dmverity_config_hash_algorithm(config);
-    var res = dmverity_validate_root_hash(rh, algo);
-    if (is_err_result(res) == 1) { return res; }
+    var res_tag, res = dmverity_validate_root_hash(rh, algo);
+    if (is_err_result(res_tag) == 1) { return Err(res); }
 
     # Validate salt if present
     var salt = dmverity_config_salt(config);
     if (salt != 0) {
-        var salt_res = dmverity_validate_hex(salt, "salt");
-        if (is_err_result(salt_res) == 1) { return salt_res; }
+        var salt_res_tag, salt_res = dmverity_validate_hex(salt, "salt");
+        if (is_err_result(salt_res_tag) == 1) { return Err(salt_res); }
     }
 
     return Ok(0);
@@ -260,16 +260,16 @@ fn dmverity_format(data_device, hash_device, algorithm, salt): i64 {
     vec_push(args, dmverity_hash_algo_str(algorithm));
 
     if (salt != 0) {
-        var salt_res = dmverity_validate_hex(salt, "salt");
-        if (is_err_result(salt_res) == 1) { return salt_res; }
+        var salt_res_tag, salt_res = dmverity_validate_hex(salt, "salt");
+        if (is_err_result(salt_res_tag) == 1) { return Err(salt_res); }
         vec_push(args, "--salt");
         vec_push(args, salt);
     }
 
     var outbuf[4096];
     memset(&outbuf, 0, 4096);
-    var cap_res = dmverity_run_capture(args, &outbuf, 4095);
-    if (is_err_result(cap_res) == 1) { return cap_res; }
+    var cap_res_tag, cap_res = dmverity_run_capture(args, &outbuf, 4095);
+    if (is_err_result(cap_res_tag) == 1) { return Err(cap_res); }
     # F-9: defense-in-depth null-terminator (4095 max bytes from
     # capture, byte 4095 reserved as terminator for the strlen()
     # below — explicit to defend against future capture-fn refactors).
@@ -324,8 +324,8 @@ fn dmverity_format(data_device, hash_device, algorithm, salt): i64 {
 # Creates a read-only device mapping at /dev/mapper/{name}.
 # Returns Ok(0) or Err.
 fn dmverity_open(config): i64 {
-    var res = dmverity_config_validate(config);
-    if (is_err_result(res) == 1) { return res; }
+    var res_tag, res = dmverity_config_validate(config);
+    if (is_err_result(res_tag) == 1) { return Err(res); }
 
     var args = vec_new();
     vec_push(args, "/usr/sbin/veritysetup");
@@ -487,8 +487,8 @@ fn dmverity_verify(data_device, hash_device, root_hash): i64 {
     # timeout). Collapsing them is right for a boolean predicate — "I could not
     # establish that this matches" is not a pass — and a caller that needs to
     # tell the two apart should be using a call that returns the reason.
-    var vr = agnosys_run_checked_timeout(args, 0, "veritysetup verify failed");
-    if (is_err_result(vr) == 1) { return Ok(0); }
+    var vr_tag, vr = agnosys_run_checked_timeout(args, 0, "veritysetup verify failed");
+    if (is_err_result(vr_tag) == 1) { return Ok(0); }
     return Ok(1);
 }
 

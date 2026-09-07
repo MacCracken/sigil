@@ -169,9 +169,9 @@ fn luks_config_validate(config): i64 {
     # cipher_null-ecb passes through cryptsetup unchanged and provides
     # zero confidentiality. Defense-in-depth against older cryptsetup
     # versions that lack the v2.8.1 partial mitigation.
-    var cipher_res = luks_validate_cipher(luks_config_cipher_algo(config),
+    var cipher_res_tag, cipher_res = luks_validate_cipher(luks_config_cipher_algo(config),
       luks_config_cipher_mode(config));
-    if (is_err_result(cipher_res) == 1) { return cipher_res; }
+    if (is_err_result(cipher_res_tag) == 1) { return Err(cipher_res); }
 
     return Ok(0);
 }
@@ -350,9 +350,9 @@ fn luks_keyfile_path(): i64 {
 # the creating user can read.
 # Returns Ok(keyfile_path) or Err.
 fn luks_write_keyfile(key_ptr, key_len): i64 {
-    var path_res = luks_keyfile_path();
-    if (is_err_result(path_res) == 1) { return path_res; }
-    var keyfile = payload(path_res);
+    var path_res_tag, path_res = luks_keyfile_path();
+    if (is_err_result(path_res_tag) == 1) { return Err(path_res); }
+    var keyfile = path_res;
     # O_NOFOLLOW = 0x20000 (131072) on Linux. Not currently exported
     # as a named constant in lib/syscalls_*.cyr; written numerically
     # with a comment until the stdlib gets the symbol.
@@ -388,8 +388,8 @@ fn luks_run_checked(args): i64 {
 # key_ptr: pointer to key bytes, key_len: key length
 # Returns Ok(loop_device_str) or Err.
 fn luks_format(config, key_ptr, key_len): i64 {
-    var res = luks_config_validate(config);
-    if (is_err_result(res) == 1) { return res; }
+    var res_tag, res = luks_config_validate(config);
+    if (is_err_result(res_tag) == 1) { return Err(res); }
 
     var backing = luks_config_backing_path(config);
     var size_mb = luks_config_size_mb(config);
@@ -405,8 +405,8 @@ fn luks_format(config, key_ptr, key_len): i64 {
     vec_push(fa_args, &size_buf);
     vec_push(fa_args, backing);
 
-    var fa_res = luks_run_checked(fa_args);
-    if (is_err_result(fa_res) == 1) { return fa_res; }
+    var fa_res_tag, fa_res = luks_run_checked(fa_args);
+    if (is_err_result(fa_res_tag) == 1) { return Err(fa_res); }
 
     # 2. losetup --find --show <backing>
     var lo_args = vec_new();
@@ -417,8 +417,8 @@ fn luks_format(config, key_ptr, key_len): i64 {
 
     var lobuf[256];
     memset(&lobuf, 0, 256);
-    var lo_res = luks_run_capture(lo_args, &lobuf, 255);
-    if (is_err_result(lo_res) == 1) { return lo_res; }
+    var lo_res_tag, lo_res = luks_run_capture(lo_args, &lobuf, 255);
+    if (is_err_result(lo_res_tag) == 1) { return Err(lo_res); }
 
     # Trim trailing newline from loop device path
     var lolen = strlen(&lobuf);
@@ -439,9 +439,9 @@ fn luks_format(config, key_ptr, key_len): i64 {
     var pbkdf = luks_pbkdf_as_str(luks_config_pbkdf(config));
 
     # Write key to a per-PID temp file for --key-file
-    var kf_res = luks_write_keyfile(key_ptr, key_len);
-    if (is_err_result(kf_res) == 1) { return kf_res; }
-    var keyfile = payload(kf_res);
+    var kf_res_tag, kf_res = luks_write_keyfile(key_ptr, key_len);
+    if (is_err_result(kf_res_tag) == 1) { return Err(kf_res); }
+    var keyfile = kf_res;
     defer { _sig_unlink(keyfile); }
 
     var cs_args = vec_new();
@@ -460,8 +460,8 @@ fn luks_format(config, key_ptr, key_len): i64 {
     vec_push(cs_args, keyfile);
     vec_push(cs_args, loop_dev);
 
-    var cs_res = luks_run_checked(cs_args);
-    if (is_err_result(cs_res) == 1) {
+    var cs_res_tag, cs_res = luks_run_checked(cs_args);
+    if (is_err_result(cs_res_tag) == 1) {
         # Detach loop on failure
         var det_args = vec_new();
         vec_push(det_args, "/usr/sbin/losetup");
@@ -471,7 +471,7 @@ fn luks_format(config, key_ptr, key_len): i64 {
         # cannot complete would hang the error path of a function that is already
         # failing. 3.12.13.
         agnosys_run_checked_timeout(det_args, 0, "losetup -d failed");
-        return cs_res;
+        return Err(cs_res);
     }
 
     return Ok(loop_dev);
@@ -481,8 +481,8 @@ fn luks_format(config, key_ptr, key_len): i64 {
 # key_ptr/key_len: key material.
 # Returns Ok(mapper_path_ptr) or Err.
 fn luks_open(config, key_ptr, key_len): i64 {
-    var res = luks_config_validate(config);
-    if (is_err_result(res) == 1) { return res; }
+    var res_tag, res = luks_config_validate(config);
+    if (is_err_result(res_tag) == 1) { return Err(res); }
 
     var name = luks_config_name(config);
     var backing = luks_config_backing_path(config);
@@ -496,8 +496,8 @@ fn luks_open(config, key_ptr, key_len): i64 {
 
     var lobuf[256];
     memset(&lobuf, 0, 256);
-    var lo_res = luks_run_capture(lo_args, &lobuf, 255);
-    if (is_err_result(lo_res) == 1) { return lo_res; }
+    var lo_res_tag, lo_res = luks_run_capture(lo_args, &lobuf, 255);
+    if (is_err_result(lo_res_tag) == 1) { return Err(lo_res); }
 
     var lolen = strlen(&lobuf);
     if (lolen > 0 && load8(&lobuf + lolen - 1) == 10) {
@@ -508,9 +508,9 @@ fn luks_open(config, key_ptr, key_len): i64 {
     memcpy(loop_dev, &lobuf, lolen + 1);
 
     # Write key to per-PID temp file
-    var kf_res = luks_write_keyfile(key_ptr, key_len);
-    if (is_err_result(kf_res) == 1) { return kf_res; }
-    var keyfile = payload(kf_res);
+    var kf_res_tag, kf_res = luks_write_keyfile(key_ptr, key_len);
+    if (is_err_result(kf_res_tag) == 1) { return Err(kf_res); }
+    var keyfile = kf_res;
     defer { _sig_unlink(keyfile); }
 
     # cryptsetup open --type luks2 --key-file <keyfile> <loop_dev> <name>
@@ -524,8 +524,8 @@ fn luks_open(config, key_ptr, key_len): i64 {
     vec_push(cs_args, loop_dev);
     vec_push(cs_args, name);
 
-    var cs_res = luks_run_checked(cs_args);
-    if (is_err_result(cs_res) == 1) { return cs_res; }
+    var cs_res_tag, cs_res = luks_run_checked(cs_args);
+    if (is_err_result(cs_res_tag) == 1) { return Err(cs_res); }
 
     # Build /dev/mapper/<name>
     var prefix = "/dev/mapper/";

@@ -103,18 +103,18 @@ fn secureboot_detect_state(): i64 {
 
     # Try reading SecureBoot EFI variable
     var sb_path = "/sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c";
-    var res = secureboot_read_efi_variable(sb_path);
-    if (is_ok(res) == 1) {
-        var data = payload(res);
+    var res_tag, res = secureboot_read_efi_variable(sb_path);
+    if (is_ok(res_tag) == 1) {
+        var data = res;
         var size = secureboot_efi_var_size(data);
         if (size >= 5) {
             var value = secureboot_efi_var_payload_byte(data, 0);
             if (value == 1) {
                 # Check SetupMode
                 var sp = "/sys/firmware/efi/efivars/SetupMode-8be4df61-93ca-11d2-aa0d-00e098032b8c";
-                var setup_res = secureboot_read_efi_variable(sp);
-                if (is_ok(setup_res) == 1) {
-                    var setup_data = payload(setup_res);
+                var setup_res_tag, setup_res = secureboot_read_efi_variable(sp);
+                if (is_ok(setup_res_tag) == 1) {
+                    var setup_data = setup_res;
                     var setup_size = secureboot_efi_var_size(setup_data);
                     if (setup_size >= 5) {
                         var setup_val = secureboot_efi_var_payload_byte(setup_data, 0);
@@ -137,8 +137,8 @@ fn secureboot_detect_state(): i64 {
     vec_push(mok_args, "--sb-state");
     var mokbuf = alloc(4096);
     var mok_n = agnosys_capture_n(mok_args, mokbuf, 4095, 0);
-    var mok_res = wrap_syscall(mok_n);
-    if (is_ok(mok_res) == 1) {
+    var mok_res_tag, mok_res = wrap_syscall(mok_n);
+    if (is_ok(mok_res_tag) == 1) {
         var output = mokbuf;
         if (mok_n > 0) {
             # Substring search for known patterns using memeq
@@ -375,8 +375,8 @@ fn secureboot_enroll_key(der_path): i64 {
 
     var outbuf[1024];
     var n = agnosys_capture_n(args, &outbuf, 1023, 0);
-    var res = wrap_syscall(n);
-    if (is_err_result(res) == 1) {
+    var res_tag, res = wrap_syscall(n);
+    if (is_err_result(res_tag) == 1) {
         return sigil_err_io(0, "mokutil --import failed");
     }
 
@@ -430,8 +430,8 @@ fn secureboot_sign_module(module_path, private_key, certificate): i64 {
     # any supported distro. Now we build the path at runtime from the
     # running kernels release string and fall back to /usr/src/linux.
     var uts[392];
-    var ures = agnosys_uname(&uts);
-    if (is_err_result(ures) == 1) {
+    var ures_tag, ures = agnosys_uname(&uts);
+    if (is_err_result(ures_tag) == 1) {
         return sigil_err_io(0, "sign-file fallback: uname(2) failed");
     }
     var release = uname_release(&uts);
@@ -623,10 +623,10 @@ fn secureboot_list_efi_variables(): i64 {
             store8(full_path + strlen(efivars_dir), 47);  # '/'
             memcpy(full_path + strlen(efivars_dir) + 1, name, linelen + 1);
 
-            var vres = secureboot_read_efi_variable(full_path);
+            var vres_tag, vres = secureboot_read_efi_variable(full_path);
             var size = 0;
-            if (is_ok(vres) == 1) {
-                size = secureboot_efi_var_size(payload(vres));
+            if (is_ok(vres_tag) == 1) {
+                size = secureboot_efi_var_size(vres);
             }
 
             vec_push(vars, secureboot_efi_var_new(name, size));

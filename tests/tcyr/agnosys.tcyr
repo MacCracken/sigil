@@ -231,9 +231,9 @@ fn main() {
     vec_push(slow, "/bin/sleep");
     vec_push(slow, "5");
     var t0 = clock_now_ms();
-    var slow_res = agnosys_run_capture_timeout(slow, cbuf, 255, 300, "slow");
+    var slow_res_tag, slow_res = agnosys_run_capture_timeout(slow, cbuf, 255, 300, "slow");
     var slow_ms = clock_now_ms() - t0;
-    assert_eq(is_err_result(slow_res), 1, "a child that outruns its bound is Err");
+    assert_eq(is_err_result(slow_res_tag), 1, "a child that outruns its bound is Err");
     assert(slow_ms < 3000, "capture returned near its bound, not after the child exited");
 
     # A NON-ZERO exit is an error, not Ok(0). This is the fail-open half:
@@ -254,9 +254,9 @@ fn main() {
     var good = vec_new();
     vec_push(good, "/bin/echo");
     vec_push(good, "sigil");
-    var good_res = agnosys_run_capture_timeout(good, cbuf, 255, 5000, "echo");
-    assert_eq(is_err_result(good_res), 0, "a successful child returns Ok");
-    assert(payload(good_res) >= 5, "and its stdout was actually captured");
+    var good_res_tag, good_res = agnosys_run_capture_timeout(good, cbuf, 255, 5000, "echo");
+    assert_eq(is_err_result(good_res_tag), 0, "a successful child returns Ok");
+    assert(good_res >= 5, "and its stdout was actually captured");
 
     # ⚠ 3.12.13 — `agnosys_run_checked` and the capture helper are BOUNDED and
     # STATUS-CHECKED too, not just `agnosys_run_capture`.

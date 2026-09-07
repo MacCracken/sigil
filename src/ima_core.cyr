@@ -152,8 +152,8 @@ fn ima_rule_validate(rule): i64 {
 
 # Format an IMA rule as a kernel policy-file line.
 fn ima_rule_to_policy_line(rule): i64 {
-    var res = ima_rule_validate(rule);
-    if (is_err_result(res) == 1) { return res; }
+    var res_tag, res = ima_rule_validate(rule);
+    if (is_err_result(res_tag) == 1) { return Err(res); }
 
     # Build string: "<action> func=<target> [uid=N] [fowner=N] [fsuuid=X] [obj_type=X] [mask=X]"
     # Allocate generous buffer
@@ -495,8 +495,8 @@ fn ima_write_policy(rules): i64 {
     var vi = 0;
     while (vi < count) {
         var rule = vec_get(rules, vi);
-        var vres = ima_rule_validate(rule);
-        if (is_err_result(vres) == 1) { return vres; }
+        var vres_tag, vres = ima_rule_validate(rule);
+        if (is_err_result(vres_tag) == 1) { return Err(vres); }
         vi = vi + 1;
     }
 
@@ -507,9 +507,9 @@ fn ima_write_policy(rules): i64 {
     var ri = 0;
     while (ri < count) {
         var rule = vec_get(rules, ri);
-        var line_res = ima_rule_to_policy_line(rule);
-        if (is_err_result(line_res) == 1) { return line_res; }
-        var line = payload(line_res);
+        var line_res_tag, line_res = ima_rule_to_policy_line(rule);
+        if (is_err_result(line_res_tag) == 1) { return Err(line_res); }
+        var line = line_res;
         var llen = strlen(line);
 
         if (ri > 0) {

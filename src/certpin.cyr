@@ -55,7 +55,7 @@ fn sigil_cert_pin_check(host, actual_pin, pin_set): i64 {
 # check. Shells out via agnosys' openssl pipeline — not on the hot
 # path; intended for pin-set construction at config time.
 fn sigil_cert_pin_compute(cert_path): i64 {
-    var res = certpin_compute_spki_pin(cert_path);
-    if (is_err_result(res) == 1) { return 0; }
-    return result_unwrap(res);
+    var res_tag, res = certpin_compute_spki_pin(cert_path);
+    if (is_err_result(res_tag) == 1) { return 0; }
+    return result_unwrap(res_tag, res);
 }

@@ -230,10 +230,10 @@ fn tpm_read_pcr_timeout(bank, indices, timeout_ms): i64 {
 
     var outbuf = alloc(4096);
     memset(outbuf, 0, 4096);
-    var cap_res = tpm_run_capture_timeout(args, outbuf, 4095, timeout_ms);
-    if (is_err_result(cap_res) == 1) { return cap_res; }
+    var cap_res_tag, cap_res = tpm_run_capture_timeout(args, outbuf, 4095, timeout_ms);
+    if (is_err_result(cap_res_tag) == 1) { return Err(cap_res); }
 
-    store8(outbuf + payload(cap_res), 0);
+    store8(outbuf + cap_res, 0);
 
     # Parse output — YAML-like:
     #   sha256:
@@ -440,10 +440,10 @@ fn tpm_seal(bank, pcr_indices, data_ptr, data_len, output_dir): i64 {
     vec_push(cr_args, "-L");
     vec_push(cr_args, pcr_sel);
 
-    var cr_res = tpm_run_checked(cr_args);
-    if (is_err_result(cr_res) == 1) {
+    var cr_res_tag, cr_res = tpm_run_checked(cr_args);
+    if (is_err_result(cr_res_tag) == 1) {
         _sig_unlink(input_file);
-        return cr_res;
+        return Err(cr_res);
     }
 
     # tpm2_load -C owner -u <pub> -r <priv> -c <ctx>
@@ -458,10 +458,10 @@ fn tpm_seal(bank, pcr_indices, data_ptr, data_len, output_dir): i64 {
     vec_push(ld_args, "-c");
     vec_push(ld_args, ctx_file);
 
-    var ld_res = tpm_run_checked(ld_args);
+    var ld_res_tag, ld_res = tpm_run_checked(ld_args);
     _sig_unlink(input_file);
 
-    if (is_err_result(ld_res) == 1) { return ld_res; }
+    if (is_err_result(ld_res_tag) == 1) { return Err(ld_res); }
 
     return Ok(tpm_sealed_new(ctx_file, pcr_sel));
 }
@@ -498,8 +498,7 @@ fn tpm_unseal(sealed, buf, buflen): i64 {
     vec_push(args, "-p");
     vec_push(args, parg);
 
-    var cap_res = tpm_run_capture(args, buf, buflen);
-    return cap_res;
+    return tpm_run_capture(args, buf, buflen);
 }
 
 # ================================================================
@@ -531,10 +530,10 @@ fn tpm_get_random(buf, count): i64 {
     # bounded by hexlen, so the buffer needs no zeroing.
     var hexcap = count * 2 + 8;
     var hexbuf = alloc(hexcap);
-    var cap_res = tpm_run_capture(args, hexbuf, hexcap - 1);
-    if (is_err_result(cap_res) == 1) { return cap_res; }
+    var cap_res_tag, cap_res = tpm_run_capture(args, hexbuf, hexcap - 1);
+    if (is_err_result(cap_res_tag) == 1) { return Err(cap_res); }
 
-    var hexlen = payload(cap_res);
+    var hexlen = cap_res;
     # Trim trailing whitespace
     while (hexlen > 0 && (load8(hexbuf + hexlen - 1) == 10 || load8(hexbuf + hexlen - 1) == 32)) {
         hexlen = hexlen - 1;
@@ -593,9 +592,9 @@ fn tpm_verify_measured_boot(expected): i64 {
     }
 
     # Read current PCR values
-    var read_res = tpm_read_pcr(bank, indices);
-    if (is_err_result(read_res) == 1) { return read_res; }
-    var current = payload(read_res);
+    var read_res_tag, read_res = tpm_read_pcr(bank, indices);
+    if (is_err_result(read_res_tag) == 1) { return Err(read_res); }
+    var current = read_res;
 
     # Compare each expected value against current
     var ei = 0;

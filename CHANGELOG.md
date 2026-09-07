@@ -5,6 +5,81 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.12.16] — 2026-09-06
+
+**Changed**
+
+- Toolchain pin **6.5.47 → 6.6.0**, and the whole of `src/` migrated to cyrius 6.6.0's
+  **Result/Option/Either VALUE FORM**. A payload variant is now a REGISTER PAIR (tag in rax,
+  payload in rdx) that allocates **zero** bytes — there is no heap box, so the `tag at +0 /
+  payload at +8` layout sigil's trust stack was written against no longer exists.
+
+  **40 declarations** across 12 files became two-value binds
+  (`var res_tag, res = f();` — the payload deliberately keeps the ORIGINAL name so every
+  downstream use is untouched), and every tag-reading call took its new arity:
+  `is_ok`/`is_err_result` keep one argument but now receive the TAG, `result_unwrap(t, v)` and
+  `err_code_of(t, v)` take two, `result_unwrap_or(t, v, fb)` takes three, and `payload(x)` is
+  **deleted** with no one-argument replacement (under the value form the payload is already a
+  plain variable, so `payload(res)` is just `res`).
+
+  Files migrated: `certpin.cyr`, `certpin_core.cyr`, `dmverity.cyr`, `ima.cyr`, `ima_core.cyr`,
+  `luks.cyr`, `secureboot.cyr`, `secureboot_core.cyr`, `sys_error.cyr`, `sys_util.cyr`,
+  `tpm.cyr`, `tpm_core.cyr` — i.e. the entire internalized trust stack (TPM seal/unseal, IMA
+  policy, Secure Boot detection/enrollment, cert-pin, dm-verity, LUKS) plus its `agnosys_*`
+  support layer.
+
+**Fixed**
+
+- ⛔ **`return res;` on an error path is a SILENT fail-OPEN under the value form, and the
+  mechanical migration produces it.** The pre-6.6.0 propagation idiom was
+
+      var res = f();
+      if (is_err_result(res) == 1) { return res; }   # propagate the whole boxed Result
+
+  Rewriting only the declaration and the predicate leaves `return res;` returning the **payload
+  alone** — the Err tag is dropped, rax carries the error *value*, and the caller's
+  `var t, v = ...` binds `t` to that value. Measured directly against a 6.6.0 `cycc`: an
+  `Err(77)` propagated this way arrives as `tag=77, is_err=0` — **an error that reads as
+  success**. Every propagating site therefore reconstructs the pair explicitly,
+  `return Err(res);`, which round-trips as `tag=1, val=77, is_err=1`. **19** propagation sites
+  were involved; on this codebase they are `veritysetup verify`, `cryptsetup`, `tpm2_*` and IMA
+  policy-write failures, i.e. exactly the paths whose whole job is to refuse.
+
+  The same shape has a second variant worth naming: a pure pass-through
+  (`var x = f(); return x;`) must drop the bind entirely and `return f();` — binding it and
+  returning the payload loses the tag on the **Ok** arm too. `tpm_unseal` was the one instance.
+
+- `result_print_err` was **1-arg over the boxed Result** and is now `result_print_err(res_tag, res)`.
+  ⚠ This is a **breaking signature change on exported API surface** — it has no in-repo caller,
+  so nothing here fails if a consumer is missed. Consumers calling it must pass both halves.
+
+- Two sites the mechanical rule got **wrong in opposite directions**, both worth recording
+  because both were silent:
+  - `src/sys_util.cyr` — the rule is per-function-scope, but a whole-file rewrite sees the name
+    `r` used for a Result in `agnosys_capture_n` and rewrites the **unrelated**
+    `var r = sys_waitpid(pid, &st, WNOHANG);` in two *other* functions. `sys_waitpid` returns a
+    plain `i64` (`lib/syscalls_linux_common.cyr:243`), not a Result. Reverted.
+  - `src/luks.cyr` — `luks_validate_cipher(...)`'s call spans two lines, so a
+    single-line `var X = call();` pattern skips it and the site stays silently un-migrated.
+
+**Verification**
+
+- `is_err_result(f(...))` **nested directly on the call** needs no change: one argument receives
+  rax, which IS the tag. Confirmed against `lib/result.cyr`'s own note and left alone at
+  `src/dmverity.cyr:507` and six assertions in `tests/tcyr/agnosys.tcyr`.
+- Audited for hand-rolled box reads (`load64(r)` as tag / `load64(r + 8)` as payload) — the
+  shape that does **not** fail loudly, since a register pair dereferenced as a pointer is a
+  plausible-looking address. sigil has **none**: every `load64(x + 8)` in `src/` is a field read
+  on one of its own `fl_alloc`'d structs (`verification_result`, `integrity_report`,
+  `attestation_result`, bignum limb arrays), not a Result.
+- `tests/tcyr/agnosys.tcyr` migrated, preserving every assertion's intent — the
+  `assert(payload(good_res) >= 5, ...)` byte-count check became `assert(good_res >= 5, ...)`,
+  still asserting that stdout was actually captured.
+- All **14** bundles regenerated (monolith + 13 profiles), each with its own `cyrius distlib`
+  call. `tests/tcyr/x509_ed25519.tcyr` and `x509_keyusage_eku.tcyr` compile against
+  `dist/sigil.cyr` rather than `src/`, so they held the stale bundle red until it was
+  regenerated — the bundle is a real gate here, not a build artifact.
+
 ## [3.12.15] — 2026-09-04
 
 **Fixed**

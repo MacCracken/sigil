@@ -41,11 +41,11 @@ fn sigil_ima_policy(s): i64 { return load64(s + 16); }
 # ================================================================
 
 fn sigil_ima_snapshot(): i64 {
-    var res = ima_get_status();
-    if (is_err_result(res) == 1) {
+    var res_tag, res = ima_get_status();
+    if (is_err_result(res_tag) == 1) {
         return sigil_ima_snapshot_new(0, 0, 0);
     }
-    var ag = result_unwrap(res);
+    var ag = result_unwrap(res_tag, res);
     return sigil_ima_snapshot_new(
     ima_status_active(ag),
     ima_status_measurement_count(ag),

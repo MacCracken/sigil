@@ -283,10 +283,10 @@ fn certpin_compute_spki_pin(cert_path): i64 {
     var dashc = "-c";
     var outcap = 1024;
     var outbuf = alloc(outcap);
-    var res = run_capture(cmd, dashc, buf, outbuf, outcap - 1);
-    if (is_err_result(res) == 1) { return res; }
+    var res_tag, res = run_capture(cmd, dashc, buf, outbuf, outcap - 1);
+    if (is_err_result(res_tag) == 1) { return Err(res); }
 
-    var total = payload(res);
+    var total = res;
     if (total <= 0) {
         return sigil_err_unknown("openssl pipeline returned empty output");
     }
