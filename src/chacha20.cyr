@@ -29,9 +29,9 @@
 
 fn _chacha_u8to32le(p): i64 {
     return (load8(p) & 0xFF)
-         | ((load8(p + 1) & 0xFF) << 8)
-         | ((load8(p + 2) & 0xFF) << 16)
-         | ((load8(p + 3) & 0xFF) << 24);
+    | ((load8(p + 1) & 0xFF) << 8)
+    | ((load8(p + 2) & 0xFF) << 16)
+    | ((load8(p + 3) & 0xFF) << 24);
 }
 
 fn _chacha_u32to8le(p, v): i64 {
@@ -171,7 +171,7 @@ fn chacha20_xor(key, nonce, counter, input, in_len, out): i64 {
         var j = 0;
         while (j < n) {
             store8(out + done + j,
-                   (load8(input + done + j) ^ load8(ksb + j)) & 0xFF);
+              (load8(input + done + j) ^ load8(ksb + j)) & 0xFF);
             j = j + 1;
         }
         ctr = (ctr + 1) & 0xffffffff;

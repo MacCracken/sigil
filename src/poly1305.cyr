@@ -39,9 +39,9 @@
 # Read 4 little-endian bytes at p as an i64 in [0, 2^32).
 fn _p1305_u8to32(p): i64 {
     return (load8(p) & 0xFF)
-         | ((load8(p + 1) & 0xFF) << 8)
-         | ((load8(p + 2) & 0xFF) << 16)
-         | ((load8(p + 3) & 0xFF) << 24);
+    | ((load8(p + 1) & 0xFF) << 8)
+    | ((load8(p + 2) & 0xFF) << 16)
+    | ((load8(p + 3) & 0xFF) << 24);
 }
 
 # Write the low 32 bits of v as 4 little-endian bytes at p.

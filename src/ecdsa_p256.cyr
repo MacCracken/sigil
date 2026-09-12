@@ -88,14 +88,14 @@ fn u256_load_be(dst, src): i64 {
         # where byte 0 of that range is the MSB of the limb.
         var off = (3 - i) * 8;
         store64(dst + i * 8,
-        ((load8(src + off + 0) & 0xFF) << 56)
-        | ((load8(src + off + 1) & 0xFF) << 48)
-        | ((load8(src + off + 2) & 0xFF) << 40)
-        | ((load8(src + off + 3) & 0xFF) << 32)
-        | ((load8(src + off + 4) & 0xFF) << 24)
-        | ((load8(src + off + 5) & 0xFF) << 16)
-        | ((load8(src + off + 6) & 0xFF) << 8)
-        | (load8(src + off + 7) & 0xFF));
+          ((load8(src + off + 0) & 0xFF) << 56)
+          | ((load8(src + off + 1) & 0xFF) << 48)
+          | ((load8(src + off + 2) & 0xFF) << 40)
+          | ((load8(src + off + 3) & 0xFF) << 32)
+          | ((load8(src + off + 4) & 0xFF) << 24)
+          | ((load8(src + off + 5) & 0xFF) << 16)
+          | ((load8(src + off + 6) & 0xFF) << 8)
+          | (load8(src + off + 7) & 0xFF));
         i = i + 1;
     }
     return 0;

@@ -88,11 +88,11 @@ fn main() {
     # ============================================================
     test_group("sgx_quote_verify_full — happy path");
     assert_eq(sgx_quote_verify_full(q, root_der, ROOT_DER_LEN, NOW_IN_WINDOW), 1,
-              "end-to-end verify against synthesized PEM chain");
+      "end-to-end verify against synthesized PEM chain");
 
     # now_unix = 0 disables time-window check.
     assert_eq(sgx_quote_verify_full(q, root_der, ROOT_DER_LEN, 0), 1,
-              "now_unix=0 disables time check (still verifies)");
+      "now_unix=0 disables time check (still verifies)");
 
     # ============================================================
     # Group 2 — cert_data_type mismatch
@@ -105,7 +105,7 @@ fn main() {
     memcpy(q_bad_type, q, 256);
     store64(q_bad_type + 104, 1);    # cert_data_type slot
     assert_eq(sgx_quote_verify_full(q_bad_type, root_der, ROOT_DER_LEN, NOW_IN_WINDOW), 0,
-              "non-PEM cert_data_type rejected");
+      "non-PEM cert_data_type rejected");
 
     # ============================================================
     # Group 3 — Time-window rejection
@@ -113,9 +113,9 @@ fn main() {
     test_group("sgx_quote_verify_full — time-window rejection");
 
     assert_eq(sgx_quote_verify_full(q, root_der, ROOT_DER_LEN, NOW_PRE_WINDOW), 0,
-              "now before leaf notBefore rejected");
+      "now before leaf notBefore rejected");
     assert_eq(sgx_quote_verify_full(q, root_der, ROOT_DER_LEN, NOW_POST_WINDOW), 0,
-              "now after leaf notAfter rejected");
+      "now after leaf notAfter rejected");
 
     # ============================================================
     # Group 4 — Wrong root anchor
@@ -127,7 +127,7 @@ fn main() {
     var WRONG_ROOT_HEX = "308201a130820148a003020102021438d027306f383dd1d498df28c0cab9abb6a26173300a06082a8648ce3d040302301d311b301906035504030c12536967696c205465737420526f6f74204341301e170d3236303532323030333730365a170d3336303531393030333730365a301d311b301906035504030c12536967696c205465737420526f6f742043413059301306072a8648ce3d020106082a8648ce3d030107034200044d9f804c6dc263817b4ac3d5a6f86be88ff2961103cee9ca304d6fcde5e37c7c3f5b953938324747f44e2bdd51d849ce61ba7c7dcd8c5e63f687f6f65a3c0a9ea3663064301d0603551d0e04160414c97b20ae5ba585c6752e0a9ba7200be5a658d768301f0603551d23041830168014c97b20ae5ba585c6752e0a9ba7200be5a658d76830120603551d130101ff040830060101ff020101300e0603551d0f0101ff040403020106300a06082a8648ce3d040302034700304402201f82729ebb77cca9b15528a89c8580537784e71e1a5face3040de63d9578ac7d02206ec8546b67b2c3448d038bd0d19f1c38845135f44b77ae75e163e95e1d17fe4a";
     var wrong_root = hex_decode(WRONG_ROOT_HEX, 842);
     assert_eq(sgx_quote_verify_full(q, wrong_root, 421, NOW_IN_WINDOW), 0,
-              "verify against unrelated root rejected");
+      "verify against unrelated root rejected");
 
     # ============================================================
     # Group 5 — Malformed root DER
@@ -137,11 +137,11 @@ fn main() {
     var bad_root = alloc(50);
     memset(bad_root, 0xFF, 50);
     assert_eq(sgx_quote_verify_full(q, bad_root, 50, NOW_IN_WINDOW), 0,
-              "malformed root DER rejected");
+      "malformed root DER rejected");
 
     # Zero-length root.
     assert_eq(sgx_quote_verify_full(q, root_der, 0, NOW_IN_WINDOW), 0,
-              "zero-length root rejected");
+      "zero-length root rejected");
 
     # ============================================================
     # Group 6 — Tampered quote body
@@ -165,7 +165,7 @@ fn main() {
     var arena = arena_new(16384);
     # First verify into the arena: same result as the bump path (1).
     assert_eq(sgx_quote_verify_full_into(q, root_der, ROOT_DER_LEN, NOW_IN_WINDOW, arena), 1,
-              "_into verify matches bump path (valid)");
+      "_into verify matches bump path (valid)");
     var used_after_one = arena_used(arena);
     assert_eq(used_after_one > 0, 1, "_into consumed arena scratch");
 
@@ -192,14 +192,14 @@ fn main() {
     # A too-small arena fails closed (returns 0), no crash.
     var tiny = arena_new(64);
     assert_eq(sgx_quote_verify_full_into(q, root_der, ROOT_DER_LEN, NOW_IN_WINDOW, tiny), 0,
-              "exhausted arena fails closed");
+      "exhausted arena fails closed");
 
     # The bump wrapper still works (delegates to _into with arena=0).
     assert_eq(sgx_quote_verify_full(q, root_der, ROOT_DER_LEN, NOW_IN_WINDOW), 1,
-              "bump wrapper still verifies");
+      "bump wrapper still verifies");
 
     assert_eq(sgx_quote_verify_full(q_t, root_der, ROOT_DER_LEN, NOW_IN_WINDOW), 0,
-              "tampered mr_enclave fails verify_full");
+      "tampered mr_enclave fails verify_full");
 
     return assert_summary();
 }

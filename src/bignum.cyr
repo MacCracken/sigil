@@ -511,27 +511,27 @@ fn bn_modinv(rinv, r, n, limbs): i64 {
     while (done == 0) {
         if (bn_is_one(u, limbs) == 1) { done = 1; }
         else { if (bn_is_one(v, limbs) == 1) { done = 2; }
-        else { if (bn_is_zero(u, limbs) == 1) { done = 3; }   # gcd>1: not invertible
-        else { if (bn_is_zero(v, limbs) == 1) { done = 3; }
-        else { if (it >= cap) { done = 3; }
-        else {
-            while ((load64(u) & 1) == 0) {
-                bn_shr1(u, limbs);
-                _bn_halve_mod(x1, n, limbs);
-            }
-            while ((load64(v) & 1) == 0) {
-                bn_shr1(v, limbs);
-                _bn_halve_mod(x2, n, limbs);
-            }
-            if (bn_cmp(u, v, limbs) >= 0) {
-                bn_sub_assign(u, v, limbs);
-                _bn_submod(x1, x2, n, limbs);
-            } else {
-                bn_sub_assign(v, u, limbs);
-                _bn_submod(x2, x1, n, limbs);
-            }
-            it = it + 1;
-        } } } } }
+            else { if (bn_is_zero(u, limbs) == 1) { done = 3; }   # gcd>1: not invertible
+                else { if (bn_is_zero(v, limbs) == 1) { done = 3; }
+                    else { if (it >= cap) { done = 3; }
+                        else {
+                            while ((load64(u) & 1) == 0) {
+                                bn_shr1(u, limbs);
+                                _bn_halve_mod(x1, n, limbs);
+                            }
+                            while ((load64(v) & 1) == 0) {
+                                bn_shr1(v, limbs);
+                                _bn_halve_mod(x2, n, limbs);
+                            }
+                            if (bn_cmp(u, v, limbs) >= 0) {
+                                bn_sub_assign(u, v, limbs);
+                                _bn_submod(x1, x2, n, limbs);
+                            } else {
+                                bn_sub_assign(v, u, limbs);
+                                _bn_submod(x2, x1, n, limbs);
+                            }
+                            it = it + 1;
+                        } } } } }
     }
 
     if (done == 3) { _bn_inv_scrub(u, v, x1, x2); return 0 - 1; }
@@ -654,7 +654,7 @@ fn _bn_ct_select(out, a_buf, b_buf, bit, limbs): i64 {
     var i = 0;
     while (i < limbs) {
         store64(out + i * 8,
-                (load64(a_buf + i * 8) & mask) | (load64(b_buf + i * 8) & nmask));
+          (load64(a_buf + i * 8) & mask) | (load64(b_buf + i * 8) & nmask));
         i = i + 1;
     }
     return 0;

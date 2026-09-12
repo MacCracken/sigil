@@ -4,7 +4,6 @@ alloc
 freelist
 string
 bayan
-tagged
 process
 ct
 thread
@@ -13,4 +12,5 @@ syscalls
 vec
 str
 io
+result
 fmt

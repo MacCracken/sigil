@@ -107,20 +107,20 @@ fn snp_report_alloc(): i64 {
 
 fn _snp_load_u32(buf, off): i64 {
     return (load8(buf + off) & 0xFF)
-         | ((load8(buf + off + 1) & 0xFF) << 8)
-         | ((load8(buf + off + 2) & 0xFF) << 16)
-         | ((load8(buf + off + 3) & 0xFF) << 24);
+    | ((load8(buf + off + 1) & 0xFF) << 8)
+    | ((load8(buf + off + 2) & 0xFF) << 16)
+    | ((load8(buf + off + 3) & 0xFF) << 24);
 }
 
 fn _snp_load_u64(buf, off): i64 {
     return (load8(buf + off) & 0xFF)
-         | ((load8(buf + off + 1) & 0xFF) << 8)
-         | ((load8(buf + off + 2) & 0xFF) << 16)
-         | ((load8(buf + off + 3) & 0xFF) << 24)
-         | ((load8(buf + off + 4) & 0xFF) << 32)
-         | ((load8(buf + off + 5) & 0xFF) << 40)
-         | ((load8(buf + off + 6) & 0xFF) << 48)
-         | ((load8(buf + off + 7) & 0xFF) << 56);
+    | ((load8(buf + off + 1) & 0xFF) << 8)
+    | ((load8(buf + off + 2) & 0xFF) << 16)
+    | ((load8(buf + off + 3) & 0xFF) << 24)
+    | ((load8(buf + off + 4) & 0xFF) << 32)
+    | ((load8(buf + off + 5) & 0xFF) << 40)
+    | ((load8(buf + off + 6) & 0xFF) << 48)
+    | ((load8(buf + off + 7) & 0xFF) << 56);
 }
 
 # ----------------------------------------------------------------
@@ -281,9 +281,9 @@ fn _snp_cert_is_self_issued(c): i64 {
 
 # snp_report_verify_full — one-shot wrapper (global bump scratch).
 fn snp_report_verify_full(report, vcek_chain_pem, vcek_chain_pem_len,
-                            ark_root_der, ark_root_der_len, now_unix): i64 {
+  ark_root_der, ark_root_der_len, now_unix): i64 {
     return snp_report_verify_full_into(report, vcek_chain_pem, vcek_chain_pem_len,
-                            ark_root_der, ark_root_der_len, now_unix, 0);
+      ark_root_der, ark_root_der_len, now_unix, 0);
 }
 
 # snp_report_verify_full_into — drift-free variant: all per-call scratch
@@ -291,7 +291,7 @@ fn snp_report_verify_full(report, vcek_chain_pem, vcek_chain_pem_len,
 # is drawn from the caller's `arena` (stdlib handle; `arena == 0` ⇒
 # global bump). Returns 1 on full success, 0 otherwise. 3.7.3.
 fn snp_report_verify_full_into(report, vcek_chain_pem, vcek_chain_pem_len,
-                            ark_root_der, ark_root_der_len, now_unix, arena): i64 {
+  ark_root_der, ark_root_der_len, now_unix, arena): i64 {
     # Cert chain must be non-empty.
     if (vcek_chain_pem_len <= 0) { return 0; }
     if (ark_root_der_len <= 0) { return 0; }
@@ -309,7 +309,7 @@ fn snp_report_verify_full_into(report, vcek_chain_pem, vcek_chain_pem_len,
     var der_pool = _x509_scratch(arena, vcek_chain_pem_len);
     if (der_pool == 0) { return 0; }
     var n = pem_decode_certs_into(vcek_chain_pem, vcek_chain_pem_len,
-                              &chain, SNP_VERIFY_FULL_MAX_CERTS, der_pool, vcek_chain_pem_len);
+      &chain, SNP_VERIFY_FULL_MAX_CERTS, der_pool, vcek_chain_pem_len);
     if (n < 1) { return 0; }
 
     # 4 cert-pointer slots (was [4]=8B=1 slot → store64(&parsed+i*8)

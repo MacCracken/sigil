@@ -141,7 +141,7 @@ fn main() {
 
     var inters = alloc(0);
     assert_eq(x509_verify_chain(leaf_cert, inters, 0, root_cert, 1781481600), 1,
-              "decoded leaf → root chain verifies (round-trip end-to-end)");
+      "decoded leaf → root chain verifies (round-trip end-to-end)");
 
     # ============================================================
     # Group 5 — _into variant: caller-provided pool
@@ -157,7 +157,7 @@ fn main() {
     var p_into = load64(&chain + 0);
     assert_eq(p_into >= &pool, 1, "_into entry pointer ≥ pool start");
     assert_eq(p_into + load64(&chain + 8) <= &pool + 2048, 1,
-              "_into entry pointer + len within pool");
+      "_into entry pointer + len within pool");
 
     # ============================================================
     # Group 6 — _into variant: pool too small
@@ -197,28 +197,28 @@ fn main() {
     var no_begin = "no markers here just garbage bytes";
     memset(&chain, 0, 64);
     assert_eq(pem_decode_certs(no_begin, 34, &chain, 4), 0 - 1,
-              "input with no BEGIN marker rejected");
+      "input with no BEGIN marker rejected");
 
     # BEGIN but no END
     var no_end = alloc(50);
     memcpy(no_end, "-----BEGIN CERTIFICATE-----\nAAAA\n", 33);
     memset(&chain, 0, 64);
     assert_eq(pem_decode_certs(no_end, 33, &chain, 4), 0 - 1,
-              "BEGIN without matching END rejected");
+      "BEGIN without matching END rejected");
 
     # Invalid base64 char inside body
     var bad_b64 = alloc(80);
     memcpy(bad_b64, "-----BEGIN CERTIFICATE-----\nAAAA*AAAA\n-----END CERTIFICATE-----\n", 64);
     memset(&chain, 0, 64);
     assert_eq(pem_decode_certs(bad_b64, 64, &chain, 4), 0 - 1,
-              "invalid base64 character rejected");
+      "invalid base64 character rejected");
 
     # Empty body between markers
     var empty_body = alloc(80);
     memcpy(empty_body, "-----BEGIN CERTIFICATE-----\n-----END CERTIFICATE-----\n", 54);
     memset(&chain, 0, 64);
     assert_eq(pem_decode_certs(empty_body, 54, &chain, 4), 0 - 1,
-              "empty body rejected");
+      "empty body rejected");
 
     # Excess padding (three `=` in final quad)
     # 8 alphabet chars → 2 quads, but tail "===" is invalid.
@@ -226,14 +226,14 @@ fn main() {
     memcpy(bad_pad, "-----BEGIN CERTIFICATE-----\nAAAA====\n-----END CERTIFICATE-----\n", 63);
     memset(&chain, 0, 64);
     assert_eq(pem_decode_certs(bad_pad, 63, &chain, 4), 0 - 1,
-              "excess padding rejected");
+      "excess padding rejected");
 
     # Alphabet char after padding
     var pad_then_alpha = alloc(80);
     memcpy(pad_then_alpha, "-----BEGIN CERTIFICATE-----\nAAA=AAAA\n-----END CERTIFICATE-----\n", 63);
     memset(&chain, 0, 64);
     assert_eq(pem_decode_certs(pad_then_alpha, 63, &chain, 4), 0 - 1,
-              "alphabet char following padding rejected");
+      "alphabet char following padding rejected");
 
     # ============================================================
     # Group 9 — Padding variants (0/1/2 chars), known-good

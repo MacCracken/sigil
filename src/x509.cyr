@@ -584,20 +584,20 @@ fn _xp_parse_sig_algid(buf, buf_len, pos, out_algo): i64 {
     if (_oid_eq(buf, oid_cp, oid_len, _oid_ecdsa_with_sha256, 8) == 1) {
         algo = X509_SIG_ECDSA_SHA256;
     } else { if (_oid_eq(buf, oid_cp, oid_len, _oid_ecdsa_with_sha384, 8) == 1) {
-        algo = X509_SIG_ECDSA_SHA384;
-    } else { if (_oid_eq(buf, oid_cp, oid_len, _oid_sha256_with_rsa, 9) == 1) {
-        algo = X509_SIG_RSA_SHA256;
-        rsa_null_required = 1;
-    } else { if (_oid_eq(buf, oid_cp, oid_len, _oid_sha384_with_rsa, 9) == 1) {
-        algo = X509_SIG_RSA_SHA384;
-        rsa_null_required = 1;
-    } else { if (_oid_eq(buf, oid_cp, oid_len, _oid_ed25519, 3) == 1) {
-        # id-Ed25519 (RFC 8410 §6): no parameters; the absent-params path
-        # below accepts it (rsa_null_required stays 0).
-        algo = X509_SIG_ED25519;
-    } else {
-        return 0 - 1;
-    } } } } }
+            algo = X509_SIG_ECDSA_SHA384;
+        } else { if (_oid_eq(buf, oid_cp, oid_len, _oid_sha256_with_rsa, 9) == 1) {
+                algo = X509_SIG_RSA_SHA256;
+                rsa_null_required = 1;
+            } else { if (_oid_eq(buf, oid_cp, oid_len, _oid_sha384_with_rsa, 9) == 1) {
+                    algo = X509_SIG_RSA_SHA384;
+                    rsa_null_required = 1;
+                } else { if (_oid_eq(buf, oid_cp, oid_len, _oid_ed25519, 3) == 1) {
+                        # id-Ed25519 (RFC 8410 §6): no parameters; the absent-params path
+                        # below accepts it (rsa_null_required stays 0).
+                        algo = X509_SIG_ED25519;
+                    } else {
+                        return 0 - 1;
+                    } } } } }
 
     # Parameters: if present, must be NULL (zero-length). ECDSA omits it
     # (RFC 5758 §3.2); RSA PKCS#1 requires the explicit NULL be present.
@@ -1038,7 +1038,7 @@ fn x509_parse_into(der, der_len, out_cert, arena): i64 {
         # inside the cert (DER-strictness bug, fixed 3.6.7).
         var inner_seq_np = 0;
         var inner_seq_len = der_walk(der, der_len, inner_sig_off, DER_TAG_SEQUENCE,
-                                       &pos_after_seq_tag, &inner_seq_np);
+          &pos_after_seq_tag, &inner_seq_np);
         if (inner_seq_len < 0) { return 0; }
         var inner_seq_end = pos_after_seq_tag + inner_seq_len;
         # The inner SEQUENCE must consume the entire BIT STRING content
@@ -1188,7 +1188,7 @@ fn _x509_verify_link(child, issuer_cert): i64 {
         var rblk = x509_cert_rsa_pubkey(issuer_cert);
         if (rblk == 0) { return 0; }
         return rsa_pkcs1v15_verify_sha256(rblk, load64(rblk + 528),
-            rblk + 512, load64(rblk + 536), der_ptr + tbs_off, tbs_len, sig_addr, sig_len);
+          rblk + 512, load64(rblk + 536), der_ptr + tbs_off, tbs_len, sig_addr, sig_len);
     }
 
     if (algo == X509_SIG_RSA_SHA384) {
@@ -1196,7 +1196,7 @@ fn _x509_verify_link(child, issuer_cert): i64 {
         var rblk = x509_cert_rsa_pubkey(issuer_cert);
         if (rblk == 0) { return 0; }
         return rsa_pkcs1v15_verify_sha384(rblk, load64(rblk + 528),
-            rblk + 512, load64(rblk + 536), der_ptr + tbs_off, tbs_len, sig_addr, sig_len);
+          rblk + 512, load64(rblk + 536), der_ptr + tbs_off, tbs_len, sig_addr, sig_len);
     }
 
     # Ed25519 chain-link (RFC 8410). The issuer's 32-byte key sits in the

@@ -110,7 +110,7 @@ fn _h_compute(idx, sig, okm384, okm256, th, gct, gtag, cct, ctag): i64 {
     sha384(_h_msgs + idx * 32, 32, th);
     # AES-256-GCM AEAD — fully banked in 3.9.6 (the issue's repro suite).
     aes_gcm_encrypt(_h_akey + idx * 32, _h_anonce + idx * 12,
-                    0, 0, _h_apt + idx * 32, 32, gct, gtag);
+      0, 0, _h_apt + idx * 32, 32, gct, gtag);
     # ChaCha20 stream (banked 3.8.0) + Poly1305 MAC (banked 3.9.6) — the
     # fixed primitives. NOTE: the chacha20poly1305_encrypt AEAD *wrapper* is
     # deliberately NOT exercised here — its `_cp_tag` `fl_alloc` mac_data
@@ -118,7 +118,7 @@ fn _h_compute(idx, sig, okm384, okm256, th, gct, gtag, cct, ctag): i64 {
     # 3.9.7 (see ADR 0007 / roadmap). Driving these two primitives directly
     # race-tests everything 3.9.6 fixed on the ChaCha path.
     chacha20_xor(_h_akey + idx * 32, _h_anonce + idx * 12, 1,
-                 _h_apt + idx * 32, 32, cct);
+      _h_apt + idx * 32, 32, cct);
     poly1305_mac(_h_akey + idx * 32, _h_apt + idx * 32, 32, ctag);
     return 0;
 }
@@ -132,9 +132,9 @@ fn _h_worker(arg): i64 {
     var rep = 0;
     while (rep < 50) {
         _h_compute(idx, _h_sig + idx * 64, _h_okm384 + idx * 48,
-                   _h_okm256 + idx * 32, _h_th + idx * 48,
-                   _h_gct + idx * 32, _h_gtag + idx * 16,
-                   _h_cct + idx * 32, _h_ctag + idx * 16);
+          _h_okm256 + idx * 32, _h_th + idx * 48,
+          _h_gct + idx * 32, _h_gtag + idx * 16,
+          _h_cct + idx * 32, _h_ctag + idx * 16);
         rep = rep + 1;
     }
     return 0;
@@ -208,9 +208,9 @@ fn main() {
         store8(_h_apt + i * 32 + 21, (i + 1) * 41 + 7);
 
         _h_compute(i, _e_sig + i * 64, _e_okm384 + i * 48,
-                   _e_okm256 + i * 32, _e_th + i * 48,
-                   _e_gct + i * 32, _e_gtag + i * 16,
-                   _e_cct + i * 32, _e_ctag + i * 16);
+          _e_okm256 + i * 32, _e_th + i * 48,
+          _e_gct + i * 32, _e_gtag + i * 16,
+          _e_cct + i * 32, _e_ctag + i * 16);
         i = i + 1;
     }
 

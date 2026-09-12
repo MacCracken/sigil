@@ -120,7 +120,7 @@ fn _seal_init(): i64 {
 
 # sgx_derive_seal_key_n — KDF with a caller-chosen key width (3.6.7).
 fn sgx_derive_seal_key_n(sealing_root, policy, measurement, isvsvn,
-                         key_id, key_id_len, out_key, out_key_len): i64 {
+  key_id, key_id_len, out_key, out_key_len): i64 {
     _seal_init();
 
     # Validate inputs.
@@ -159,18 +159,18 @@ fn sgx_derive_seal_key_n(sealing_root, policy, measurement, isvsvn,
     # HKDF-SHA256 over the constructed info. hkdf() returns 0 on
     # success, non-zero on error; normalise to sigil's 1/0 convention.
     var rc = hkdf(SGX_SEAL_SALT, SGX_SEAL_SALT_LEN,
-                  sealing_root, 32,
-                  _seal_info, 35 + key_id_len,
-                  out_key, out_key_len);
+      sealing_root, 32,
+      _seal_info, 35 + key_id_len,
+      out_key, out_key_len);
     if (rc != 0) { return 0; }
     return 1;
 }
 
 # Back-compatible 256-bit wrapper (original 7-arg surface).
 fn sgx_derive_seal_key(sealing_root, policy, measurement, isvsvn,
-                       key_id, key_id_len, out_key): i64 {
+  key_id, key_id_len, out_key): i64 {
     return sgx_derive_seal_key_n(sealing_root, policy, measurement, isvsvn,
-                                 key_id, key_id_len, out_key, SGX_SEAL_KEY_SIZE);
+      key_id, key_id_len, out_key, SGX_SEAL_KEY_SIZE);
 }
 
 # Aliases — same operation, names match the arc plan's surface.
@@ -179,28 +179,28 @@ fn sgx_derive_seal_key(sealing_root, policy, measurement, isvsvn,
 # step.
 
 fn sgx_seal_key(sealing_root, policy, measurement, isvsvn,
-                key_id, key_id_len, out_key): i64 {
+  key_id, key_id_len, out_key): i64 {
     return sgx_derive_seal_key(sealing_root, policy, measurement, isvsvn,
-                                key_id, key_id_len, out_key);
+      key_id, key_id_len, out_key);
 }
 
 fn sgx_unseal_key(sealing_root, policy, measurement, isvsvn,
-                  key_id, key_id_len, out_key): i64 {
+  key_id, key_id_len, out_key): i64 {
     return sgx_derive_seal_key(sealing_root, policy, measurement, isvsvn,
-                                key_id, key_id_len, out_key);
+      key_id, key_id_len, out_key);
 }
 
 # Width-parameterized seal / unseal aliases (3.6.7) — pass out_key_len
 # = SGX_SEAL_KEY_SIZE_128 (16) for an AES-128 key or _256 (32) for AES-256.
 
 fn sgx_seal_key_n(sealing_root, policy, measurement, isvsvn,
-                  key_id, key_id_len, out_key, out_key_len): i64 {
+  key_id, key_id_len, out_key, out_key_len): i64 {
     return sgx_derive_seal_key_n(sealing_root, policy, measurement, isvsvn,
-                                 key_id, key_id_len, out_key, out_key_len);
+      key_id, key_id_len, out_key, out_key_len);
 }
 
 fn sgx_unseal_key_n(sealing_root, policy, measurement, isvsvn,
-                    key_id, key_id_len, out_key, out_key_len): i64 {
+  key_id, key_id_len, out_key, out_key_len): i64 {
     return sgx_derive_seal_key_n(sealing_root, policy, measurement, isvsvn,
-                                 key_id, key_id_len, out_key, out_key_len);
+      key_id, key_id_len, out_key, out_key_len);
 }

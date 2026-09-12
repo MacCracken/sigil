@@ -92,14 +92,14 @@ fn assert_batch_matches_serial(sv, paths, types, count, label) {
         var batch_vr = vec_get(batch_results, i);
 
         assert_eq(vresult_passed(batch_vr),
-                  vresult_passed(ref_vr),
-                  "passed matches serial");
+          vresult_passed(ref_vr),
+          "passed matches serial");
 
         var ref_art = vresult_artifact(ref_vr);
         var batch_art = vresult_artifact(batch_vr);
         assert_eq(artifact_trust_level(batch_art),
-                  artifact_trust_level(ref_art),
-                  "trust_level matches serial");
+          artifact_trust_level(ref_art),
+          "trust_level matches serial");
 
         # Content hash must be identical (same file contents).
         var ref_h = artifact_content_hash(ref_art);
@@ -128,11 +128,11 @@ fn assert_batch_is_deterministic(sv, paths, types, count) {
         var v1 = vec_get(r1, i);
         var v2 = vec_get(r2, i);
         assert_eq(vresult_passed(v1), vresult_passed(v2),
-                  "determinism: passed");
+          "determinism: passed");
         var a1 = vresult_artifact(v1);
         var a2 = vresult_artifact(v2);
         assert_eq(artifact_trust_level(a1), artifact_trust_level(a2),
-                  "determinism: trust_level");
+          "determinism: trust_level");
         i = i + 1;
     }
 }
@@ -159,20 +159,20 @@ fn main() {
 
     # Archetype 1: signed + in trust store → TRUST_VERIFIED
     var signed_path = write_test_file("/tmp/sigil_batch_signed.bin",
-                                       "signed-artifact-body");
+      "signed-artifact-body");
     var signed_art = sv_sign_artifact(sv, signed_path, &sk, kid,
-                                       ARTIFACT_SYSTEM_BINARY);
+      ARTIFACT_SYSTEM_BINARY);
     assert(signed_art != 0, "signed artifact registered");
 
     # Archetype 2: unknown (not in trust store) → TRUST_UNVERIFIED
     var unknown_path = write_test_file("/tmp/sigil_batch_unknown.bin",
-                                        "unknown-artifact-body");
+      "unknown-artifact-body");
 
     # Archetype 3: signed, then revoked → TRUST_REVOKED
     var revoked_path = write_test_file("/tmp/sigil_batch_revoked.bin",
-                                        "revoked-artifact-body");
+      "revoked-artifact-body");
     var revoked_art = sv_sign_artifact(sv, revoked_path, &sk, kid,
-                                        ARTIFACT_SYSTEM_BINARY);
+      ARTIFACT_SYSTEM_BINARY);
     assert(revoked_art != 0, "revoked artifact registered");
     var revoked_hash = artifact_content_hash(revoked_art);
     var re = revocation_entry_new(0, revoked_hash, "batch test", "admin");

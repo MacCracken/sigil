@@ -307,9 +307,9 @@ fn sv_verify_artifact(sv, path, artifact_type): i64 {
     # incur no contention.
     var a = vresult_artifact(vr);
     var ae = audit_artifact_verified(path, artifact_type,
-                                     artifact_trust_level(a),
-                                     vresult_passed(vr),
-                                     artifact_content_hash(a));
+      artifact_trust_level(a),
+      vresult_passed(vr),
+      artifact_content_hash(a));
     alog_record(load64(sv + 48), ae);
     return vr;
 }
@@ -728,9 +728,9 @@ fn sv_snapshot_trust_store(sv): i64 {
         var chash = vec_get(keys, i);
         var artifact = map_get(store, chash);
         map_set(snap, chash, _snap_entry_new(
-        artifact_trust_level(artifact),
-        artifact_path(artifact)
-        ));
+            artifact_trust_level(artifact),
+            artifact_path(artifact)
+            ));
         i = i + 1;
     }
     return snap;
@@ -801,22 +801,22 @@ fn sv_diff_trust_store(sv, old_snap): i64 {
         var new_art = map_get(store, chash);
         if (old_snap_entry == 0) {
             var ac = artifact_change_new(
-            chash,
-            artifact_path(new_art),
-            0 - 1,
-            artifact_trust_level(new_art)
-            );
+              chash,
+              artifact_path(new_art),
+              0 - 1,
+              artifact_trust_level(new_art)
+              );
             vec_push(load64(diff), ac);
         } else {
             var old_tl = snap_entry_trust_level(old_snap_entry);
             var new_tl = artifact_trust_level(new_art);
             if (old_tl != new_tl) {
                 var ac = artifact_change_new(
-                chash,
-                artifact_path(new_art),
-                old_tl,
-                new_tl
-                );
+                  chash,
+                  artifact_path(new_art),
+                  old_tl,
+                  new_tl
+                  );
                 vec_push(load64(diff + 16), ac);
             }
         }
@@ -831,11 +831,11 @@ fn sv_diff_trust_store(sv, old_snap): i64 {
         if (map_get(store, chash) == 0) {
             var old_snap_entry = map_get(old_snap, chash);
             var ac = artifact_change_new(
-            chash,
-            snap_entry_path(old_snap_entry),
-            snap_entry_trust_level(old_snap_entry),
-            0 - 1
-            );
+              chash,
+              snap_entry_path(old_snap_entry),
+              snap_entry_trust_level(old_snap_entry),
+              0 - 1
+              );
             vec_push(load64(diff + 8), ac);
         }
         i = i + 1;
@@ -1180,9 +1180,9 @@ fn sv_verify_batch(sv, artifacts, count): i64 {
             var aatype = load64(artifacts + ai * 16 + 8);
             var aart = vresult_artifact(avr);
             var ae_b = audit_artifact_verified(apath, aatype,
-                                               artifact_trust_level(aart),
-                                               vresult_passed(avr),
-                                               artifact_content_hash(aart));
+              artifact_trust_level(aart),
+              vresult_passed(avr),
+              artifact_content_hash(aart));
             alog_record(load64(sv + 48), ae_b);
             ai = ai + 1;
         }

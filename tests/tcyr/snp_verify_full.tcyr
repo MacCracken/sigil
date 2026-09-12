@@ -74,19 +74,19 @@ fn main() {
 
     var r = snp_report_alloc();
     assert_eq(snp_report_parse(report_buf, SNP_REPORT_LEN, r), 1,
-              "fixture SNP report parses");
+      "fixture SNP report parses");
 
     # ============================================================
     # Group 1 — Happy path
     # ============================================================
     test_group("snp_report_verify_full — happy path");
     assert_eq(snp_report_verify_full(r, vcek_chain, VCEK_CHAIN_PEM_LEN,
-                                       root_der, ROOT_DER_LEN, NOW_IN_WINDOW), 1,
-              "end-to-end SEV-SNP verify against synthesized chain");
+        root_der, ROOT_DER_LEN, NOW_IN_WINDOW), 1,
+      "end-to-end SEV-SNP verify against synthesized chain");
 
     assert_eq(snp_report_verify_full(r, vcek_chain, VCEK_CHAIN_PEM_LEN,
-                                       root_der, ROOT_DER_LEN, 0), 1,
-              "now_unix=0 disables time check");
+        root_der, ROOT_DER_LEN, 0), 1,
+      "now_unix=0 disables time check");
 
     # ============================================================
     # Group 2 — Wrong root anchor
@@ -96,8 +96,8 @@ fn main() {
     var WRONG_ROOT_HEX = "308201a130820148a003020102021438d027306f383dd1d498df28c0cab9abb6a26173300a06082a8648ce3d040302301d311b301906035504030c12536967696c205465737420526f6f74204341301e170d3236303532323030333730365a170d3336303531393030333730365a301d311b301906035504030c12536967696c205465737420526f6f742043413059301306072a8648ce3d020106082a8648ce3d030107034200044d9f804c6dc263817b4ac3d5a6f86be88ff2961103cee9ca304d6fcde5e37c7c3f5b953938324747f44e2bdd51d849ce61ba7c7dcd8c5e63f687f6f65a3c0a9ea3663064301d0603551d0e04160414c97b20ae5ba585c6752e0a9ba7200be5a658d768301f0603551d23041830168014c97b20ae5ba585c6752e0a9ba7200be5a658d76830120603551d130101ff040830060101ff020101300e0603551d0f0101ff040403020106300a06082a8648ce3d040302034700304402201f82729ebb77cca9b15528a89c8580537784e71e1a5face3040de63d9578ac7d02206ec8546b67b2c3448d038bd0d19f1c38845135f44b77ae75e163e95e1d17fe4a";
     var wrong_root = hex_decode(WRONG_ROOT_HEX, 842);
     assert_eq(snp_report_verify_full(r, vcek_chain, VCEK_CHAIN_PEM_LEN,
-                                       wrong_root, 421, NOW_IN_WINDOW), 0,
-              "verify against unrelated root rejected");
+        wrong_root, 421, NOW_IN_WINDOW), 0,
+      "verify against unrelated root rejected");
 
     # ============================================================
     # Group 3 — Malformed inputs
@@ -105,22 +105,22 @@ fn main() {
     test_group("snp_report_verify_full — malformed inputs");
 
     assert_eq(snp_report_verify_full(r, vcek_chain, 0,
-                                       root_der, ROOT_DER_LEN, NOW_IN_WINDOW), 0,
-              "zero-length VCEK chain rejected");
+        root_der, ROOT_DER_LEN, NOW_IN_WINDOW), 0,
+      "zero-length VCEK chain rejected");
     assert_eq(snp_report_verify_full(r, vcek_chain, VCEK_CHAIN_PEM_LEN,
-                                       root_der, 0, NOW_IN_WINDOW), 0,
-              "zero-length root rejected");
+        root_der, 0, NOW_IN_WINDOW), 0,
+      "zero-length root rejected");
 
     # Negative VCEK chain length.
     assert_eq(snp_report_verify_full(r, vcek_chain, 0 - 1,
-                                       root_der, ROOT_DER_LEN, NOW_IN_WINDOW), 0,
-              "negative chain length rejected");
+        root_der, ROOT_DER_LEN, NOW_IN_WINDOW), 0,
+      "negative chain length rejected");
 
     # Garbage cert chain bytes (not PEM).
     var garbage = "not pem data at all just random bytes";
     assert_eq(snp_report_verify_full(r, garbage, 36,
-                                       root_der, ROOT_DER_LEN, NOW_IN_WINDOW), 0,
-              "non-PEM chain bytes rejected");
+        root_der, ROOT_DER_LEN, NOW_IN_WINDOW), 0,
+      "non-PEM chain bytes rejected");
 
     # ============================================================
     # Group 4 — Tampered report
@@ -133,10 +133,10 @@ fn main() {
     store8(report_t + 0x90, (load8(report_t + 0x90) & 0xFF) ^ 0x01);
     var rt = snp_report_alloc();
     assert_eq(snp_report_parse(report_t, SNP_REPORT_LEN, rt), 1,
-              "tampered report still parses");
+      "tampered report still parses");
     assert_eq(snp_report_verify_full(rt, vcek_chain, VCEK_CHAIN_PEM_LEN,
-                                       root_der, ROOT_DER_LEN, NOW_IN_WINDOW), 0,
-              "tampered measurement fails verify_full");
+        root_der, ROOT_DER_LEN, NOW_IN_WINDOW), 0,
+      "tampered measurement fails verify_full");
 
     # ============================================================
     # Group 5 — Wrong-curve leaf rejection
@@ -160,8 +160,8 @@ fn main() {
     # confirms a non-P-384 leaf cannot satisfy verify_full.
     var p256_chain = hex_decode(P256_LEAF_PEM_HEX, 2 * 627);
     assert_eq(snp_report_verify_full(r, p256_chain, 627,
-                                       root_der, ROOT_DER_LEN, NOW_IN_WINDOW), 0,
-              "P-256-only chain (no P-384 leaf) rejected");
+        root_der, ROOT_DER_LEN, NOW_IN_WINDOW), 0,
+      "P-256-only chain (no P-384 leaf) rejected");
 
     return assert_summary();
 }

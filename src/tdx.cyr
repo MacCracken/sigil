@@ -127,14 +127,14 @@ fn tdx_quote_alloc(): i64 {
 # to a shared lib/le.cyr can wait until a third consumer arrives).
 fn _tdx_load_u16(buf, off): i64 {
     return (load8(buf + off) & 0xFF)
-         | ((load8(buf + off + 1) & 0xFF) << 8);
+    | ((load8(buf + off + 1) & 0xFF) << 8);
 }
 
 fn _tdx_load_u32(buf, off): i64 {
     return (load8(buf + off) & 0xFF)
-         | ((load8(buf + off + 1) & 0xFF) << 8)
-         | ((load8(buf + off + 2) & 0xFF) << 16)
-         | ((load8(buf + off + 3) & 0xFF) << 24);
+    | ((load8(buf + off + 1) & 0xFF) << 8)
+    | ((load8(buf + off + 2) & 0xFF) << 16)
+    | ((load8(buf + off + 3) & 0xFF) << 24);
 }
 
 # ================================================================
@@ -230,7 +230,7 @@ fn tdx_quote_parse(buf, buf_len, out): i64 {
     # own signature (qe_report_sig) is always 64 B (Intel PCK is
     # P-256 across all variants); only ecdsa_sig + ak widen.
     var sig_min_fixed = sig_w + ak_w + 384 + TDX_ECDSA_SIG_SIZE_P256
-                       + 2 + 2 + 4;
+    + 2 + 2 + 4;
     if (sig_data_len < sig_min_fixed) { return 0; }
 
     store64(out + 56, sig_data_len);
@@ -368,14 +368,14 @@ fn tdx_quote_verify_with_pck(quote, pck_pk): i64 {
     var ecdsa_sig = tdx_quote_ecdsa_sig_ptr(quote);
     if (att_key_type == TDX_ATT_KEY_TYPE_ECDSA_P384) {
         if (ecdsa_p384_verify(ak, _tdxv_quote_body,
-                               TDX_QUOTE_SIGNED_PREFIX_SIZE,
-                               ecdsa_sig) != 1) {
+            TDX_QUOTE_SIGNED_PREFIX_SIZE,
+            ecdsa_sig) != 1) {
             return 0;
         }
     } else {
         if (ecdsa_p256_verify(ak, _tdxv_quote_body,
-                               TDX_QUOTE_SIGNED_PREFIX_SIZE,
-                               ecdsa_sig) != 1) {
+            TDX_QUOTE_SIGNED_PREFIX_SIZE,
+            ecdsa_sig) != 1) {
             return 0;
         }
     }
@@ -434,7 +434,7 @@ fn tdx_quote_verify_full_into(quote, root_ca_der, root_ca_der_len, now_unix, are
     var der_pool = _x509_scratch(arena, cert_data_len);
     if (der_pool == 0) { return 0; }
     var n = pem_decode_certs_into(cert_data, cert_data_len,
-                              &chain, TDX_VERIFY_FULL_MAX_CERTS, der_pool, cert_data_len);
+      &chain, TDX_VERIFY_FULL_MAX_CERTS, der_pool, cert_data_len);
     if (n < 1) { return 0; }
 
     # Step 3 — parse each in-quote cert + caller's root.

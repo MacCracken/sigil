@@ -3,12 +3,11 @@
 alloc
 freelist
 string
-tagged
 process
 ct
 thread
 thread_local
 syscalls
-fmt
 vec
 str
+fmt

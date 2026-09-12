@@ -146,18 +146,18 @@ fn main() {
     var ac_cert_len = AC_CERT_HEX_N / 2;
     var ac_key = alloc(2384);
     assert_eq(rsa_privkey_from_der(ac_key_der, AC_KEY_HEX_N / 2, ac_key) >= 0, 1,
-        "verify fixture: RSA private key parses");
+      "verify fixture: RSA private key parses");
 
     # Sign the same synthetic 256-byte PE the hash KAT above uses.
     var sgn = alloc(8192);
     var sgn_len = 0;
     assert_eq(authenticode_pe_sign(&pe, 256, ac_key, ac_cert, ac_cert_len,
-                                   sgn, &sgn_len), 0, "sign the synthetic PE");
+        sgn, &sgn_len), 0, "sign the synthetic PE");
 
     # ---- positive ------------------------------------------------
     var rsn = 0 - 1;
     assert_eq(authenticode_pe_verify_ex(sgn, sgn_len, ac_cert, ac_cert_len, 0, &rsn), 1,
-        "signed PE verifies against its own db cert");
+      "signed PE verifies against its own db cert");
     assert_eq(rsn, AC_VOK, "reason is AC_VOK");
 
     # `authenticode_pe_hash_signed` over the SIGNED image must reproduce the
@@ -167,7 +167,7 @@ fn main() {
     authenticode_pe_hash(&pe, 256, &h_uns);
     assert_eq(authenticode_pe_hash_signed(sgn, sgn_len, &h_sgn), 0, "hash_signed parses");
     assert_eq(ct_eq_bytes(&h_uns, &h_sgn, 32), 1,
-        "hash_signed(signed) == hash(unsigned)");
+      "hash_signed(signed) == hash(unsigned)");
 
     # A CheckSum edit is inside a SKIP region, so it must NOT break the
     # signature — this proves the skip arithmetic is actually applied on the
@@ -175,7 +175,7 @@ fn main() {
     var cks_save = load8(sgn + 0x98);
     store8(sgn + 0x98, cks_save ^ 0xFF);
     assert_eq(authenticode_pe_verify(sgn, sgn_len, ac_cert, ac_cert_len, 0), 1,
-        "CheckSum byte is skipped — still verifies");
+      "CheckSum byte is skipped — still verifies");
     store8(sgn + 0x98, cks_save);
 
     # ---- the 3.12.2 pad-in-hash fix ------------------------------
@@ -198,16 +198,16 @@ fn main() {
     var sgn253 = alloc(8192);
     var sgn253_len = 0;
     assert_eq(authenticode_pe_sign(&pe253, 253, ac_key, ac_cert, ac_cert_len,
-                                   sgn253, &sgn253_len), 0, "sign an unaligned (253-byte) PE");
+        sgn253, &sgn253_len), 0, "sign an unaligned (253-byte) PE");
     assert_eq(authenticode_pe_verify(sgn253, sgn253_len, ac_cert, ac_cert_len, 0), 1,
-        "unaligned PE round-trips (pad IS inside the hash — 3.12.2 fix)");
+      "unaligned PE round-trips (pad IS inside the hash — 3.12.2 fix)");
 
     # ---- negative: image / digest binding ------------------------
     var b_save = load8(sgn + 0x50);
     store8(sgn + 0x50, b_save ^ 0x01);
     rsn = 0 - 1;
     assert_eq(authenticode_pe_verify_ex(sgn, sgn_len, ac_cert, ac_cert_len, 0, &rsn), 0,
-        "tampered image body rejected");
+      "tampered image body rejected");
     assert_eq(rsn, AC_VERR_IMAGE_HASH, "  reason AC_VERR_IMAGE_HASH");
     store8(sgn + 0x50, b_save);
 
@@ -219,21 +219,21 @@ fn main() {
     _wr32(sgn, secdir, tab_off + 1);                 # unaligned table offset
     rsn = 0 - 1;
     assert_eq(authenticode_pe_verify_ex(sgn, sgn_len, ac_cert, ac_cert_len, 0, &rsn), 0,
-        "unaligned cert-table offset rejected");
+      "unaligned cert-table offset rejected");
     assert_eq(rsn, AC_VERR_CERTTAB, "  reason AC_VERR_CERTTAB");
 
     _wr32(sgn, secdir, sgn_len + 4096);              # table past EOF
     assert_eq(authenticode_pe_verify(sgn, sgn_len, ac_cert, ac_cert_len, 0), 0,
-        "cert table past EOF rejected");
+      "cert table past EOF rejected");
 
     _wr32(sgn, secdir, 0xFFFFFFF0);                  # near-2^32 offset
     assert_eq(authenticode_pe_verify(sgn, sgn_len, ac_cert, ac_cert_len, 0), 0,
-        "near-2^32 cert-table offset rejected (no wrap)");
+      "near-2^32 cert-table offset rejected (no wrap)");
     _wr32(sgn, secdir, tab_off);
 
     _wr32(sgn, secdir + 4, 8);                       # size below dwLength
     assert_eq(authenticode_pe_verify(sgn, sgn_len, ac_cert, ac_cert_len, 0), 0,
-        "cert-table size below dwLength rejected");
+      "cert-table size below dwLength rejected");
     _wr32(sgn, secdir + 4, tab_size);
 
     # ---- negative: WIN_CERTIFICATE header ------------------------
@@ -241,53 +241,53 @@ fn main() {
     _wr16(sgn, tab_off + 6, 0x0001);                 # WIN_CERT_TYPE_X509
     rsn = 0 - 1;
     assert_eq(authenticode_pe_verify_ex(sgn, sgn_len, ac_cert, ac_cert_len, 0, &rsn), 0,
-        "wrong wCertificateType rejected");
+      "wrong wCertificateType rejected");
     assert_eq(rsn, AC_VERR_WINCERT, "  reason AC_VERR_WINCERT");
     _wr16(sgn, tab_off + 6, 0x0002);
 
     _wr16(sgn, tab_off + 4, 0x0100);                 # wrong revision
     assert_eq(authenticode_pe_verify(sgn, sgn_len, ac_cert, ac_cert_len, 0), 0,
-        "wrong wRevision rejected");
+      "wrong wRevision rejected");
     _wr16(sgn, tab_off + 4, 0x0200);
 
     _wr32(sgn, tab_off, 4);                          # dwLength below the header
     assert_eq(authenticode_pe_verify(sgn, sgn_len, ac_cert, ac_cert_len, 0), 0,
-        "dwLength < 9 rejected");
+      "dwLength < 9 rejected");
     _wr32(sgn, tab_off, dwlen_save);
 
     # ---- negative: unsigned / truncated / malformed PE -----------
     rsn = 0 - 1;
     assert_eq(authenticode_pe_verify_ex(&pe, 256, ac_cert, ac_cert_len, 0, &rsn), 0,
-        "unsigned image rejected");
+      "unsigned image rejected");
     assert_eq(rsn, AC_VERR_NO_SIG, "  reason AC_VERR_NO_SIG");
 
     rsn = 0 - 1;
     assert_eq(authenticode_pe_verify_ex(sgn, 0x20, ac_cert, ac_cert_len, 0, &rsn), 0,
-        "pe_len below the DOS header rejected (no OOB read)");
+      "pe_len below the DOS header rejected (no OOB read)");
     assert_eq(rsn, AC_VERR_PE, "  reason AC_VERR_PE");
 
     assert_eq(authenticode_pe_verify(sgn, tab_off + 4, ac_cert, ac_cert_len, 0), 0,
-        "truncated inside the cert table rejected");
+      "truncated inside the cert table rejected");
 
     var lf_save = _pe_rd32(sgn, 0x3C);
     _wr32(sgn, 0x3C, sgn_len);                       # e_lfanew past EOF
     assert_eq(authenticode_pe_verify(sgn, sgn_len, ac_cert, ac_cert_len, 0), 0,
-        "e_lfanew past EOF rejected");
+      "e_lfanew past EOF rejected");
     _wr32(sgn, 0x3C, 0x10);                          # e_lfanew inside the DOS stub
     assert_eq(authenticode_pe_verify(sgn, sgn_len, ac_cert, ac_cert_len, 0), 0,
-        "e_lfanew inside the DOS header rejected");
+      "e_lfanew inside the DOS header rejected");
     _wr32(sgn, 0x3C, lf_save);
 
     var mg_save = _pe_rd16(sgn, 0x58);
     _wr16(sgn, 0x58, 0x0107);                        # unknown optional-header magic
     assert_eq(authenticode_pe_verify(sgn, sgn_len, ac_cert, ac_cert_len, 0), 0,
-        "unknown optional-header magic rejected (3.12.2 allow-list)");
+      "unknown optional-header magic rejected (3.12.2 allow-list)");
     _wr16(sgn, 0x58, mg_save);
 
     var nrva_save = _pe_rd32(sgn, 0x58 + 108);
     _wr32(sgn, 0x58 + 108, 3);                       # NumberOfRvaAndSizes < 5
     assert_eq(authenticode_pe_verify(sgn, sgn_len, ac_cert, ac_cert_len, 0), 0,
-        "NumberOfRvaAndSizes < 5 rejected (3.12.2)");
+      "NumberOfRvaAndSizes < 5 rejected (3.12.2)");
     _wr32(sgn, 0x58 + 108, nrva_save);
 
     # ---- negative: PKCS#7 / signature ----------------------------
@@ -296,7 +296,7 @@ fn main() {
     store8(sgn + p7_off, 0x31);                      # ContentInfo not a SEQUENCE
     rsn = 0 - 1;
     assert_eq(authenticode_pe_verify_ex(sgn, sgn_len, ac_cert, ac_cert_len, 0, &rsn), 0,
-        "malformed ContentInfo rejected");
+      "malformed ContentInfo rejected");
     assert_eq(rsn, AC_VERR_PKCS7, "  reason AC_VERR_PKCS7");
     store8(sgn + p7_off, ci_save);
 
@@ -307,7 +307,7 @@ fn main() {
     store8(sgn + last, l_save ^ 0x01);
     rsn = 0 - 1;
     assert_eq(authenticode_pe_verify_ex(sgn, sgn_len, ac_cert, ac_cert_len, 0, &rsn), 0,
-        "tampered signature rejected");
+      "tampered signature rejected");
     assert_eq(rsn, AC_VERR_SIGNATURE, "  reason AC_VERR_SIGNATURE");
     store8(sgn + last, l_save);
 
@@ -315,14 +315,14 @@ fn main() {
     var other_cert = hex_decode(AC_CA_CERT_HEX, AC_CA_CERT_HEX_N);
     rsn = 0 - 1;
     assert_eq(authenticode_pe_verify_ex(sgn, sgn_len, other_cert,
-                                        AC_CA_CERT_HEX_N / 2, 0, &rsn), 0,
-        "valid image, WRONG trust anchor rejected");
+        AC_CA_CERT_HEX_N / 2, 0, &rsn), 0,
+      "valid image, WRONG trust anchor rejected");
     assert_eq(rsn, AC_VERR_TRUST, "  reason AC_VERR_TRUST");
 
     # Still verifies against the right anchor after all that mutation —
     # proves every restore above was complete.
     assert_eq(authenticode_pe_verify(sgn, sgn_len, ac_cert, ac_cert_len, 0), 1,
-        "blob restored intact after the negative sweep");
+      "blob restored intact after the negative sweep");
 
     # ============================================================
     # Chain-mode verify: db holds a CA, signer is a leaf under it.
@@ -336,20 +336,20 @@ fn main() {
     var ca_cert_len = AC_CA_CERT_HEX_N / 2;
     var lf_key = alloc(2384);
     assert_eq(rsa_privkey_from_der(lf_key_der, AC_LEAF_KEY_HEX_N / 2, lf_key) >= 0, 1,
-        "chain fixture: leaf private key parses");
+      "chain fixture: leaf private key parses");
 
     var csgn = alloc(8192);
     var csgn_len = 0;
     assert_eq(authenticode_pe_sign(&pe, 256, lf_key, lf_cert, lf_cert_len,
-                                   csgn, &csgn_len), 0, "sign with the leaf key");
+        csgn, &csgn_len), 0, "sign with the leaf key");
     assert_eq(authenticode_pe_verify_chain(csgn, csgn_len, ca_cert, ca_cert_len, 0), 1,
-        "leaf-signed PE verifies to the CA anchor");
+      "leaf-signed PE verifies to the CA anchor");
     # Anchor-equality must REJECT it — the signer is the leaf, not the CA.
     assert_eq(authenticode_pe_verify(csgn, csgn_len, ca_cert, ca_cert_len, 0), 0,
-        "anchor-equality rejects a leaf signed under the CA");
+      "anchor-equality rejects a leaf signed under the CA");
     # And the CA must not vouch for the unrelated self-signed db cert.
     assert_eq(authenticode_pe_verify_chain(sgn, sgn_len, ca_cert, ca_cert_len, 0), 0,
-        "chain mode rejects a signer outside the CA");
+      "chain mode rejects a signer outside the CA");
 
     # ============================================================
     # ECDSA P-256 signer variant (3.12.2) — the other half of P4.
@@ -363,16 +363,16 @@ fn main() {
     var esgn = alloc(8192);
     var esgn_len = 0;
     assert_eq(authenticode_pe_sign_p256(&pe, 256, ec_scalar, ec_cert, ec_cert_len,
-                                        esgn, &esgn_len), 0, "P-256 sign the synthetic PE");
+        esgn, &esgn_len), 0, "P-256 sign the synthetic PE");
     rsn = 0 - 1;
     assert_eq(authenticode_pe_verify_ex(esgn, esgn_len, ec_cert, ec_cert_len, 0, &rsn), 1,
-        "P-256 signed PE verifies");
+      "P-256 signed PE verifies");
     assert_eq(rsn, AC_VOK, "  reason AC_VOK");
 
     var eb_save = load8(esgn + 0x50);
     store8(esgn + 0x50, eb_save ^ 0x01);
     assert_eq(authenticode_pe_verify(esgn, esgn_len, ec_cert, ec_cert_len, 0), 0,
-        "P-256: tampered image body rejected");
+      "P-256: tampered image body rejected");
     store8(esgn + 0x50, eb_save);
 
     var etab = _pe_rd32(esgn, secdir);
@@ -381,14 +381,14 @@ fn main() {
     var el_save = load8(esgn + elast);
     store8(esgn + elast, el_save ^ 0x01);
     assert_eq(authenticode_pe_verify(esgn, esgn_len, ec_cert, ec_cert_len, 0), 0,
-        "P-256: tampered signature rejected");
+      "P-256: tampered signature rejected");
     store8(esgn + elast, el_save);
 
     # Cross-algorithm: the RSA anchor must not validate the P-256 image.
     assert_eq(authenticode_pe_verify(esgn, esgn_len, ac_cert, ac_cert_len, 0), 0,
-        "P-256 image rejected under the RSA anchor");
+      "P-256 image rejected under the RSA anchor");
     assert_eq(authenticode_pe_verify(esgn, esgn_len, ec_cert, ec_cert_len, 0), 1,
-        "P-256 blob restored intact");
+      "P-256 blob restored intact");
 
 
     # ============================================================
@@ -419,7 +419,7 @@ fn main() {
 
     rsn = 0 - 1;
     assert_eq(authenticode_pe_verify_ex(at_pe, at_len, ac_cert, ac_cert_len, 0, &rsn), 1,
-        "signedAttrs + sha256WithRSAEncryption binary verifies");
+      "signedAttrs + sha256WithRSAEncryption binary verifies");
     assert_eq(rsn, AC_VOK, "  reason AC_VOK");
 
     # Tamper the image body: the signedAttrs messageDigest binds the
@@ -429,7 +429,7 @@ fn main() {
     store8(at_pe + 0x50, at_b ^ 0x01);
     rsn = 0 - 1;
     assert_eq(authenticode_pe_verify_ex(at_pe, at_len, ac_cert, ac_cert_len, 0, &rsn), 0,
-        "signedAttrs: tampered image body rejected");
+      "signedAttrs: tampered image body rejected");
     assert_eq(rsn, AC_VERR_IMAGE_HASH, "  reason AC_VERR_IMAGE_HASH");
     store8(at_pe + 0x50, at_b);
 
@@ -441,12 +441,12 @@ fn main() {
     store8(at_pe + at_last, at_l ^ 0x01);
     rsn = 0 - 1;
     assert_eq(authenticode_pe_verify_ex(at_pe, at_len, ac_cert, ac_cert_len, 0, &rsn), 0,
-        "signedAttrs: tampered signature rejected");
+      "signedAttrs: tampered signature rejected");
     assert_eq(rsn, AC_VERR_SIGNATURE, "  reason AC_VERR_SIGNATURE");
     store8(at_pe + at_last, at_l);
 
     assert_eq(authenticode_pe_verify(at_pe, at_len, ac_cert, ac_cert_len, 0), 1,
-        "signedAttrs blob restored intact");
+      "signedAttrs blob restored intact");
 
     return assert_summary();
 }

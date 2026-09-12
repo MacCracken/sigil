@@ -114,11 +114,11 @@ fn der_int_small(v): i64 {
 # guard 0x00 is prepended if the top bit is set.
 fn der_int_bytes(be, len): i64 {
     if (len > 0) { if ((load8(be) & 0x80) != 0) {
-        var out = alloc(len + 1);
-        store8(out, 0);
-        memcpy(out + 1, be, len);
-        return der_tlv(0x02, out, len + 1);
-    } }
+            var out = alloc(len + 1);
+            store8(out, 0);
+            memcpy(out + 1, be, len);
+            return der_tlv(0x02, out, len + 1);
+        } }
     return der_tlv(0x02, be, len);
 }
 
@@ -154,7 +154,7 @@ fn der_algid_null(oid_bytes, oid_len): i64 {
 fn _pe_rd16(pe, off): i64 { return (load8(pe + off) & 0xFF) | ((load8(pe + off + 1) & 0xFF) << 8); }
 fn _pe_rd32(pe, off): i64 {
     return (load8(pe + off) & 0xFF) | ((load8(pe + off + 1) & 0xFF) << 8)
-         | ((load8(pe + off + 2) & 0xFF) << 16) | ((load8(pe + off + 3) & 0xFF) << 24);
+    | ((load8(pe + off + 2) & 0xFF) << 16) | ((load8(pe + off + 3) & 0xFF) << 24);
 }
 
 # Locate the optional header's CheckSum field and the IMAGE_DIRECTORY_ENTRY_
@@ -1025,7 +1025,7 @@ fn _ac_verify_sig(p7, p7_len, d, c, out_reason): i64 {
         }
         var ct_off = 0; var ct_len = 0;
         if (_ac_attr_find(p7, p7_len, at_c, at_n, &_OID_ATTR_CONTENTTYPE, 9,
-                          &ct_off, &ct_len) != 1) {
+            &ct_off, &ct_len) != 1) {
             store64(out_reason, AC_VERR_ATTRS); return 0;
         }
         var cto_c = 0; var cto_n = 0;
@@ -1037,7 +1037,7 @@ fn _ac_verify_sig(p7, p7_len, d, c, out_reason): i64 {
         # messageDigest attribute must equal SHA-256(SpcIndirectDataContent).
         var mdv_off = 0; var mdv_len = 0;
         if (_ac_attr_find(p7, p7_len, at_c, at_n, &_OID_ATTR_MSGDIGEST, 9,
-                          &mdv_off, &mdv_len) != 1) {
+            &mdv_off, &mdv_len) != 1) {
             store64(out_reason, AC_VERR_ATTRS); return 0;
         }
         var mo_c = 0; var mo_n = 0;
@@ -1067,7 +1067,7 @@ fn _ac_verify_sig(p7, p7_len, d, c, out_reason): i64 {
             store64(out_reason, AC_VERR_SIGNER); return 0;
         }
         if (_ecdsa_p256_verify_digest_der(x509_cert_pubkey(c), &dig, 32,
-                                          p7 + sig_off, sig_len) != 1) {
+            p7 + sig_off, sig_len) != 1) {
             store64(out_reason, AC_VERR_SIGNATURE); return 0;
         }
         return 1;
@@ -1087,7 +1087,7 @@ fn _ac_verify_sig(p7, p7_len, d, c, out_reason): i64 {
     var pfx[32];
     var pl = _rsa_di_sha256(&pfx);
     if (_rsa_pkcs1v15_check(rblk, nlen, rblk + 512, elen, &pfx, pl,
-                            &dig, 32, p7 + sig_off, sig_len) != 1) {
+        &dig, 32, p7 + sig_off, sig_len) != 1) {
         store64(out_reason, AC_VERR_SIGNATURE); return 0;
     }
     return 1;

@@ -47,10 +47,10 @@ fn sigil_ima_snapshot(): i64 {
     }
     var ag = result_unwrap(res_tag, res);
     return sigil_ima_snapshot_new(
-    ima_status_active(ag),
-    ima_status_measurement_count(ag),
-    ima_status_policy_loaded(ag)
-    );
+      ima_status_active(ag),
+      ima_status_measurement_count(ag),
+      ima_status_policy_loaded(ag)
+      );
 }
 
 # Convenience predicates — avoid allocating a snapshot when the

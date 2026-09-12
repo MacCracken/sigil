@@ -55,8 +55,8 @@ fn main() {
     var mac1[48];
     hmac_sha384(k1, 20, d1, 8, &mac1);
     assert_streq(hex_encode(&mac1, 48),
-    "afd03944d84895626b0825f4ab46907f15f9dadbe4101ec682aa034c7cebc59cfaea9ea9076ede7f4af152e8b2fa9cb6",
-    "TC1");
+      "afd03944d84895626b0825f4ab46907f15f9dadbe4101ec682aa034c7cebc59cfaea9ea9076ede7f4af152e8b2fa9cb6",
+      "TC1");
 
     # TC2: key "Jefe", data "what do ya want for nothing?"
     var k2 = hex_decode("4a656665", 8);
@@ -64,8 +64,8 @@ fn main() {
     var mac2[48];
     hmac_sha384(k2, 4, d2, 28, &mac2);
     assert_streq(hex_encode(&mac2, 48),
-    "af45d2e376484031617f78d2b58a6b1b9c7ef464f5a01b47e42ec3736322445e8e2240ca5e69e2c78b3239ecfab21649",
-    "TC2");
+      "af45d2e376484031617f78d2b58a6b1b9c7ef464f5a01b47e42ec3736322445e8e2240ca5e69e2c78b3239ecfab21649",
+      "TC2");
 
     # TC3: key 0xaa*20, data 0xdd*50
     var k3 = hex_decode("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 40);
@@ -73,8 +73,8 @@ fn main() {
     var mac3[48];
     hmac_sha384(k3, 20, d3, 50, &mac3);
     assert_streq(hex_encode(&mac3, 48),
-    "88062608d3e6ad8a0aa2ace014c8a86f0aa635d947ac9febe83ef4e55966144b2a5ab39dc13814b94e3ab6e101a34f27",
-    "TC3");
+      "88062608d3e6ad8a0aa2ace014c8a86f0aa635d947ac9febe83ef4e55966144b2a5ab39dc13814b94e3ab6e101a34f27",
+      "TC3");
 
     # TC4: key 0x01..0x19 (25 bytes), data 0xcd*50
     var k4 = hex_decode("0102030405060708090a0b0c0d0e0f10111213141516171819", 50);
@@ -82,8 +82,8 @@ fn main() {
     var mac4[48];
     hmac_sha384(k4, 25, d4, 50, &mac4);
     assert_streq(hex_encode(&mac4, 48),
-    "3e8a69b7783c25851933ab6290af6ca77a9981480850009cc5577c6e1f573b4e6801dd23c4a7d679ccf8a386c674cffb",
-    "TC4");
+      "3e8a69b7783c25851933ab6290af6ca77a9981480850009cc5577c6e1f573b4e6801dd23c4a7d679ccf8a386c674cffb",
+      "TC4");
 
     # TC6: key 0xaa*131 (> 128-byte block -> key-hash path), data
     # "Test Using Larger Than Block-Size Key - Hash Key First"
@@ -92,16 +92,16 @@ fn main() {
     var mac6[48];
     hmac_sha384(k6, 131, d6, 54, &mac6);
     assert_streq(hex_encode(&mac6, 48),
-    "4ece084485813e9088d2c63a041bc5b44f9ef1012a2b588f3cd11f05033ac4c60c2ef6ab4030fe8296248df163f44952",
-    "TC6 (long key)");
+      "4ece084485813e9088d2c63a041bc5b44f9ef1012a2b588f3cd11f05033ac4c60c2ef6ab4030fe8296248df163f44952",
+      "TC6 (long key)");
 
     # TC7: same 131-byte key, longer data
     var d7 = hex_decode("5468697320697320612074657374207573696e672061206c6172676572207468616e20626c6f636b2d73697a65206b657920616e642061206c6172676572207468616e20626c6f636b2d73697a6520646174612e20546865206b6579206e6565647320746f20626520686173686564206265666f7265206265696e6720757365642062792074686520484d414320616c676f726974686d2e", 304);
     var mac7[48];
     hmac_sha384(k6, 131, d7, 152, &mac7);
     assert_streq(hex_encode(&mac7, 48),
-    "6617178e941f020d351e2f254e8fd32c602420feb0b8fb9adccebb82461e99c5a678cc31e799176d3860e6110c46523e",
-    "TC7 (long key + long data)");
+      "6617178e941f020d351e2f254e8fd32c602420feb0b8fb9adccebb82461e99c5a678cc31e799176d3860e6110c46523e",
+      "TC7 (long key + long data)");
 
     # ============================================================
     # HKDF-SHA384 Vector A — RFC 5869 TC1 inputs over SHA-384
@@ -116,23 +116,23 @@ fn main() {
     var prkA[48];
     hkdf_extract_sha384(saltA, 13, ikmA, 22, &prkA);
     assert_streq(hex_encode(&prkA, 48),
-    "704b39990779ce1dc548052c7dc39f303570dd13fb39f7acc564680bef80e8dec70ee9a7e1f3e293ef68eceb072a5ade",
-    "A PRK");
+      "704b39990779ce1dc548052c7dc39f303570dd13fb39f7acc564680bef80e8dec70ee9a7e1f3e293ef68eceb072a5ade",
+      "A PRK");
 
     var okmA[42];
     var rcA = hkdf_expand_sha384(&prkA, 48, infoA, 10, &okmA, 42);
     assert_eq(rcA, 0, "A expand rc");
     assert_streq(hex_encode(&okmA, 42),
-    "9b5097a86038b805309076a44b3a9f38063e25b516dcbf369f394cfab43685f748b6457763e4f0204fc5",
-    "A OKM");
+      "9b5097a86038b805309076a44b3a9f38063e25b516dcbf369f394cfab43685f748b6457763e4f0204fc5",
+      "A OKM");
 
     # One-shot hkdf_sha384() must match.
     var okmAb[42];
     var rcAb = hkdf_sha384(saltA, 13, ikmA, 22, infoA, 10, &okmAb, 42);
     assert_eq(rcAb, 0, "A oneshot rc");
     assert_streq(hex_encode(&okmAb, 42),
-    "9b5097a86038b805309076a44b3a9f38063e25b516dcbf369f394cfab43685f748b6457763e4f0204fc5",
-    "A oneshot OKM");
+      "9b5097a86038b805309076a44b3a9f38063e25b516dcbf369f394cfab43685f748b6457763e4f0204fc5",
+      "A oneshot OKM");
 
     # ============================================================
     # HKDF-SHA384 Vector B — empty salt + empty info, 48-byte OKM
@@ -144,15 +144,15 @@ fn main() {
     var prkB[48];
     hkdf_extract_sha384(0, 0, ikmB, 22, &prkB);
     assert_streq(hex_encode(&prkB, 48),
-    "10e40cf072a4c5626e43dd22c1cf727d4bb140975c9ad0cbc8e45b40068f8f0ba57cdb598af9dfa6963a96899af047e5",
-    "B PRK (empty salt)");
+      "10e40cf072a4c5626e43dd22c1cf727d4bb140975c9ad0cbc8e45b40068f8f0ba57cdb598af9dfa6963a96899af047e5",
+      "B PRK (empty salt)");
 
     var okmB[48];
     var rcB = hkdf_expand_sha384(&prkB, 48, 0, 0, &okmB, 48);
     assert_eq(rcB, 0, "B expand rc");
     assert_streq(hex_encode(&okmB, 48),
-    "c8c96e710f89b0d7990bca68bcdec8cf854062e54c73a7abc743fade9b242daacc1cea5670415b52849c97c4e787c1f2",
-    "B OKM (empty info)");
+      "c8c96e710f89b0d7990bca68bcdec8cf854062e54c73a7abc743fade9b242daacc1cea5670415b52849c97c4e787c1f2",
+      "B OKM (empty info)");
 
     # ============================================================
     # HKDF-SHA384 Vector C — 96-byte OKM (two expand rounds)
@@ -166,15 +166,15 @@ fn main() {
     var prkC[48];
     hkdf_extract_sha384(saltC, 16, ikmC, 22, &prkC);
     assert_streq(hex_encode(&prkC, 48),
-    "fd766a798ddaf2515ad5d3c090155461ff38daef099be2192b9d7a0b0e5dc87ddf80ebe06f2b961fe8d3c3644064b743",
-    "C PRK");
+      "fd766a798ddaf2515ad5d3c090155461ff38daef099be2192b9d7a0b0e5dc87ddf80ebe06f2b961fe8d3c3644064b743",
+      "C PRK");
 
     var okmC[96];
     var rcC = hkdf_expand_sha384(&prkC, 48, infoC, 10, &okmC, 96);
     assert_eq(rcC, 0, "C expand rc");
     assert_streq(hex_encode(&okmC, 96),
-    "22a799dcff5a5a5fd7c477fa437dc634276dcad8df5e0919606ad2eed2a109ded47fd4911c158b3842215ce0ddeb449a14431cd1d6170e30ae467753a64acc738e423387e67f3026ba9a7ec4939413b570f0660000bb304212df1b4c35b015c6",
-    "C OKM (two rounds)");
+      "22a799dcff5a5a5fd7c477fa437dc634276dcad8df5e0919606ad2eed2a109ded47fd4911c158b3842215ce0ddeb449a14431cd1d6170e30ae467753a64acc738e423387e67f3026ba9a7ec4939413b570f0660000bb304212df1b4c35b015c6",
+      "C OKM (two rounds)");
 
     # ============================================================
     # Edge: out_len over RFC 5869 §2.3 cap (255*48 = 12240)

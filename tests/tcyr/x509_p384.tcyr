@@ -91,7 +91,7 @@ fn main() {
 
     var pk = x509_cert_pubkey(vcek);
     assert_eq(bytes_eq(pk, vcek_pub_expected, 96), 1,
-              "extracted P-384 pubkey matches openssl reference");
+      "extracted P-384 pubkey matches openssl reference");
 
     # ============================================================
     # Group 2 — P-256 root
@@ -110,9 +110,9 @@ fn main() {
 
     var inters = alloc(0);
     assert_eq(x509_verify_chain(vcek, inters, 0, root, NOW_IN_WINDOW), 1,
-              "P-256 root → P-384 leaf chain verifies");
+      "P-256 root → P-384 leaf chain verifies");
     assert_eq(x509_verify_chain(vcek, inters, 0, root, 0), 1,
-              "now_unix=0 disables time check (still verifies)");
+      "now_unix=0 disables time check (still verifies)");
 
     # ============================================================
     # Group 4 — wrong-issuer rejection (signature-width guard)
@@ -130,7 +130,7 @@ fn main() {
     var leaf_clone = x509_cert_alloc();
     memcpy(leaf_clone, vcek, 256);
     assert_eq(x509_verify_chain(leaf_clone, inters, 0, vcek, NOW_IN_WINDOW), 0,
-              "64-byte (P-256-signed) child rejected against a P-384 issuer");
+      "64-byte (P-256-signed) child rejected against a P-384 issuer");
 
     # ============================================================
     # Group 5 — P-384 chain-link green path (3.6.7)
@@ -150,7 +150,7 @@ fn main() {
     assert_eq(x509_parse(hex_decode(P384LEAF_HEX, 908), 454, p384leaf), 1, "P-384 leaf parses");
     assert_eq(x509_cert_sig_algo(p384leaf), X509_SIG_ECDSA_SHA384, "leaf sig algo = ECDSA-SHA384");
     assert_eq(x509_verify_chain(p384leaf, inters, 0, p384ca, 1782864000), 1,
-              "P-384 CA → P-384 leaf (SHA-384) chain verifies");
+      "P-384 CA → P-384 leaf (SHA-384) chain verifies");
     assert_eq(_x509_verify_link(p384leaf, p384ca), 1, "direct P-384 link verify");
     # Tamper the leaf's last signature byte → reject.
     var p384leaf_bad = x509_cert_alloc();

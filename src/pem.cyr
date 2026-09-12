@@ -258,7 +258,7 @@ fn _pem_b64_decode(pem, body_start, body_end, out, out_max): i64 {
 
 # _into variant — caller-provided DER scratch pool.
 fn pem_decode_certs_into(pem, pem_len, out_chain, max_certs,
-                          der_pool, der_pool_size): i64 {
+  der_pool, der_pool_size): i64 {
     _pem_init();
 
     if (pem_len < 0) { return 0 - 1; }
@@ -293,7 +293,7 @@ fn pem_decode_certs_into(pem, pem_len, out_chain, max_certs,
         if (pool_used > der_pool_size) { return 0 - 1; }  # paranoid
         var pool_avail = der_pool_size - pool_used;
         var decoded = _pem_b64_decode(pem, body_start, end_off,
-                                       der_pool + pool_used, pool_avail);
+          der_pool + pool_used, pool_avail);
         if (decoded < 0) { return 0 - 1; }
 
         # Record entry in the chain array.
@@ -323,5 +323,5 @@ fn pem_decode_certs(pem, pem_len, out_chain, max_certs): i64 {
     if (pem_len <= 0) { return 0 - 1; }
     var pool = alloc(pem_len);
     return pem_decode_certs_into(pem, pem_len, out_chain, max_certs,
-                                   pool, pem_len);
+      pool, pem_len);
 }
