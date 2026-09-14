@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.12.18] - 2026-09-13
+
+### Fixed
+
+- **`agnosys_uname` was dead on aarch64-Linux and a SIGSYS on Intel-Mac.** `src/sysinfo.cyr`
+  issued raw `syscall(63, out)` — x86_64 uname(2). On aarch64 63 is READ(2) (EBADF → `Err`,
+  so every uname consumer took its error path); on x86 Mach-O it was unrouted. Now
+  `sys_uname` from `lib/sys.cyr` (added to the stdlib set), which spells `SYS_UNAME` per
+  peer and synthesises the utsname from sysctl on Darwin. Found by the cyrius 6.6.4
+  raw-syscall sweep (`raw_syscall_literals_routed` gate; issue 2026-09-12).
+- **`luks_write_keyfile`'s `O_NOFOLLOW` was the x86_64 bit, spelled numerically.** On aarch64
+  131072 is O_LARGEFILE, so the symlink refusal was silently lost (O_EXCL still caught the
+  final component). `O_NOFOLLOW` is a stdlib symbol since cyrius 6.6.4 with each peer's own
+  value.
+
+### Changed
+
+- **Toolchain `6.6.2` → `6.6.4`** — the release that defines `O_NOFOLLOW` / `O_DIRECTORY` per
+  target and routes raw fstat/lstat on aarch64.
+
+## [3.12.17] - 2026-09-12
+
+### Changed
+
+- **Toolchain `6.6.0` → `6.6.2`.** No source change: this repo was already on the
+  value form, so the flip cost it nothing. Re-verified on every surface it ships —
+  build, tests, and any bench/fuzz/distlib target, including every
+  `[lib.<profile>]` bundle.
+
 ## [3.12.16] — 2026-09-06
 
 **Changed**
@@ -112,16 +141,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   call — passing several names to one invocation does not regenerate them all.
 
 ## [Unreleased]
-
-## [3.12.17] - 2026-09-12
-
-### Changed
-
-- **Toolchain `6.6.0` → `6.6.2`.** No source change: this repo was already on the
-  value form, so the flip cost it nothing. Re-verified on every surface it ships —
-  build, tests, and any bench/fuzz/distlib target, including every
-  `[lib.<profile>]` bundle.
-
 
 ## [3.12.14] — 2026-08-28 — the subprocess guard covers Windows too, not only agnos
 

@@ -353,10 +353,10 @@ fn luks_write_keyfile(key_ptr, key_len): i64 {
     var path_res_tag, path_res = luks_keyfile_path();
     if (is_err_result(path_res_tag) == 1) { return Err(path_res); }
     var keyfile = path_res;
-    # O_NOFOLLOW = 0x20000 (131072) on Linux. Not currently exported
-    # as a named constant in lib/syscalls_*.cyr; written numerically
-    # with a comment until the stdlib gets the symbol.
-    var open_flags = O_WRONLY | O_CREAT | O_TRUNC | O_EXCL | 131072;
+    # 3.12.18 (cyrius 6.6.4): O_NOFOLLOW is a stdlib symbol now, with the peer's own value —
+    # the literal 131072 was the x86_64 bit, which on aarch64 is O_LARGEFILE (the symlink
+    # refusal was silently lost there; O_EXCL still caught the final component).
+    var open_flags = O_WRONLY | O_CREAT | O_TRUNC | O_EXCL | O_NOFOLLOW;
     var fd = sys_open(keyfile, open_flags, 384);  # 0600
     if (fd < 0) {
         return sigil_err_syscall_failed(0 - fd, "failed to create keyfile (O_EXCL|O_NOFOLLOW)");
