@@ -116,6 +116,8 @@ var TDX_BODY_OFF_REPORT_DATA     = 520;
 #  136..255  reserved
 # ================================================================
 
+# Allocate a zeroed 256-byte TdxQuote struct to pass as `out` to `tdx_quote_parse`.
+# Bump-allocated via `alloc`; never `free()` it.
 fn tdx_quote_alloc(): i64 {
     var q = alloc(256);
     memset(q, 0, 256);
@@ -141,28 +143,50 @@ fn _tdx_load_u32(buf, off): i64 {
 # Field accessors
 # ================================================================
 
+# Accessor: the quote buffer pointer given to `tdx_quote_parse` (caller-owned, not copied).
 fn tdx_quote_buf(q): i64                { return load64(q + 0); }
+# Accessor: the quote length in bytes, as given to `tdx_quote_parse`.
 fn tdx_quote_buf_len(q): i64            { return load64(q + 8); }
+# Accessor: header `version` (u16 at quote +0); 4 after a successful parse.
 fn tdx_quote_version(q): i64            { return load64(q + 16); }
+# Accessor: header `att_key_type` (u16 at quote +2): 2 = ECDSA P-256, 3 = ECDSA P-384.
 fn tdx_quote_att_key_type(q): i64       { return load64(q + 24); }
+# Accessor: header `tee_type` (u32 at quote +4); 0x81 (TDX) after a successful parse.
 fn tdx_quote_tee_type(q): i64           { return load64(q + 32); }
 
+# Accessor: pointer to the 584-byte TD_QUOTE_BODY at quote +48, inside the caller's buffer.
 fn tdx_quote_td_body_ptr(q): i64        { return load64(q + 0) + load64(q + 48); }
 
+# Accessor: pointer to the 48-byte MRSEAM (TDX module measurement) at TD body +16.
 fn tdx_quote_mrseam_ptr(q): i64         { return tdx_quote_td_body_ptr(q) + TDX_BODY_OFF_MRSEAM; }
+# Accessor: pointer to the 48-byte MRSEAMSIGNER (TDX module signer) at TD body +64.
 fn tdx_quote_mrseamsigner_ptr(q): i64   { return tdx_quote_td_body_ptr(q) + TDX_BODY_OFF_MRSEAMSIGNER; }
+# Accessor: pointer to the 48-byte MRTD (initial TD contents measurement) at TD body +136.
 fn tdx_quote_mrtd_ptr(q): i64           { return tdx_quote_td_body_ptr(q) + TDX_BODY_OFF_MRTD; }
+# Accessor: pointer to the 48-byte MRCONFIGID (software-defined config ID) at TD body +184.
 fn tdx_quote_mrconfigid_ptr(q): i64     { return tdx_quote_td_body_ptr(q) + TDX_BODY_OFF_MRCONFIGID; }
+# Accessor: pointer to the 48-byte MROWNER (software-defined TD owner ID) at TD body +232.
 fn tdx_quote_mrowner_ptr(q): i64        { return tdx_quote_td_body_ptr(q) + TDX_BODY_OFF_MROWNER; }
+# Accessor: pointer to the 48-byte RTMR0 runtime measurement register at TD body +328.
 fn tdx_quote_rtmr0_ptr(q): i64          { return tdx_quote_td_body_ptr(q) + TDX_BODY_OFF_RTMR0; }
+# Accessor: pointer to the 48-byte RTMR1 runtime measurement register at TD body +376.
 fn tdx_quote_rtmr1_ptr(q): i64          { return tdx_quote_td_body_ptr(q) + TDX_BODY_OFF_RTMR1; }
+# Accessor: pointer to the 48-byte RTMR2 runtime measurement register at TD body +424.
 fn tdx_quote_rtmr2_ptr(q): i64          { return tdx_quote_td_body_ptr(q) + TDX_BODY_OFF_RTMR2; }
+# Accessor: pointer to the 48-byte RTMR3 runtime measurement register at TD body +472.
 fn tdx_quote_rtmr3_ptr(q): i64          { return tdx_quote_td_body_ptr(q) + TDX_BODY_OFF_RTMR3; }
+# Accessor: pointer to the 64-byte REPORTDATA (TD-supplied data) at TD body +520.
 fn tdx_quote_report_data_ptr(q): i64    { return tdx_quote_td_body_ptr(q) + TDX_BODY_OFF_REPORT_DATA; }
+# Accessor: pointer to the 8-byte TDATTRIBUTES field at TD body +120.
 fn tdx_quote_td_attributes_ptr(q): i64  { return tdx_quote_td_body_ptr(q) + TDX_BODY_OFF_TD_ATTRIBUTES; }
+# Accessor: pointer to the 8-byte XFAM (extended-features-available mask) at TD body +128.
 fn tdx_quote_xfam_ptr(q): i64           { return tdx_quote_td_body_ptr(q) + TDX_BODY_OFF_XFAM; }
 
+# Accessor: pointer to the attestation key (AK), raw big-endian Qx||Qy: 64 B for P-256,
+# 96 B for P-384 (see `tdx_quote_ak_size`).
 fn tdx_quote_ak_ptr(q): i64             { return load64(q + 0) + load64(q + 72); }
+# Accessor: pointer to the AK's signature (raw big-endian r||s) over header || TD body
+# (632 B): 64 B for P-256, 96 B for P-384 (see `tdx_quote_ecdsa_sig_size`).
 fn tdx_quote_ecdsa_sig_ptr(q): i64      { return load64(q + 0) + load64(q + 64); }
 
 # Per-att_key_type widths. The signature section's `ecdsa_sig` and
@@ -172,22 +196,36 @@ fn tdx_quote_ak_size(q): i64 {
     if (load64(q + 24) == TDX_ATT_KEY_TYPE_ECDSA_P384) { return TDX_AK_SIZE_P384; }
     return TDX_AK_SIZE_P256;
 }
+# Byte width of the quote's AK signature: 96 when att_key_type is 3 (P-384), else 64.
 fn tdx_quote_ecdsa_sig_size(q): i64 {
     if (load64(q + 24) == TDX_ATT_KEY_TYPE_ECDSA_P384) { return TDX_ECDSA_SIG_SIZE_P384; }
     return TDX_ECDSA_SIG_SIZE_P256;
 }
+# Accessor: pointer to the 384-byte QE report (SGX enclave-report layout) signed by the PCK.
 fn tdx_quote_qe_report_ptr(q): i64      { return load64(q + 0) + load64(q + 80); }
+# Accessor: pointer to the 64-byte PCK signature over the QE report (P-256, raw BE r||s).
 fn tdx_quote_qe_report_sig_ptr(q): i64  { return load64(q + 0) + load64(q + 88); }
+# Accessor: pointer to the qe_auth_data bytes (past their u16 size prefix); length via
+# `tdx_quote_qe_auth_data_len`.
 fn tdx_quote_qe_auth_data_ptr(q): i64   { return load64(q + 0) + load64(q + 96); }
+# Accessor: qe_auth_data length in bytes (u16 from the quote, 0..65535).
 fn tdx_quote_qe_auth_data_len(q): i64   { return load64(q + 104); }
+# Accessor: qe_cert_data_type (u16); `tdx_quote_verify_full` requires 5 (PCK chain, PEM).
 fn tdx_quote_cert_data_type(q): i64     { return load64(q + 112); }
+# Accessor: pointer to the qe_cert_data bytes (past the u16 type + u32 size); length via
+# `tdx_quote_cert_data_len`.
 fn tdx_quote_cert_data_ptr(q): i64      { return load64(q + 0) + load64(q + 120); }
+# Accessor: qe_cert_data length in bytes (u32 from the quote).
 fn tdx_quote_cert_data_len(q): i64      { return load64(q + 128); }
 
 # ================================================================
 # tdx_quote_parse — single-pass linear walk.
 # ================================================================
 
+# Parse a TDX v4 quote (`buf_len` bytes at `buf`) into the 256-byte TdxQuote at `out`.
+# Returns 1 on success; 0 if malformed or unsupported (version != 4, tee_type != 0x81,
+# att_key_type not 2/3, or bad lengths). Byte fields are not copied: accessors point into
+# `buf`, which must outlive `out`. On 0, `out` may be partly filled and must not be used.
 fn tdx_quote_parse(buf, buf_len, out): i64 {
     memset(out, 0, 256);
 
@@ -302,6 +340,10 @@ fn _tdxv_init(): i64 {
     return 0;
 }
 
+# Verify a successfully parsed quote against a caller-trusted PCK key (`pck_pk`: 64-byte BE
+# P-256 Qx||Qy): PCK sig over the QE report, AK binding in QE report_data, AK sig over
+# header || TD body (632 B); the AK steps use SHA-384 / P-384 when att_key_type is 3.
+# Returns 1 iff all pass, else 0. Not thread-safe: uses unbanked module-global scratch.
 fn tdx_quote_verify_with_pck(quote, pck_pk): i64 {
     _tdxv_init();
 

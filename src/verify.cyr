@@ -42,6 +42,9 @@ var _VSC_SHA_CTX    = 544;
 var _VSC_SIZE       = 768;
 var _VSC_MAX_CHECKS = 8;
 
+# Allocates one 768-byte VerifyScratch (fl_alloc) and wires its inline check vec to its
+# inline storage (len 0, fixed cap 16). Pass it to sv_verify_artifact_into; the returned vr
+# points into this block, so keep the block alive while the result is in use.
 fn verify_scratch_new(): i64 {
     var s = fl_alloc(_VSC_SIZE);
     # Wire the inline vec_hdr to the inline vec_data.
@@ -103,6 +106,9 @@ fn _vresult_add_check_scratch(s, name, passed, detail): i64 {
 #   +0   key_id       (C-string ptr)
 #   +8   path_prefix  (C-string ptr)
 
+# Allocates a 16-byte KeyPin (fl_alloc) pinning signer `key_id` to paths that start with
+# `path_prefix` (C-string pointers, stored not copied). The match is a plain byte-prefix
+# compare, not path-component aware. Returns the pointer; install it with sv_add_key_pin.
 fn key_pin_new(key_id, path_prefix): i64 {
     var kp = fl_alloc(16);
     store64(kp, key_id);
@@ -110,7 +116,9 @@ fn key_pin_new(key_id, path_prefix): i64 {
     return kp;
 }
 
+# Returns the pinned signer key-id C-string of KeyPin `kp`.
 fn kpin_key_id(kp): i64 { return load64(kp); }
+# Returns the path-prefix C-string of KeyPin `kp`.
 fn kpin_prefix(kp): i64 { return load64(kp + 8); }
 
 # ================================================================
@@ -125,6 +133,9 @@ fn kpin_prefix(kp): i64 { return load64(kp + 8); }
 #   +40  revoked_list     (vec)
 #   +48  pin_violations   (vec)
 
+# Allocates a 56-byte ComplianceReport (fl_alloc) with zero counts and five empty vecs
+# (compliant, below_minimum, unsigned, revoked, pin_violations). Returns the pointer;
+# sv_compliance_report fills it.
 fn compliance_report_new(): i64 {
     var cr = fl_alloc(56);
     store64(cr, 0);
@@ -137,12 +148,17 @@ fn compliance_report_new(): i64 {
     return cr;
 }
 
+# Returns the number of trust-store artifacts covered by report `cr`.
 fn creport_total(cr): i64 { return load64(cr); }
+# Returns the number of compliant artifacts in report `cr`.
 fn creport_compliant_count(cr): i64 { return load64(cr + 8); }
+# Returns 1 if every artifact in report `cr` is compliant (also 1 for an empty store),
+# else 0.
 fn creport_is_compliant(cr): i64 {
     if (load64(cr + 8) == load64(cr)) { return 1; }
     return 0;
 }
+# Returns the number of non-compliant artifacts in report `cr` (total minus compliant).
 fn creport_violation_count(cr): i64 {
     return load64(cr) - load64(cr + 8);
 }
@@ -159,6 +175,9 @@ fn creport_violation_count(cr): i64 {
 #   +40  key_pins      (vec of KeyPin)
 #   +48  audit_log     (AuditLog ptr)
 
+# Allocates a 56-byte SigilVerifier (fl_alloc) over the caller's `keyring` (PublisherKeyring)
+# and `policy` (TrustPolicy), both held by pointer, with a fresh empty revocation list,
+# integrity verifier, trust store, key-pin vec and audit log. Returns the pointer.
 fn sigil_verifier_new(keyring, policy): i64 {
     var sv = fl_alloc(56);
     store64(sv, keyring);
@@ -171,23 +190,35 @@ fn sigil_verifier_new(keyring, policy): i64 {
     return sv;
 }
 
+# Returns the PublisherKeyring of verifier `sv`.
 fn sv_keyring(sv): i64 { return load64(sv); }
+# Returns the TrustPolicy of verifier `sv`.
 fn sv_policy(sv): i64 { return load64(sv + 8); }
+# Returns the RevocationList of verifier `sv`.
 fn sv_revocations(sv): i64 { return load64(sv + 16); }
+# Returns the IntegrityVerifier of verifier `sv`.
 fn sv_integrity(sv): i64 { return load64(sv + 24); }
+# Returns the trust-store hashmap of verifier `sv` (content-hash C-string -> TrustedArtifact).
 fn sv_trust_store(sv): i64 { return load64(sv + 32); }
+# Returns the vec of KeyPin pointers of verifier `sv`.
 fn sv_key_pins(sv): i64 { return load64(sv + 40); }
+# Returns the AuditLog of verifier `sv`.
 fn sv_audit_log(sv): i64 { return load64(sv + 48); }
 
 # ================================================================
 # Key pin management
 # ================================================================
 
+# Appends KeyPin `pin` to verifier `sv`; returns `sv`. Once any pin's prefix matches an
+# artifact's path, the key_pin check passes only for a signer that one of the matching pins
+# names; paths no pin matches accept any signer.
 fn sv_add_key_pin(sv, pin): i64 {
     vec_push(load64(sv + 40), pin);
     return sv;
 }
 
+# Removes every KeyPin of `sv` whose prefix equals `path_prefix` exactly (streq, not a prefix
+# match). Returns the number of pins removed; the KeyPin blocks are not freed.
 fn sv_remove_key_pins(sv, path_prefix): i64 {
     var pins = load64(sv + 40);
     var plen = vec_len(pins);
@@ -238,6 +269,9 @@ fn _sv_key_authorized(sv, path, signer_key_id): i64 {
 # Register artifacts in trust store
 # ================================================================
 
+# Inserts `artifact` into the trust store under its content hash, replacing any entry for
+# that hash; returns `sv`. A SystemCore level is downgraded in place to Verified (use
+# sv_register_system_core for SystemCore); any other level is kept as-is.
 fn sv_register_trusted(sv, artifact): i64 {
     # Downgrade SystemCore to Verified (only register_system_core allows SystemCore)
     if (artifact_trust_level(artifact) == TRUST_SYSTEM_CORE) {
@@ -248,6 +282,8 @@ fn sv_register_trusted(sv, artifact): i64 {
     return sv;
 }
 
+# Sets `artifact`'s trust level to SystemCore in place and inserts it into the trust store
+# under its content hash, replacing any entry for that hash; returns `sv`.
 fn sv_register_system_core(sv, artifact): i64 {
     artifact_set_trust_level(artifact, TRUST_SYSTEM_CORE);
     var chash = artifact_content_hash(artifact);
@@ -259,6 +295,11 @@ fn sv_register_system_core(sv, artifact): i64 {
 # Sign an artifact and register it
 # ================================================================
 
+# Hashes the file at `path` (SHA-256 hex), Ed25519-signs that 64-char hex string with the
+# 64-byte `secret_key` (seed || pk), registers the artifact at Verified with `key_id` as its
+# signer, and records an AUDIT_ARTIFACT_SIGNED event. Returns the new TrustedArtifact, or 0
+# if the file cannot be opened. `key_id` is recorded as given — it is not checked against
+# the keyring or `secret_key`.
 fn sv_sign_artifact(sv, path, secret_key, key_id, artifact_type): i64 {
     var chash = hash_file(path);
     if (chash == 0) { return 0; }
@@ -520,6 +561,10 @@ fn sv_verify_artifact_into(sv, path, artifact_type, scratch): i64 {
 # Convenience: verify agent binary
 # ================================================================
 
+# Verifies the agent binary at `path` via sv_verify_artifact (ARTIFACT_AGENT_BINARY). If the
+# policy disallows unsigned artifacts and no "signature" check passed, appends a failed
+# "unsigned_agent" check and clears `passed`. Returns the VerificationResult (caller does
+# not free).
 fn sv_verify_agent(sv, path): i64 {
     var policy = load64(sv + 8);
     var vr = sv_verify_artifact(sv, path, ARTIFACT_AGENT_BINARY);
@@ -561,6 +606,9 @@ fn sv_verify_agent(sv, path): i64 {
 # (argonaut/ark) enforce it themselves before calling in.
 # ================================================================
 
+# Verifies the package at `path` via sv_verify_artifact (ARTIFACT_PACKAGE); a non-zero
+# `expected_hash` hex C-string must also match the content hash (constant-time compare) or
+# `passed` is cleared. Returns the VerificationResult (caller does not free).
 fn sv_verify_package(sv, path, expected_hash): i64 {
     var vr = sv_verify_artifact(sv, path, ARTIFACT_PACKAGE);
     if (expected_hash == 0) { return vr; }
@@ -586,6 +634,9 @@ fn sv_verify_package(sv, path, expected_hash): i64 {
 # Revocation management
 # ================================================================
 
+# Adds RevocationEntry `entry` to the verifier's revocation list and, on success, records an
+# AUDIT_REVOCATION_ADDED event. Returns SIGIL_ERR_NONE, or SIGIL_ERR_INVALID_INPUT if the
+# entry has neither a key id nor a content hash. Stored trust levels are left unchanged.
 fn sv_add_revocation(sv, entry): i64 {
     var rl = load64(sv + 16);
     var result = rl_add(rl, entry);
@@ -596,6 +647,8 @@ fn sv_add_revocation(sv, entry): i64 {
     return result;
 }
 
+# Returns 1 if the non-zero `key_id` or `content_hash` is on the verifier's revocation list
+# (any revoked_after cutoff is ignored), else 0. Pass 0 to skip either lookup.
 fn sv_check_revocation(sv, key_id, content_hash): i64 {
     var rl = load64(sv + 16);
     if (key_id != 0) {
@@ -607,6 +660,7 @@ fn sv_check_revocation(sv, key_id, content_hash): i64 {
     return 0;
 }
 
+# Returns the number of entries on the verifier's revocation list.
 fn sv_revocation_count(sv): i64 {
     return rl_len(load64(sv + 16));
 }
@@ -615,6 +669,8 @@ fn sv_revocation_count(sv): i64 {
 # Trust store queries
 # ================================================================
 
+# Returns the stored TrustLevel of the trust-store artifact with `content_hash`, or
+# TRUST_UNVERIFIED if there is none. The revocation list is not consulted.
 fn sv_trust_level_for(sv, content_hash): i64 {
     var store = load64(sv + 32);
     var artifact = map_get(store, content_hash);
@@ -622,6 +678,9 @@ fn sv_trust_level_for(sv, content_hash): i64 {
     return artifact_trust_level(artifact);
 }
 
+# Tallies the trust store into a new SigilStats block (sigil_stats_new): total artifacts,
+# those stored at Verified or above, and those stored as Revoked. Counts use stored trust
+# levels only (the revocation list is not consulted). Returns the pointer.
 fn sv_stats(sv): i64 {
     var store = load64(sv + 32);
     var s = sigil_stats_new();
@@ -652,6 +711,11 @@ fn sv_stats(sv): i64 {
 # Compliance report
 # ================================================================
 
+# Classifies every trust-store artifact against the policy into a new ComplianceReport:
+# revoked (stored level Revoked), below_minimum, pin_violations (signer not authorized by a
+# matching KeyPin), unsigned (no signature while the policy disallows it), else compliant.
+# Uses stored trust levels only: no signature re-check and no revocation-list lookup.
+# Returns the report; its vecs hold the live TrustedArtifact pointers.
 fn sv_compliance_report(sv): i64 {
     var cr = compliance_report_new();
     var store = load64(sv + 32);
@@ -715,9 +779,14 @@ fn _snap_entry_new(trust_level, path): i64 {
     return se;
 }
 
+# Returns the trust level captured in snapshot entry `se`.
 fn snap_entry_trust_level(se): i64 { return load64(se); }
+# Returns the path C-string captured in snapshot entry `se`.
 fn snap_entry_path(se): i64 { return load64(se + 8); }
 
+# Snapshots the trust store into a new hashmap: content hash -> 16-byte entry holding the
+# artifact's trust level and path at this moment (read with snap_entry_*). Returns the map,
+# for a later sv_diff_trust_store.
 fn sv_snapshot_trust_store(sv): i64 {
     var store = load64(sv + 32);
     var keys = map_keys(store);
@@ -748,6 +817,9 @@ fn sv_snapshot_trust_store(sv): i64 {
 # For a "changed" record, both old and new are set and differ.
 # For "added", old = -1. For "removed", new = -1.
 
+# Allocates a 32-byte ArtifactChange (fl_alloc) recording `content_hash`, `path` and trust
+# levels `old_tl` -> `new_tl`; -1 for old_tl marks an added artifact, -1 for new_tl a removed
+# one. Returns the pointer.
 fn artifact_change_new(content_hash, path, old_tl, new_tl): i64 {
     var ac = fl_alloc(32);
     store64(ac, content_hash);
@@ -757,9 +829,13 @@ fn artifact_change_new(content_hash, path, old_tl, new_tl): i64 {
     return ac;
 }
 
+# Returns the content-hash C-string of change record `ac`.
 fn ac_content_hash(ac): i64 { return load64(ac); }
+# Returns the artifact path C-string of change record `ac`.
 fn ac_path(ac): i64 { return load64(ac + 8); }
+# Returns the trust level before change `ac` (-1 if the artifact was added).
 fn ac_old_trust_level(ac): i64 { return load64(ac + 16); }
+# Returns the trust level after change `ac` (-1 if the artifact was removed).
 fn ac_new_trust_level(ac): i64 { return load64(ac + 24); }
 
 # TrustStoreDiff (24 bytes): added, removed, changed (all vecs of ArtifactChange ptrs).
@@ -774,9 +850,13 @@ fn trust_store_diff_new(): i64 {
     return d;
 }
 
+# Returns the vec of ArtifactChange records for artifacts added since the snapshot.
 fn tsdiff_added(d): i64 { return load64(d); }
+# Returns the vec of ArtifactChange records for artifacts removed since the snapshot.
 fn tsdiff_removed(d): i64 { return load64(d + 8); }
+# Returns the vec of ArtifactChange records for artifacts whose trust level changed.
 fn tsdiff_changed(d): i64 { return load64(d + 16); }
+# Returns 1 if diff `d` has no added, removed or changed records, else 0.
 fn tsdiff_is_empty(d): i64 {
     if (vec_len(load64(d)) == 0) {
         if (vec_len(load64(d + 8)) == 0) {
@@ -786,6 +866,9 @@ fn tsdiff_is_empty(d): i64 {
     return 0;
 }
 
+# Diffs the live trust store against `old_snap` (from sv_snapshot_trust_store) into a new
+# TrustStoreDiff: added (hash absent from the snapshot), removed (hash no longer stored) and
+# changed (trust level differs; a path change alone is not reported). Returns the pointer.
 fn sv_diff_trust_store(sv, old_snap): i64 {
     var diff = trust_store_diff_new();
     var store = load64(sv + 32);
@@ -866,6 +949,10 @@ fn sv_diff_trust_store(sv, old_snap): i64 {
 # as json_write_escaped in trust.cyr.
 # ================================================================
 
+# Loads the JSON array at `path` (sv_save_trust_store's format; see the block above) into
+# the trust store, adding or replacing entries by hash with the saved trust level as-is,
+# SystemCore included. Reads at most the first 64 KiB. Returns the number of artifacts
+# loaded (0 on IO failure or an empty file).
 fn sv_load_trust_store(sv, path): i64 {
     var buf = alloc(65536);
     var n = file_read_all(path, buf, 65536);
@@ -960,11 +1047,17 @@ fn sv_load_trust_store(sv, path): i64 {
     return loaded;
 }
 
+# Writes the trust store to `path` as a JSON array of {hash, path, type, trust} objects,
+# creating or truncating the file (mode 0644); signatures and signers are not saved.
+# Returns SIGIL_ERR_NONE, or SIGIL_ERR_IO if the file cannot be opened (the individual
+# write results are not checked).
 fn sv_save_trust_store(sv, path): i64 {
     var store = load64(sv + 32);
     var keys = map_keys(store);
     var klen = vec_len(keys);
-    var fd = file_open(path, 577, 420);
+    # 3.13.0: named flags — the literal 577 lost O_TRUNC on Darwin, so a store that shrank
+    # (a revoked artifact removed) kept a fragment of the larger previous store.
+    var fd = file_open(path, O_WRONLY | O_CREAT | O_TRUNC, 420);  # 0644
     if (fd < 0) { return SIGIL_ERR_IO; }
     file_write(fd, "[", 1);
     var i = 0;
@@ -1088,6 +1181,12 @@ fn _batch_worker(arg): i64 {
     return 0;
 }
 
+# Verifies `count` artifacts from `artifacts`, a packed array of 16-byte {path, type}
+# records. At count >= _SIGIL_BATCH_PARALLEL_THRESHOLD it fans out across up to
+# _SIGIL_BATCH_WORKERS threads (one pre-allocated VerifyScratch per artifact); smaller
+# batches run serially through sv_verify_artifact. Returns a new vec of VerificationResult
+# pointers in input order and records one audit event per artifact on the calling thread.
+# The trust store must not be mutated while a batch runs.
 fn sv_verify_batch(sv, artifacts, count): i64 {
     if (count >= _SIGIL_BATCH_PARALLEL_THRESHOLD) {
         # Pre-warm crypto module init on the main thread so the lazy
@@ -1213,6 +1312,12 @@ fn sv_verify_batch(sv, artifacts, count): i64 {
 # Boot chain verification
 # ================================================================
 
+# Checks boot-component integrity: for each path in `components` (a vec of C-strings), every
+# trust-store artifact with exactly that path becomes an expected-hash measurement, the
+# verifier's integrity policy is replaced by them, and iv_verify_all re-hashes each file.
+# Returns that IntegrityReport, or a fresh empty one when the policy's verify_on_boot is off.
+# Hash integrity only: trust levels, signatures and revocations are not consulted, and a
+# component with no trust-store entry adds no measurement (so it is not reported at all).
 fn sv_verify_boot_chain(sv, components): i64 {
     var policy = load64(sv + 8);
     if (policy_verify_on_boot(policy) == 0) {

@@ -11,6 +11,8 @@ enum KeyRole {
     KEY_ROLE_PUBLISHER = 2;
 }
 
+# Returns the display name of KeyRole `role` as a static C-string (`Root`, `Intermediate`,
+# `Publisher`), or `unknown` for any other value. keyring_save emits it as the JSON `role`.
 fn key_role_name(role): i64 {
     if (role == KEY_ROLE_ROOT) { return "Root"; }
     if (role == KEY_ROLE_INTERMEDIATE) { return "Intermediate"; }
@@ -35,6 +37,9 @@ fn key_role_name(role): i64 {
 #   +80  secret_key      (ptr to 32 raw bytes, 0 = none, for HMAC signing)
 #   +88  allowed_types   (vec of ARTIFACT_* i64s, 0 = all types allowed)
 
+# Allocates a 96-byte KeyVersion (fl_alloc) for `key_id` and its public-key hex C-string,
+# both stored by pointer (not copied). Starts as role Publisher, valid from now, no expiry;
+# every other field is 0 (no issuer, publisher info, secret key or type limit). Returns it.
 fn key_version_new(key_id, public_key_hex): i64 {
     var kv = fl_alloc(96);
     store64(kv, key_id);
@@ -52,22 +57,39 @@ fn key_version_new(key_id, public_key_hex): i64 {
     return kv;
 }
 
+# Returns the key-id C-string of key version `kv`.
 fn kv_key_id(kv): i64 { return load64(kv); }
+# Returns the valid-from time of `kv` (epoch seconds).
 fn kv_valid_from(kv): i64 { return load64(kv + 8); }
+# Returns the valid-until time of `kv` (epoch seconds; 0 = no expiry).
 fn kv_valid_until(kv): i64 { return load64(kv + 16); }
+# Returns the public-key hex C-string of `kv` (64 hex chars expected; not validated on store).
 fn kv_public_key_hex(kv): i64 { return load64(kv + 24); }
+# Returns the KeyRole (KEY_ROLE_*) of `kv`.
 fn kv_role(kv): i64 { return load64(kv + 32); }
+# Returns the issuer key-id C-string of `kv` (0 = none / self-signed).
 fn kv_issued_by(kv): i64 { return load64(kv + 40); }
+# Returns the publisher-name C-string of `kv` (0 = none).
 fn kv_pub_name(kv): i64 { return load64(kv + 64); }
+# Returns the publisher-contact C-string of `kv` (0 = none).
 fn kv_pub_contact(kv): i64 { return load64(kv + 72); }
+# Returns the secret-key buffer pointer attached to `kv` (0 = none).
 fn kv_secret_key(kv): i64 { return load64(kv + 80); }
 
+# Sets the valid-from time of `kv` to `v` (epoch seconds); returns `kv`.
 fn kv_set_valid_from(kv, v): i64 { store64(kv + 8, v); return kv; }
+# Sets the valid-until time of `kv` to `v` (epoch seconds, 0 = no expiry); returns `kv`.
 fn kv_set_valid_until(kv, v): i64 { store64(kv + 16, v); return kv; }
+# Sets the KeyRole (KEY_ROLE_*) of `kv` to `r`; returns `kv`.
 fn kv_set_role(kv, r): i64 { store64(kv + 32, r); return kv; }
+# Sets the issuer key-id C-string of `kv` to `v` (0 = none / self-signed); returns `kv`.
 fn kv_set_issued_by(kv, v): i64 { store64(kv + 40, v); return kv; }
+# Sets the publisher-name C-string of `kv` to `v` (0 = none); returns `kv`.
 fn kv_set_pub_name(kv, v): i64 { store64(kv + 64, v); return kv; }
+# Sets the publisher-contact C-string of `kv` to `v` (0 = none); returns `kv`.
 fn kv_set_pub_contact(kv, v): i64 { store64(kv + 72, v); return kv; }
+# Attaches secret-key buffer `sk` to `kv` (0 = none); returns `kv`. Only the pointer is
+# stored: the buffer is not copied, so the caller keeps ownership (and its zeroization).
 fn kv_set_secret_key(kv, sk): i64 { store64(kv + 80, sk); return kv; }
 
 # Allowed-artifact-type restriction. An unset (0) list means "this key
@@ -77,6 +99,8 @@ fn kv_set_secret_key(kv, sk): i64 { store64(kv + 80, sk); return kv; }
 # "allowed_type" check, independent of the signature itself.
 fn kv_allowed_types(kv): i64 { return load64(kv + 88); }
 
+# Adds `artifact_type` (ARTIFACT_*) to `kv`'s allowed-type list (created on first use),
+# restricting the key to the listed types (see kv_is_type_allowed). Returns `kv`.
 fn kv_add_allowed_type(kv, artifact_type): i64 {
     var v = load64(kv + 88);
     if (v == 0) { v = vec_new(); store64(kv + 88, v); }
@@ -84,6 +108,7 @@ fn kv_add_allowed_type(kv, artifact_type): i64 {
     return kv;
 }
 
+# Drops `kv`'s allowed-type list (reset to 0 = every ArtifactType allowed); returns `kv`.
 fn kv_clear_allowed_types(kv): i64 { store64(kv + 88, 0); return kv; }
 
 # Is this key authorized to sign artifacts of `artifact_type`?
@@ -101,6 +126,8 @@ fn kv_is_type_allowed(kv, artifact_type): i64 {
     return 0;
 }
 
+# Returns 1 if `kv` is valid at epoch time `when` (valid_from <= when and, unless valid_until
+# is 0 = no expiry, when <= valid_until; both bounds inclusive), else 0.
 fn kv_is_valid_at(kv, when): i64 {
     if (when < load64(kv + 8)) { return 0; }
     var until = load64(kv + 16);
@@ -117,6 +144,8 @@ fn kv_is_valid_at(kv, when): i64 {
 #   +0   keys_map   (hashmap: key_id -> vec of KeyVersion)
 #   +8   keys_dir   (C-string ptr)
 
+# Allocates a 16-byte PublisherKeyring (fl_alloc) with an empty key-id map; returns the
+# pointer. `keys_dir` (stored by pointer) is where keyring_save writes; 0 disables saving.
 fn keyring_new(keys_dir): i64 {
     var kr = fl_alloc(16);
     store64(kr, map_new());
@@ -124,6 +153,9 @@ fn keyring_new(keys_dir): i64 {
     return kr;
 }
 
+# Appends key version `kv` to the version list for its key ID (a new ID gets a new list,
+# keyed by its key-id C-string pointer, not a copy), so the last-added version is the
+# newest. No duplicate or validity checks. Returns `kr`.
 fn keyring_add_key(kr, kv): i64 {
     var m = load64(kr);
     var kid = kv_key_id(kv);
@@ -138,6 +170,8 @@ fn keyring_add_key(kr, kv): i64 {
     return kr;
 }
 
+# Returns the newest (last-added) version of `key_id` that is valid now (kv_is_valid_at at
+# clock_epoch_secs), or 0 if the ID is unknown or no version is currently valid.
 fn keyring_get_current(kr, key_id): i64 {
     var m = load64(kr);
     var versions = map_get(m, key_id);
@@ -154,17 +188,22 @@ fn keyring_get_current(kr, key_id): i64 {
     return 0;
 }
 
+# Returns the keyring's own vec of every KeyVersion for `key_id`, in insertion order (the
+# live internal vec, not a copy), or 0 if the ID is unknown.
 fn keyring_get_all_versions(kr, key_id): i64 {
     var m = load64(kr);
     var versions = map_get(m, key_id);
     return versions;
 }
 
+# Returns the number of distinct key IDs in the keyring (not the number of versions).
 fn keyring_len(kr): i64 {
     var m = load64(kr);
     return map_count(m);
 }
 
+# Returns a new vec of every KeyVersion (all IDs and versions, valid or not) whose role is
+# `role` (KEY_ROLE_*); empty if none match.
 fn keyring_find_by_role(kr, role): i64 {
     var result = vec_new();
     var m = load64(kr);
@@ -188,6 +227,7 @@ fn keyring_find_by_role(kr, role): i64 {
     return result;
 }
 
+# Returns 1 if the keyring holds no key IDs, else 0.
 fn keyring_is_empty(kr): i64 {
     if (keyring_len(kr) == 0) { return 1; }
     return 0;
@@ -358,7 +398,9 @@ fn keyring_save(kr): i64 {
                 pos = pos + 5;
                 store8(path + pos, 0);
 
-                var fd = file_open(path, 577, 420);  # O_WRONLY|O_CREAT|O_TRUNC, 0644
+                # 3.13.0: named flags — the literal 577 lost O_TRUNC on Darwin (0x241 there is
+                # O_WRONLY|O_ASYNC|O_CREAT), so a shrinking key file kept a stale tail.
+                var fd = file_open(path, O_WRONLY | O_CREAT | O_TRUNC, 420);  # 0644
                 if (fd >= 0) {
                     file_write(fd, "[", 1);
                     var j = 0;
@@ -443,6 +485,7 @@ fn json_write_escaped(fd, s, slen): i64 {
 # Hash functions
 # ================================================================
 
+# SHA-256 of `len` bytes at `data`, as a freshly alloc'd 64-char lowercase hex C-string.
 fn hash_data(data, len): i64 {
     return sha256_hex(data, len);
 }
@@ -456,8 +499,11 @@ fn hash_data_with(data, len, algorithm): i64 {
     return sha256_hex(data, len);
 }
 
+# Streams the file at `path` through SHA-256; returns the digest as a freshly alloc'd
+# 64-char lowercase hex C-string, or 0 if the file cannot be opened. A read error ends the
+# stream as if at EOF, so the digest then covers only the bytes read before it.
 fn hash_file(path): i64 {
-    var fd = file_open(path, 0, 0);
+    var fd = file_open(path, O_RDONLY, 0);
     if (fd < 0) { return 0; }
     var ctx = sha256_init();
     var buf[4096];
@@ -488,7 +534,7 @@ fn hash_file(path): i64 {
 # #7). The 4 KB file_read buffer remains a stack-local — fine for
 # concurrent workers, each thread gets its own stack.
 fn hash_file_into(path, hex_out, ctx_buf): i64 {
-    var fd = file_open(path, 0, 0);
+    var fd = file_open(path, O_RDONLY, 0);
     if (fd < 0) { return 0; }
     sha256_init_into(ctx_buf);
     # Banked per thread (3.6): the file-read buffer and digest are
@@ -531,7 +577,7 @@ fn hash_file_into(path, hex_out, ctx_buf): i64 {
 # silently skip hashing.
 fn hash_file_with(path, algorithm): i64 {
     if (algorithm != HASH_ALG_SHA512) { return hash_file(path); }
-    var fd = file_open(path, 0, 0);
+    var fd = file_open(path, O_RDONLY, 0);
     if (fd < 0) { return 0; }
     var ctx = sha512_init();
     var buf[4096];
@@ -551,6 +597,8 @@ fn hash_file_with(path, algorithm): i64 {
 # Signing / verification (Ed25519)
 # ================================================================
 
+# Ed25519-signs `len` bytes at `data` with the 64-byte `secret_key` (seed || pk, as written
+# by generate_keypair). Returns a freshly alloc'd 64-byte signature.
 fn sign_data(data, len, secret_key): i64 {
     # secret_key is 64 bytes (seed || pk) from ed25519_keypair
     var sig = alloc(64);
@@ -558,6 +606,8 @@ fn sign_data(data, len, secret_key): i64 {
     return sig;
 }
 
+# Verifies the 64-byte Ed25519 signature `sig` over `len` bytes at `data` against the raw
+# 32-byte `public_key` (not hex). Returns 1 if valid, 0 otherwise.
 fn verify_data(data, len, sig, public_key): i64 {
     # public_key is 32 bytes
     return ed25519_verify(public_key, data, len, sig);
@@ -567,6 +617,10 @@ fn verify_data(data, len, sig, public_key): i64 {
 # Key generation (Ed25519)
 # ================================================================
 
+# Generates an Ed25519 keypair from a fresh 32-byte CSPRNG seed: writes the 64-byte secret
+# key (seed || pk) to `sk_out` and the 32-byte public key to `pk_out`. Returns the key ID,
+# an alloc'd C-string of the first 16 hex chars of the public key, or 0 on entropy failure
+# (outputs untouched). The caller owns the secret in `sk_out` (wipe it with zeroize_key).
 fn generate_keypair(sk_out, pk_out): i64 {
     # sk_out: 64 bytes (seed || pk), pk_out: 32 bytes
     # Returns key_id (C-string) on success, 0 on entropy failure.
@@ -591,6 +645,7 @@ fn generate_keypair(sk_out, pk_out): i64 {
 # Key zeroization
 # ================================================================
 
+# Overwrites the `len`-byte key buffer at `key_buf` with zeros (memset). Returns 0.
 fn zeroize_key(key_buf, len): i64 {
     memset(key_buf, 0, len);
     return 0;

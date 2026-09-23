@@ -6,7 +6,7 @@
 # (tpm2_pcrread, tpm2_pcrextend, tpm2_create, tpm2_load, tpm2_unseal,
 # tpm2_getrandom).
 #
-# Requires: lib/syscalls.cyr, lib/process.cyr, lib/string.cyr, lib/vec.cyr,
+# Requires: lib/syscalls.cyr, lib/io.cyr, lib/process.cyr, lib/string.cyr, lib/vec.cyr,
 #           lib/alloc.cyr, lib/fmt.cyr, src/error.cyr
 
 #define LINUX
@@ -16,6 +16,7 @@ include "lib/alloc.cyr"
 include "lib/vec.cyr"
 include "lib/tagged.cyr"
 include "lib/syscalls.cyr"
+include "lib/io.cyr"
 include "lib/process.cyr"
 include "src/error.cyr"
 
@@ -400,14 +401,31 @@ fn tpm_seal(bank, pcr_indices, data_ptr, data_len, output_dir): i64 {
     memcpy(input_file + dir_len, "/seal_input.bin", 15);
     store8(input_file + dir_len + 15, 0);
 
-    var ifd = sys_open(input_file, O_WRONLY | O_CREAT | O_TRUNC, 384);
+    # ⛔ 3.13.0 — this file holds the PLAINTEXT being sealed, so it gets the LUKS
+    # keyfile's audit-F-3 treatment. It used O_WRONLY|O_CREAT|O_TRUNC with no
+    # O_EXCL / O_NOFOLLOW, so a symlink planted at <output_dir>/seal_input.bin was
+    # FOLLOWED: the target was truncated and overwritten with the secret. Now any
+    # stale entry is removed first (unlink removes a symlink, it does not follow
+    # it), and the create is O_EXCL|O_NOFOLLOW at 0600, so a symlink re-planted in
+    # between fails the create instead of redirecting the data.
+    # No `defer` (cyrius 6.6.x skips it on a Result return — the old
+    # `defer { sys_close(ifd); }` leaked the fd on every call); every exit closes
+    # explicitly. A failed or SHORT write removes the partial file rather than
+    # leaving plaintext behind or sealing a truncated payload.
+    xunlink(input_file);
+    var ifd = file_open(input_file, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 384);  # 0600
     if (ifd < 0) {
-        return sigil_err_syscall_failed(0 - ifd, "failed to write seal input");
+        return sigil_err_syscall_failed(0 - ifd, "failed to create seal input (O_EXCL|O_NOFOLLOW)");
     }
-    defer { sys_close(ifd); }
-    var wret = sys_write(ifd, data_ptr, data_len);
+    var wret = agnosys_write_all(ifd, data_ptr, data_len);
+    var cret = file_close(ifd);
     if (wret < 0) {
+        xunlink(input_file);
         return sigil_err_syscall_failed(0 - wret, "write failed");
+    }
+    if (cret < 0) {
+        xunlink(input_file);
+        return sigil_err_syscall_failed(0 - cret, "close of seal input failed");
     }
 
     # Build output file paths
@@ -442,7 +460,7 @@ fn tpm_seal(bank, pcr_indices, data_ptr, data_len, output_dir): i64 {
 
     var cr_res_tag, cr_res = tpm_run_checked(cr_args);
     if (is_err_result(cr_res_tag) == 1) {
-        _sig_unlink(input_file);
+        xunlink(input_file);
         return Err(cr_res);
     }
 
@@ -459,7 +477,7 @@ fn tpm_seal(bank, pcr_indices, data_ptr, data_len, output_dir): i64 {
     vec_push(ld_args, ctx_file);
 
     var ld_res_tag, ld_res = tpm_run_checked(ld_args);
-    _sig_unlink(input_file);
+    xunlink(input_file);
 
     if (is_err_result(ld_res_tag) == 1) { return Err(ld_res); }
 

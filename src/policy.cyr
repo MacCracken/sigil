@@ -11,6 +11,10 @@
 #   +32  revoked_by    (C-string ptr)
 #   +40  revoked_after (epoch seconds, 0 = unconditional)
 
+# Allocates a 48-byte RevocationEntry (fl_alloc) revoking key `key_id` and/or artifact
+# `content_hash` (either may be 0, not both: rl_add rejects that), with revoked_at = now and
+# revoked_after = 0 (unconditional). Strings are stored by pointer, not copied; `reason` and
+# `revoked_by` must be non-null for the JSONL writers. Returns the pointer.
 fn revocation_entry_new(key_id, content_hash, reason, revoked_by): i64 {
     var e = fl_alloc(48);
     store64(e, key_id);
@@ -22,12 +26,21 @@ fn revocation_entry_new(key_id, content_hash, reason, revoked_by): i64 {
     return e;
 }
 
+# Returns the revoked key-id C-string of entry `e` (0 = the entry revokes no key).
 fn rev_key_id(e): i64 { return load64(e); }
+# Returns the revoked content-hash C-string of entry `e` (0 = the entry revokes no artifact).
 fn rev_content_hash(e): i64 { return load64(e + 8); }
+# Returns the revocation-reason C-string of entry `e`.
 fn rev_reason(e): i64 { return load64(e + 16); }
+# Returns the revoked_at time of entry `e` (epoch seconds, when the revocation was recorded).
 fn rev_at(e): i64 { return load64(e + 24); }
+# Returns the revoked-by C-string (who issued the revocation) of entry `e`.
 fn rev_by(e): i64 { return load64(e + 32); }
+# Returns revoked_after of entry `e` (epoch seconds; 0 = unconditional). Timed queries
+# (rl_is_*_revoked_at with `at` != 0) apply the entry only when `at` >= this; untimed
+# queries (`at` = 0, rl_is_key_revoked, rl_is_artifact_revoked) always apply it.
 fn rev_after(e): i64 { return load64(e + 40); }
+# Sets revoked_after of entry `e` to `v` (epoch seconds, 0 = unconditional); returns `e`.
 fn rev_set_after(e, v): i64 { store64(e + 40, v); return e; }
 
 # ================================================================
@@ -38,6 +51,8 @@ fn rev_set_after(e, v): i64 { store64(e + 40, v); return e; }
 #   +8   revoked_keys  (hashmap key_id -> 1)
 #   +16  revoked_hashes (hashmap content_hash -> 1)
 
+# Allocates an empty 24-byte RevocationList (fl_alloc): an entry vec plus key-id and
+# content-hash lookup maps. Returns the pointer.
 fn revocation_list_new(): i64 {
     var rl = fl_alloc(24);
     store64(rl, vec_new());
@@ -46,6 +61,9 @@ fn revocation_list_new(): i64 {
     return rl;
 }
 
+# Appends `entry` to `rl` and indexes its key ID and/or content hash (by pointer). Returns
+# SIGIL_ERR_NONE, or SIGIL_ERR_INVALID_INPUT (nothing added) if the entry names neither.
+# No duplicate check (rl_merge dedupes).
 fn rl_add(rl, entry): i64 {
     var kid = load64(entry);
     var chash = load64(entry + 8);
@@ -62,10 +80,14 @@ fn rl_add(rl, entry): i64 {
     return SIGIL_ERR_NONE;
 }
 
+# Returns 1 if `rl` holds any revocation entry for `key_id`, else 0. Untimed: revoked_after
+# is ignored, so a conditional entry counts even before it takes effect.
 fn rl_is_key_revoked(rl, key_id): i64 {
     return rl_is_key_revoked_at(rl, key_id, 0);
 }
 
+# Returns 1 if `key_id` is revoked as of epoch time `at` (some entry for it has revoked_after
+# 0 = unconditional, or revoked_after <= `at`), else 0. `at` = 0 is untimed: any entry counts.
 fn rl_is_key_revoked_at(rl, key_id, at): i64 {
     var keys = load64(rl + 8);
     if (map_get(keys, key_id) == 0) { return 0; }
@@ -89,10 +111,14 @@ fn rl_is_key_revoked_at(rl, key_id, at): i64 {
     return 0;
 }
 
+# Returns 1 if `rl` holds any revocation entry for `content_hash`, else 0. Untimed, like
+# rl_is_key_revoked: revoked_after is ignored.
 fn rl_is_artifact_revoked(rl, content_hash): i64 {
     return rl_is_artifact_revoked_at(rl, content_hash, 0);
 }
 
+# Returns 1 if `content_hash` is revoked as of epoch time `at` (some entry for it has
+# revoked_after 0 = unconditional, or revoked_after <= `at`), else 0. `at` = 0 is untimed.
 fn rl_is_artifact_revoked_at(rl, content_hash, at): i64 {
     var hashes = load64(rl + 16);
     if (map_get(hashes, content_hash) == 0) { return 0; }
@@ -115,9 +141,14 @@ fn rl_is_artifact_revoked_at(rl, content_hash, at): i64 {
     return 0;
 }
 
+# Returns the number of entries in `rl` (not the number of distinct keys or hashes).
 fn rl_len(rl): i64 { return vec_len(load64(rl)); }
+# Returns 1 if `rl` has no entries, else 0.
 fn rl_is_empty(rl): i64 { if (rl_len(rl) == 0) { return 1; } return 0; }
 
+# Adds each entry of `other` not already in `rl` (via rl_add, shared by pointer); returns
+# the count added. Duplicate = same key ID and content hash (0 matches 0); revoked_after is
+# not compared, so a same-target entry that takes effect earlier is still skipped.
 fn rl_merge(rl, other): i64 {
     var other_entries = load64(other);
     var olen = vec_len(other_entries);
@@ -160,6 +191,8 @@ fn rl_merge(rl, other): i64 {
 #   +24  next_update (epoch seconds, 0 = none)
 #   +32  entries     (vec of RevocationEntry ptrs)
 
+# Allocates a 40-byte Crl (fl_alloc) with `version` and `issuer` (non-null C-string, stored
+# by pointer), issued_at = now, no next_update (0) and an empty entry vec. Returns the pointer.
 fn crl_new(version, issuer): i64 {
     var c = fl_alloc(40);
     store64(c, version);
@@ -170,19 +203,29 @@ fn crl_new(version, issuer): i64 {
     return c;
 }
 
+# Returns the version number of CRL `c`.
 fn crl_version(c): i64 { return load64(c); }
+# Returns the issuer C-string of CRL `c`.
 fn crl_issuer(c): i64 { return load64(c + 8); }
+# Returns the issued_at time of CRL `c` (epoch seconds).
 fn crl_issued_at(c): i64 { return load64(c + 16); }
+# Returns the next_update time of CRL `c` (epoch seconds; 0 = none).
 fn crl_next_update(c): i64 { return load64(c + 24); }
+# Returns the CRL's own vec of RevocationEntry pointers (the live vec, not a copy).
 fn crl_entries(c): i64 { return load64(c + 32); }
 
+# Sets the next_update time of CRL `c` to `v` (epoch seconds, 0 = none); returns `c`.
 fn crl_set_next_update(c, v): i64 { store64(c + 24, v); return c; }
 
+# Appends `entry` to CRL `c` by pointer, unvalidated (rl_add vets it when the CRL is
+# applied with crl_apply_to). Returns `c`.
 fn crl_add_entry(c, entry): i64 {
     vec_push(load64(c + 32), entry);
     return c;
 }
 
+# Returns 1 if CRL `c` has a next_update and the current time is past it, else 0 (a CRL
+# with no next_update is never stale).
 fn crl_is_stale(c): i64 {
     var next = load64(c + 24);
     if (next == 0) { return 0; }
@@ -190,6 +233,8 @@ fn crl_is_stale(c): i64 {
     return 0;
 }
 
+# Adds every entry of CRL `c` to revocation list `rl` via rl_add; returns the count
+# accepted (entries naming neither key nor hash are rejected). No dedupe or staleness check.
 fn crl_apply_to(c, rl): i64 {
     var entries = load64(c + 32);
     var elen = vec_len(entries);
@@ -473,8 +518,13 @@ fn _rev_entry_from_jsonl(line, llen): i64 {
 # writer always round-trips cleanly.
 var _rl_load_bad = 0;
 
+# Returns how many lines the most recent rl_from_jsonl parse rejected (rl_load parses via
+# it); a module global, reset at the start of each parse.
 fn rl_load_bad_count(): i64 { return _rl_load_bad; }
 
+# Parses `content_len` bytes of JSONL into a new RevocationList (one entry per line, empty
+# lines skipped). Malformed or rl_add-rejected lines are skipped and counted (see
+# rl_load_bad_count). Returns the list, possibly empty. Not reentrant (module-global state).
 fn rl_from_jsonl(content, content_len): i64 {
     _rl_load_bad = 0;
     var rl = revocation_list_new();
@@ -507,6 +557,8 @@ fn rl_save(rl, path): i64 {
     return SIGIL_ERR_NONE;
 }
 
+# Reads the file at `path` (at most 64 KiB; any excess is silently dropped) and parses it
+# with rl_from_jsonl. Returns the new RevocationList, or 0 if the file cannot be read.
 fn rl_load(path): i64 {
     var buf = alloc(65536);
     var n = file_read_all(path, buf, 65536);
@@ -519,6 +571,8 @@ fn rl_load(path): i64 {
 # entries in the same format as rl_to_jsonl.
 # ================================================================
 
+# Serializes CRL `c` to JSONL: a header line (version, issuer, issued_at, next_update), then
+# one line per entry as in rl_to_jsonl. Returns a freshly alloc'd NUL-terminated C-string.
 fn crl_to_jsonl(c): i64 {
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "{\"version\":");
@@ -638,6 +692,8 @@ fn crl_from_jsonl(content, content_len): i64 {
     return c;
 }
 
+# Writes crl_to_jsonl(c) to `path` (created or truncated, mode 0644). Returns SIGIL_ERR_NONE
+# or SIGIL_ERR_IO. Not atomic: a failed write can leave `path` truncated.
 fn crl_save(c, path): i64 {
     var jsonl = crl_to_jsonl(c);
     var n = file_write_all(path, jsonl, strlen(jsonl));
@@ -645,6 +701,9 @@ fn crl_save(c, path): i64 {
     return SIGIL_ERR_NONE;
 }
 
+# Reads the file at `path` (at most 64 KiB; any excess is silently dropped) and parses it
+# with crl_from_jsonl. Returns the new Crl, or 0 if the file cannot be read or its header
+# line is missing, malformed or lacks an issuer. Malformed entry lines are skipped uncounted.
 fn crl_load(path): i64 {
     var buf = alloc(65536);
     var n = file_read_all(path, buf, 65536);

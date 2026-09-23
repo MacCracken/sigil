@@ -99,6 +99,8 @@ var SNP_OFF_SIG_S             = 0x2E8;
 #           buf + SNP_OFF_* — no need to store per-field offsets)
 # ================================================================
 
+# Allocate a zeroed 256-byte SnpReport struct to pass as `out` to `snp_report_parse`.
+# Bump-allocated via `alloc`; never `free()` it.
 fn snp_report_alloc(): i64 {
     var r = alloc(256);
     memset(r, 0, 256);
@@ -127,27 +129,50 @@ fn _snp_load_u64(buf, off): i64 {
 # Accessors
 # ----------------------------------------------------------------
 
+# Accessor: the report buffer pointer given to `snp_report_parse` (caller-owned, not copied).
 fn snp_report_buf(r): i64               { return load64(r + 0); }
+# Accessor: VERSION (u32 at 0x000); 2 after a successful parse.
 fn snp_report_version(r): i64            { return load64(r + 16); }
+# Accessor: GUEST_SVN, the guest security version number (u32 at 0x004).
 fn snp_report_guest_svn(r): i64          { return load64(r + 24); }
+# Accessor: guest POLICY (u64 at 0x008).
 fn snp_report_policy(r): i64             { return load64(r + 32); }
+# Accessor: VMPL the report was requested at (u32 at 0x030).
 fn snp_report_vmpl(r): i64               { return load64(r + 40); }
+# Accessor: SIGNATURE_ALGO (u32 at 0x034); parse only accepts 1 (ECDSA P-384 / SHA-384).
 fn snp_report_signature_algo(r): i64     { return load64(r + 48); }
+# Accessor: CURRENT_TCB, the platform's current TCB_VERSION (u64 at 0x038), as a raw bit
+# pattern (negative as an i64 when bit 63 is set).
 fn snp_report_current_tcb(r): i64        { return load64(r + 56); }
+# Accessor: PLATFORM_INFO flags (u64 at 0x040).
 fn snp_report_platform_info(r): i64      { return load64(r + 64); }
+# Accessor: REPORTED_TCB, the TCB_VERSION the signing VCEK was derived from (u64 at 0x180),
+# as a raw bit pattern (negative as an i64 when bit 63 is set).
 fn snp_report_reported_tcb(r): i64       { return load64(r + 72); }
 
+# Accessor: pointer to the 16-byte FAMILY_ID (provided at launch) at 0x010.
 fn snp_report_family_id_ptr(r): i64      { return snp_report_buf(r) + SNP_OFF_FAMILY_ID; }
+# Accessor: pointer to the 16-byte IMAGE_ID (provided at launch) at 0x020.
 fn snp_report_image_id_ptr(r): i64       { return snp_report_buf(r) + SNP_OFF_IMAGE_ID; }
+# Accessor: pointer to the 64-byte REPORT_DATA (guest-supplied) at 0x050.
 fn snp_report_data_ptr(r): i64           { return snp_report_buf(r) + SNP_OFF_REPORT_DATA; }
+# Accessor: pointer to the 48-byte launch MEASUREMENT at 0x090.
 fn snp_report_measurement_ptr(r): i64    { return snp_report_buf(r) + SNP_OFF_MEASUREMENT; }
+# Accessor: pointer to the 32-byte HOST_DATA (hypervisor-supplied at launch) at 0x0C0.
 fn snp_report_host_data_ptr(r): i64      { return snp_report_buf(r) + SNP_OFF_HOST_DATA; }
+# Accessor: pointer to the 48-byte ID_KEY_DIGEST (SHA-384 of the ID key) at 0x0E0.
 fn snp_report_id_key_digest_ptr(r): i64  { return snp_report_buf(r) + SNP_OFF_ID_KEY_DIGEST; }
+# Accessor: pointer to the 48-byte AUTHOR_KEY_DIGEST (SHA-384 of the author key) at 0x110.
 fn snp_report_author_key_digest_ptr(r): i64 { return snp_report_buf(r) + SNP_OFF_AUTHOR_KEY_DIGEST; }
+# Accessor: pointer to the 32-byte REPORT_ID (this guest's report ID) at 0x140.
 fn snp_report_report_id_ptr(r): i64      { return snp_report_buf(r) + SNP_OFF_REPORT_ID; }
+# Accessor: pointer to the 32-byte REPORT_ID_MA (migration agent's report ID) at 0x160.
 fn snp_report_report_id_ma_ptr(r): i64   { return snp_report_buf(r) + SNP_OFF_REPORT_ID_MA; }
+# Accessor: pointer to the 64-byte CHIP_ID (unique chip ID, zero when masked) at 0x1A0.
 fn snp_report_chip_id_ptr(r): i64        { return snp_report_buf(r) + SNP_OFF_CHIP_ID; }
+# Accessor: pointer to signature R at 0x2A0: 72 bytes little-endian, value in the low 48.
 fn snp_report_sig_r_ptr(r): i64          { return snp_report_buf(r) + SNP_OFF_SIG_R; }
+# Accessor: pointer to signature S at 0x2E8: 72 bytes little-endian, value in the low 48.
 fn snp_report_sig_s_ptr(r): i64          { return snp_report_buf(r) + SNP_OFF_SIG_S; }
 
 # ================================================================
@@ -157,6 +182,9 @@ fn snp_report_sig_s_ptr(r): i64          { return snp_report_buf(r) + SNP_OFF_SI
 # anything else.
 # ================================================================
 
+# Parse a SEV-SNP attestation report (`buf_len` bytes at `buf`) into the 256-byte SnpReport
+# at `out`. Returns 1 on success; 0 unless `buf_len` is 1184, VERSION is 2 and SIGNATURE_ALGO
+# is 1 (ECDSA P-384 / SHA-384). Byte-field accessors point into `buf`; it must outlive `out`.
 fn snp_report_parse(buf, buf_len, out): i64 {
     memset(out, 0, 256);
 
@@ -215,6 +243,9 @@ fn _snp_reverse_bytes(dst, src, len): i64 {
     return 0;
 }
 
+# Verify a parsed report's ECDSA P-384 / SHA-384 signature over its first 672 bytes against
+# a caller-trusted VCEK key (`vcek_pk`: 96-byte BE Qx||Qy); nonzero R/S padding is rejected.
+# Returns 1 iff valid, else 0. Not thread-safe: uses an unbanked module-global scratch buffer.
 fn snp_report_verify(report, vcek_pk): i64 {
     _snp_v_init();
 

@@ -17,6 +17,8 @@
 # where mokutil fails, this is SB_NOT_SUPPORTED.
 # ================================================================
 
+# Current Secure Boot state from secureboot_detect_state() as an SB_* constant (SB_ENABLED,
+# SB_DISABLED, SB_SETUP_MODE, SB_NOT_SUPPORTED); an Err maps to SB_NOT_SUPPORTED. Plain value.
 fn sigil_sb_state(): i64 {
     var res_tag, res = secureboot_detect_state();
     if (is_err_result(res_tag) == 1) {

@@ -265,6 +265,10 @@ fn _init_ed_p(): i64 {
     return 0;
 }
 
+# Reduce a 512-bit value `val` (8 little-endian i64 limbs, 64 bytes) mod
+# p = 2^255 - 19 via 2^256 ≡ 38, writing the fully reduced u256 (< p) to `out`.
+# The fold and final-subtraction loops run a value-dependent number of times.
+# Returns 0.
 fn u512_mod_p(out, val): i64 {
     _init_ed_p();
 
@@ -320,6 +324,9 @@ fn u512_mod_p(out, val): i64 {
 # Field arithmetic mod p
 # ================================================================
 
+# r = a + b mod p for canonical inputs (< p): a 256-bit add, then one
+# conditional subtraction of p (a value-dependent branch). The add's carry-out
+# is not examined. Returns 0.
 fn fp_add(r, a, b): i64 {
     _init_ed_p();
     u256_add(r, a, b);
@@ -327,6 +334,8 @@ fn fp_add(r, a, b): i64 {
     return 0;
 }
 
+# r = a - b mod p for canonical inputs (< p): a 256-bit subtract, adding p back
+# when it borrows (a value-dependent branch). Returns 0.
 fn fp_sub(r, a, b): i64 {
     _init_ed_p();
     var borrow = u256_sub(r, a, b);
@@ -334,6 +343,8 @@ fn fp_sub(r, a, b): i64 {
     return 0;
 }
 
+# r = -a mod p for a canonical input (< p): p - a, or 0 when a is zero (branches
+# on that test). Returns 0.
 fn fp_neg(r, a): i64 {
     _init_ed_p();
     if (u256_is_zero(a) == 1) {
@@ -344,6 +355,9 @@ fn fp_neg(r, a): i64 {
     return 0;
 }
 
+# r = a * b mod p: the full 512-bit u256_mul_full product reduced by
+# u512_mod_p, so any 256-bit operands work and r is fully reduced (< p). The
+# product goes to scratch first, so r may alias a or b. Returns 0.
 fn fp_mul(r, a, b): i64 {
     # Per-thread banked scratch (3.6): `var prod[N]` is a static
     # function-scope global (CLAUDE.md quirk #1). Each batch-verify
@@ -356,6 +370,7 @@ fn fp_mul(r, a, b): i64 {
     return 0;
 }
 
+# r = a^2 mod p (fp_mul(r, a, a); r may alias a).
 fn fp_sq(r, a): i64 {
     return fp_mul(r, a, a);
 }
@@ -364,6 +379,9 @@ fn fp_sq(r, a): i64 {
 # Modular exponentiation: r = base^exp mod p
 # ================================================================
 
+# r = base^exp mod p by right-to-left square-and-multiply over all 256 bits of
+# the u256 `exp`. The multiply is skipped on zero bits (branches on exp), so use
+# it only with a public exponent. Returns 0.
 fn fp_pow(r, base, exp): i64 {
     _init_ed_p();
     # Per-thread banked scratch (3.6) — see fp_mul / u512_mod_p.
@@ -410,6 +428,9 @@ fn _fpi_sq_n(buf, n): i64 {
     return 0;
 }
 
+# r = a^-1 mod p, computed as a^(p-2) with the fixed curve25519 addition chain
+# (254 squarings + 11 multiplies, the same sequence for every a); a = 0 gives 0.
+# `a` is copied to scratch first, so r may alias a. Returns 0.
 fn fp_inv(r, a): i64 {
     _init_ed_p();
     # Per-thread banked scratch (3.6): these 8 chain temporaries are

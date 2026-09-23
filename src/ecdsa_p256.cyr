@@ -377,6 +377,8 @@ fn _onc_init(): i64 {
     return 0;
 }
 
+# Returns 1 if affine (x, y) (32-byte LE-limb u256 buffers) is a valid P-256 point: both
+# coordinates in [0, p), not (0, 0), and y^2 == x^3 - 3x + b (mod p); else 0.
 fn pt_is_on_curve(x, y): i64 {
     _onc_init();
     var bk = cbank();
@@ -622,6 +624,8 @@ fn fn_p256_reduce256(out, a): i64 {
 # r = (a * b) mod n
 var _p256_n_prod = 0;
 
+# r = (a * b) mod n: 512-bit product in cbank() lane scratch, then n_reduce long division.
+# r may alias a and/or b (both are consumed before r is written).
 fn fn_p256_mul(r, a, b): i64 {
     _p256_init();
     if (_p256_n_prod == 0) { _p256_n_prod = alloc(64 * SIGIL_CRYPTO_BANKS); }
@@ -711,6 +715,8 @@ fn _p256si_init(): i64 {
     return 0;
 }
 
+# r = a^(-1) mod n = a^(n-2) via the fixed 4-bit window above (a^1..a^15 table in cbank() lane
+# scratch; schedule set by the public exponent n-2). a == 0 gives 0; r may alias a.
 fn fn_p256_inv(r, a): i64 {
     _p256si_init();
     var bk = cbank();
@@ -770,16 +776,19 @@ fn pt_alloc(): i64 {
     return p;
 }
 
+# Sets 96-byte point `p` to the point at infinity (zeroes X, Y and Z). Returns 0.
 fn pt_set_infinity(p): i64 {
     memset(p, 0, 96);
     return 0;
 }
 
+# Returns 1 if `p` is the point at infinity (Z == 0), else 0.
 fn pt_is_infinity(p): i64 {
     if (u256_is_zero(_pt_z(p)) == 1) { return 1; }
     return 0;
 }
 
+# dst = src: copies one 96-byte Jacobian point. Returns 0.
 fn pt_copy(dst, src): i64 {
     memcpy(dst, src, 96);
     return 0;
@@ -822,6 +831,8 @@ var _pt_aff_zinv  = 0;
 var _pt_aff_zinv2 = 0;
 var _pt_aff_zinv3 = 0;
 
+# out_x = X/Z^2, out_y = Y/Z^3 (32-byte LE-limb buffers) via one fp_p256_inv. Returns 1, or 0
+# with out_x/out_y untouched if `p` is the point at infinity.
 fn pt_to_affine(out_x, out_y, p): i64 {
     if (pt_is_infinity(p) == 1) { return 0; }
     if (_pt_aff_zinv  == 0) { _pt_aff_zinv  = alloc(32 * SIGIL_CRYPTO_BANKS); }
@@ -878,6 +889,8 @@ fn _ptd_init(): i64 {
     return 0;
 }
 
+# out = 2p (Jacobian, dbl-2001-b with a = -3; formulas above); returns early with out =
+# infinity when p is infinity. out may alias p: every coord of p is read before out is written.
 fn pt_double(out, p): i64 {
     _p256_init();
     _ptd_init();
@@ -997,6 +1010,8 @@ fn _pta_init(): i64 {
     return 0;
 }
 
+# out = p + q (Jacobian, add-2007-bl; formulas above); out may alias p or q. Branches on the
+# special cases (p or q at infinity, p == q, p == -q), so it is not constant-time.
 fn pt_add(out, p, q): i64 {
     _p256_init();
     _pta_init();
@@ -1667,6 +1682,9 @@ fn _ecdsa_der_int(src, off, src_len, dst): i64 {
     return _ecdsa_der_int_w(src, off, src_len, dst, 32);
 }
 
+# As ecdsa_p256_verify (SHA-256 of msg; pk = 64-byte Qx || Qy big-endian), but `sig_der` is a
+# DER SEQUENCE { INTEGER r, INTEGER s } of sig_der_len bytes, short-form lengths only.
+# Returns 1 iff valid, else 0 (also 0 on a bad tag or length).
 fn ecdsa_p256_verify_der(pk, msg, msg_len, sig_der, sig_der_len): i64 {
     if (sig_der_len < 8) { return 0; }
     if ((load8(sig_der) & 0xFF) != 0x30) { return 0; }

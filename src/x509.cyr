@@ -312,17 +312,32 @@ fn x509_cert_alloc_into(arena): i64 {
     return c;
 }
 
+# Allocate a zeroed 272-byte X509Cert from the global bump heap
+# (x509_cert_alloc_into with arena 0; never freed individually). Returns the
+# cert pointer, or 0 on allocation failure.
 fn x509_cert_alloc(): i64 {
     return x509_cert_alloc_into(0);
 }
 
+# Pointer to the cert's 96-byte public-key slot (+96): Qx || Qy for P-256 (low
+# 64 bytes) or P-384 (all 96), the raw 32-byte key for Ed25519; unused for RSA.
+# P-256 / P-384 points are on-curve-checked at parse time.
 fn x509_cert_pubkey(c): i64        { return c + 96; }
+# Validity notBefore, as Unix epoch seconds (UTC).
 fn x509_cert_not_before(c): i64    { return load64(c + 80); }
+# Validity notAfter, as Unix epoch seconds (UTC).
 fn x509_cert_not_after(c): i64     { return load64(c + 88); }
+# 1 if basicConstraints asserts cA = TRUE, else 0 (also 0 when it is absent).
 fn x509_cert_is_ca(c): i64         { return load64(c + 216); }
+# basicConstraints pathLenConstraint, or -1 when absent.
 fn x509_cert_path_len(c): i64      { return load64(c + 224); }
+# This cert's signature algorithm as an X509_SIG_* value (the TBS and outer
+# AlgorithmIdentifiers are required to match at parse time).
 fn x509_cert_sig_algo(c): i64      { return load64(c + 192); }
+# Subject key type as an X509_CURVE_* tag: P256, P384, RSA or ED25519.
 fn x509_cert_curve(c): i64         { return load64(c + 232); }
+# Byte length of the key at x509_cert_pubkey: 64 (P-256), 96 (P-384),
+# 32 (Ed25519), or 0 for RSA (whose key is at x509_cert_rsa_pubkey).
 fn x509_cert_pubkey_len(c): i64    { return load64(c + 240); }
 # For an RSA cert (curve == X509_CURVE_RSA): pointer to the 544-byte RSA
 # public-key block, or 0 for EC certs. Block layout: n[512] || e[16] ||
@@ -334,6 +349,8 @@ fn x509_cert_rsa_pubkey(c): i64    { return load64(c + 248); }
 # (digitalSignature=0x80, keyEncipherment=0x20, keyAgreement=0x08,
 # keyCertSign=0x04, cRLSign=0x02). eku low bit (0x01) = serverAuth (or anyEKU).
 fn x509_cert_key_usage(c): i64     { return load64(c + 256); }
+# extendedKeyUsage in the same encoding: 0 = absent, else `0x100 | serverAuth`,
+# where bit 0x01 is set if id-kp-serverAuth or anyExtendedKeyUsage is listed.
 fn x509_cert_eku(c): i64           { return load64(c + 264); }
 
 # Internal setters (for x509_parse below).

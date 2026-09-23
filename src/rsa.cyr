@@ -54,10 +54,12 @@
 # re-probed under **6.5.11** it is false for any array inside the per-fn stack
 # budget: non-tail recursion yields four distinct frames 576 B apart, and two
 # threads land ~2 MB apart (one thread stack). The budget is **122,880 bytes**
-# per function, counted cumulatively (`cyrius/src/frontend/parse_decl.cyr:89`);
-# exceeding it makes the compiler emit `note: oversized array local kept in
-# shared global (not per-thread)`, which is the signal that a local really did
-# become shared. **Re-verify that probe before relying on quirk #1 anywhere
+# per function, counted cumulatively (`cyrius/src/frontend/parse_decl.cyr:122`
+# as of 6.6.6 — the 15,360-slot check; it was `:89` under 6.5.11); exceeding it
+# makes the compiler emit `warning: array local over the per-fn frame budget
+# gets STATIC storage` naming the declaration's file:line (cyrius 6.6.5+; it was
+# `note: oversized array local kept in shared global (not per-thread)` before),
+# which is the signal that a local really did become shared. **Re-verify that probe before relying on quirk #1 anywhere
 # else in this tree.**
 #
 # Now function-scope (per-call, therefore per-thread, no lane, no ceiling):

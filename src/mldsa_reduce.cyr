@@ -42,6 +42,7 @@ var MLDSA_QINV = 58728449;              # Q * QINV ≡ -1 (mod 2^32)
 #     which is equivalent here because `a - t*Q` is always an
 #     exact multiple of 2^32 by Montgomery construction.
 
+# Montgomery reduction: returns r ≡ a · 2^-32 (mod Q) with |r| < Q, for |a| ≤ Q · 2^31.
 fn mldsa_montgomery_reduce(a): i64 {
     # Step 1: t_low = low 32 bits of a * QINV (unsigned view).
     var t_raw = a * MLDSA_QINV;
@@ -88,6 +89,7 @@ fn mldsa_montgomery_reduce(a): i64 {
 #     OR folds into the logical-shift result.
 # No data-dependent branch; all straight-line arithmetic.
 
+# reduce32: returns r ≡ a (mod Q) with |r| ≤ 6283008, for |a| ≤ 2^31 − 2^22 − 1.
 fn mldsa_reduce32(a): i64 {
     var x = a + (1 << 22);
     var logical = x >> 23;
@@ -110,6 +112,7 @@ fn mldsa_reduce32(a): i64 {
 # addend. No data-dependent branch — the sign-bit extraction and
 # multiply are straight-line arithmetic.
 
+# caddq: adds Q to a negative a, mapping a ∈ (−Q, Q) to its representative in [0, Q).
 fn mldsa_caddq(a): i64 {
     var neg = (a >> 63) & 1;
     return a + neg * MLDSA_Q;
@@ -121,6 +124,7 @@ fn mldsa_caddq(a): i64 {
 # Convenience wrapper = caddq ∘ reduce32. Used at pack boundaries
 # where the coefficient must be the unique in-range representative.
 
+# freeze: returns the canonical representative of a mod Q in [0, Q) (reduce32, then caddq).
 fn mldsa_freeze(a): i64 {
     return mldsa_caddq(mldsa_reduce32(a));
 }

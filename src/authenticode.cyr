@@ -23,7 +23,9 @@
 # A "dv" is a 16-byte {ptr, len} DER-value handle. `dv_new` boxes a byte
 # span; `dv_ptr` / `dv_len` read its pointer and length back out.
 fn dv_new(ptr, len): i64 { var d = alloc(16); store64(d, ptr); store64(d + 8, len); return d; }
+# Byte pointer held by DER-value handle `d` (its +0 field).
 fn dv_ptr(d): i64 { return load64(d); }
+# Byte length held by DER-value handle `d` (its +8 field).
 fn dv_len(d): i64 { return load64(d + 8); }
 
 # Number of bytes a DER definite length field occupies for content length `n`.

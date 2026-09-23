@@ -57,6 +57,10 @@ var _aes_ni_st_rk[240];
 var _aes_ni_st_pt[16];
 var _aes_ni_st_ct[16];
 
+# 1 if the AES-NI block path may be used, else 0: CPUID leaf 1 ECX bit 25 must
+# be set AND both NI self-tests (AES-256 FIPS 197 §C.3, AES-128 §C.1) must match.
+# The verdict is cached after the first call; concurrent first callers wait on
+# a CAS latch while one thread runs the probe.
 fn aes_ni_available(): i64 {
     if (_aes_ni_cache != 2) { return _aes_ni_cache; }
     # First-probe serialization (3.9.6 — concurrent-TLS-handshake fix):

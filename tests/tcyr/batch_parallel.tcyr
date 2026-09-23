@@ -71,7 +71,7 @@ fn build_artifacts(paths, types, count) {
 
 # Write a file with contents — returns the path (caller-owned).
 fn write_test_file(path, body) {
-    var fd = file_open(path, 577, 420);
+    var fd = file_open(path, O_WRONLY | O_CREAT | O_TRUNC, 420);
     file_write(fd, body, strlen(body));
     file_close(fd);
     return path;
@@ -237,4 +237,4 @@ fn main() {
 }
 
 var exit_code = main();
-syscall(60, exit_code);
+sys_exit(exit_code);

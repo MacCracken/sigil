@@ -96,6 +96,8 @@ fn _mldsa_shake_squeeze_blocks(out, nblocks, rate): i64 {
 # bytes; acceptance probability Q / 2^23 ≈ 0.999 so 5 blocks of
 # SHAKE-128 (= 840 B) are almost always enough for 256 coeffs.
 
+# RejNTTPoly inner loop: take 3-byte little-endian groups of buf[buflen], mask to 23 bits,
+# keep values < Q; writes up to `len` i64 coeffs in [0, Q) to `a` and returns how many.
 fn mldsa_rej_uniform(a, len, buf, buflen): i64 {
     var ctr = 0;
     var pos = 0;
@@ -121,6 +123,8 @@ fn mldsa_rej_uniform(a, len, buf, buflen): i64 {
 # `4 - nibble`, nibbles in [9, 15] reject. Acceptance per nibble
 # is 9/16. η=4 path only; η=2 rejection tables are not ML-DSA-65.
 
+# RejBoundedPoly inner loop (η = 4): low then high nibble t of each byte of buf[buflen];
+# t < 9 yields the coeff 4 − t ∈ [−4, 4]. Writes up to `len` to `a`, returns how many.
 fn mldsa_rej_eta(a, len, buf, buflen): i64 {
     var ctr = 0;
     var pos = 0;
@@ -164,6 +168,9 @@ var _mldsa_pu_off = 0;
 var _mldsa_pu_buflen = 0;
 var _mldsa_pu_a = 0;
 
+# RejNTTPoly: fill `a` (256 coeffs) with uniform values in [0, Q), used as an NTT-domain
+# entry of Â, from SHAKE-128(seed[32] ‖ nonce as 2 LE bytes). Shared module state, so not
+# reentrant. Returns 0.
 fn mldsa_poly_uniform(a, seed, nonce): i64 {
     _mldsa_sample_init();
     _mldsa_pu_a = a;
@@ -205,6 +212,8 @@ fn mldsa_poly_uniform(a, seed, nonce): i64 {
 var _mldsa_pe_ctr = 0;
 var _mldsa_pe_a = 0;
 
+# RejBoundedPoly (η = 4): fill `a` (256 coeffs) with values in [−4, 4] from
+# SHAKE-256(seed[64] ‖ nonce as 2 LE bytes). Shared module state, so not reentrant. Returns 0.
 fn mldsa_poly_uniform_eta(a, seed, nonce): i64 {
     _mldsa_sample_init();
     _mldsa_pe_a = a;
@@ -235,6 +244,8 @@ fn mldsa_poly_uniform_eta(a, seed, nonce): i64 {
 # with coefficients in [1 − γ1, γ1]. No rejection; the unpack
 # is exact.
 
+# One ExpandMask poly: unpack the first 640 bytes of SHAKE-256(seed[64] ‖ nonce as 2 LE
+# bytes) as 20-bit values into `a`, coeffs in [1 − γ1, γ1]. Shared module state. Returns 0.
 fn mldsa_poly_uniform_gamma1(a, seed, nonce): i64 {
     _mldsa_sample_init();
     _mldsa_shake256_stream_init(seed, MLDSA_CRHBYTES, nonce);
@@ -256,6 +267,8 @@ var _mldsa_ch_pos = 0;
 var _mldsa_ch_signs = 0;
 var _mldsa_ch_i = 0;
 
+# SampleInBall: expand c̃ (`seed`, CTILDEBYTES = 48) via SHAKE-256 into `c` with exactly
+# τ = 49 coeffs in {−1, +1} (signed i64) and the rest 0. Shared module state. Returns 0.
 fn mldsa_poly_challenge(c, seed): i64 {
     _mldsa_sample_init();
     _mldsa_ch_c = c;

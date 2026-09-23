@@ -4,8 +4,15 @@
 # Provides IMA policy rule construction, measurement parsing, status
 # querying, and file integrity verification via xattr.
 #
-# Requires: lib/syscalls.cyr, lib/process.cyr, lib/string.cyr, lib/vec.cyr,
+# Requires: lib/syscalls.cyr, lib/io.cyr, lib/process.cyr, lib/string.cyr, lib/vec.cyr,
 #           lib/alloc.cyr, lib/fmt.cyr, src/error.cyr
+#
+# 3.13.0: no `defer` in this file. cyrius 6.6.0-6.6.6 skips a `defer` when the fn
+# returns a value-form Result, and every fn here does, so the three `defer { sys_close }`
+# blocks never ran and each call leaked an fd. Every exit now closes explicitly, and the
+# file ops go through io.cyr (`file_open` / `file_read` / `file_close`): on agnos a raw
+# `sys_open` is (name, namelen, flags), so the Linux-shaped call passed the flags as the
+# name length.
 
 #define LINUX
 include "lib/string.cyr"
@@ -14,6 +21,7 @@ include "lib/alloc.cyr"
 include "lib/vec.cyr"
 include "lib/tagged.cyr"
 include "lib/syscalls.cyr"
+include "lib/io.cyr"
 include "lib/process.cyr"
 include "lib/slice.cyr"
 include "src/error.cyr"
@@ -291,14 +299,13 @@ fn ima_get_status(): i64 {
     # Count measurements by reading ascii_runtime_measurements
     var mpath = "/sys/kernel/security/ima/ascii_runtime_measurements";
     var mcount = 0;
-    var mfd = sys_open(mpath, O_RDONLY, 0);
+    var mfd = file_open(mpath, O_RDONLY, 0);
     if (mfd >= 0) {
-        defer { sys_close(mfd); }
         var rbuf[4096];
         var s: [u8] = 0;
         var rgo = 1;
         while (rgo == 1) {
-            var n = sys_read(mfd, &rbuf, 4096);
+            var n = file_read(mfd, &rbuf, 4096);
             if (n <= 0) {
                 rgo = 0;
             } else {
@@ -313,6 +320,7 @@ fn ima_get_status(): i64 {
                 }
             }
         }
+        file_close(mfd);
     }
 
     # Check if policy file exists
@@ -438,11 +446,10 @@ fn ima_parse_measurements(content): i64 {
 # Read + parse the kernel IMA measurement log. Returns Result.
 fn ima_read_measurements(): i64 {
     var path = "/sys/kernel/security/ima/ascii_runtime_measurements";
-    var fd = sys_open(path, O_RDONLY, 0);
+    var fd = file_open(path, O_RDONLY, 0);
     if (fd < 0) {
         return sigil_err_io(0 - fd, "Failed to read IMA measurements");
     }
-    defer { sys_close(fd); }
 
     # Read the entire measurement log, growing the buffer to EOF rather
     # than silently truncating. IMA logs on a busy system routinely exceed
@@ -455,13 +462,14 @@ fn ima_read_measurements(): i64 {
     var total = 0;
     var rgo = 1;
     while (rgo == 1) {
-        var n = sys_read(fd, buf + total, bufsize - total - 1);
+        var n = file_read(fd, buf + total, bufsize - total - 1);
         if (n <= 0) {
             rgo = 0;
         } else {
             total = total + n;
             if (total >= bufsize - 1) {
                 if (bufsize >= cap_max) {
+                    file_close(fd);
                     return sigil_err_io(0, "IMA measurement log exceeds 32MB cap");
                 }
                 var newsize = bufsize * 2;
@@ -473,6 +481,7 @@ fn ima_read_measurements(): i64 {
             }
         }
     }
+    file_close(fd);
     store8(buf + total, 0);
 
     return ima_parse_measurements(buf);
@@ -529,7 +538,7 @@ fn ima_write_policy(rules): i64 {
         return sigil_err_unknown("IMA policy file not found; is IMA enabled?");
     }
 
-    var fd = sys_open(ppath, O_WRONLY, 0);
+    var fd = file_open(ppath, O_WRONLY, 0);
     if (fd < 0) {
         var errno = 0 - fd;
         if (errno == EACCES || errno == EPERM) {
@@ -537,11 +546,15 @@ fn ima_write_policy(rules): i64 {
         }
         return sigil_err_io(errno, "Failed to write IMA policy");
     }
-    defer { sys_close(fd); }
 
-    var wret = sys_write(fd, policy_buf, pos);
+    # 3.13.0: the whole policy or an error — a short write is not a loaded policy.
+    var wret = agnosys_write_all(fd, policy_buf, pos);
+    var cret = file_close(fd);
     if (wret < 0) {
         return sigil_err_io(0 - wret, "Failed to write IMA policy");
+    }
+    if (cret < 0) {
+        return sigil_err_io(0 - cret, "Failed to write IMA policy (close)");
     }
 
     return Ok(0);

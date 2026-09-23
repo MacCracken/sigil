@@ -74,6 +74,9 @@ fn _mldsa_decode_i32_le(hex_str, idx): i64 {
 # Init — decode the zetas hex literal once into the module buffer.
 # ================================================================
 
+# Decode the 256 zetas (ζ^brv8(k) · 2^32 mod Q, centered, ζ = 1753) into a 2048-byte
+# `alloc`'d table on first call; later calls return at once. Returns 0. Unsynchronised
+# check-then-set: the first call must not race another thread.
 fn mldsa_ntt_init(): i64 {
     if (_mldsa_ntt_inited == 1) { return 0; }
     _mldsa_zetas = alloc(256 * 8);
@@ -94,6 +97,8 @@ fn mldsa_ntt_init(): i64 {
 # add/sub; caller ensures inputs are small enough that i32 range
 # is preserved (bounded by roughly Q after each layer).
 
+# Forward NTT, in place, on one poly `a` (256 i64 coeffs, 2048 B): natural in, bit-reversed
+# out. No reductions, so |coeff| can grow by up to 8·Q (one Q per layer). Returns 0.
 fn mldsa_ntt(a): i64 {
     mldsa_ntt_init();
     var k = 0;
@@ -127,6 +132,8 @@ fn mldsa_ntt(a): i64 {
 # in a single Montgomery reduction — folding the inverse-N and
 # the Montgomery-R correction into one scan of the buffer.
 
+# Inverse NTT, in place, on one poly `a` (2048 B): bit-reversed in, natural out, times 2^32
+# (the "tomont" factor). Wants |coeff| < Q on input; every output has |coeff| < Q. Returns 0.
 fn mldsa_invntt_tomont(a): i64 {
     mldsa_ntt_init();
     var k = 256;

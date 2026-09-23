@@ -67,8 +67,10 @@ var BN_MAX_LIMBS = 64;
 # arrays are static globals" — which was true under cycc 6.0.52 and has
 # been FALSE since cyrius 6.3.15 routed array locals to per-thread stack
 # slots. Every buffer above is far inside the 122,880-byte per-fn budget,
-# and the compiler emits `note: oversized array local kept in shared
-# global` if one ever is not. That note is the only signal to trust here;
+# and the compiler warns if one ever is not — since cyrius 6.6.5 the text is
+# `warning: array local over the per-fn frame budget gets STATIC storage`,
+# naming the declaration's file:line (it was a `note: oversized array local`
+# before). That warning is the only signal to trust here;
 # do not re-introduce a lane on the strength of the old quirk text.
 #
 # Secret residue is still wiped, but per CALL rather than per LANE:
@@ -80,17 +82,21 @@ var BN_MAX_LIMBS = 64;
 # Basic limb ops (all take a `limbs` count; buffers are byte ptrs)
 # ----------------------------------------------------------------
 
+# Zero the `limbs` 64-bit limbs (limbs * 8 bytes) at `a`. Returns 0.
 fn bn_zero(a, limbs): i64 {
     var i = 0;
     while (i < limbs) { store64(a + i * 8, 0); i = i + 1; }
     return 0;
 }
 
+# Copy `limbs` limbs (limbs * 8 bytes) from `src` to `dst`. Returns 0.
 fn bn_copy(dst, src, limbs): i64 {
     memcpy(dst, src, limbs * 8);
     return 0;
 }
 
+# 1 if all `limbs` limbs at `a` are zero, else 0. ORs every limb together
+# before the single test (no early exit on the first non-zero limb).
 fn bn_is_zero(a, limbs): i64 {
     var acc = 0;
     var i = 0;
@@ -562,7 +568,7 @@ fn _bn_mont_mul(out, a, b, n, n0inv, limbs): i64 {
     # The banking existed for cyrius **quirk #1** — "function-scope `var X[N]` arrays are
     # static globals", confirmed under cycc 6.0.52. **That is no longer true.** cyrius
     # v6.3.15 routed array locals to per-thread STACK slots (`_STACK_ARRAYS = 1`,
-    # src/frontend/parse.cyr:287) and sigil never revisited the workaround. Verified
+    # src/frontend/parse.cyr:287 at 6.3.15; :1000 at 6.6.6) and sigil never revisited the workaround. Verified
     # directly on cycc 6.5.12 with two real threads writing distinct sentinels into their
     # own `var buf[64]` and reading them back after the sibling wrote: 111111 / 222222, no
     # collision.

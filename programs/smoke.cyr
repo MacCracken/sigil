@@ -55,5 +55,5 @@ fn main() {
 
 #ifdef SIGIL_SMOKE
 var exit_code = main();
-syscall(SYS_EXIT, exit_code);
+sys_exit(exit_code);
 #endif

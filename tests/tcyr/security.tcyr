@@ -157,7 +157,7 @@ fn main() {
     # temp file and check the serialized form is the expected escape.
     test_group("JSON escape dangerous bytes");
     var tmp_path = "/tmp/sigil_json_escape_test";
-    var jfd = file_open(tmp_path, 577, 420);
+    var jfd = file_open(tmp_path, O_WRONLY | O_CREAT | O_TRUNC, 420);
     # Input: quote, backslash, newline, tab, control (0x01), plain
     var input[6];
     store8(&input, 34);    # "
@@ -170,12 +170,12 @@ fn main() {
     file_close(jfd);
 
     # Read back and check escapes
-    var rfd = file_open(tmp_path, 0, 0);
+    var rfd = file_open(tmp_path, O_RDONLY, 0);
     var rbuf[64];
     memset(&rbuf, 0, 64);
     var rn = file_read(rfd, &rbuf, 63);
     file_close(rfd);
-    syscall(87, tmp_path);
+    xunlink(tmp_path);
     # Expected: \"\\\n\t\u0001A -> bytes:
     #   \ " (2) + \ \ (2) + \ n (2) + \ t (2) + \ u 0 0 0 1 (6) + A (1) = 15
     assert_eq(rn, 15, "escaped output length");
@@ -195,15 +195,15 @@ fn main() {
 
     test_group("JSON escape no-op for safe content");
     var spath = "/tmp/sigil_json_safe_test";
-    var sfd = file_open(spath, 577, 420);
+    var sfd = file_open(spath, O_WRONLY | O_CREAT | O_TRUNC, 420);
     json_write_escaped(sfd, "safe_key-01", 11);
     file_close(sfd);
-    var srfd = file_open(spath, 0, 0);
+    var srfd = file_open(spath, O_RDONLY, 0);
     var sbuf[16];
     memset(&sbuf, 0, 16);
     var srn = file_read(srfd, &sbuf, 15);
     file_close(srfd);
-    syscall(87, spath);
+    xunlink(spath);
     assert_eq(srn, 11, "no-op length");
     assert_eq(ct_eq_bytes_lens(&sbuf, 11, "safe_key-01", 11), 1, "safe content passthrough");
 
@@ -214,4 +214,4 @@ fn main() {
 }
 
 var exit_code = main();
-syscall(60, exit_code);
+sys_exit(exit_code);

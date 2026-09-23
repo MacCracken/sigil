@@ -36,12 +36,16 @@ enum VerityConst {
 # Hash algorithm helpers
 # ================================================================
 
+# veritysetup `--hash` name for a VerityHashAlgo: "sha256" or "sha512" (static string);
+# any other value falls back to "sha256".
 fn dmverity_hash_algo_str(algo): i64 {
     if (algo == VERITY_SHA256) { return "sha256"; }
     if (algo == VERITY_SHA512) { return "sha512"; }
     return "sha256";
 }
 
+# Root-hash length in hex characters for a VerityHashAlgo: 64 (SHA-256) or 128 (SHA-512);
+# any other value falls back to 64.
 fn dmverity_hash_hex_len(algo): i64 {
     if (algo == VERITY_SHA256) { return VERITY_SHA256_HEX_LEN; }
     if (algo == VERITY_SHA512) { return VERITY_SHA512_HEX_LEN; }
@@ -69,12 +73,16 @@ struct dmverity_config {
     salt;
 }
 
+# New zeroed dmverity_config (64 B, bump `alloc` — never free() it): every field 0, so the
+# algorithm defaults to VERITY_SHA256 and salt to none.
 fn dmverity_config_alloc(): i64 {
     var c = alloc(64);
     memset(c, 0, 64);
     return c;
 }
 
+# Set the mapping name and the data / hash device paths on config `c` (C-string ptrs stored
+# by reference, not copied). No validation here; returns `c`.
 fn dmverity_config_set_devices(c, name, data_device, hash_device): i64 {
     dmverity_config_set_name(c, name);
     dmverity_config_set_data_device(c, data_device);
@@ -82,6 +90,8 @@ fn dmverity_config_set_devices(c, name, data_device, hash_device): i64 {
     return c;
 }
 
+# Set block sizes, VerityHashAlgo, root-hash hex string and salt hex string (0 = no salt) on
+# config `c`, stored by reference. dmverity_config_validate checks them later; returns `c`.
 fn dmverity_config_set_params(c, data_bs, hash_bs, algo, root_hash, salt): i64 {
     dmverity_config_set_data_block_size(c, data_bs);
     dmverity_config_set_hash_block_size(c, hash_bs);
@@ -99,6 +109,8 @@ fn dmverity_config_set_params(c, data_bs, hash_bs, algo, root_hash, salt): i64 {
 #derive(accessors)
 struct dmverity_status { name; is_active; is_verified; corruption_detected; root_hash; }
 
+# New dmverity_status (40 B, bump `alloc`) with all five fields set; string fields are
+# stored by reference.
 fn dmverity_status_new(name, is_active, is_verified, corruption_detected, root_hash): i64 {
     var s = alloc(40);
     dmverity_status_set_name(s, name);
@@ -230,10 +242,14 @@ fn dmverity_config_validate(config): i64 {
 # Helper: run veritysetup
 # ================================================================
 
+# Run a veritysetup argv vec via agnosys_run_capture, capturing stdout into buf[buflen].
+# Returns Ok(bytes_read) or Err("veritysetup execution failed").
 fn dmverity_run_capture(args, buf, buflen): i64 {
     return agnosys_run_capture(args, buf, buflen, "veritysetup execution failed");
 }
 
+# Run a veritysetup argv vec via agnosys_run_checked. Returns Ok(0) if it exits 0, else
+# Err("veritysetup command failed").
 fn dmverity_run_checked(args): i64 {
     return agnosys_run_checked(args, "veritysetup command failed");
 }

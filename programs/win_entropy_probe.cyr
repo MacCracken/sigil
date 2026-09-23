@@ -68,4 +68,4 @@ fn main(): i64 {
 }
 
 var _ec = main();
-syscall(60, _ec);
+sys_exit(_ec);

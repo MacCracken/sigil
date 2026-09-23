@@ -55,7 +55,7 @@ fn main() {
     var i = 0;
     while (i < 20) {
         var path = _fuzz_path(i);
-        var fd = file_open(path, 577, 420);
+        var fd = file_open(path, O_WRONLY | O_CREAT | O_TRUNC, 420);
         var content = alloc(256);
         memset(content, 0x41 + (i % 26), 256);
         file_write(fd, content, 256);
@@ -91,7 +91,7 @@ fn main() {
     assert_eq(ireport_is_clean(report2), 1, "clean after import");
 
     # Tamper with one file and re-verify
-    var tamper_fd = file_open("/tmp/sigil_fuzz_5.bin", 577, 420);
+    var tamper_fd = file_open("/tmp/sigil_fuzz_5.bin", O_WRONLY | O_CREAT | O_TRUNC, 420);
     file_write(tamper_fd, "TAMPERED", 8);
     file_close(tamper_fd);
 
@@ -103,7 +103,7 @@ fn main() {
     i = 0;
     while (i < 20) {
         var path = _fuzz_path(i);
-        syscall(87, path);
+        xunlink(path);
         i = i + 1;
     }
 
@@ -111,4 +111,4 @@ fn main() {
 }
 
 var exit_code = main();
-syscall(60, exit_code);
+sys_exit(exit_code);

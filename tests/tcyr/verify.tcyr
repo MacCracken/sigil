@@ -39,7 +39,7 @@ fn main() {
 
     # Setup: create a temp file to verify
     var tmppath = "/tmp/sigil_verify_test.txt";
-    var tfd = file_open(tmppath, 577, 420);
+    var tfd = file_open(tmppath, O_WRONLY | O_CREAT | O_TRUNC, 420);
     file_write(tfd, "test artifact content", 21);
     file_close(tfd);
 
@@ -167,7 +167,7 @@ fn main() {
     # ============================================================
     test_group("verify agent unsigned");
     var tmppath2 = "/tmp/sigil_verify_agent.txt";
-    var tfd2 = file_open(tmppath2, 577, 420);
+    var tfd2 = file_open(tmppath2, O_WRONLY | O_CREAT | O_TRUNC, 420);
     file_write(tfd2, "unsigned agent", 14);
     file_close(tfd2);
 
@@ -271,7 +271,7 @@ fn main() {
     sv_register_system_core(sv, art_b);
 
     var ts_path = "/tmp/sigil_trust_store_test.json";
-    syscall(87, ts_path);
+    xunlink(ts_path);
     assert_eq(sv_save_trust_store(sv, ts_path), SIGIL_ERR_NONE, "save ok");
 
     var sv2 = sigil_verifier_new(keyring_new("/tmp/sigil_ts_keys2"), trust_policy_new());
@@ -288,7 +288,7 @@ fn main() {
     var sv3 = sigil_verifier_new(keyring_new("/tmp/sigil_ts_keys3"), trust_policy_new());
     sv_load_trust_store(sv3, ts_path);
     assert_eq(sv_trust_level_for(sv3, "hash_escape"), TRUST_VERIFIED, "escape path roundtrip");
-    syscall(87, ts_path);
+    xunlink(ts_path);
 
     # Missing file is not a crash: returns 0 loaded.
     var sv_empty = sigil_verifier_new(keyring_new("/tmp/sigil_ts_keys_empty"), trust_policy_new());
@@ -303,7 +303,7 @@ fn main() {
     # ============================================================
     test_group("verify_package no hash");
     var pkg_path = "/tmp/sigil_pkg_test.bin";
-    var pkg_fd = file_open(pkg_path, 577, 420);
+    var pkg_fd = file_open(pkg_path, O_WRONLY | O_CREAT | O_TRUNC, 420);
     file_write(pkg_fd, "package payload", 15);
     file_close(pkg_fd);
     var pkg_hash_actual = hash_file(pkg_path);
@@ -349,14 +349,14 @@ fn main() {
         ci_b = ci_b + 1;
     }
     assert_eq(exp_failed, 1, "expected_hash fails when mismatched");
-    syscall(87, pkg_path);
+    xunlink(pkg_path);
 
     # Cleanup
-    syscall(87, tmppath);
-    syscall(87, tmppath2);
+    xunlink(tmppath);
+    xunlink(tmppath2);
 
     return assert_summary();
 }
 
 var exit_code = main();
-syscall(60, exit_code);
+sys_exit(exit_code);

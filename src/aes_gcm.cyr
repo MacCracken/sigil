@@ -101,6 +101,10 @@ fn _aes_decode_hex(buf, hex_str, byte_len): i64 {
     return 0;
 }
 
+# Lazily allocates (bump `alloc`) and decodes the read-only AES tables: the
+# 256-byte forward S-box (FIPS 197 Fig. 7) and Rcon[0..10]. Idempotent, but the
+# init flag is not atomic — make the first call before spawning threads.
+# Returns 0.
 fn aes_gcm_global_init(): i64 {
     if (_aes_inited == 1) { return 0; }
     _aes_sbox = alloc(256);
@@ -133,6 +137,10 @@ fn _aes_xtime(b): i64 {
 # FIPS 197 § 5.2 algorithm. Nk=8, Nr=14, total expanded size = 4*4*(Nr+1)=240.
 # ================================================================
 
+# Expands the 32-byte AES-256 `key` into the 240-byte schedule (15 round keys,
+# FIPS 197 §5.2) at `round_keys`, which the caller provides — 16-byte aligned
+# if it is to take the AES-NI block path. The schedule is key material: wiping
+# it after use is the caller's job. Returns 0.
 fn aes256_key_expand(key, round_keys): i64 {
     aes_gcm_global_init();
     # First 32 bytes of the expanded key = raw key material.
@@ -192,6 +200,10 @@ fn aes256_key_expand(key, round_keys): i64 {
 # there is no separate "i%4==0 SubWord-only" branch (that branch in
 # the AES-256 path exists only because Nk=8 > 4).
 
+# Expands the 16-byte AES-128 `key` into the 176-byte schedule (11 round keys,
+# FIPS 197 §5.2) at `round_keys`, which the caller provides — 16-byte aligned
+# if it is to take the AES-NI block path. The schedule is key material: wiping
+# it after use is the caller's job. Returns 0.
 fn aes_128_key_expand(key, round_keys): i64 {
     aes_gcm_global_init();
     # First 16 bytes of the expanded key = raw key material.
@@ -385,6 +397,10 @@ fn _aes_encrypt_block_sw(round_keys, in_block, out_block, nr): i64 {
 # the CLAUDE.md discipline ("fl_alloc for round keys") without
 # requiring every call site to know about the alignment invariant.
 
+# Encrypts one 16-byte block under a 240-byte AES-256 schedule (from
+# aes256_key_expand). Uses AES-NI when aes_ni_available() and `round_keys` is
+# 16-byte aligned, otherwise the software FIPS 197 §5.1 rounds; both give the
+# same bytes. `out_block` may equal `in_block`. Returns 0.
 fn aes256_encrypt_block(round_keys, in_block, out_block): i64 {
     if (aes_ni_available() == 1) {
         if ((round_keys & 15) == 0) {
@@ -395,6 +411,10 @@ fn aes256_encrypt_block(round_keys, in_block, out_block): i64 {
     return _aes_encrypt_block_sw(round_keys, in_block, out_block, 14);
 }
 
+# Encrypts one 16-byte block under a 176-byte AES-128 schedule (from
+# aes_128_key_expand). Uses AES-NI when aes_ni_available() and `round_keys` is
+# 16-byte aligned, otherwise the software FIPS 197 §5.1 rounds; both give the
+# same bytes. `out_block` may equal `in_block`. Returns 0.
 fn aes128_encrypt_block(round_keys, in_block, out_block): i64 {
     if (aes_ni_available() == 1) {
         if ((round_keys & 15) == 0) {

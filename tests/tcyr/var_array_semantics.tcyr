@@ -49,12 +49,12 @@ fn main() {
     # Third call: if static, we now see 0xBB.
     var b3 = probe(0xCC);
 
-    syscall(1, 1, "First call observed:  ", 22);
-    fmt_int(b1); syscall(1, 1, "\n", 1);
-    syscall(1, 1, "Second call observed: ", 22);
-    fmt_int(b2); syscall(1, 1, "\n", 1);
-    syscall(1, 1, "Third call observed:  ", 22);
-    fmt_int(b3); syscall(1, 1, "\n", 1);
+    sys_write(1, "First call observed:  ", 22);
+    fmt_int(b1); sys_write(1, "\n", 1);
+    sys_write(1, "Second call observed: ", 22);
+    fmt_int(b2); sys_write(1, "\n", 1);
+    sys_write(1, "Third call observed:  ", 22);
+    fmt_int(b3); sys_write(1, "\n", 1);
 
     # var X[N] inside a function is a function-scope static in cyrius:
     # buf retains the prior call's bytes, so b2 sees 0xAA and b3 sees
@@ -64,9 +64,9 @@ fn main() {
         if (b3 == 0xBB) { is_static = 1; }
     }
     if (is_static == 1) {
-        syscall(1, 1, "VERDICT: var X[N] inside a function is STATIC (persists across calls)\n", 70);
+        sys_write(1, "VERDICT: var X[N] inside a function is STATIC (persists across calls)\n", 70);
     } else {
-        syscall(1, 1, "VERDICT: var X[N] inside a function appears to be per-call\n", 60);
+        sys_write(1, "VERDICT: var X[N] inside a function appears to be per-call\n", 59);
     }
     # Emit the suite's standard pass/fail summary. Previously this probe
     # printed only the VERDICT + returned an exit code, which

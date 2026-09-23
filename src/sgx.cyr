@@ -119,6 +119,8 @@ var SGX_REPORT_OFF_REPORT_DATA  = 320;
 #  128..255  reserved
 # ================================================================
 
+# Allocate a zeroed 256-byte SgxQuote struct to pass as `out` to `sgx_quote_parse`.
+# Bump-allocated via `alloc`; never `free()` it.
 fn sgx_quote_alloc(): i64 {
     var q = alloc(256);
     memset(q, 0, 256);
@@ -144,45 +146,66 @@ fn _sgx_load_u32(buf, off): i64 {
 # into the original DER buffer.
 # ================================================================
 
+# Accessor: header `version` (u16 at quote +0); 3 after a successful parse.
 fn sgx_quote_version(q): i64        { return load64(q + 16); }
+# Accessor: header `att_key_type` (u16 at quote +2); 2 (ECDSA P-256) after a successful parse.
 fn sgx_quote_att_key_type(q): i64   { return load64(q + 24); }
+# Accessor: the quote buffer pointer given to `sgx_quote_parse` (caller-owned, not copied).
 fn sgx_quote_buf(q): i64            { return load64(q + 0); }
+# Accessor: the quote length in bytes, as given to `sgx_quote_parse`.
 fn sgx_quote_buf_len(q): i64        { return load64(q + 8); }
 
+# Accessor: pointer to the 384-byte ISV enclave report at quote +48, inside the caller's buffer.
 fn sgx_quote_report_body_ptr(q): i64 {
     return load64(q + 0) + load64(q + 40);
 }
 
+# Accessor: pointer to the 32-byte MRENCLAVE at enclave report +64.
 fn sgx_quote_mr_enclave_ptr(q): i64 {
     return sgx_quote_report_body_ptr(q) + SGX_REPORT_OFF_MR_ENCLAVE;
 }
 
+# Accessor: pointer to the 32-byte MRSIGNER at enclave report +128.
 fn sgx_quote_mr_signer_ptr(q): i64 {
     return sgx_quote_report_body_ptr(q) + SGX_REPORT_OFF_MR_SIGNER;
 }
 
+# Accessor: ISVPRODID (u16 at enclave report +256), read from the quote buffer on each call.
 fn sgx_quote_isv_prod_id(q): i64 {
     return _sgx_load_u16(sgx_quote_buf(q),
       load64(q + 40) + SGX_REPORT_OFF_ISV_PROD_ID);
 }
 
+# Accessor: ISVSVN (u16 at enclave report +258), read from the quote buffer on each call.
 fn sgx_quote_isv_svn(q): i64 {
     return _sgx_load_u16(sgx_quote_buf(q),
       load64(q + 40) + SGX_REPORT_OFF_ISV_SVN);
 }
 
+# Accessor: pointer to the 64-byte REPORTDATA at enclave report +320.
 fn sgx_quote_report_data_ptr(q): i64 {
     return sgx_quote_report_body_ptr(q) + SGX_REPORT_OFF_REPORT_DATA;
 }
 
+# Accessor: pointer to the 64-byte attestation key (AK), raw big-endian P-256 Qx||Qy.
 fn sgx_quote_ak_ptr(q): i64           { return load64(q + 0) + load64(q + 64); }
+# Accessor: pointer to the AK's 64-byte signature (raw BE r||s) over header || enclave report.
 fn sgx_quote_ecdsa_sig_ptr(q): i64    { return load64(q + 0) + load64(q + 56); }
+# Accessor: pointer to the 384-byte QE report (the quoting enclave's own report).
 fn sgx_quote_qe_report_ptr(q): i64    { return load64(q + 0) + load64(q + 72); }
+# Accessor: pointer to the 64-byte PCK signature over the QE report (P-256, raw BE r||s).
 fn sgx_quote_qe_report_sig_ptr(q): i64 { return load64(q + 0) + load64(q + 80); }
+# Accessor: pointer to the qe_auth_data bytes (past their u16 size prefix); length via
+# `sgx_quote_qe_auth_data_len`.
 fn sgx_quote_qe_auth_data_ptr(q): i64 { return load64(q + 0) + load64(q + 88); }
+# Accessor: qe_auth_data length in bytes (u16 from the quote, 0..65535).
 fn sgx_quote_qe_auth_data_len(q): i64 { return load64(q + 96); }
+# Accessor: qe_cert_data_type (u16); `sgx_quote_verify_full` requires 5 (PCK chain, PEM).
 fn sgx_quote_cert_data_type(q): i64   { return load64(q + 104); }
+# Accessor: pointer to the qe_cert_data bytes (past the u16 type + u32 size); length via
+# `sgx_quote_cert_data_len`.
 fn sgx_quote_cert_data_ptr(q): i64    { return load64(q + 0) + load64(q + 112); }
+# Accessor: qe_cert_data length in bytes (u32 from the quote).
 fn sgx_quote_cert_data_len(q): i64    { return load64(q + 120); }
 
 # ================================================================
@@ -191,6 +214,10 @@ fn sgx_quote_cert_data_len(q): i64    { return load64(q + 120); }
 # Returns 1 on success, 0 on any malformed input.
 # ================================================================
 
+# Parse a DCAP v3 quote (`buf_len` bytes at `buf`) into the 256-byte SgxQuote at `out`.
+# Returns 1 on success; 0 if malformed or unsupported (version != 3, att_key_type != 2, or
+# bad lengths). Byte fields are not copied: accessors point into `buf`, which must outlive
+# `out`. On 0, `out` may be partly filled and must not be used.
 fn sgx_quote_parse(buf, buf_len, out): i64 {
     memset(out, 0, 256);
 
@@ -301,6 +328,10 @@ fn _sgxv_init(): i64 {
     return 0;
 }
 
+# Verify a successfully parsed quote against a caller-trusted PCK key (`pck_pk`: 64-byte BE
+# P-256 Qx||Qy): PCK sig over the QE report, QE report_data == SHA-256(AK || qe_auth_data)
+# followed by 32 zero bytes, then AK sig over header || enclave report (432 B). Returns 1
+# iff all three pass, else 0. Not thread-safe: uses unbanked module-global scratch.
 fn sgx_quote_verify_with_pck(quote, pck_pk): i64 {
     _sgxv_init();
 

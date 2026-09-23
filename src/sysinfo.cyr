@@ -30,17 +30,15 @@ enum UtsConst { UTS_SIZE = 390; }
 #endif
 
 # Query uname into a caller buffer (>= UTS_SIZE bytes). Returns Result Ok(out)/Err.
+# 3.12.18 (cyrius 6.6.4): lib/sys.cyr's sys_uname — the raw 63 was x86_64 uname(2) only:
+# on aarch64-Linux 63 is READ(2) (EBADF → Err, agnosys_uname dead), on x86 Mach-O it was
+# unrouted (SIGSYS). sys_uname spells SYS_UNAME per peer and synthesises the utsname on
+# Darwin from sysctl, where there is no uname(2) at all.
+# 3.13.0: agnos goes through it too — it was the last raw `syscall(34, out, 64)` here. The
+# stdlib's agnos arm is the same call, spelled `SYS_UNAME` with the 64-byte length, so the
+# two target arms collapse into one.
 fn agnosys_uname(out): i64 {
-    #ifdef CYRIUS_TARGET_AGNOS
-    var ret = syscall(34, out, 64);          # agnos sovereign uname#34 (buf, len)
-    #endif
-    #ifndef CYRIUS_TARGET_AGNOS
-    # 3.12.18 (cyrius 6.6.4): lib/sys.cyr's sys_uname — the raw 63 was x86_64 uname(2) only:
-    # on aarch64-Linux 63 is READ(2) (EBADF → Err, agnosys_uname dead), on x86 Mach-O it was
-    # unrouted (SIGSYS). sys_uname spells SYS_UNAME per peer and synthesises the utsname on
-    # Darwin from sysctl, where there is no uname(2) at all.
     var ret = sys_uname(out);
-    #endif
     if (ret < 0) { return sigil_err_from_syscall_ret(ret); }
     return Ok(out);
 }

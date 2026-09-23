@@ -30,13 +30,22 @@ var _ed25519_inited = 0;
 # +64:  Z (32 bytes)
 # +96:  T (32 bytes)
 
+# Allocate a 128-byte extended point (X, Y, Z, T) from the bump heap (`alloc`,
+# never freed individually); initialise it with ge_identity or ge_copy.
+# Returns the pointer, or 0 on allocation failure.
 fn ge_alloc(): i64 { return alloc(128); }
 
+# Pointer to the X coordinate of extended point `p` (u256 field element, +0).
 fn ge_x(p): i64 { return p; }
+# Pointer to the Y coordinate of extended point `p` (u256 field element, +32).
 fn ge_y(p): i64 { return p + 32; }
+# Pointer to the Z coordinate of extended point `p` (u256 field element, +64).
 fn ge_z(p): i64 { return p + 64; }
+# Pointer to the T = XY/Z coordinate of extended point `p` (u256, +96).
 fn ge_t(p): i64 { return p + 96; }
 
+# Set `p` to the neutral element (X, Y, Z, T) = (0, 1, 1, 0) with direct
+# limb stores (no allocation). Returns 0.
 fn ge_identity(p): i64 {
     # Identity in extended coordinates: (X,Y,Z,T) = (0,1,1,0).
     # Written limb-direct rather than via u256_from(0)/u256_from(1),
@@ -51,6 +60,7 @@ fn ge_identity(p): i64 {
     return 0;
 }
 
+# Copy the 128-byte extended point `src` to `dst`. Returns 0.
 fn ge_copy(dst, src): i64 {
     memcpy(dst, src, 128);
     return 0;
@@ -62,6 +72,10 @@ fn ge_copy(dst, src): i64 {
 # Cost: 8M + 1D (D = multiply by 2d)
 # ================================================================
 
+# r = p + q on edwards25519, all three in extended coordinates (HWCD08 unified
+# formula, so it also covers p == q and identity operands). Every read of p and
+# q precedes the first write to r, so r may alias either. Needs ed25519_init()
+# (uses the 2d constant). Returns 0.
 fn ge_add(r, p, q): i64 {
     # Per-thread banked working scratch (3.6): every `var X[N]` is a
     # static function-scope global (CLAUDE.md quirk #1). Each batch
@@ -114,6 +128,9 @@ fn ge_add(r, p, q): i64 {
 # Point doubling
 # ================================================================
 
+# r = 2p in extended coordinates (HWCD08 doubling with a = -1; p's T is not
+# read). All reads of p precede the writes to r, so in-place (r == p) is fine.
+# Returns 0.
 fn ge_double(r, p): i64 {
     # Per-thread banked working scratch (3.6) — see ge_add.
     var bk = cbank();
@@ -174,6 +191,11 @@ fn ge_cmov(dst, src, bit): i64 {
     return 0;
 }
 
+# r = [s]p for a 32-byte little-endian scalar `s` (all 256 bits, LSB first).
+# Every bit does one ge_add, one ge_cmov select and one ge_double, so the
+# point-op sequence is independent of s (the fp_* field ops still branch on
+# values). r is set to identity before p is read: r must not alias p. Needs
+# ed25519_init(). Returns 0.
 fn ge_scalarmult(r, s, p): i64 {
     # Per-thread banked working points (3.6) — see ge_add.
     var bk = cbank();
@@ -227,6 +249,10 @@ fn _ge_table_select(dst, row, digit): i64 {
     return 0;
 }
 
+# r = [s]B for a 32-byte little-endian scalar `s`, via the fixed-base comb
+# `_ed_B_table`: 64 4-bit windows, each a full-row _ge_table_select (every entry
+# scanned, no digit-indexed load) plus one ge_add, no doublings. Needs
+# ed25519_init() (the table is built there). Returns 0.
 fn ge_scalarmult_base(r, s): i64 {
     # Per-thread banked working points (3.6) — see ge_add.
     var bk = cbank();
@@ -292,6 +318,9 @@ fn _build_ed_B_table(): i64 {
 # Encode y with sign of x in high bit of last byte
 # ================================================================
 
+# Compress extended point `p` to its 32-byte RFC 8032 encoding at `out`: affine
+# y = Y/Z little-endian, with the low bit of x = X/Z in bit 255. One fp_inv of Z
+# per call. Returns 0.
 fn ge_to_bytes(out, p): i64 {
     # Per-thread banked working scratch (3.6) — see ge_add.
     var bk = cbank();
@@ -321,6 +350,11 @@ fn ge_to_bytes(out, p): i64 {
 # curve constants.
 var _ed_decomp_exp = 0;
 
+# Decompress the 32-byte RFC 8032 encoding `s` into extended point `p` (Z = 1,
+# T = xy), recovering x from x^2 = (y^2-1)/(dy^2+1) and its sign from bit 255.
+# Always returns 0 — there is no decode-failure result: y >= p, a y with no
+# square root, or x = 0 with the sign bit set is not rejected. Variable-time
+# (branches on the decoded value). Calls ed25519_init().
 fn ge_from_bytes(p, s): i64 {
     ed25519_init();
 
@@ -402,6 +436,11 @@ fn ge_from_bytes(p, s): i64 {
 # Ed25519 initialization
 # ================================================================
 
+# Lazily build the read-only Ed25519 constants with bump `alloc`: d, 2d,
+# sqrt(-1), the group order L, the base point B, the 128 KB fixed-base comb
+# table, the (p-5)/8 exponent and 2^256 mod L. Idempotent, but the init flag is
+# not atomic — make the first call before spawning threads (sv_verify_batch
+# pre-warms it). Returns 0.
 fn ed25519_init(): i64 {
     if (_ed25519_inited == 1) { return 0; }
     _init_ed_p();
@@ -463,6 +502,10 @@ fn ed25519_init(): i64 {
 # ed25519_init() so the parallel-batch pre-warm covers it.
 var _scr_r256 = 0;
 
+# Reduce a 64-byte little-endian integer (e.g. a SHA-512 digest) mod the group
+# order L into a 4-limb u256 at `out` (< L). Folds hi * (2^256 mod L) into lo
+# until hi is zero, then subtracts L; the iteration count depends on the value
+# (not constant-time). Needs ed25519_init(). Returns 0.
 fn sc_reduce(out, s64): i64 {
     # Reduce 512-bit value mod L using: val = hi*2^256 + lo ≡ hi*R + lo (mod L)
     # where R = 2^256 mod L. Iterate until hi == 0.
@@ -521,6 +564,9 @@ fn sc_reduce(out, s64): i64 {
 # sc_muladd: out = (a * b + c) mod L
 # ================================================================
 
+# out = (a * b + c) mod L for 4-limb u256 scalars — the RFC 8032 S = r + h*a
+# step. Forms the 512-bit sum, reduces it with sc_reduce (variable-time), and
+# zeroes its product scratch before returning. Needs ed25519_init(). Returns 0.
 fn sc_muladd(out, a, b, c): i64 {
     # Per-worker banked scratch (3.9.6): `prod` was a function-scope
     # static global (quirk #1). sc_muladd computes S = (r + h*a) on the
@@ -546,6 +592,10 @@ fn sc_muladd(out, a, b, c): i64 {
 # Ed25519 keypair: seed (32 bytes) -> sk (64 bytes), pk (32 bytes)
 # ================================================================
 
+# Derive an Ed25519 key pair from a 32-byte `seed` (RFC 8032 §5.1.5): a is the
+# clamped first 32 bytes of SHA-512(seed) and pk = encode([a]B). Writes the
+# 32-byte pk to `pk_out` and the 64-byte secret key seed || pk to `sk_out`.
+# Returns 0.
 fn ed25519_keypair(seed, sk_out, pk_out): i64 {
     ed25519_init();
     # `secret var` (cyrius 5.3.5+) gives compiler-guaranteed
@@ -575,6 +625,11 @@ fn ed25519_keypair(seed, sk_out, pk_out): i64 {
 # Ed25519 sign: sk (64b), msg, msg_len -> sig (64b)
 # ================================================================
 
+# Sign `msg_len` bytes at `msg` with the 64-byte secret key `sk` (seed || pk, as
+# written by ed25519_keypair); writes the 64-byte signature R || S (RFC 8032
+# §5.1.6, deterministic nonce) to `sig_out`. sk[32..64] is hashed into h as-is,
+# not re-derived from the seed, so it must be the seed's own public key. Zeroes
+# its expanded-key, nonce and scalar buffers before returning. Returns 0.
 fn ed25519_sign(sk, msg, msg_len, sig_out): i64 {
     ed25519_init();
     # Per-worker banked scratch (3.9.6 — concurrent-TLS-handshake fix).
@@ -722,6 +777,10 @@ fn ed25519_verify(pk, msg, msg_len, sig): i64 {
 # Generate random keypair
 # ================================================================
 
+# Generate a fresh Ed25519 key pair from a 32-byte CSPRNG seed
+# (`_sigil_random_fill`): 64-byte sk (seed || pk) to `sk_out`, 32-byte pk to
+# `pk_out`. Returns 1 on success; on entropy failure zeroes both outputs and
+# returns 0.
 fn ed25519_generate_keypair(sk_out, pk_out): i64 {
     # Entropy via sigil's single fail-closed CSPRNG boundary
     # (src/random.cyr → stdlib random_bytes): per-target getrandom /

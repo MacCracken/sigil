@@ -178,12 +178,18 @@ fn sgx_derive_seal_key(sealing_root, policy, measurement, isvsvn,
 # semantic labels for the caller's surrounding AEAD encrypt/decrypt
 # step.
 
+# Seal-side alias of sgx_derive_seal_key: writes the 32-byte (AES-256) sealing
+# key for (policy, measurement, isvsvn, key_id) to `out_key`. Returns 1 on
+# success, 0 on an out-of-range input.
 fn sgx_seal_key(sealing_root, policy, measurement, isvsvn,
   key_id, key_id_len, out_key): i64 {
     return sgx_derive_seal_key(sealing_root, policy, measurement, isvsvn,
       key_id, key_id_len, out_key);
 }
 
+# Unseal-side alias of sgx_derive_seal_key — the same deterministic derivation,
+# so identical inputs give the key sgx_seal_key produced. Writes 32 bytes to
+# `out_key`. Returns 1 on success, 0 on an out-of-range input.
 fn sgx_unseal_key(sealing_root, policy, measurement, isvsvn,
   key_id, key_id_len, out_key): i64 {
     return sgx_derive_seal_key(sealing_root, policy, measurement, isvsvn,
@@ -193,12 +199,17 @@ fn sgx_unseal_key(sealing_root, policy, measurement, isvsvn,
 # Width-parameterized seal / unseal aliases (3.6.7) — pass out_key_len
 # = SGX_SEAL_KEY_SIZE_128 (16) for an AES-128 key or _256 (32) for AES-256.
 
+# Seal-side alias of sgx_derive_seal_key_n: writes an `out_key_len`-byte key
+# (16 or 32) to `out_key`. Returns 1 on success, 0 on an out-of-range input.
 fn sgx_seal_key_n(sealing_root, policy, measurement, isvsvn,
   key_id, key_id_len, out_key, out_key_len): i64 {
     return sgx_derive_seal_key_n(sealing_root, policy, measurement, isvsvn,
       key_id, key_id_len, out_key, out_key_len);
 }
 
+# Unseal-side alias of sgx_derive_seal_key_n (same derivation as
+# sgx_seal_key_n): writes an `out_key_len`-byte key (16 or 32) to `out_key`.
+# Returns 1 on success, 0 on an out-of-range input.
 fn sgx_unseal_key_n(sealing_root, policy, measurement, isvsvn,
   key_id, key_id_len, out_key, out_key_len): i64 {
     return sgx_derive_seal_key_n(sealing_root, policy, measurement, isvsvn,

@@ -1,0 +1,325 @@
+# fd_hygiene.tcyr — every trust-stack fn releases what it acquired, on every exit.
+#
+# 3.13.0. cyrius 6.6.0-6.6.6 SKIPS a `defer` block when the enclosing fn returns
+# a value-form Result pair (`return Ok(x);`, `return Err(e);`, or a tail call to a
+# pair-returning fn) — cyrius issue
+# 2026-09-22-agnodrm-defer-skipped-on-value-form-result-return.md. Every one of
+# sigil's 8 `defer`s sat in such a fn, so none of them ever ran: the LUKS key was
+# left in /tmp after every `luks_format` / `luks_open`, and `luks_write_keyfile`,
+# `tpm_seal`, `secureboot_read_efi_variable` and three IMA readers/writers each
+# leaked an fd per call. The fix removes every `defer` and releases explicitly.
+# Issue: docs/development/issues/archive/2026-09-22-luks-keyfile-left-in-tmp-defer-skipped.md
+#
+# Runs unprivileged on a host with no cryptsetup volume, no TPM tools and no
+# IMA: the LUKS keyfile lifecycle is driven through `_luks_run_with_keyfile` with
+# /bin/sh standing in for cryptsetup, `tpm_seal` is exercised up to the missing
+# (or failing) `tpm2_create`, and the write-failure paths are forced with an
+# unreadable source buffer (write(2) -> -EFAULT). The IMA fds are on paths that
+# need /sys/kernel/security/ima and are covered by review, not by this file.
+#
+# fd accounting: `lowest_free_fd()` opens and closes /dev/null. The kernel hands
+# out the LOWEST free descriptor, so any fd a call leaked shows up as a higher
+# number here.
+
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/string.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fs.cyr"
+include "lib/fmt.cyr"
+include "lib/bayan.cyr"
+include "lib/sakshi.cyr"
+include "lib/chrono.cyr"
+include "lib/tagged.cyr"
+include "lib/process.cyr"
+include "lib/slice.cyr"
+include "lib/sys.cyr"
+
+include "lib/thread_local.cyr"
+include "src/crypto_scratch.cyr"
+include "src/mul64.cyr"
+include "src/types.cyr"
+include "src/error.cyr"
+include "lib/random.cyr"
+include "src/random.cyr"
+include "src/sha256.cyr"
+include "src/hex.cyr"
+include "lib/ct.cyr"
+include "src/hmac.cyr"
+include "src/sha512.cyr"
+include "src/bigint_ext.cyr"
+include "src/ed25519.cyr"
+include "src/sys_error.cyr"
+include "src/sys_util.cyr"
+include "src/sysinfo.cyr"
+include "src/certpin_core.cyr"
+include "src/tpm_core.cyr"
+include "src/ima_core.cyr"
+include "src/secureboot_core.cyr"
+include "src/luks.cyr"
+
+var _fdh_pid = 0;
+
+fn lowest_free_fd(): i64 {
+    var fd = file_open("/dev/null", O_RDONLY, 0);
+    file_close(fd);
+    return fd;
+}
+
+fn cat2(a, b): i64 {
+    var al = strlen(a);
+    var bl = strlen(b);
+    var out = alloc(al + bl + 1);
+    memcpy(out, a, al);
+    memcpy(out + al, b, bl);
+    store8(out + al + bl, 0);
+    return out;
+}
+
+fn pid_str(): i64 {
+    var buf = alloc(24);
+    memset(buf, 0, 24);
+    fmt_int_buf(_fdh_pid, buf);
+    return buf;
+}
+
+# /tmp/sigil_fdh_<pid>_<tag> — per-process, so parallel runs never collide.
+fn tmp_name(tag): i64 {
+    return cat2(cat2(cat2("/tmp/sigil_fdh_", pid_str()), "_"), tag);
+}
+
+# Read a small file into a fresh NUL-terminated buffer; returns 0 if unreadable.
+fn slurp(path, out_len): i64 {
+    var buf = alloc(512);
+    memset(buf, 0, 512);
+    var n = file_read_all(path, buf, 511);
+    if (n < 0) { store64(out_len, 0); return 0; }
+    store64(out_len, n);
+    return buf;
+}
+
+# How many of THIS process's LUKS keyfiles (/tmp/.agnos-luks-<pid>-<hex>) exist.
+fn count_own_keyfiles(): i64 {
+    var pfx = cat2(cat2(".agnos-luks-", pid_str()), "-");
+    var plen = strlen(pfx);
+    var entries = dir_list(str_from("/tmp"));
+    var n = 0;
+    var i = 0;
+    while (i < vec_len(entries)) {
+        var e = vec_get(entries, i);
+        if (str_len(e) >= plen) {
+            if (memeq(str_data(e), pfx, plen) == 1) { n = n + 1; }
+        }
+        i = i + 1;
+    }
+    return n;
+}
+
+fn main() {
+    alloc_init();
+    _fdh_pid = sys_getpid();
+
+    var key = alloc(64);
+    var ki = 0;
+    while (ki < 64) { store8(key + ki, (ki * 7 + 3) & 0xFF); ki = ki + 1; }
+
+    # ============================================================
+    # agnosys_write_all — a SHORT or failed write is never a success.
+    # ============================================================
+    test_group("agnosys_write_all");
+    var wp = tmp_name("wall");
+    xunlink(wp);
+    var wfd = file_open(wp, O_WRONLY | O_CREAT | O_EXCL, 384);
+    assert(wfd >= 0, "scratch file created");
+    assert_eq(agnosys_write_all(wfd, key, 64), 64, "a whole-buffer write returns the full length");
+    assert(agnosys_write_all(wfd, 1, 64) < 0,
+      "an unreadable source is a negative errno, never a byte count");
+    file_close(wfd);
+    var wlen = 0;
+    slurp(wp, &wlen);
+    assert_eq(wlen, 64, "only the good write landed");
+    xunlink(wp);
+
+    # ============================================================
+    # luks_write_keyfile — no fd leaked, the whole key written, and a
+    # failed write leaves no keyfile behind.
+    # ============================================================
+    test_group("luks_write_keyfile");
+    var own0 = count_own_keyfiles();
+    var base = lowest_free_fd();
+    var all_ok = 1;
+    var all_full = 1;
+    var i = 0;
+    while (i < 8) {
+        var kt, kf = luks_write_keyfile(key, 64);
+        if (is_err_result(kt) == 1) { all_ok = 0; }
+        else {
+            var klen = 0;
+            var kb = slurp(kf, &klen);
+            if (klen != 64) { all_full = 0; }
+            elif (memeq(kb, key, 64) == 0) { all_full = 0; }
+            xunlink(kf);
+        }
+        i = i + 1;
+    }
+    assert_eq(all_ok, 1, "8 keyfile writes all return Ok");
+    assert_eq(all_full, 1, "each keyfile holds exactly the key bytes");
+    assert_eq(lowest_free_fd(), base, "8 keyfile writes leak no fd");
+
+    var bt, bv = luks_write_keyfile(1, 64);
+    assert_eq(is_err_result(bt), 1, "a failed key write is Err");
+    assert_eq(count_own_keyfiles(), own0, "a failed key write removes the file it created");
+    assert_eq(lowest_free_fd(), base, "a failed key write leaks no fd");
+
+    # ============================================================
+    # _luks_run_with_keyfile — the lifecycle luks_format / luks_open use.
+    # /bin/sh stands in for cryptsetup and records what it was handed:
+    # the keyfile path ($1), the bytes in it, and the first post-arg ($2).
+    # ============================================================
+    test_group("luks keyfile lifecycle (command succeeds)");
+    var rec_path = tmp_name("kpath");
+    var rec_body = tmp_name("kbody");
+    var rec_tail = tmp_name("ktail");
+    xunlink(rec_path);
+    xunlink(rec_body);
+    xunlink(rec_tail);
+    var script_ok = cat2(cat2(cat2(cat2(cat2(
+      "cat \"$1\" > ", rec_body), " && printf %s \"$1\" > "), rec_path),
+      " && printf %s \"$2\" > "), rec_tail);
+    var pre = vec_new();
+    vec_push(pre, "/bin/sh");
+    vec_push(pre, "-c");
+    vec_push(pre, script_ok);
+    vec_push(pre, "sh");
+    var post = vec_new();
+    vec_push(post, "tail-arg");
+    base = lowest_free_fd();
+    var rt, rv = _luks_run_with_keyfile(pre, post, key, 64);
+    assert_eq(is_err_result(rt), 0, "a successful keyed command is Ok");
+    var seen_len = 0;
+    var seen = slurp(rec_path, &seen_len);
+    assert(seen_len > 17, "the command was handed a keyfile path");
+    if (seen_len > 17) {
+        assert_eq(memeq(seen, "/tmp/.agnos-luks-", 17), 1, "the path is a staged LUKS keyfile");
+        assert_eq(file_exists(seen), 0, "the keyfile is GONE after a successful run");
+    }
+    var body_len = 0;
+    var body = slurp(rec_body, &body_len);
+    assert_eq(body_len, 64, "the command saw the whole key");
+    if (body_len == 64) { assert_eq(memeq(body, key, 64), 1, "byte for byte"); }
+    var tail_len = 0;
+    var tail = slurp(rec_tail, &tail_len);
+    assert_eq(tail_len, 8, "post-args follow the keyfile path");
+    if (tail_len == 8) { assert_eq(memeq(tail, "tail-arg", 8), 1, "in order"); }
+    assert_eq(count_own_keyfiles(), own0, "no keyfile of this process is left in /tmp");
+    assert_eq(lowest_free_fd(), base, "a keyed run leaks no fd");
+
+    test_group("luks keyfile lifecycle (command fails)");
+    xunlink(rec_path);
+    var script_fail = cat2(cat2("printf %s \"$1\" > ", rec_path), "; exit 3");
+    var pre_f = vec_new();
+    vec_push(pre_f, "/bin/sh");
+    vec_push(pre_f, "-c");
+    vec_push(pre_f, script_fail);
+    vec_push(pre_f, "sh");
+    var post_f = vec_new();
+    base = lowest_free_fd();
+    var ft, fv = _luks_run_with_keyfile(pre_f, post_f, key, 64);
+    assert_eq(is_err_result(ft), 1, "a failing keyed command is Err");
+    var fseen_len = 0;
+    var fseen = slurp(rec_path, &fseen_len);
+    assert(fseen_len > 17, "the failing command was still handed a keyfile");
+    if (fseen_len > 17) {
+        assert_eq(file_exists(fseen), 0, "the keyfile is GONE after a FAILED run");
+    }
+    assert_eq(count_own_keyfiles(), own0, "no keyfile of this process is left in /tmp");
+    assert_eq(lowest_free_fd(), base, "a failed keyed run leaks no fd");
+    xunlink(rec_path);
+    xunlink(rec_body);
+    xunlink(rec_tail);
+
+    # ============================================================
+    # secureboot_read_efi_variable — the fd is closed on the success
+    # path AND on the too-short path.
+    # ============================================================
+    test_group("secureboot_read_efi_variable");
+    var ev_ok = tmp_name("efivar_ok");
+    var ev_short = tmp_name("efivar_short");
+    xunlink(ev_ok);
+    xunlink(ev_short);
+    # 4-byte EFI attributes header + payload (16 bytes, >= the 5 the reader needs).
+    var evbuf = alloc(16);
+    memset(evbuf, 0x41, 16);
+    store32(evbuf, 7);
+    file_write_all(ev_ok, evbuf, 16);
+    file_write_all(ev_short, "abc", 3);
+    base = lowest_free_fd();
+    var ev_all_ok = 1;
+    var ev_all_err = 1;
+    i = 0;
+    while (i < 8) {
+        var et, evv = secureboot_read_efi_variable(ev_ok);
+        if (is_err_result(et) == 1) { ev_all_ok = 0; }
+        var st2, sv2 = secureboot_read_efi_variable(ev_short);
+        if (is_err_result(st2) == 0) { ev_all_err = 0; }
+        i = i + 1;
+    }
+    assert_eq(ev_all_ok, 1, "a 16-byte variable reads Ok");
+    assert_eq(ev_all_err, 1, "a 3-byte variable is Err (too short)");
+    assert_eq(lowest_free_fd(), base, "16 reads over both paths leak no fd");
+    xunlink(ev_ok);
+    xunlink(ev_short);
+
+    # ============================================================
+    # tpm_seal — the staged PLAINTEXT is removed, a planted symlink is
+    # not followed, a failed write removes the partial file, and no fd
+    # leaks. On a host without tpm2-tools the call stops at tpm2_create.
+    # ============================================================
+    test_group("tpm_seal staging");
+    var sdir = tmp_name("seal");
+    var sinput = cat2(sdir, "/seal_input.bin");
+    var starget = cat2(sdir, "/target");
+    xunlink(sinput);
+    xunlink(starget);
+    xrmdir(sdir);
+    assert_eq(xmkdir(sdir, 448), 0, "seal scratch dir created");   # 0700
+    file_write_all(starget, "ORIGINAL", 8);
+    assert_eq(xsymlink(starget, sinput), 0, "a symlink is planted at the staging path");
+    var vind = vec_new();
+    vec_push(vind, 7);
+    base = lowest_free_fd();
+    tpm_seal(TPM_SHA256, vind, "top-secret-plaintext", 20, sdir);
+    var tgt_len = 0;
+    var tgt = slurp(starget, &tgt_len);
+    assert_eq(tgt_len, 8, "the symlink target was not overwritten");
+    if (tgt_len == 8) { assert_eq(memeq(tgt, "ORIGINAL", 8), 1, "its bytes are untouched"); }
+    assert_eq(file_exists(sinput), 0, "the staged plaintext is removed");
+
+    var wt, wv = tpm_seal(TPM_SHA256, vind, 1, 20, sdir);
+    assert_eq(is_err_result(wt), 1, "a failed staging write is Err");
+    assert_eq(file_exists(sinput), 0, "a failed staging write removes the partial file");
+
+    i = 0;
+    while (i < 4) {
+        tpm_seal(TPM_SHA256, vind, "top-secret-plaintext", 20, sdir);
+        i = i + 1;
+    }
+    assert_eq(file_exists(sinput), 0, "no staged plaintext survives repeated seals");
+    assert_eq(lowest_free_fd(), base, "6 seals leak no fd");
+    xunlink(sinput);
+    xunlink(starget);
+    xunlink(cat2(sdir, "/sealed.ctx"));
+    xunlink(cat2(sdir, "/sealed.pub"));
+    xunlink(cat2(sdir, "/sealed.priv"));
+    xrmdir(sdir);
+
+    return assert_summary();
+}
+
+var exit_code = main();
+sys_exit(exit_code);

@@ -4,7 +4,7 @@
 # Reads EFI variables from /sys/firmware/efi/efivars/ to detect
 # secure boot state. Falls back to mokutil subprocess.
 #
-# Requires: src/error.cyr, lib/syscalls.cyr, lib/process.cyr
+# Requires: src/error.cyr, lib/syscalls.cyr, lib/io.cyr, lib/process.cyr
 
 # ================================================================
 # Secure Boot state constants
@@ -48,16 +48,19 @@ fn secureboot_read_efi_variable(path): i64 {
     # the flags word in `namelen`, i.e. a zero-length name. That is a
     # silent ABI miscompile off Linux (no ud2, no diagnostic), which is
     # exactly what the cyrlint `xsys` rule flags. `xopen` bridges it.
-    var fd = xopen(path, 0);        # O_RDONLY
+    var fd = xopen(path, O_RDONLY);
     if (fd < 0) {
         return sigil_err_io(0 - fd, "failed to open efi variable");
     }
-    defer { file_close(fd); }
 
     # Read up to 256 bytes (EFI variables are typically small)
     var buf = alloc(256);
     memset(buf, 0, 256);
-    var nread = sys_read(fd, buf, 256);
+    var nread = file_read(fd, buf, 256);
+    # 3.13.0: closed here, once, for every exit below. This was a
+    # `defer { file_close(fd); }`, which cyrius 6.6.0-6.6.6 skips when the fn returns
+    # a value-form Result — so every read, successful or not, leaked the fd.
+    file_close(fd);
 
     if (nread < 0) {
         return sigil_err_io(0 - nread, "failed to read efi variable");
@@ -168,6 +171,7 @@ fn secureboot_detect_state(): i64 {
 # Helper: check if Secure Boot is enforcing
 # ================================================================
 
+# 1 if a SB_* state means Secure Boot is actively enforcing (SB_ENABLED), else 0.
 fn secureboot_is_enforcing(state): i64 {
     return state == SB_ENABLED;
 }
@@ -190,6 +194,8 @@ fn secureboot_state_str(state): i64 {
 #derive(accessors)
 struct secureboot_key { subject; issuer; fingerprint; not_before; not_after; }
 
+# Allocate a 40-byte EnrolledKey (`secureboot_key_*` accessors) holding the given C-string
+# pointers as-is (no copy). Bump `alloc`, never freed.
 fn secureboot_enrolled_key_new(subject, issuer, fingerprint, not_before, not_after): i64 {
     var k = alloc(40);
     secureboot_key_set_subject(k, subject);
@@ -485,6 +491,8 @@ fn secureboot_sign_module(module_path, private_key, certificate): i64 {
 #derive(accessors)
 struct secureboot_sig { module; has_sig; signer; algorithm; }
 
+# Allocate a 32-byte module-signature record (`secureboot_sig_*` accessors): module path,
+# has_sig flag, signer and algorithm, stored as given (no copy). Bump `alloc`, never freed.
 fn secureboot_sig_info_new(module_path, has_sig, signer, algo): i64 {
     var s = alloc(32);
     secureboot_sig_set_module(s, module_path);
@@ -564,6 +572,8 @@ fn secureboot_verify_module(module_path): i64 {
 #derive(accessors)
 struct secureboot_efi_var { name; data_size; }
 
+# Allocate a 16-byte EFI-variable record (`secureboot_efi_var_*` accessors): name pointer
+# (stored, not copied) and data size in bytes. Bump `alloc`, never freed.
 fn secureboot_efi_var_new(name, size): i64 {
     var v = alloc(16);
     secureboot_efi_var_set_name(v, name);

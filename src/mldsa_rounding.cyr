@@ -31,6 +31,8 @@
 var _mldsa_p2r_a1 = 0;      # output high part
 var _mldsa_p2r_a0 = 0;      # output low part (balanced)
 
+# Power2Round (D = 13) of a ∈ [0, Q): returns a1 ∈ [0, 1023] and also leaves a1 / a0 in
+# `_mldsa_p2r_a1` / `_mldsa_p2r_a0`, where a = a1 · 2^13 + a0 and a0 ∈ [-4095, 4096].
 fn mldsa_power2round(a): i64 {
     # Standard trick: add 2^{D-1}-1 before the right-shift so
     # the shift rounds to nearest instead of toward zero. Input
@@ -61,6 +63,8 @@ fn mldsa_power2round(a): i64 {
 var _mldsa_dec_a1 = 0;      # high bits (w1 in the spec)
 var _mldsa_dec_a0 = 0;      # low bits (balanced, w0)
 
+# Decompose (γ2 = (Q−1)/32) of a ∈ [0, Q): returns a1 = HighBits ∈ [0, 15] and also leaves
+# a1 / a0 in `_mldsa_dec_a1` / `_mldsa_dec_a0`, a0 ∈ [−γ2, γ2] (−γ2 only when a1 wraps to 0).
 fn mldsa_decompose(a): i64 {
     var a1 = (a + 127) >> 7;
     a1 = (a1 * 1025 + (1 << 21)) >> 22;
@@ -82,6 +86,7 @@ fn mldsa_high_bits(a): i64 {
     return _mldsa_dec_a1;
 }
 
+# LowBits: the balanced a0 of mldsa_decompose(a); also overwrites the `_mldsa_dec_*` globals.
 fn mldsa_low_bits(a): i64 {
     mldsa_decompose(a);
     return _mldsa_dec_a0;
@@ -98,6 +103,8 @@ fn mldsa_low_bits(a): i64 {
 # signal is already encoded in the output. No timing surface
 # beyond what the caller already publishes.
 
+# MakeHint in low/high-bits form: returns 1 if a0 > γ2, a0 < −γ2, or a0 == −γ2 with
+# a1 != 0, else 0. mldsa65_sign passes a0 = w0 − c·s2 + c·t0 and a1 = w1.
 fn mldsa_make_hint(a0, a1): i64 {
     if (a0 > MLDSA65_GAMMA2) { return 1; }
     if (a0 < 0 - MLDSA65_GAMMA2) { return 1; }
@@ -118,6 +125,8 @@ fn mldsa_make_hint(a0, a1): i64 {
 # on the sign of a0. Wrap-around uses the same `& 15` mask as
 # the decompose step so a1 stays in [0, 15].
 
+# UseHint of a ∈ [0, Q): a1 = HighBits(a) if hint == 0, else a1 ± 1 mod 16 (+1 when a0 > 0).
+# Returns a value in [0, 15]; overwrites the `_mldsa_dec_*` globals.
 fn mldsa_use_hint(a, hint): i64 {
     mldsa_decompose(a);
     var a1 = _mldsa_dec_a1;
@@ -182,6 +191,8 @@ fn mldsa_poly_use_hint(r, a, h): i64 {
 # Polyveck wrappers (K = 6 lanes)
 # ================================================================
 
+# Power2Round every coefficient of the K polys of `v` (in [0, Q)): high parts (t1) to `v1`,
+# balanced low parts (t0) to `v0`. `v1` may alias `v`. Returns 0.
 fn mldsa_polyveck_power2round(v1, v0, v): i64 {
     var i = 0;
     while (i < MLDSA65_K) {
@@ -191,6 +202,8 @@ fn mldsa_polyveck_power2round(v1, v0, v): i64 {
     return 0;
 }
 
+# Decompose every coefficient of the K polys of `v` (in [0, Q)): HighBits (w1, [0, 15]) to
+# `v1`, balanced LowBits (w0) to `v0`. `v1` may alias `v`. Returns 0.
 fn mldsa_polyveck_decompose(v1, v0, v): i64 {
     var i = 0;
     while (i < MLDSA65_K) {
@@ -211,6 +224,8 @@ fn mldsa_polyveck_make_hint(h, v0, v1): i64 {
     return s;
 }
 
+# w[i][j] = UseHint(u[i][j], h[i][j]) over the K polys: rebuilds w1 (coeffs in [0, 15])
+# from `u` (coeffs in [0, Q)) and the 0/1 hint polys `h`. `w` may alias `u`. Returns 0.
 fn mldsa_polyveck_use_hint(w, u, h): i64 {
     var i = 0;
     while (i < MLDSA65_K) {

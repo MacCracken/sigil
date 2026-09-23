@@ -54,11 +54,11 @@ fn main() {
     var sig = alloc(64);
     ed25519_sign(sk, "", 0, sig);
     var sig_hex = hex_encode(sig, 64);
-    syscall(1, 1, "sig R: ", 7);
-    syscall(1, 1, sig_hex, 64);
-    syscall(1, 1, "\nsig S: ", 7);
-    syscall(1, 1, sig_hex + 64, 64);
-    syscall(1, 1, "\n", 1);
+    sys_write(1, "sig R: ", 7);
+    sys_write(1, sig_hex, 64);
+    sys_write(1, "\nsig S: ", 8);
+    sys_write(1, sig_hex + 64, 64);
+    sys_write(1, "\n", 1);
 
     test_group("verify own sig");
     var valid = ed25519_verify(pk, "", 0, sig);
@@ -77,4 +77,4 @@ fn main() {
 }
 
 var exit_code = main();
-syscall(60, exit_code);
+sys_exit(exit_code);

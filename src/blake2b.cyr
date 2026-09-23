@@ -37,6 +37,10 @@ fn _blake2b_ult(a, b): i64 {
     return 0;
 }
 
+# Lazily allocates (bump `alloc`) and fills the read-only BLAKE2b tables: the
+# 64-byte IV (RFC 7693 §2.6) and the 10 x 16-byte SIGMA permutations (§2.7).
+# Idempotent, but the init flag is not atomic — make the first call before
+# spawning threads. Returns 0.
 fn blake2b_global_init(): i64 {
     if (_blake2b_inited == 1) { return 0; }
 

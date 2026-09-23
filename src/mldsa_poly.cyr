@@ -113,6 +113,7 @@ fn mldsa_poly_chknorm(a, B): i64 {
 # Polyvec L (length L = 5)
 # ================================================================
 
+# w[i] = u[i] + v[i] for the L = 5 polys (no modular reduction). Returns 0.
 fn mldsa_polyvecl_add(w, u, v): i64 {
     var i = 0;
     while (i < MLDSA65_L) {
@@ -122,6 +123,7 @@ fn mldsa_polyvecl_add(w, u, v): i64 {
     return 0;
 }
 
+# reduce32 every coefficient of the L polys in place, to [-6283008, 6283008]. Returns 0.
 fn mldsa_polyvecl_reduce(v): i64 {
     var i = 0;
     while (i < MLDSA65_L) {
@@ -131,6 +133,7 @@ fn mldsa_polyvecl_reduce(v): i64 {
     return 0;
 }
 
+# Forward NTT (mldsa_ntt) of each of the L polys, in place. Returns 0.
 fn mldsa_polyvecl_ntt(v): i64 {
     var i = 0;
     while (i < MLDSA65_L) {
@@ -140,6 +143,7 @@ fn mldsa_polyvecl_ntt(v): i64 {
     return 0;
 }
 
+# Inverse NTT times 2^32 (mldsa_invntt_tomont) of each of the L polys, in place. Returns 0.
 fn mldsa_polyvecl_invntt_tomont(v): i64 {
     var i = 0;
     while (i < MLDSA65_L) {
@@ -159,6 +163,8 @@ fn mldsa_polyvecl_pointwise_poly_montgomery(r, a, v): i64 {
     return 0;
 }
 
+# Returns 1 if any coefficient of the L polys has |c| ≥ bound (or bound > (Q-1)/8), else 0.
+# Exits at the first violation; see mldsa_poly_chknorm for why that is acceptable.
 fn mldsa_polyvecl_chknorm(v, bound): i64 {
     var i = 0;
     while (i < MLDSA65_L) {
@@ -172,6 +178,7 @@ fn mldsa_polyvecl_chknorm(v, bound): i64 {
 # Polyvec K (length K = 6)
 # ================================================================
 
+# w[i] = u[i] + v[i] for the K = 6 polys (no modular reduction). Returns 0.
 fn mldsa_polyveck_add(w, u, v): i64 {
     var i = 0;
     while (i < MLDSA65_K) {
@@ -181,6 +188,7 @@ fn mldsa_polyveck_add(w, u, v): i64 {
     return 0;
 }
 
+# w[i] = u[i] - v[i] for the K polys (no modular reduction). Returns 0.
 fn mldsa_polyveck_sub(w, u, v): i64 {
     var i = 0;
     while (i < MLDSA65_K) {
@@ -190,6 +198,7 @@ fn mldsa_polyveck_sub(w, u, v): i64 {
     return 0;
 }
 
+# reduce32 every coefficient of the K polys in place, to [-6283008, 6283008]. Returns 0.
 fn mldsa_polyveck_reduce(v): i64 {
     var i = 0;
     while (i < MLDSA65_K) {
@@ -199,6 +208,7 @@ fn mldsa_polyveck_reduce(v): i64 {
     return 0;
 }
 
+# caddq every coefficient of the K polys in place: (−Q, Q) → [0, Q). Returns 0.
 fn mldsa_polyveck_caddq(v): i64 {
     var i = 0;
     while (i < MLDSA65_K) {
@@ -208,6 +218,8 @@ fn mldsa_polyveck_caddq(v): i64 {
     return 0;
 }
 
+# Multiply every coefficient of the K polys by 2^D (D = 13) in place, unreduced; verify
+# uses it for t1 · 2^D. Assumes |coeff| < 2^(31-D), unchecked. Returns 0.
 fn mldsa_polyveck_shiftl(v): i64 {
     var i = 0;
     while (i < MLDSA65_K) {
@@ -217,6 +229,7 @@ fn mldsa_polyveck_shiftl(v): i64 {
     return 0;
 }
 
+# Forward NTT (mldsa_ntt) of each of the K polys, in place. Returns 0.
 fn mldsa_polyveck_ntt(v): i64 {
     var i = 0;
     while (i < MLDSA65_K) {
@@ -226,6 +239,7 @@ fn mldsa_polyveck_ntt(v): i64 {
     return 0;
 }
 
+# Inverse NTT times 2^32 (mldsa_invntt_tomont) of each of the K polys, in place. Returns 0.
 fn mldsa_polyveck_invntt_tomont(v): i64 {
     var i = 0;
     while (i < MLDSA65_K) {
@@ -235,6 +249,8 @@ fn mldsa_polyveck_invntt_tomont(v): i64 {
     return 0;
 }
 
+# r[i] = a · v[i] for i in 0..K (poly × polyveck, pointwise Montgomery in the NTT domain).
+# Each coefficient is read before it is written, so `r` may alias `v`. Returns 0.
 fn mldsa_polyveck_pointwise_poly_montgomery(r, a, v): i64 {
     var i = 0;
     while (i < MLDSA65_K) {
@@ -244,6 +260,8 @@ fn mldsa_polyveck_pointwise_poly_montgomery(r, a, v): i64 {
     return 0;
 }
 
+# Returns 1 if any coefficient of the K polys has |c| ≥ bound (or bound > (Q-1)/8), else 0.
+# Exits at the first violation; see mldsa_poly_chknorm for why that is acceptable.
 fn mldsa_polyveck_chknorm(v, bound): i64 {
     var i = 0;
     while (i < MLDSA65_K) {
@@ -309,6 +327,9 @@ var _mldsa_mat_A = 0;
 var _mldsa_mat_v = 0;
 var _mldsa_mat_i = 0;
 
+# t = Â · v in the NTT domain: t[i] = Σ_j A[i][j] · v[j] (Montgomery products) for the K rows
+# of the K×L matrix `A` against polyvecl `v`, into polyveck `t`. `t` must not overlap `v`
+# (re-read for every row). Loop state and scratch are module globals: not reentrant. Returns 0.
 fn mldsa_polyvec_matrix_pointwise_montgomery(t, A, v): i64 {
     _mldsa_mat_t = t;
     _mldsa_mat_A = A;

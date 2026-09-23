@@ -5,7 +5,7 @@
 # storage. Shells out to `cryptsetup` (standard tool from the cryptsetup
 # package), `fallocate`, `losetup`, `mkfs.*`, `mount`, and `umount`.
 #
-# Requires: lib/syscalls.cyr, lib/process.cyr, lib/string.cyr, lib/vec.cyr,
+# Requires: lib/syscalls.cyr, lib/io.cyr, lib/process.cyr, lib/string.cyr, lib/vec.cyr,
 #           lib/alloc.cyr, lib/fmt.cyr, src/error.cyr
 
 #define LINUX
@@ -15,6 +15,7 @@ include "lib/alloc.cyr"
 include "lib/vec.cyr"
 include "lib/tagged.cyr"
 include "lib/syscalls.cyr"
+include "lib/io.cyr"
 include "lib/process.cyr"
 include "src/error.cyr"
 
@@ -65,12 +66,15 @@ struct luks_config {
     pbkdf;
 }
 
+# Allocate a zeroed 72-byte LuksConfig (9 fields; bump `alloc`, never freed).
 fn luks_config_alloc(): i64 {
     var c = alloc(72);
     memset(c, 0, 72);
     return c;
 }
 
+# Set the volume fields: name, backing file, size in MiB, mount point, LUKS_FS_* filesystem.
+# Stores the pointers as given (no copy). Returns `c`.
 fn luks_config_set_core(c, name, backing_path, size_mb, mount_point, filesystem): i64 {
     luks_config_set_name(c, name);
     luks_config_set_backing_path(c, backing_path);
@@ -80,6 +84,8 @@ fn luks_config_set_core(c, name, backing_path, size_mb, mount_point, filesystem)
     return c;
 }
 
+# Set the crypto fields: cipher algo + mode strings, key size in bits, LUKS_PBKDF_* KDF.
+# Not validated here — `luks_config_validate` checks them. Returns `c`.
 fn luks_config_set_crypto(c, cipher_algo, cipher_mode, key_size_bits, pbkdf): i64 {
     luks_config_set_cipher_algo(c, cipher_algo);
     luks_config_set_cipher_mode(c, cipher_mode);
@@ -100,6 +106,7 @@ fn luks_config_default(name, backing_path, mount_point): i64 {
 # Filesystem string helpers
 # ================================================================
 
+# The `mount -t` name for a LUKS_FS_* value ("ext4" / "xfs" / "btrfs"); unknown -> "ext4".
 fn luks_fs_as_str(fs): i64 {
     if (fs == LUKS_FS_EXT4) { return "ext4"; }
     if (fs == LUKS_FS_XFS) { return "xfs"; }
@@ -107,6 +114,7 @@ fn luks_fs_as_str(fs): i64 {
     return "ext4";
 }
 
+# Absolute path of the mkfs tool for a LUKS_FS_* value; unknown -> /usr/sbin/mkfs.ext4.
 fn luks_fs_mkfs_cmd(fs): i64 {
     if (fs == LUKS_FS_EXT4) { return "/usr/sbin/mkfs.ext4"; }
     if (fs == LUKS_FS_XFS) { return "/usr/sbin/mkfs.xfs"; }
@@ -114,6 +122,7 @@ fn luks_fs_mkfs_cmd(fs): i64 {
     return "/usr/sbin/mkfs.ext4";
 }
 
+# The cryptsetup `--pbkdf` name for a LUKS_PBKDF_* value; unknown -> "argon2id".
 fn luks_pbkdf_as_str(pbkdf): i64 {
     if (pbkdf == LUKS_PBKDF_ARGON2ID) { return "argon2id"; }
     if (pbkdf == LUKS_PBKDF_PBKDF2) { return "pbkdf2"; }
@@ -285,6 +294,8 @@ fn luks_validate_cipher(algo, mode): i64 {
 # Build cipher string for cryptsetup (e.g., "aes-xts-plain64")
 # ================================================================
 
+# Build the cryptsetup `--cipher` string "<algo>-<mode>" (e.g. "aes-xts-plain64") as a fresh
+# NUL-terminated `alloc` buffer. Does not validate — callers run `luks_config_validate` first.
 fn luks_cipher_str(config): i64 {
     var algo = luks_config_cipher_algo(config);
     var mode = luks_config_cipher_mode(config);
@@ -348,7 +359,18 @@ fn luks_keyfile_path(): i64 {
 # closed); O_NOFOLLOW refuses to traverse a symlink at the final component
 # (CVE-2025-6020 / pam_namespace symlink-race class). 0600 mode means only
 # the creating user can read.
-# Returns Ok(keyfile_path) or Err.
+#
+# ⛔ 3.13.0 — NO `defer` HERE (CLAUDE.md rule, until cyrius fixes it). 6.6.0-6.6.6 skip a
+# `defer` block when the fn returns a value-form Result, so the old
+# `defer { sys_close(fd); }` never ran: every call leaked its fd. Every exit below
+# releases explicitly instead. cyrius issue
+# 2026-09-22-agnodrm-defer-skipped-on-value-form-result-return.md.
+# A write that fails OR comes up short removes the file this call created — a
+# truncated key must never reach cryptsetup, and a keyfile must never outlive a
+# failure. A create that FAILS removes nothing: under O_EXCL an existing path is
+# somebody else's (possibly a planted symlink), not ours to delete.
+# Returns Ok(keyfile_path) or Err. The caller owns the path and must remove it;
+# `_luks_run_with_keyfile` is the lifecycle that does.
 fn luks_write_keyfile(key_ptr, key_len): i64 {
     var path_res_tag, path_res = luks_keyfile_path();
     if (is_err_result(path_res_tag) == 1) { return Err(path_res); }
@@ -356,17 +378,58 @@ fn luks_write_keyfile(key_ptr, key_len): i64 {
     # 3.12.18 (cyrius 6.6.4): O_NOFOLLOW is a stdlib symbol now, with the peer's own value —
     # the literal 131072 was the x86_64 bit, which on aarch64 is O_LARGEFILE (the symlink
     # refusal was silently lost there; O_EXCL still caught the final component).
+    # 3.13.0: io.cyr's `file_open`, not a raw `sys_open` — on agnos `sys_open` is
+    # (name, namelen, flags), so the Linux-shaped call passed the flags as the name length.
     var open_flags = O_WRONLY | O_CREAT | O_TRUNC | O_EXCL | O_NOFOLLOW;
-    var fd = sys_open(keyfile, open_flags, 384);  # 0600
+    var fd = file_open(keyfile, open_flags, 384);  # 0600
     if (fd < 0) {
         return sigil_err_syscall_failed(0 - fd, "failed to create keyfile (O_EXCL|O_NOFOLLOW)");
     }
-    defer { sys_close(fd); }
-    var wret = sys_write(fd, key_ptr, key_len);
+    var wret = agnosys_write_all(fd, key_ptr, key_len);
+    var cret = file_close(fd);
     if (wret < 0) {
+        xunlink(keyfile);
         return sigil_err_syscall_failed(0 - wret, "write keyfile failed");
     }
+    if (cret < 0) {
+        xunlink(keyfile);
+        return sigil_err_syscall_failed(0 - cret, "close keyfile failed");
+    }
     return Ok(keyfile);
+}
+
+# Run `pre ++ [keyfile] ++ post` (bounded, status-checked) with `key_ptr[0..key_len)`
+# staged in a fresh 0600 keyfile, and remove that keyfile on EVERY exit — a command
+# that succeeds, one that fails, and one that never ran. Returns the run's Result.
+#
+# ⛔ 3.13.0. This replaces the `defer { _sig_unlink(keyfile); }` that `luks_format`
+# and `luks_open` relied on. cyrius 6.6.x skips a `defer` on a value-form Result
+# return, and both fns return nothing else, so the key was left in /tmp after every
+# format and every open — on the success path and on the cryptsetup-failure path.
+# If the keyfile cannot be removed afterwards (anything but ENOENT) this reports Err
+# even when the command succeeded: key material still on disk is the failure this
+# exists to prevent, and it must not be reported as a clean success.
+fn _luks_run_with_keyfile(pre, post, key_ptr, key_len): i64 {
+    var kf_res_tag, kf_res = luks_write_keyfile(key_ptr, key_len);
+    if (is_err_result(kf_res_tag) == 1) { return Err(kf_res); }
+    var keyfile = kf_res;
+
+    var args = vec_new();
+    var ai = 0;
+    while (ai < vec_len(pre)) { vec_push(args, vec_get(pre, ai)); ai = ai + 1; }
+    vec_push(args, keyfile);
+    ai = 0;
+    while (ai < vec_len(post)) { vec_push(args, vec_get(post, ai)); ai = ai + 1; }
+
+    var run_tag, run = luks_run_checked(args);
+    var urm = xunlink(keyfile);
+    if (is_err_result(run_tag) == 1) { return Err(run); }
+    if (urm < 0) {
+        if (urm != 0 - 2) {   # ENOENT: already gone, which is the goal
+            return sigil_err_syscall_failed(0 - urm, "failed to remove LUKS keyfile");
+        }
+    }
+    return Ok(run);
 }
 
 # ================================================================
@@ -438,31 +501,29 @@ fn luks_format(config, key_ptr, key_len): i64 {
     var klen = fmt_int_buf(key_bits, &kbuf);
     var pbkdf = luks_pbkdf_as_str(luks_config_pbkdf(config));
 
-    # Write key to a per-PID temp file for --key-file
-    var kf_res_tag, kf_res = luks_write_keyfile(key_ptr, key_len);
-    if (is_err_result(kf_res_tag) == 1) { return Err(kf_res); }
-    var keyfile = kf_res;
-    defer { _sig_unlink(keyfile); }
+    # cryptsetup luksFormat ... --key-file <keyfile> <loop_dev>. The key is staged in
+    # a per-PID-plus-random temp file that `_luks_run_with_keyfile` removes on every
+    # exit (3.13.0 — the `defer` that used to do it never ran; see that fn).
+    var cs_pre = vec_new();
+    vec_push(cs_pre, "/usr/sbin/cryptsetup");
+    vec_push(cs_pre, "luksFormat");
+    vec_push(cs_pre, "--type");
+    vec_push(cs_pre, "luks2");
+    vec_push(cs_pre, "--cipher");
+    vec_push(cs_pre, cipher);
+    vec_push(cs_pre, "--key-size");
+    vec_push(cs_pre, &kbuf);
+    vec_push(cs_pre, "--pbkdf");
+    vec_push(cs_pre, pbkdf);
+    vec_push(cs_pre, "--batch-mode");
+    vec_push(cs_pre, "--key-file");
+    var cs_post = vec_new();
+    vec_push(cs_post, loop_dev);
 
-    var cs_args = vec_new();
-    vec_push(cs_args, "/usr/sbin/cryptsetup");
-    vec_push(cs_args, "luksFormat");
-    vec_push(cs_args, "--type");
-    vec_push(cs_args, "luks2");
-    vec_push(cs_args, "--cipher");
-    vec_push(cs_args, cipher);
-    vec_push(cs_args, "--key-size");
-    vec_push(cs_args, &kbuf);
-    vec_push(cs_args, "--pbkdf");
-    vec_push(cs_args, pbkdf);
-    vec_push(cs_args, "--batch-mode");
-    vec_push(cs_args, "--key-file");
-    vec_push(cs_args, keyfile);
-    vec_push(cs_args, loop_dev);
-
-    var cs_res_tag, cs_res = luks_run_checked(cs_args);
+    var cs_res_tag, cs_res = _luks_run_with_keyfile(cs_pre, cs_post, key_ptr, key_len);
     if (is_err_result(cs_res_tag) == 1) {
-        # Detach loop on failure
+        # Detach loop on failure — including a keyfile that could not be written,
+        # which returned before detaching until 3.13.0.
         var det_args = vec_new();
         vec_push(det_args, "/usr/sbin/losetup");
         vec_push(det_args, "-d");
@@ -507,24 +568,20 @@ fn luks_open(config, key_ptr, key_len): i64 {
     var loop_dev = alloc(lolen + 1);
     memcpy(loop_dev, &lobuf, lolen + 1);
 
-    # Write key to per-PID temp file
-    var kf_res_tag, kf_res = luks_write_keyfile(key_ptr, key_len);
-    if (is_err_result(kf_res_tag) == 1) { return Err(kf_res); }
-    var keyfile = kf_res;
-    defer { _sig_unlink(keyfile); }
+    # cryptsetup open --type luks2 --key-file <keyfile> <loop_dev> <name>. The key is
+    # staged in a temp file that `_luks_run_with_keyfile` removes on every exit
+    # (3.13.0 — the `defer` that used to do it never ran; see that fn).
+    var cs_pre = vec_new();
+    vec_push(cs_pre, "/usr/sbin/cryptsetup");
+    vec_push(cs_pre, "open");
+    vec_push(cs_pre, "--type");
+    vec_push(cs_pre, "luks2");
+    vec_push(cs_pre, "--key-file");
+    var cs_post = vec_new();
+    vec_push(cs_post, loop_dev);
+    vec_push(cs_post, name);
 
-    # cryptsetup open --type luks2 --key-file <keyfile> <loop_dev> <name>
-    var cs_args = vec_new();
-    vec_push(cs_args, "/usr/sbin/cryptsetup");
-    vec_push(cs_args, "open");
-    vec_push(cs_args, "--type");
-    vec_push(cs_args, "luks2");
-    vec_push(cs_args, "--key-file");
-    vec_push(cs_args, keyfile);
-    vec_push(cs_args, loop_dev);
-    vec_push(cs_args, name);
-
-    var cs_res_tag, cs_res = luks_run_checked(cs_args);
+    var cs_res_tag, cs_res = _luks_run_with_keyfile(cs_pre, cs_post, key_ptr, key_len);
     if (is_err_result(cs_res_tag) == 1) { return Err(cs_res); }
 
     # Build /dev/mapper/<name>

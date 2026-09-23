@@ -215,6 +215,8 @@ fn _mldsa_polyw1_pack(r, a): i64 {
     return 0;
 }
 
+# w1Encode: pack the K = 6 w1 polys of `v` (coeffs in [0, 15], 4 bits each) into `r`,
+# K · 128 = 768 bytes, for the challenge hash. Returns 0.
 fn mldsa_polyveck_pack_w1(r, v): i64 {
     var i = 0;
     while (i < MLDSA65_K) {
@@ -242,6 +244,8 @@ fn mldsa_pack_pk(pk, rho, t1): i64 {
     return 0;
 }
 
+# pkDecode, inverse of mldsa_pack_pk: copy ρ (32 B) of the 1952-byte `pk` to `rho` and unpack
+# its K t1 polys (10-bit coeffs, [0, 1023]) into `t1` (K · 2048 B). No checks; returns 0.
 fn mldsa_unpack_pk(rho, t1, pk): i64 {
     memcpy(rho, pk, MLDSA_SEEDBYTES);
     var i = 0;
@@ -284,6 +288,9 @@ fn mldsa_pack_sk(sk, rho, key, tr, t0, s1, s2): i64 {
     return 0;
 }
 
+# skDecode, inverse of mldsa_pack_sk: split the 4032-byte `sk` into rho (32 B), key (32 B),
+# tr (64 B) and unpack s1 (L polys), s2 (K polys) and t0 (K polys), 2048 B per poly.
+# No range validation of the packed coefficients; returns 0.
 fn mldsa_unpack_sk(rho, key, tr, t0, s1, s2, sk): i64 {
     var off = 0;
     memcpy(rho, sk + off, MLDSA_SEEDBYTES);

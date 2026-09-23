@@ -161,6 +161,9 @@ fn _mldsa_sv_squeeze(out, outlen): i64 {
 #   6. tr = SHAKE-256(pk, 64 bytes).
 #   7. Pack pk = rho ‖ t1, sk = rho ‖ key ‖ tr ‖ s1 ‖ s2 ‖ t0.
 
+# ML-DSA-65 KeyGen_internal: derive a keypair deterministically from the 32-byte seed ξ into
+# caller-allocated pk (1952 B) and sk (4032 B). Returns 0. Runs in the shared module
+# workspace, so it is single-threaded.
 fn mldsa65_keypair_from_seed(seed, pk, sk): i64 {
     _mldsa_ws_init();
 
@@ -245,6 +248,9 @@ var _mldsa_sign_nonce = 0;
 var _mldsa_sign_sig = 0;
 var _mldsa_sign_sk = 0;
 
+# Deterministic ML-DSA-65 sign (rnd = 0^32, empty context): write the 3309-byte signature of
+# msg[msglen] under the 4032-byte `sk` into caller-allocated `sig`. Loops until a candidate
+# passes every check; returns 0. Runs in the shared module workspace, so single-threaded.
 fn mldsa65_sign(sig, msg, msglen, sk): i64 {
     _mldsa_ws_init();
     _mldsa_sign_sig = sig;
@@ -363,6 +369,9 @@ fn mldsa65_sign(sig, msg, msglen, sk): i64 {
 # `crypto_sign_verify_internal` (int returning 0/−1 from the C
 # ref; we flip to 0/1 to match sigil's other boolean returns).
 
+# Verify the 3309-byte ML-DSA-65 `sig` over msg[msglen] (empty context) against the 1952-byte
+# `pk`. Returns 0 if VALID, 1 otherwise — the reverse of ed25519_verify's 1 = valid. Runs in
+# the shared module workspace, so single-threaded.
 fn mldsa65_verify(sig, msg, msglen, pk): i64 {
     _mldsa_ws_init();
 

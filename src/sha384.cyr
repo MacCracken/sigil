@@ -38,6 +38,9 @@ fn sha384_init_into(ctx): i64 {
     return 0;
 }
 
+# Allocates a 208-byte SHA-384 context from the freelist (`fl_alloc`) and seeds
+# it with the FIPS 180-4 §5.3.4 IV via sha384_init_into. Returns the context
+# pointer; free it with `fl_free` after sha384_finalize.
 fn sha384_init(): i64 {
     var ctx = fl_alloc(208);
     sha384_init_into(ctx);

@@ -56,12 +56,14 @@ var _p384_inited = 0;
 # u384 helpers — 6 × 64-bit LE limbs = 48 bytes
 # ----------------------------------------------------------------
 
+# Returns a new 48-byte u384 (six LE limbs) set to 0; bump-allocated with `alloc` (do not free).
 fn u384_zero(): i64 {
     var r = alloc(48);
     memset(r, 0, 48);
     return r;
 }
 
+# Returns a new bump-allocated 48-byte u384 with limb 0 = `val` and the upper limbs zero.
 fn u384_from(val): i64 {
     var r = alloc(48);
     memset(r, 0, 48);
@@ -69,17 +71,21 @@ fn u384_from(val): i64 {
     return r;
 }
 
+# dst = src: copies one 48-byte u384 (six LE limbs). Returns 0.
 fn u384_copy(dst, src): i64 {
     memcpy(dst, src, 48);
     return 0;
 }
 
+# Returns a new bump-allocated 48-byte copy of `a`.
 fn u384_clone(a): i64 {
     var r = alloc(48);
     memcpy(r, a, 48);
     return r;
 }
 
+# Returns 1 if all six limbs of `a` are zero, else 0 (variable-time: exits at the first
+# non-zero limb).
 fn u384_is_zero(a): i64 {
     var i = 0;
     while (i < 6) {
@@ -89,6 +95,8 @@ fn u384_is_zero(a): i64 {
     return 1;
 }
 
+# Returns 1 if `a` and `b` are equal, else 0 (variable-time: exits at the first differing
+# limb).
 fn u384_eq(a, b): i64 {
     var i = 0;
     while (i < 6) {
@@ -496,6 +504,8 @@ fn p384_reduce(out, val): i64 {
 # Field arithmetic mod p384
 # ================================================================
 
+# r = (a + b) mod p384 for a, b in [0, p); r may alias a and/or b. The carry and range fix-ups
+# are data-dependent conditional subtracts (not constant-time).
 fn fp_p384_add(r, a, b): i64 {
     _p384_init();
     var carry = u384_add(r, a, b);
@@ -504,6 +514,8 @@ fn fp_p384_add(r, a, b): i64 {
     return 0;
 }
 
+# r = (a - b) mod p384 for a, b in [0, p), adding p back on borrow (a data-dependent branch);
+# r may alias a and/or b.
 fn fp_p384_sub(r, a, b): i64 {
     _p384_init();
     var borrow = u384_sub(r, a, b);
@@ -511,6 +523,7 @@ fn fp_p384_sub(r, a, b): i64 {
     return 0;
 }
 
+# r = (-a) mod p384 for a in [0, p): p - a, or 0 when a == 0. r may alias a.
 fn fp_p384_neg(r, a): i64 {
     _p384_init();
     if (u384_is_zero(a) == 1) { u384_copy(r, a); return 0; }
@@ -518,6 +531,8 @@ fn fp_p384_neg(r, a): i64 {
     return 0;
 }
 
+# r = (a * b) mod p384: schoolbook 768-bit product in cbank() lane scratch, then Solinas
+# reduction. r may alias a and/or b (both are consumed before r is written).
 fn fp_p384_mul(r, a, b): i64 {
     _p384_init();
     var _p384_prodb = _p384_prod + cbank() * 96;
@@ -526,6 +541,7 @@ fn fp_p384_mul(r, a, b): i64 {
     return 0;
 }
 
+# r = a^2 mod p384 (fp_p384_mul(r, a, a)); r may alias a.
 fn fp_p384_sq(r, a): i64 {
     return fp_p384_mul(r, a, a);
 }
@@ -549,6 +565,8 @@ fn _p384_inv_init(): i64 {
     return 0;
 }
 
+# r = a^(-1) mod p384 via Fermat a^(p-2): square-and-multiply over the public exponent p-2, so
+# the multiply schedule does not depend on `a`. a == 0 gives 0; r may alias a.
 fn fp_p384_inv(r, a): i64 {
     _p384_inv_init();
     var bk = cbank();
@@ -600,6 +618,8 @@ fn _p384_long_div_reduce_n(R, lo): i64 {
     return 0;
 }
 
+# out = val mod n384: reduces a 768-bit `val` (96 bytes, 12 LE limbs) into 48-byte `out` by
+# bitwise long division (384 shift / conditional-subtract steps) in cbank() lane scratch.
 fn n384_reduce(out, val): i64 {
     _p384_init();
     if (_p384_n_R == 0) { _p384_n_R = alloc(48 * SIGIL_CRYPTO_BANKS); }
@@ -611,6 +631,8 @@ fn n384_reduce(out, val): i64 {
     return 0;
 }
 
+# out = a mod n384 for a 384-bit `a`: a copy plus one conditional subtract, exact since
+# a < 2^384 < 2n.
 fn fn_p384_reduce384(out, a): i64 {
     _p384_init();
     u384_copy(out, a);
@@ -620,6 +642,8 @@ fn fn_p384_reduce384(out, a): i64 {
 
 var _p384_n_prod = 0;
 
+# r = (a * b) mod n384: 768-bit product in cbank() lane scratch, then n384_reduce long
+# division. r may alias a and/or b.
 fn fn_p384_mul(r, a, b): i64 {
     _p384_init();
     if (_p384_n_prod == 0) { _p384_n_prod = alloc(96 * SIGIL_CRYPTO_BANKS); }
@@ -648,6 +672,8 @@ fn _p384_ninv_init(): i64 {
     return 0;
 }
 
+# r = a^(-1) mod n384 via Fermat a^(n-2): square-and-multiply with fn_p384_mul over the public
+# exponent n-2 (schedule independent of `a`). a == 0 gives 0; r may alias a.
 fn fn_p384_inv(r, a): i64 {
     _p384_ninv_init();
     var bk = cbank();
@@ -695,6 +721,8 @@ fn _onc384_init(): i64 {
     return 0;
 }
 
+# Returns 1 if affine (x, y) (48-byte LE-limb u384 buffers) is a valid P-384 point: both
+# coordinates in [0, p), not (0, 0), and y^2 == x^3 - 3x + b (mod p); else 0.
 fn pt_p384_is_on_curve(x, y): i64 {
     _onc384_init();
     var bk = cbank();
@@ -731,27 +759,34 @@ fn _pt384_x(p): i64 { return p; }
 fn _pt384_y(p): i64 { return p + 48; }
 fn _pt384_z(p): i64 { return p + 96; }
 
+# Returns a new 144-byte Jacobian point, zeroed (the point at infinity); bump-allocated with
+# `alloc` (do not free).
 fn pt384_alloc(): i64 {
     var p = alloc(144);
     memset(p, 0, 144);
     return p;
 }
 
+# Sets 144-byte point `p` to the point at infinity (zeroes X, Y and Z). Returns 0.
 fn pt384_set_infinity(p): i64 {
     memset(p, 0, 144);
     return 0;
 }
 
+# Returns 1 if `p` is the point at infinity (Z == 0), else 0.
 fn pt384_is_infinity(p): i64 {
     if (u384_is_zero(_pt384_z(p)) == 1) { return 1; }
     return 0;
 }
 
+# dst = src: copies one 144-byte Jacobian point. Returns 0.
 fn pt384_copy(dst, src): i64 {
     memcpy(dst, src, 144);
     return 0;
 }
 
+# Constant-time conditional swap of two 144-byte points: a <-> b if swap == 1, unchanged if
+# swap == 0 (swap must be 0 or 1). XOR mask over all 18 limbs; no branch on swap or data.
 fn pt384_cswap(swap, a, b): i64 {
     var mask = 0 - swap;
     var i = 0;
@@ -766,6 +801,8 @@ fn pt384_cswap(swap, a, b): i64 {
     return 0;
 }
 
+# Loads affine (x, y) (48-byte LE-limb buffers) into 144-byte point `p` as Jacobian (x, y, 1).
+# Returns 0.
 fn pt384_from_affine(p, x, y): i64 {
     u384_copy(_pt384_x(p), x);
     u384_copy(_pt384_y(p), y);
@@ -778,6 +815,8 @@ var _pt384_aff_zinv  = 0;
 var _pt384_aff_zinv2 = 0;
 var _pt384_aff_zinv3 = 0;
 
+# Jacobian -> affine: out_x = X/Z^2, out_y = Y/Z^3 (48-byte LE-limb buffers) via one
+# fp_p384_inv. Returns 1, or 0 with out_x/out_y untouched if `p` is the point at infinity.
 fn pt384_to_affine(out_x, out_y, p): i64 {
     if (pt384_is_infinity(p) == 1) { return 0; }
     if (_pt384_aff_zinv  == 0) { _pt384_aff_zinv  = alloc(48 * SIGIL_CRYPTO_BANKS); }
@@ -822,6 +861,8 @@ fn _ptd384_init(): i64 {
     return 0;
 }
 
+# out = 2p (Jacobian, EFD dbl-2001-b with a = -3); returns early with out = infinity when p is
+# infinity. out may alias p: p is fully read before out is written.
 fn pt384_double(out, p): i64 {
     _p384_init();
     _ptd384_init();
@@ -915,6 +956,8 @@ fn _pta384_init(): i64 {
     return 0;
 }
 
+# out = p + q (Jacobian, EFD add-2007-bl); out may alias p or q. Branches on the special cases
+# (p or q at infinity copies the other, p == q doubles, p == -q gives infinity): not CT.
 fn pt384_add(out, p, q): i64 {
     _p384_init();
     _pta384_init();
@@ -1009,6 +1052,9 @@ fn _ptm384_init(): i64 {
     return 0;
 }
 
+# out = k * P via a Montgomery ladder over all 384 bits of k (six LE limbs; P, out 144-byte
+# Jacobian) with branch-free pt384_cswap; the sign path's k * G. Not fully constant-time:
+# pt384_add / pt384_double exit early on infinity, which R0 is for each leading zero bit of k.
 fn pt384_scalarmul(out, k, P): i64 {
     _p384_init();
     _ptm384_init();
@@ -1115,6 +1161,9 @@ fn _ecq384_init(): i64 {
     return 0;
 }
 
+# out = k * Q for a variable 144-byte Jacobian point Q (k: six LE limbs) via a 4-bit window:
+# per-lane table of 0..15 * Q, then 96 rounds of 4 doublings + a table add, MSB first.
+# Verify-only, NON-CT (the table index is the scalar nibble): PUBLIC scalar and point only.
 fn p384_scalarmul_var(out, k, Q): i64 {
     _p384_init();
     _ecq384_init();
