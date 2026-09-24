@@ -109,7 +109,10 @@ One item stays open, since it needs a host with IMA enabled:
   - `ed25519_verify` does +3 point doublings (the small-order check).
   - ECDSA sign does +1 hash and 5 field multiplies (the blinding).
 - The lazy-init fast path stays a plain load on x86; it fences on aarch64 only.
-- Re-run `CYRIUS_DCE=1 cyrius bench tests/bcyr/sigil.bcyr` on a quiet host before tagging.
+- **Pending follow-up (for the next agent):** 3.13.1 shipped without a clean benchmark. When
+  the host is idle, run `CYRIUS_DCE=1 cyrius bench tests/bcyr/sigil.bcyr`, plus
+  `tests/bcyr/{rsa,ecdsa_p256,ecdsa_p384}.bcyr`. Compare against the `v3.13.0-closeout` rows,
+  then append a `v3.13.1-issue-cleanup` block to `benches/history.csv`.
 
 ### Tests
 
