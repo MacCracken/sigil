@@ -116,7 +116,22 @@ fn ima_is_hex_char(ch): i64 {
     return agnosys_is_hex_char(ch);
 }
 
-# Validate a single rule. Returns Ok(0) or Err.
+# An obj_type byte: an SELinux type identifier is [A-Za-z0-9_.-]. Returns 1 or 0.
+fn _ima_is_obj_type_char(ch): i64 {
+    if (ch == 46) { return 1; }   # '.'
+    return agnosys_is_name_char(ch);
+}
+
+enum ImaRuleLimits { IMA_OBJ_TYPE_MAX = 255; IMA_POLICY_LINE_CAP = 512; }
+
+# Validate an IMA rule before it is rendered: fsuuid (32 hex), mask (allow-list) and, since
+# 3.13.0, obj_type (1..IMA_OBJ_TYPE_MAX bytes of [A-Za-z0-9_.-]). Returns Ok(0) or Err.
+#
+# ⛔ 3.13.0 (audit N1): obj_type was not validated at all. ima_rule_to_policy_line copies it
+# into a fixed IMA_POLICY_LINE_CAP-byte line, so a long obj_type overflowed that heap block,
+# and a newline in it ended the rule early and INJECTED the rest as extra kernel IMA policy
+# rules — "x\ndont_measure func=BPRM_CHECK" turns measurement off for every exec. With every
+# field validated, the longest renderable line is 407 bytes plus its NUL, inside the cap.
 fn ima_rule_validate(rule): i64 {
     # Validate fsuuid if set
     var fsuuid = ima_rule_fsuuid(rule);
@@ -149,6 +164,26 @@ fn ima_rule_validate(rule): i64 {
         }
     }
 
+    # Validate obj_type if set (3.13.0, audit N1 — see the note above)
+    var obj_type = ima_rule_obj_type(rule);
+    if (obj_type != 0) {
+        var olen = strlen(obj_type);
+        if (olen == 0) {
+            return sigil_err_invalid_argument("obj_type cannot be empty");
+        }
+        if (olen > IMA_OBJ_TYPE_MAX) {
+            return sigil_err_invalid_argument("obj_type too long (max 255 bytes)");
+        }
+        var oi = 0;
+        while (oi < olen) {
+            if (_ima_is_obj_type_char(load8(obj_type + oi)) == 0) {
+                return sigil_err_invalid_argument(
+                  "obj_type must be an SELinux type identifier ([A-Za-z0-9_.-])");
+            }
+            oi = oi + 1;
+        }
+    }
+
     return Ok(0);
 }
 
@@ -164,8 +199,9 @@ fn ima_rule_to_policy_line(rule): i64 {
     if (is_err_result(res_tag) == 1) { return Err(res); }
 
     # Build string: "<action> func=<target> [uid=N] [fowner=N] [fsuuid=X] [obj_type=X] [mask=X]"
-    # Allocate generous buffer
-    var buf = alloc(512);
+    # The rule was validated above, so every field is bounded: the longest possible line is
+    # 13 + 6 + 14 + 25 + 28 + 40 + 265 + 16 = 407 bytes + NUL, inside IMA_POLICY_LINE_CAP.
+    var buf = alloc(IMA_POLICY_LINE_CAP);
     var pos = 0;
 
     # Action
@@ -443,14 +479,9 @@ fn ima_parse_measurements(content): i64 {
 # Returns Ok(vec_of_measurement_ptrs) or Err.
 # ================================================================
 
-# Read + parse the kernel IMA measurement log. Returns Result.
-fn ima_read_measurements(): i64 {
-    var path = "/sys/kernel/security/ima/ascii_runtime_measurements";
-    var fd = file_open(path, O_RDONLY, 0);
-    if (fd < 0) {
-        return sigil_err_io(0 - fd, "Failed to read IMA measurements");
-    }
-
+# Read the whole IMA log from an already-open `fd` into a fresh NUL-terminated
+# heap buffer. Returns Ok(buf) or Err. Does NOT close `fd` (the caller owns it).
+fn _ima_read_log_fd(fd): i64 {
     # Read the entire measurement log, growing the buffer to EOF rather
     # than silently truncating. IMA logs on a busy system routinely exceed
     # a fixed 64KB buffer; truncating would hide measurements from
@@ -463,13 +494,18 @@ fn ima_read_measurements(): i64 {
     var rgo = 1;
     while (rgo == 1) {
         var n = file_read(fd, buf + total, bufsize - total - 1);
-        if (n <= 0) {
+        # M9: only 0 is EOF. A negative read is an ERROR — treating it as EOF
+        # handed the prefix read so far to the parser as the complete log, and
+        # an attestation consumer silently lost every later measurement.
+        if (n < 0) {
+            return sigil_err_io(0 - n, "Failed to read IMA measurements");
+        }
+        if (n == 0) {
             rgo = 0;
         } else {
             total = total + n;
             if (total >= bufsize - 1) {
                 if (bufsize >= cap_max) {
-                    file_close(fd);
                     return sigil_err_io(0, "IMA measurement log exceeds 32MB cap");
                 }
                 var newsize = bufsize * 2;
@@ -481,10 +517,23 @@ fn ima_read_measurements(): i64 {
             }
         }
     }
-    file_close(fd);
     store8(buf + total, 0);
+    return Ok(buf);
+}
 
-    return ima_parse_measurements(buf);
+# Read + parse the kernel IMA measurement log. Returns Result.
+fn ima_read_measurements(): i64 {
+    var path = "/sys/kernel/security/ima/ascii_runtime_measurements";
+    var fd = file_open(path, O_RDONLY, 0);
+    if (fd < 0) {
+        return sigil_err_io(0 - fd, "Failed to read IMA measurements");
+    }
+    # No `defer` (a value-form Result return skips it under cyrius 6.6.x): the
+    # fd is closed explicitly before either result is returned.
+    var rd_tag, rd = _ima_read_log_fd(fd);
+    file_close(fd);
+    if (is_err_result(rd_tag) == 1) { return Err(rd); }
+    return ima_parse_measurements(rd);
 }
 
 # ================================================================
@@ -509,8 +558,10 @@ fn ima_write_policy(rules): i64 {
         vi = vi + 1;
     }
 
-    # Build the policy string
-    var policy_buf = alloc(count * 512);
+    # Build the policy string. Each validated line is < IMA_POLICY_LINE_CAP bytes including its
+    # separating newline; the bound is still checked per line below (3.13.0 defence in depth).
+    var policy_cap = count * IMA_POLICY_LINE_CAP;
+    var policy_buf = alloc(policy_cap);
     var pos = 0;
 
     var ri = 0;
@@ -521,6 +572,9 @@ fn ima_write_policy(rules): i64 {
         var line = line_res;
         var llen = strlen(line);
 
+        if (pos + 1 + llen + 1 > policy_cap) {
+            return sigil_err_invalid_argument("IMA policy line exceeds its bound");
+        }
         if (ri > 0) {
             store8(policy_buf + pos, 10);  # newline
             pos = pos + 1;

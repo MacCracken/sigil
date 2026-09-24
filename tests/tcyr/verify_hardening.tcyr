@@ -1,0 +1,390 @@
+# verify_hardening.tcyr — 3.13.0 regression tests for src/verify.cyr
+#
+# One assertion group per audit finding (each red on the pre-3.13.0 code):
+#   H6  sv_load_trust_store: 64 KiB truncation, NULL-path records, partial final record
+#   M2  sv_verify_boot_chain: fail-open on unknown / revoked / unsigned components,
+#       false mismatch on duplicate paths, clobbering the verifier's integrity policy
+#   M7  sv_verify_agent / sv_verify_package audit the FINAL outcome
+#   M8  allow_unsigned enforced on the verify path; signatures persist across save/load
+#
+# Crash-prone calls (save / boot chain over a store that holds a NULL-path artifact) are
+# guarded behind the assertion that proves the store is clean, so on the unfixed code the
+# failure is reported as an assertion rather than a segfault.
+
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fmt.cyr"
+include "lib/bayan.cyr"
+include "lib/sakshi.cyr"
+include "lib/chrono.cyr"
+include "lib/thread.cyr"
+
+include "lib/thread_local.cyr"
+include "src/crypto_scratch.cyr"
+include "src/mul64.cyr"
+include "src/types.cyr"
+include "src/error.cyr"
+include "lib/random.cyr"
+include "src/random.cyr"
+include "src/sha256.cyr"
+include "src/hex.cyr"
+include "lib/ct.cyr"
+include "src/hmac.cyr"
+include "src/sha512.cyr"
+include "src/bigint_ext.cyr"
+include "src/ed25519.cyr"
+include "src/trust.cyr"
+include "src/integrity.cyr"
+include "src/policy.cyr"
+include "src/audit.cyr"
+include "src/verify.cyr"
+
+fn write_str_file(path, s): i64 {
+    var fd = file_open(path, O_WRONLY | O_CREAT | O_TRUNC, 420);
+    if (fd < 0) { return 0; }
+    file_write(fd, s, strlen(s));
+    file_close(fd);
+    return path;
+}
+
+# Passed flag of the most recent audit event of verifier `sv` (-2 if the log is empty).
+fn last_audit_passed(sv): i64 {
+    var log = sv_audit_log(sv);
+    var n = alog_len(log);
+    if (n == 0) { return 0 - 2; }
+    return ae_passed(vec_get(alog_events(log), n - 1));
+}
+
+# Appends C-string `s` at `buf + off`; returns the new offset.
+fn cat_at(buf, off, s): i64 {
+    var l = strlen(s);
+    memcpy(buf + off, s, l);
+    return off + l;
+}
+
+# Builds the JSON text of one old-format (pre-3.13.0, no signature) trust-store record.
+fn old_record(hash, path, trust): i64 {
+    var out = alloc(512);
+    var o = cat_at(out, 0, "[{\"hash\":\"");
+    o = cat_at(out, o, hash);
+    o = cat_at(out, o, "\",\"path\":\"");
+    o = cat_at(out, o, path);
+    o = cat_at(out, o, "\",\"type\":1,\"trust\":");
+    var nb[24];
+    memset(&nb, 0, 24);
+    fmt_int_buf(trust, &nb);
+    o = cat_at(out, o, &nb);
+    o = cat_at(out, o, "}]");
+    store8(out + o, 0);
+    return out;
+}
+
+fn main() {
+    alloc_init();
+    ed25519_init();
+
+    var sk[64];
+    var pk[32];
+    var kid = generate_keypair(&sk, &pk);
+    var pk_hex = hex_encode(&pk, 32);
+    var kr = keyring_new("/tmp/sigil_vh_keys");
+    var kv = key_version_new(kid, pk_hex);
+    kv_set_secret_key(kv, &sk);
+    keyring_add_key(kr, kv);
+
+    var f_a = write_str_file("/tmp/sigil_vh_a.bin", "component a body");
+    var f_b = write_str_file("/tmp/sigil_vh_b.bin", "component b body");
+    var f_c = write_str_file("/tmp/sigil_vh_c.bin", "component c body");
+    var f_d = write_str_file("/tmp/sigil_vh_d.bin", "component d body v2");
+    var f_e = write_str_file("/tmp/sigil_vh_e.bin", "component e body");
+    var f_u = write_str_file("/tmp/sigil_vh_u.bin", "unsigned body");
+    var f_s = write_str_file("/tmp/sigil_vh_s.bin", "substitute target");
+    var ts_path = "/tmp/sigil_vh_store.json";
+
+    # ============================================================
+    # H6 — trust-store load: no 64 KiB cap, no NULL-path records,
+    #      no partial final record
+    # ============================================================
+    test_group("H6 load past 64 KiB");
+    var sv_big = sigil_verifier_new(kr, trust_policy_new());
+    var long_path = alloc(160);
+    memset(long_path, 0, 160);
+    cat_at(long_path, 0, "/tmp/sigil_vh/a/very/long/path/segment/that/pads/every/record/");
+    cat_at(long_path, strlen(long_path), "out/to/over/two/hundred/bytes/in/total/file.bin");
+    var hb[32];
+    var big_n = 600;
+    var last_hash = 0;
+    var bi = 0;
+    while (bi < big_n) {
+        memset(&hb, 0, 32);
+        store64(&hb, bi + 1);
+        var hh = hex_encode(&hb, 32);
+        var ba = trusted_artifact_new(long_path, ARTIFACT_SYSTEM_BINARY, hh);
+        artifact_set_trust_level(ba, TRUST_VERIFIED);
+        sv_register_trusted(sv_big, ba);
+        last_hash = hh;
+        bi = bi + 1;
+    }
+    xunlink(ts_path);
+    assert_eq(sv_save_trust_store(sv_big, ts_path), SIGIL_ERR_NONE, "big store saved");
+    var big_len = 0;
+    var big_buf = file_read_whole(ts_path, &big_len);
+    assert(big_buf != 0, "big store readable");
+    assert_gt(big_len, 65536, "big store is larger than 64 KiB");
+    var sv_big2 = sigil_verifier_new(kr, trust_policy_new());
+    assert_eq(sv_load_trust_store(sv_big2, ts_path), big_n, "all 600 records loaded");
+    assert_eq(sv_trust_level_for(sv_big2, last_hash), TRUST_VERIFIED, "record past 64 KiB loaded");
+
+    test_group("H6 record without path is skipped");
+    write_str_file(ts_path,
+      "[{\"hash\":\"aaaa\",\"type\":1,\"trust\":1},{\"hash\":\"bbbb\",\"path\":\"/x\",\"type\":1,\"trust\":1}]");
+    var sv_np = sigil_verifier_new(kr, trust_policy_new());
+    assert_eq(sv_load_trust_store(sv_np, ts_path), 1, "only the complete record loads");
+    var np_art = map_get(sv_trust_store(sv_np), "aaaa");
+    assert_eq(np_art, 0, "path-less record not installed");
+    assert_eq(sv_trust_level_for(sv_np, "bbbb"), TRUST_VERIFIED, "good record installed");
+    if (np_art == 0) {
+        # Would dereference a NULL path (strlen / streq) on the unfixed code.
+        assert_eq(sv_save_trust_store(sv_np, ts_path), SIGIL_ERR_NONE, "save after skip ok");
+        var np_comps = vec_new();
+        vec_push(np_comps, "/x");
+        var np_rep = sv_verify_boot_chain(sv_np, np_comps);
+        assert(np_rep != 0, "boot chain over loaded store does not crash");
+    }
+
+    test_group("H6 record without hash is skipped");
+    write_str_file(ts_path, "[{\"path\":\"/nohash\",\"type\":1,\"trust\":1}]");
+    var sv_nh = sigil_verifier_new(kr, trust_policy_new());
+    assert_eq(sv_load_trust_store(sv_nh, ts_path), 0, "hash-less record not loaded");
+
+    test_group("H6 partial final record is not loaded");
+    write_str_file(ts_path,
+      "[{\"hash\":\"cccc\",\"path\":\"/c\",\"type\":1,\"trust\":1},{\"hash\":\"dddd\",\"path\":\"/d");
+    var sv_pt = sigil_verifier_new(kr, trust_policy_new());
+    assert_eq(sv_load_trust_store(sv_pt, ts_path), 1, "only the closed record loads");
+    assert_eq(map_get(sv_trust_store(sv_pt), "dddd"), 0, "truncated record not installed");
+    write_str_file(ts_path, "[{\"hash\":\"eeee\",\"path\":\"/e\",\"type\":1,\"trust\":1");
+    var sv_pt2 = sigil_verifier_new(kr, trust_policy_new());
+    assert_eq(sv_load_trust_store(sv_pt2, ts_path), 0, "unclosed single record not loaded");
+
+    # ============================================================
+    # M8 — allow_unsigned enforced on the verify path
+    # ============================================================
+    test_group("M8 unsigned Verified artifact fails strict policy");
+    var sv_m8 = sigil_verifier_new(kr, trust_policy_new());   # strict, allow_unsigned = 0
+    var u_art = trusted_artifact_new(f_u, ARTIFACT_PACKAGE, hash_file(f_u));
+    artifact_set_trust_level(u_art, TRUST_VERIFIED);
+    sv_register_trusted(sv_m8, u_art);
+    var vr_u = sv_verify_artifact(sv_m8, f_u, ARTIFACT_PACKAGE);
+    assert_eq(vresult_passed(vr_u), 0, "unsigned artifact rejected by sv_verify_artifact");
+    assert_eq(artifact_trust_level(vresult_artifact(vr_u)), TRUST_UNVERIFIED,
+      "unsigned artifact reported Unverified");
+    var vr_up = sv_verify_package(sv_m8, f_u, 0);
+    assert_eq(vresult_passed(vr_up), 0, "unsigned package rejected by sv_verify_package");
+
+    var pol_low = trust_policy_new();
+    policy_set_min_trust(pol_low, TRUST_UNVERIFIED);
+    var sv_m8l = sigil_verifier_new(kr, pol_low);
+    var l_u = trusted_artifact_new(f_u, ARTIFACT_PACKAGE, hash_file(f_u));
+    artifact_set_trust_level(l_u, TRUST_VERIFIED);
+    sv_register_trusted(sv_m8l, l_u);
+    assert_eq(vresult_passed(sv_verify_artifact(sv_m8l, f_u, ARTIFACT_PACKAGE)), 0,
+      "unsigned rejected even with min_trust = Unverified");
+
+    test_group("M8 signature from unknown signer fails strict policy");
+    var sv_m8k = sigil_verifier_new(keyring_new("/tmp/sigil_vh_empty_keys"), trust_policy_new());
+    var k_art = trusted_artifact_new(f_u, ARTIFACT_PACKAGE, hash_file(f_u));
+    artifact_set_trust_level(k_art, TRUST_VERIFIED);
+    artifact_set_signature(k_art, alloc(64));
+    artifact_set_signer(k_art, "no-such-key");
+    sv_register_trusted(sv_m8k, k_art);
+    assert_eq(vresult_passed(sv_verify_artifact(sv_m8k, f_u, ARTIFACT_PACKAGE)), 0,
+      "unverifiable signature rejected");
+
+    test_group("M8 allow_unsigned=1 still admits unsigned");
+    var pol_open = trust_policy_new();
+    policy_set_allow_unsigned(pol_open, 1);
+    var sv_m8o = sigil_verifier_new(kr, pol_open);
+    var o_art = trusted_artifact_new(f_u, ARTIFACT_PACKAGE, hash_file(f_u));
+    artifact_set_trust_level(o_art, TRUST_VERIFIED);
+    sv_register_trusted(sv_m8o, o_art);
+    assert_eq(vresult_passed(sv_verify_artifact(sv_m8o, f_u, ARTIFACT_PACKAGE)), 1,
+      "unsigned admitted when policy allows it");
+
+    test_group("M8 signatures survive save+load");
+    var sv_sig = sigil_verifier_new(kr, trust_policy_new());
+    var s_art = sv_sign_artifact(sv_sig, f_a, &sk, kid, ARTIFACT_SYSTEM_BINARY);
+    assert(s_art != 0, "signed artifact");
+    xunlink(ts_path);
+    assert_eq(sv_save_trust_store(sv_sig, ts_path), SIGIL_ERR_NONE, "signed store saved");
+    var sv_sig2 = sigil_verifier_new(kr, trust_policy_new());
+    assert_eq(sv_load_trust_store(sv_sig2, ts_path), 1, "signed store loaded");
+    var l_art = map_get(sv_trust_store(sv_sig2), artifact_content_hash(s_art));
+    assert(l_art != 0, "loaded artifact present");
+    var l_sig = 0;
+    var l_signer = 0;
+    if (l_art != 0) {
+        l_sig = artifact_signature(l_art);
+        l_signer = artifact_signer_key_id(l_art);
+    }
+    assert(l_sig != 0, "signature restored");
+    if (l_sig != 0) {
+        assert_eq(memeq(l_sig, artifact_signature(s_art), 64), 1, "signature bytes identical");
+    }
+    assert(l_signer != 0, "signer restored");
+    if (l_signer != 0) { assert_streq(l_signer, kid, "signer key id identical"); }
+    assert_eq(vresult_passed(sv_verify_artifact(sv_sig2, f_a, ARTIFACT_SYSTEM_BINARY)), 1,
+      "loaded signed artifact verifies");
+
+    test_group("M8 old-format store loads unsigned (fail closed)");
+    write_str_file(ts_path, old_record(hash_file(f_a), f_a, TRUST_VERIFIED));
+    var sv_old = sigil_verifier_new(kr, trust_policy_new());
+    assert_eq(sv_load_trust_store(sv_old, ts_path), 1, "old-format record loads");
+    assert_eq(artifact_signature(map_get(sv_trust_store(sv_old), hash_file(f_a))), 0,
+      "old-format record has no signature");
+    assert_eq(vresult_passed(sv_verify_artifact(sv_old, f_a, ARTIFACT_SYSTEM_BINARY)), 0,
+      "old-format record fails strict verify");
+
+    test_group("M8 malformed signature field rejects the record");
+    write_str_file(ts_path,
+      "[{\"hash\":\"ffff\",\"path\":\"/f\",\"type\":1,\"trust\":1,\"sig\":\"zz\",\"signer\":\"k\"}]");
+    var sv_bad = sigil_verifier_new(kr, trust_policy_new());
+    assert_eq(sv_load_trust_store(sv_bad, ts_path), 0, "bad sig hex record not loaded");
+
+    # ============================================================
+    # M7 — audit records the FINAL outcome
+    # ============================================================
+    test_group("M7 sv_verify_agent audit matches result");
+    var pol_perm = trust_policy_new();
+    policy_set_enforcement(pol_perm, ENFORCE_PERMISSIVE);
+    var sv_m7 = sigil_verifier_new(kr, pol_perm);
+    var ag_art = trusted_artifact_new(f_u, ARTIFACT_AGENT_BINARY, hash_file(f_u));
+    artifact_set_trust_level(ag_art, TRUST_VERIFIED);
+    sv_register_trusted(sv_m7, ag_art);
+    var vr_ag = sv_verify_agent(sv_m7, f_u);
+    assert_eq(vresult_passed(vr_ag), 0, "unsigned agent fails");
+    assert_eq(last_audit_passed(sv_m7), 0, "agent audit event records FAIL");
+
+    test_group("M7 sv_verify_package audit matches result");
+    var sv_m7p = sigil_verifier_new(kr, trust_policy_new());
+    sv_sign_artifact(sv_m7p, f_b, &sk, kid, ARTIFACT_PACKAGE);
+    var vr_pok = sv_verify_package(sv_m7p, f_b, hash_file(f_b));
+    assert_eq(vresult_passed(vr_pok), 1, "matching package passes");
+    assert_eq(last_audit_passed(sv_m7p), 1, "matching package audit PASS");
+    var vr_pbad = sv_verify_package(sv_m7p, f_b,
+      "0000000000000000000000000000000000000000000000000000000000000000");
+    assert_eq(vresult_passed(vr_pbad), 0, "hash mismatch fails");
+    assert_eq(last_audit_passed(sv_m7p), 0, "hash mismatch audit event records FAIL");
+
+    # ============================================================
+    # M2 — boot chain fails closed and runs the full check chain
+    # ============================================================
+    var sv_bc = sigil_verifier_new(kr, trust_policy_new());
+    sv_sign_artifact(sv_bc, f_a, &sk, kid, ARTIFACT_BOOT_COMPONENT);
+    var c_art = sv_sign_artifact(sv_bc, f_c, &sk, kid, ARTIFACT_BOOT_COMPONENT);
+    var e_art = sv_sign_artifact(sv_bc, f_e, &sk, kid, ARTIFACT_BOOT_COMPONENT);
+    sv_sign_artifact(sv_bc, f_d, &sk, kid, ARTIFACT_BOOT_COMPONENT);
+
+    test_group("M2 known good component is clean");
+    var comps_ok = vec_new();
+    vec_push(comps_ok, f_a);
+    var rep_ok = sv_verify_boot_chain(sv_bc, comps_ok);
+    assert_eq(ireport_is_clean(rep_ok), 1, "signed component clean");
+    assert_eq(ireport_total(rep_ok), 1, "one component checked");
+    assert_eq(ireport_verified(rep_ok), 1, "one component verified");
+
+    test_group("M2 unknown component fails");
+    var comps_unk = vec_new();
+    vec_push(comps_unk, f_b);
+    var rep_unk = sv_verify_boot_chain(sv_bc, comps_unk);
+    assert_eq(ireport_is_clean(rep_unk), 0, "unknown-only chain not clean");
+    assert_eq(ireport_total(rep_unk), 1, "unknown component counted");
+    var comps_mix = vec_new();
+    vec_push(comps_mix, f_a);
+    vec_push(comps_mix, f_b);
+    var rep_mix = sv_verify_boot_chain(sv_bc, comps_mix);
+    assert_eq(ireport_is_clean(rep_mix), 0, "known + unknown chain not clean");
+    assert_eq(ireport_verified(rep_mix), 1, "only the known component verified");
+
+    test_group("M2 revoked component fails");
+    sv_add_revocation(sv_bc, revocation_entry_new(0, artifact_content_hash(c_art), "t", "admin"));
+    var comps_rev = vec_new();
+    vec_push(comps_rev, f_c);
+    assert_eq(ireport_is_clean(sv_verify_boot_chain(sv_bc, comps_rev)), 0,
+      "revocation-listed component not clean");
+    artifact_set_trust_level(e_art, TRUST_REVOKED);
+    var comps_rev2 = vec_new();
+    vec_push(comps_rev2, f_e);
+    assert_eq(ireport_is_clean(sv_verify_boot_chain(sv_bc, comps_rev2)), 0,
+      "stored-Revoked component not clean");
+
+    test_group("M2 unsigned / bad-signature component fails");
+    var sv_bu = sigil_verifier_new(kr, trust_policy_new());
+    var bu_art = trusted_artifact_new(f_u, ARTIFACT_BOOT_COMPONENT, hash_file(f_u));
+    artifact_set_trust_level(bu_art, TRUST_VERIFIED);
+    sv_register_trusted(sv_bu, bu_art);
+    var comps_u = vec_new();
+    vec_push(comps_u, f_u);
+    assert_eq(ireport_is_clean(sv_verify_boot_chain(sv_bu, comps_u)), 0,
+      "unsigned component not clean");
+    var bs_art = sv_sign_artifact(sv_bu, f_s, &sk, kid, ARTIFACT_BOOT_COMPONENT);
+    var bsig = artifact_signature(bs_art);
+    store8(bsig, (load8(bsig) & 0xFF) ^ 1);
+    var comps_s = vec_new();
+    vec_push(comps_s, f_s);
+    assert_eq(ireport_is_clean(sv_verify_boot_chain(sv_bu, comps_s)), 0,
+      "bad-signature component not clean");
+
+    test_group("M2 duplicate path entries resolve without false mismatch");
+    var old_d = trusted_artifact_new(f_d, ARTIFACT_BOOT_COMPONENT, sha256_hex("component d body v1", 19));
+    artifact_set_trust_level(old_d, TRUST_VERIFIED);
+    sv_register_trusted(sv_bc, old_d);
+    var comps_d = vec_new();
+    vec_push(comps_d, f_d);
+    var rep_d = sv_verify_boot_chain(sv_bc, comps_d);
+    assert_eq(ireport_is_clean(rep_d), 1, "current version of duplicated path clean");
+    assert_eq(ireport_total(rep_d), 1, "duplicated path counted once");
+    assert_eq(ireport_verified(rep_d), 1, "duplicated path verified once");
+
+    test_group("M2 content trusted for another path is rejected");
+    var sv_sub = sigil_verifier_new(kr, trust_policy_new());
+    var sub_art = sv_sign_artifact(sv_sub, f_a, &sk, kid, ARTIFACT_BOOT_COMPONENT);
+    # Register /tmp/sigil_vh_s.bin's slot with a different hash, then put a's content there.
+    var sub_slot = trusted_artifact_new(f_s, ARTIFACT_BOOT_COMPONENT, sha256_hex("x", 1));
+    artifact_set_trust_level(sub_slot, TRUST_VERIFIED);
+    sv_register_trusted(sv_sub, sub_slot);
+    write_str_file(f_s, "component a body");
+    var comps_sub = vec_new();
+    vec_push(comps_sub, f_s);
+    assert(sub_art != 0, "source artifact signed");
+    assert_eq(ireport_is_clean(sv_verify_boot_chain(sv_sub, comps_sub)), 0,
+      "substituted content not clean");
+
+    test_group("M2 verifier integrity policy is not clobbered");
+    var iv = sv_integrity(sv_bc);
+    iv_add_baseline(iv, f_b);
+    var pol_before = iv_policy(iv);
+    var n_before = vec_len(load64(pol_before));
+    sv_verify_boot_chain(sv_bc, comps_ok);
+    assert_eq(iv_policy(iv), pol_before, "integrity policy pointer unchanged");
+    assert_eq(vec_len(load64(iv_policy(iv))), n_before, "caller baseline kept");
+
+    xunlink(ts_path);
+    xunlink(f_a);
+    xunlink(f_b);
+    xunlink(f_c);
+    xunlink(f_d);
+    xunlink(f_e);
+    xunlink(f_u);
+    xunlink(f_s);
+    return assert_summary();
+}
+
+var exit_code = main();
+sys_exit(exit_code);

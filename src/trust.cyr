@@ -30,8 +30,10 @@ fn key_role_name(role): i64 {
 #   +24  public_key_hex  (C-string ptr, 64-char hex)
 #   +32  role            (i64 KEY_ROLE_*)
 #   +40  issued_by       (C-string ptr, 0 = self-signed)
-#   +48  issuer_sig      (ptr to raw bytes, 0 = none)
-#   +56  issuer_sig_len  (i64)
+#   +48  issuer_sig      (ptr to raw bytes, 0 = none) — the issuing parent's Ed25519
+#                        signature over kv_issuance_message_into(kv); see
+#                        keyring_sign_issuance / keyring_validate_chain
+#   +56  issuer_sig_len  (i64; must be 64 for the link to validate)
 #   +64  pub_name        (C-string ptr, 0 = none)
 #   +72  pub_contact     (C-string ptr, 0 = none)
 #   +80  secret_key      (ptr to 32 raw bytes, 0 = none, for HMAC signing)
@@ -69,6 +71,10 @@ fn kv_public_key_hex(kv): i64 { return load64(kv + 24); }
 fn kv_role(kv): i64 { return load64(kv + 32); }
 # Returns the issuer key-id C-string of `kv` (0 = none / self-signed).
 fn kv_issued_by(kv): i64 { return load64(kv + 40); }
+# Returns the issuer-signature buffer pointer of `kv` (0 = none); see keyring_sign_issuance.
+fn kv_issuer_sig(kv): i64 { return load64(kv + 48); }
+# Returns the issuer-signature length of `kv` in bytes (64 for an Ed25519 signature).
+fn kv_issuer_sig_len(kv): i64 { return load64(kv + 56); }
 # Returns the publisher-name C-string of `kv` (0 = none).
 fn kv_pub_name(kv): i64 { return load64(kv + 64); }
 # Returns the publisher-contact C-string of `kv` (0 = none).
@@ -84,6 +90,14 @@ fn kv_set_valid_until(kv, v): i64 { store64(kv + 16, v); return kv; }
 fn kv_set_role(kv, r): i64 { store64(kv + 32, r); return kv; }
 # Sets the issuer key-id C-string of `kv` to `v` (0 = none / self-signed); returns `kv`.
 fn kv_set_issued_by(kv, v): i64 { store64(kv + 40, v); return kv; }
+# Attaches issuer signature `sig` (`sig_len` bytes; 0 = none) to `kv`; returns `kv`. Only the
+# pointer is stored. keyring_validate_chain accepts a link only if sig_len is exactly 64 and
+# the bytes are the parent's Ed25519 signature over kv_issuance_message_into(kv).
+fn kv_set_issuer_sig(kv, sig, sig_len): i64 {
+    store64(kv + 48, sig);
+    store64(kv + 56, sig_len);
+    return kv;
+}
 # Sets the publisher-name C-string of `kv` to `v` (0 = none); returns `kv`.
 fn kv_set_pub_name(kv, v): i64 { store64(kv + 64, v); return kv; }
 # Sets the publisher-contact C-string of `kv` to `v` (0 = none); returns `kv`.
@@ -326,15 +340,218 @@ fn keyring_get_chain(kr, key_id): i64 {
     return chain;
 }
 
-# Validate chain: verify each key was issued by its parent
-fn keyring_validate_chain(kr, key_id): i64 {
-    var chain = keyring_get_chain(kr, key_id);
-    var clen = vec_len(chain);
-    if (clen == 0) { return 0; }
-    # Last key in chain should be root
-    var root = vec_get(chain, clen - 1);
-    if (kv_role(root) != KEY_ROLE_ROOT) { return 0; }
+# ================================================================
+# Key issuance signatures (3.13.0 — audit M1)
+# ================================================================
+# Every non-root KeyVersion carries its parent's Ed25519 signature over a canonical,
+# domain-separated issuance message (layout in kv_issuance_message_into's doc).
+# keyring_validate_chain verifies each link against it, fail-closed.
+
+# Maximum number of keys in a validated chain (leaf .. root inclusive).
+var _KEYRING_MAX_CHAIN = 10;
+
+# Writes the low `nbytes` bytes of `v` big-endian at `p`.
+fn _kv_put_be(p, v, nbytes): i64 {
+    var i = 0;
+    while (i < nbytes) {
+        store8(p + i, (v >> ((nbytes - 1 - i) * 8)) & 0xFF);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Length of C-string `s` for the issuance message (0 for a null pointer).
+fn _kv_msg_strlen(s): i64 {
+    if (s == 0) { return 0; }
+    return strlen(s);
+}
+
+# Writes u32-BE length || bytes of C-string `s` (0 = empty) at `p`; returns bytes written.
+fn _kv_put_lpstr(p, s): i64 {
+    var n = _kv_msg_strlen(s);
+    _kv_put_be(p, n, 4);
+    if (n > 0) { memcpy(p + 4, s, n); }
+    return 4 + n;
+}
+
+# Decodes `kv`'s public-key hex into the 32 bytes at `out`. Returns 1 only for exactly 64
+# valid hex characters, else 0.
+fn _kv_decode_pk(kv, out): i64 {
+    var hex = kv_public_key_hex(kv);
+    if (hex == 0) { return 0; }
+    if (strlen(hex) != 64) { return 0; }
+    return hex_decode_into(hex, 64, out);
+}
+
+# Returns the byte length of `kv`'s canonical issuance message (see kv_issuance_message_into),
+# or -1 if `kv` has none: missing/empty key_id, a public key that is not exactly 64 hex chars,
+# or a string field whose length does not fit the u32 length prefix.
+fn kv_issuance_message_len(kv): i64 {
+    if (kv == 0) { return -1; }
+    var kid = kv_key_id(kv);
+    var klen = _kv_msg_strlen(kid);
+    if (klen == 0) { return -1; }
+    var pk[32];
+    if (_kv_decode_pk(kv, &pk) == 0) { return -1; }
+    var ilen = _kv_msg_strlen(kv_issued_by(kv));
+    var nlen = _kv_msg_strlen(kv_pub_name(kv));
+    var clen = _kv_msg_strlen(kv_pub_contact(kv));
+    var lim = 4294967295;
+    if (klen > lim) { return -1; }
+    if (ilen > lim) { return -1; }
+    if (nlen > lim) { return -1; }
+    if (clen > lim) { return -1; }
+    var tcount = 0;
+    var types = kv_allowed_types(kv);
+    if (types != 0) { tcount = vec_len(types); }
+    if (tcount > lim) { return -1; }
+    return 98 + klen + ilen + nlen + clen + tcount * 8;
+}
+
+# Writes `kv`'s canonical issuance message — the exact bytes a parent key signs to issue
+# `kv` — to `out` (size it with kv_issuance_message_len). Returns the byte count, or -1
+# (nothing written) if kv_issuance_message_len is -1. Integers are big-endian; strings are
+# a u32 byte length then the bytes, no NUL (a null pointer encodes as length 0):
+#   "SIGIL-KEY-ISSUANCE-V1" 0x00       22 B  domain tag
+#   key_id                             u32 len || bytes
+#   public key                         32 B  raw, decoded from public_key_hex
+#   role                               u64   KEY_ROLE_*
+#   valid_from, valid_until            u64, u64  (two's complement; 0 = no expiry)
+#   issued_by                          u32 len || bytes (the parent key_id)
+#   pub_name, pub_contact              u32 len || bytes each
+#   allowed_types                      u32 count || count x u64, in stored order
+#                                      (count 0 = unrestricted, whether unset or empty)
+# Any change to these fields after signing invalidates the issuer signature.
+fn kv_issuance_message_into(kv, out): i64 {
+    var total = kv_issuance_message_len(kv);
+    if (total < 0) { return -1; }
+    memcpy(out, "SIGIL-KEY-ISSUANCE-V1", 21);
+    store8(out + 21, 0);
+    var p = out + 22;
+    p = p + _kv_put_lpstr(p, kv_key_id(kv));
+    _kv_decode_pk(kv, p);
+    p = p + 32;
+    _kv_put_be(p, kv_role(kv), 8);
+    _kv_put_be(p + 8, kv_valid_from(kv), 8);
+    _kv_put_be(p + 16, kv_valid_until(kv), 8);
+    p = p + 24;
+    p = p + _kv_put_lpstr(p, kv_issued_by(kv));
+    p = p + _kv_put_lpstr(p, kv_pub_name(kv));
+    p = p + _kv_put_lpstr(p, kv_pub_contact(kv));
+    var types = kv_allowed_types(kv);
+    var tcount = 0;
+    if (types != 0) { tcount = vec_len(types); }
+    _kv_put_be(p, tcount, 4);
+    p = p + 4;
+    var i = 0;
+    while (i < tcount) {
+        _kv_put_be(p, vec_get(types, i), 8);
+        p = p + 8;
+        i = i + 1;
+    }
+    return total;
+}
+
+# Issues `child_kv`: Ed25519-signs its canonical issuance message (kv_issuance_message_into)
+# with the parent's 64-byte `parent_secret_key` (seed || pk, as from generate_keypair) and
+# attaches the fresh 64-byte signature with kv_set_issuer_sig. Set every child field —
+# issued_by (the parent key_id), role, validity, allowed types, publisher info — BEFORE
+# calling: a later change invalidates the signature. Returns 1, or 0 (nothing attached) if
+# `parent_secret_key` is null, the child has no issued_by, or it has no issuance message.
+# The parent key is not checked against issued_by here; keyring_validate_chain does that.
+fn keyring_sign_issuance(parent_secret_key, child_kv): i64 {
+    if (parent_secret_key == 0) { return 0; }
+    if (child_kv == 0) { return 0; }
+    if (kv_issued_by(child_kv) == 0) { return 0; }
+    var mlen = kv_issuance_message_len(child_kv);
+    if (mlen < 0) { return 0; }
+    var msg = fl_alloc(mlen);
+    kv_issuance_message_into(child_kv, msg);
+    var sig = alloc(64);
+    ed25519_sign(parent_secret_key, msg, mlen, sig);
+    fl_free(msg);
+    kv_set_issuer_sig(child_kv, sig, 64);
     return 1;
+}
+
+# Returns 1 if `child`'s issuer_sig is exactly 64 bytes and a valid Ed25519 signature by
+# `parent`'s public key over child's issuance message, else 0.
+fn _kv_issuer_sig_ok(child, parent): i64 {
+    var sig = kv_issuer_sig(child);
+    if (sig == 0) { return 0; }
+    if (kv_issuer_sig_len(child) != 64) { return 0; }
+    var ppk[32];
+    if (_kv_decode_pk(parent, &ppk) == 0) { return 0; }
+    var mlen = kv_issuance_message_len(child);
+    if (mlen < 0) { return 0; }
+    var msg = fl_alloc(mlen);
+    kv_issuance_message_into(child, msg);
+    var ok = ed25519_verify(&ppk, msg, mlen, sig);
+    fl_free(msg);
+    if (ok == 1) { return 1; }
+    return 0;
+}
+
+# Returns the version of `issuer_id` that issued `child`: the newest version valid at `now`
+# whose role may issue (Root or Intermediate) and whose key verifies child's issuer_sig.
+# Trying every valid version keeps children of a rotated-out-but-overlapping parent valid.
+# Returns 0 if none qualifies.
+fn _keyring_find_issuer(kr, issuer_id, child, now): i64 {
+    var versions = map_get(load64(kr), issuer_id);
+    if (versions == 0) { return 0; }
+    var i = vec_len(versions) - 1;
+    while (i >= 0) {
+        var p = vec_get(versions, i);
+        if (kv_is_valid_at(p, now) == 1) {
+            if (kv_role(p) != KEY_ROLE_PUBLISHER) {
+                if (_kv_issuer_sig_ok(child, p) == 1) { return p; }
+            }
+        }
+        i = i - 1;
+    }
+    return 0;
+}
+
+# Validates the issuance chain of `key_id`, fail-closed: returns 1 only if every link verifies,
+# else 0. Starting from its current version (keyring_get_current), each non-Root key must name
+# an issued_by other than itself, and that key ID must have a version that is valid now, has
+# role Root or Intermediate (a Publisher cannot issue), and whose Ed25519 public key verifies
+# the child's 64-byte issuer_sig over kv_issuance_message_into(child) (see
+# keyring_sign_issuance). The walk must reach a Root — the trust anchor, whose own issued_by
+# must be 0 or its own key_id; a Root's issuer_sig is not checked — within 10 keys, without
+# revisiting a key ID (cycle). An unknown key, missing or non-64-byte signature, forged or
+# stale signature (any signed field changed), missing or expired parent, or a chain topped by
+# a non-Root all return 0.
+fn keyring_validate_chain(kr, key_id): i64 {
+    if (key_id == 0) { return 0; }
+    var now = clock_epoch_secs();
+    var kv = keyring_get_current(kr, key_id);
+    if (kv == 0) { return 0; }
+    var seen[80];                       # _KEYRING_MAX_CHAIN key-id pointers
+    var depth = 0;
+    while (depth < _KEYRING_MAX_CHAIN) {
+        var kid = kv_key_id(kv);
+        if (kid == 0) { return 0; }
+        var j = 0;
+        while (j < depth) {
+            if (streq(load64(&seen + j * 8), kid) == 1) { return 0; }   # cycle
+            j = j + 1;
+        }
+        store64(&seen + depth * 8, kid);
+        var issuer = kv_issued_by(kv);
+        if (kv_role(kv) == KEY_ROLE_ROOT) {
+            if (issuer == 0) { return 1; }
+            if (streq(issuer, kid) == 1) { return 1; }
+            return 0;                   # a Root that names another issuer is no anchor
+        }
+        if (issuer == 0) { return 0; }  # chain ends at a non-Root
+        if (streq(issuer, kid) == 1) { return 0; }  # self-issued non-Root
+        var parent = _keyring_find_issuer(kr, issuer, kv, now);
+        if (parent == 0) { return 0; }
+        kv = parent;
+        depth = depth + 1;
+    }
+    return 0;
 }
 
 # Validate key_id as a safe filename:
@@ -500,8 +717,9 @@ fn hash_data_with(data, len, algorithm): i64 {
 }
 
 # Streams the file at `path` through SHA-256; returns the digest as a freshly alloc'd
-# 64-char lowercase hex C-string, or 0 if the file cannot be opened. A read error ends the
-# stream as if at EOF, so the digest then covers only the bytes read before it.
+# 64-char lowercase hex C-string, or 0 if the file cannot be opened or any read fails (a
+# negative read, e.g. EISDIR on a directory or EIO, is an error, never EOF — no digest of a
+# prefix is ever returned).
 fn hash_file(path): i64 {
     var fd = file_open(path, O_RDONLY, 0);
     if (fd < 0) { return 0; }
@@ -513,6 +731,10 @@ fn hash_file(path): i64 {
         n = file_read(fd, &buf, 4096);
     }
     file_close(fd);
+    if (n < 0) {
+        fl_free(ctx);
+        return 0;
+    }
     var digest[32];
     sha256_finalize(ctx, &digest);
     fl_free(ctx);
@@ -523,7 +745,8 @@ fn hash_file(path): i64 {
 # lowercase SHA-256 hex digest plus a NUL terminator (65 bytes
 # total) into `hex_out`, using `ctx_buf` as a 144-byte scratch
 # SHA-256 context. Returns 1 on success, 0 if the file could not
-# be opened.
+# be opened or any read fails (a negative read is an error, never
+# EOF; `hex_out` is then left unwritten).
 #
 # Caller MUST size:
 #   hex_out  ≥ 65 bytes
@@ -552,6 +775,7 @@ fn hash_file_into(path, hex_out, ctx_buf): i64 {
         n = file_read(fd, bufb, 4096);
     }
     file_close(fd);
+    if (n < 0) { return 0; }
     sha256_finalize(ctx_buf, digestb);
     # Inline hex_encode of the 32-byte digest into hex_out (lowercase,
     # NUL-terminated). Mirrors hex.cyr's hex_encode body but writes
@@ -572,7 +796,8 @@ fn hash_file_into(path, hex_out, ctx_buf): i64 {
 }
 
 # File hash with algorithm selection (mirror of hash_data_with for
-# on-disk content). Returns hex C-string, or 0 on file open failure.
+# on-disk content). Returns hex C-string, or 0 if the file cannot be
+# opened or any read fails (a negative read is an error, never EOF).
 # Unknown algorithm falls back to SHA-256 — trust engine must never
 # silently skip hashing.
 fn hash_file_with(path, algorithm): i64 {
@@ -587,6 +812,10 @@ fn hash_file_with(path, algorithm): i64 {
         n = file_read(fd, &buf, 4096);
     }
     file_close(fd);
+    if (n < 0) {
+        fl_free(ctx);
+        return 0;
+    }
     var digest[64];
     sha512_finalize(ctx, &digest);
     fl_free(ctx);

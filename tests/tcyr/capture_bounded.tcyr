@@ -1,0 +1,183 @@
+# capture_bounded.tcyr — every sigil subprocess CAPTURE is bounded and
+# status-checked, and the IMA log reader never mistakes a read error for EOF.
+#
+# M10 (MEDIUM). `agnosys_run_capture` delegated to the stdlib's `exec_capture`,
+# which is UNBOUNDED (no deadline on the drain or the reap) and DISCARDS the
+# child's exit status: a tool that was missing (exit 127) or failed came back as
+# Ok(bytes) — fail OPEN. Its callers are `luks_run_capture` (the
+# `losetup --find --show` in luks_format / luks_open) and `dmverity_run_capture`
+# (dmverity_format's `veritysetup format`, whose "Root hash:" line is the trust
+# anchor). It now delegates to `agnosys_run_capture_timeout(..., 0, errmsg)`,
+# the same move `agnosys_run_checked` made in 3.12.13.
+#
+# M9 (MEDIUM, IMA part). `ima_read_measurements` treated a negative `file_read`
+# as EOF and parsed the prefix read so far as the complete measurement log, so
+# an attestation consumer silently lost measurements. A read error is now Err.
+# The real path needs /sys/kernel/security/ima (absent on most dev hosts), so
+# the read loop is driven through `_ima_read_log_fd` with fds whose read(2)
+# fails: a directory (-EISDIR) and a write-only descriptor (-EBADF).
+
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/string.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fs.cyr"
+include "lib/fmt.cyr"
+include "lib/bayan.cyr"
+include "lib/sakshi.cyr"
+include "lib/chrono.cyr"
+include "lib/tagged.cyr"
+include "lib/process.cyr"
+include "lib/slice.cyr"
+include "lib/sys.cyr"
+
+include "lib/thread_local.cyr"
+include "src/crypto_scratch.cyr"
+include "src/mul64.cyr"
+include "src/types.cyr"
+include "src/error.cyr"
+include "lib/random.cyr"
+include "src/random.cyr"
+include "src/sha256.cyr"
+include "src/hex.cyr"
+include "lib/ct.cyr"
+include "src/hmac.cyr"
+include "src/sha512.cyr"
+include "src/bigint_ext.cyr"
+include "src/ed25519.cyr"
+include "src/sys_error.cyr"
+include "src/sys_util.cyr"
+include "src/sysinfo.cyr"
+include "src/certpin_core.cyr"
+include "src/tpm_core.cyr"
+include "src/ima_core.cyr"
+include "src/secureboot_core.cyr"
+include "src/luks.cyr"
+include "src/dmverity.cyr"
+
+fn argv1(a0): i64 {
+    var v = vec_new();
+    vec_push(v, a0);
+    return v;
+}
+
+fn argv2(a0, a1): i64 {
+    var v = vec_new();
+    vec_push(v, a0);
+    vec_push(v, a1);
+    return v;
+}
+
+fn main() {
+    alloc_init();
+    var cbuf = alloc(256);
+
+    # ============================================================
+    # agnosys_run_capture — status-checked.
+    # ============================================================
+    test_group("agnosys_run_capture status");
+    var f_tag, f_v = agnosys_run_capture(argv1("/bin/false"), cbuf, 255, "false");
+    assert_eq(is_err_result(f_tag), 1, "/bin/false (exit 1) is Err, never Ok(0)");
+
+    var m_tag, m_v = agnosys_run_capture(argv1("/nonexistent/sigil-probe"), cbuf, 255,
+      "missing");
+    assert_eq(is_err_result(m_tag), 1, "a missing binary (exit 127) is Err, never Ok(0)");
+
+    memset(cbuf, 0, 256);
+    var e_tag, e_v = agnosys_run_capture(argv2("/bin/echo", "sigil"), cbuf, 255, "echo");
+    assert_eq(is_err_result(e_tag), 0, "/bin/echo sigil is Ok");
+    assert_eq(e_v, 6, "and it captured exactly 'sigil\\n'");
+    assert_eq(memeq(cbuf, "sigil\n", 6), 1, "and the captured bytes are the child's stdout");
+
+    # ============================================================
+    # luks_run_capture / dmverity_run_capture inherit it.
+    # ============================================================
+    test_group("luks_run_capture inherits");
+    var lf_tag, lf_v = luks_run_capture(argv1("/bin/false"), cbuf, 255);
+    assert_eq(is_err_result(lf_tag), 1, "luks: /bin/false is Err");
+    var lm_tag, lm_v = luks_run_capture(argv1("/nonexistent/losetup"), cbuf, 255);
+    assert_eq(is_err_result(lm_tag), 1, "luks: a missing losetup is Err, not an empty loop dev");
+    memset(cbuf, 0, 256);
+    var le_tag, le_v = luks_run_capture(argv2("/bin/echo", "sigil"), cbuf, 255);
+    assert_eq(is_err_result(le_tag), 0, "luks: /bin/echo sigil is Ok");
+    assert_eq(le_v, 6, "luks: captured 6 bytes");
+
+    test_group("dmverity_run_capture inherits");
+    var df_tag, df_v = dmverity_run_capture(argv1("/bin/false"), cbuf, 255);
+    assert_eq(is_err_result(df_tag), 1, "dmverity: /bin/false is Err");
+    var dm_tag, dm_v = dmverity_run_capture(argv1("/nonexistent/veritysetup"), cbuf, 255);
+    assert_eq(is_err_result(dm_tag), 1, "dmverity: a missing veritysetup is Err");
+    memset(cbuf, 0, 256);
+    var de_tag, de_v = dmverity_run_capture(argv2("/bin/echo", "sigil"), cbuf, 255);
+    assert_eq(is_err_result(de_tag), 0, "dmverity: /bin/echo sigil is Ok");
+    assert_eq(de_v, 6, "dmverity: captured 6 bytes");
+
+    # ============================================================
+    # agnosys_run_capture — bounded (default deadline, 10 s).
+    # A child that outlives the default bound is SIGKILLed and reported
+    # as Err near the bound, rather than blocking until it exits and
+    # then coming back Ok(0).
+    # ============================================================
+    test_group("agnosys_run_capture bounded");
+    var t0 = clock_now_ms();
+    var s_tag, s_v = agnosys_run_capture(argv2("/bin/sleep", "13"), cbuf, 255, "sleep");
+    var s_ms = clock_now_ms() - t0;
+    assert_eq(is_err_result(s_tag), 1, "a child that outruns the default bound is Err");
+    assert(s_ms < 12000, "and the capture returned near the 10 s bound, not after the child");
+
+    # ============================================================
+    # _ima_read_log_fd — a read ERROR is Err, never a truncated log.
+    # ============================================================
+    test_group("ima read error");
+    var dfd = file_open("/tmp", O_RDONLY, 0);
+    assert(dfd >= 0, "opened a directory fd");
+    var id_tag, id_v = _ima_read_log_fd(dfd);
+    assert_eq(is_err_result(id_tag), 1, "read(2) -EISDIR is Err, not an empty log");
+    assert_eq(file_close(dfd), 0, "the helper left the caller's fd open (caller owns it)");
+
+    var wfd = file_open("/dev/null", O_WRONLY, 0);
+    assert(wfd >= 0, "opened a write-only fd");
+    var iw_tag, iw_v = _ima_read_log_fd(wfd);
+    assert_eq(is_err_result(iw_tag), 1, "read(2) -EBADF is Err, not an empty log");
+    file_close(wfd);
+
+    # The good path still reads to EOF and the result still parses.
+    test_group("ima read ok");
+    var line = "10 0123456789abcdef0123456789abcdef01234567 ima-ng sha256:00ff /usr/bin/x\n";
+    # Per-process name so concurrent runs never collide.
+    var pidb = alloc(24);
+    memset(pidb, 0, 24);
+    fmt_int_buf(sys_getpid(), pidb);
+    var pfx = "/tmp/sigil_capture_bounded_ima_";
+    var lp = alloc(64);
+    memset(lp, 0, 64);
+    memcpy(lp, pfx, strlen(pfx));
+    memcpy(lp + strlen(pfx), pidb, strlen(pidb));
+    xunlink(lp);
+    assert(file_write_all(lp, line, strlen(line)) == strlen(line), "wrote a one-line log");
+    var rfd = file_open(lp, O_RDONLY, 0);
+    var ir_tag, ir_v = _ima_read_log_fd(rfd);
+    file_close(rfd);
+    xunlink(lp);
+    assert_eq(is_err_result(ir_tag), 0, "a readable log is Ok");
+    assert_eq(strlen(ir_v), strlen(line), "and the whole log was read");
+    var pm_tag, pm_v = ima_parse_measurements(ir_v);
+    assert_eq(is_err_result(pm_tag), 0, "and it parses");
+    assert_eq(vec_len(pm_v), 1, "into one measurement");
+
+    # On a host without IMA the public reader fails closed (open error).
+    if (sys_access("/sys/kernel/security/ima/ascii_runtime_measurements", 0) < 0) {
+        var ra_tag, ra_v = ima_read_measurements();
+        assert_eq(is_err_result(ra_tag), 1, "no IMA log -> Err");
+    }
+
+    return assert_summary();
+}
+
+var exit_code = main();
+sys_exit(exit_code);

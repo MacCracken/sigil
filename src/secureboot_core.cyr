@@ -4,6 +4,10 @@
 # Reads EFI variables from /sys/firmware/efi/efivars/ to detect
 # secure boot state. Falls back to mokutil subprocess.
 #
+# Every external tool (mokutil, kmodsign, modinfo, ls) is exec'd by an
+# ABSOLUTE path resolved from a fixed trusted-directory list by
+# `_sb_tool_path` — never by bare name, never via $PATH (audit M5, 3.13.0).
+#
 # Requires: src/error.cyr, lib/syscalls.cyr, lib/io.cyr, lib/process.cyr
 
 # ================================================================
@@ -89,8 +93,84 @@ fn secureboot_efi_var_size(data): i64 {
 }
 
 # ================================================================
+# Trusted tool resolution (audit M5, 3.13.0)
+# ================================================================
+#
+# `agnosys_capture_n` forks and calls execve(2) directly, and execve does no
+# PATH search: an argv[0] without a '/' is opened RELATIVE TO THE CWD. Through
+# 3.12.x every tool here was passed by bare name, so a process whose cwd was
+# attacker-writable ran a planted ./mokutil and reported whatever it printed
+# ("SecureBoot enabled", a forged module signer, a successful kmodsign). Each
+# tool is now resolved against this fixed list — the conventions luks.cyr
+# (/usr/sbin/cryptsetup) and tpm_core.cyr (/usr/bin/tpm2_*) already use — and
+# a tool found in none of them FAILS CLOSED. The cwd and $PATH are never used.
+
+# `dir` + `name` if that file exists and is executable, else 0.
+fn _sb_tool_in(dir, name): i64 {
+    var dl = strlen(dir);
+    var nl = strlen(name);
+    var p = alloc(dl + nl + 1);
+    memcpy(p, dir, dl);
+    memcpy(p + dl, name, nl);
+    store8(p + dl + nl, 0);
+    if (sys_access(p, 1) == 0) { return p; }   # 1 = X_OK
+    return 0;
+}
+
+# Absolute path of tool `name` from the trusted dirs (/usr/bin, /usr/sbin, /bin,
+# /sbin, in that order), or 0 if it is in none of them. A null or empty name, or
+# one containing '/', is rejected (0): only a plain name is resolved.
+fn _sb_tool_path(name): i64 {
+    if (name == 0) { return 0; }
+    var nl = strlen(name);
+    if (nl == 0) { return 0; }
+    var i = 0;
+    while (i < nl) {
+        if (load8(name + i) == 47) { return 0; }   # '/'
+        i = i + 1;
+    }
+    var p = _sb_tool_in("/usr/bin/", name);
+    if (p == 0) { p = _sb_tool_in("/usr/sbin/", name); }
+    if (p == 0) { p = _sb_tool_in("/bin/", name); }
+    if (p == 0) { p = _sb_tool_in("/sbin/", name); }
+    return p;
+}
+
+# ================================================================
 # Secure Boot state detection
 # ================================================================
+
+# SB_* state from `mokutil --sb-state` (the fallback when the SecureBoot EFI
+# variable is unreadable). SB_NOT_SUPPORTED when mokutil is not in the trusted
+# dirs, fails, or prints nothing.
+fn _secureboot_state_from_mokutil(): i64 {
+    var mokutil = _sb_tool_path("mokutil");
+    if (mokutil == 0) { return SB_NOT_SUPPORTED; }
+    var mok_args = vec_new();
+    vec_push(mok_args, mokutil);
+    vec_push(mok_args, "--sb-state");
+    var mokbuf = alloc(4096);
+    memset(mokbuf, 0, 4096);
+    var mok_n = agnosys_capture_n(mok_args, mokbuf, 4095, 0);
+    if (mok_n <= 0) { return SB_NOT_SUPPORTED; }
+    # Substring search for known patterns using memeq
+    var output = mokbuf;
+    var outlen = strlen(output);
+    var i = 0;
+    while (i < outlen) {
+        if (i + 7 <= outlen && memeq(output + i, "enabled", 7) == 1) {
+            return SB_ENABLED;
+        }
+        if (i + 8 <= outlen && memeq(output + i, "disabled", 8) == 1) {
+            return SB_DISABLED;
+        }
+        if (i + 5 <= outlen && memeq(output + i, "setup", 5) == 1) {
+            return SB_SETUP_MODE;
+        }
+        i = i + 1;
+    }
+    return SB_DISABLED;
+}
 
 # Detect the current Secure Boot state.
 # Returns Result: Ok(SecureBootState) or Err.
@@ -134,37 +214,9 @@ fn secureboot_detect_state(): i64 {
         }
     }
 
-    # Fallback: try mokutil --sb-state
-    var mok_args = vec_new();
-    vec_push(mok_args, "mokutil");
-    vec_push(mok_args, "--sb-state");
-    var mokbuf = alloc(4096);
-    var mok_n = agnosys_capture_n(mok_args, mokbuf, 4095, 0);
-    var mok_res_tag, mok_res = wrap_syscall(mok_n);
-    if (is_ok(mok_res_tag) == 1) {
-        var output = mokbuf;
-        if (mok_n > 0) {
-            # Substring search for known patterns using memeq
-            var outlen = strlen(output);
-            var i = 0;
-            while (i < outlen) {
-                if (i + 7 <= outlen && memeq(output + i, "enabled", 7) == 1) {
-                    return Ok(SB_ENABLED);
-                }
-                if (i + 8 <= outlen && memeq(output + i, "disabled", 8) == 1) {
-                    return Ok(SB_DISABLED);
-                }
-                if (i + 5 <= outlen && memeq(output + i, "setup", 5) == 1) {
-                    return Ok(SB_SETUP_MODE);
-                }
-                i = i + 1;
-            }
-            return Ok(SB_DISABLED);
-        }
-    }
-
-    # mokutil not available, cannot determine
-    return Ok(SB_NOT_SUPPORTED);
+    # Fallback: mokutil --sb-state (SB_NOT_SUPPORTED when mokutil is absent from
+    # the trusted dirs or fails — cannot determine).
+    return Ok(_secureboot_state_from_mokutil());
 }
 
 # ================================================================
@@ -336,8 +388,12 @@ fn secureboot_parse_mokutil_list(output, outlen): i64 {
 # List enrolled MOK (Machine Owner Key) certificates.
 # Returns Result: Ok(vec_of_keys) or Err.
 fn secureboot_list_enrolled_keys(): i64 {
+    var mokutil = _sb_tool_path("mokutil");
+    if (mokutil == 0) {
+        return sigil_err_io(ENOENT, "mokutil not found in trusted system dirs");
+    }
     var args = vec_new();
-    vec_push(args, "mokutil");
+    vec_push(args, mokutil);
     vec_push(args, "--list-enrolled");
 
     var outbuf = alloc(8192);
@@ -374,8 +430,12 @@ fn secureboot_enroll_key(der_path): i64 {
         return sigil_err_invalid_argument("certificate path too short");
     }
 
+    var mokutil = _sb_tool_path("mokutil");
+    if (mokutil == 0) {
+        return sigil_err_io(ENOENT, "mokutil not found in trusted system dirs");
+    }
     var args = vec_new();
-    vec_push(args, "mokutil");
+    vec_push(args, mokutil);
     vec_push(args, "--import");
     vec_push(args, der_path);
 
@@ -418,17 +478,21 @@ fn secureboot_sign_module(module_path, private_key, certificate): i64 {
         return sigil_err_invalid_argument("certificate file not found");
     }
 
-    # Try kmodsign first
-    var args = vec_new();
-    vec_push(args, "kmodsign");
-    vec_push(args, "sha256");
-    vec_push(args, private_key);
-    vec_push(args, certificate);
-    vec_push(args, module_path);
-
+    # Try kmodsign first — only from the trusted dirs; absent, fall through to
+    # sign-file exactly as a failed kmodsign run does.
     var outbuf[1024];
-    var n = agnosys_capture_n(args, &outbuf, 1023, 0);
-    if (n >= 0) { return Ok(0); }
+    var n = 0 - 1;
+    var kmodsign = _sb_tool_path("kmodsign");
+    if (kmodsign != 0) {
+        var args = vec_new();
+        vec_push(args, kmodsign);
+        vec_push(args, "sha256");
+        vec_push(args, private_key);
+        vec_push(args, certificate);
+        vec_push(args, module_path);
+        n = agnosys_capture_n(args, &outbuf, 1023, 0);
+        if (n >= 0) { return Ok(0); }
+    }
 
     # Fallback: sign-file from kernel headers. Audit F-4 (2026-04-26):
     # the prior hardcoded "/usr/lib/modules-load.d/../linux/scripts/sign-file"
@@ -512,8 +576,12 @@ fn secureboot_verify_module(module_path): i64 {
         return sigil_err_invalid_argument("module file not found");
     }
 
+    var modinfo = _sb_tool_path("modinfo");
+    if (modinfo == 0) {
+        return sigil_err_io(ENOENT, "modinfo not found in trusted system dirs");
+    }
     var args = vec_new();
-    vec_push(args, "modinfo");
+    vec_push(args, modinfo);
     vec_push(args, module_path);
 
     var outbuf = alloc(4096);
@@ -590,8 +658,12 @@ fn secureboot_list_efi_variables(): i64 {
     }
 
     # Read directory listing via ls
+    var ls = _sb_tool_path("ls");
+    if (ls == 0) {
+        return sigil_err_io(ENOENT, "ls not found in trusted system dirs");
+    }
     var args = vec_new();
-    vec_push(args, "ls");
+    vec_push(args, ls);
     vec_push(args, efivars_dir);
 
     var outbuf = alloc(16384);

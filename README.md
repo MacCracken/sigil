@@ -11,12 +11,14 @@ revocation management.
 
 Cyrius (ported from Rust v1.0.0; original Rust source removed in
 2.7.0). **Zero external _crypto_ dependencies** — every primitive is
-implemented in-house. The full (small) dependency set — cyrius stdlib +
-one AGNOS first-party crate (`sakshi`, tracing) — is listed under
-[Dependencies](#dependencies). (The former `agnosys` kernel-interface dep
-was dropped at 3.8.1; its helpers are internalized.)
+implemented in-house. The whole dependency set is the cyrius stdlib, which
+since 3.12.7 also carries the AGNOS first-party tracing library `sakshi`; there
+are **zero git deps**. See [Dependencies](#dependencies). (The former `agnosys`
+kernel-interface dep was dropped at 3.8.1; its helpers are internalized.)
 
-**Cyrius pin:** `6.5.3` (synced across `cyrius.cyml` and CI).
+**Cyrius pin:** `cyrius.cyml` `[package].cyrius` is the single source of truth.
+CI reads it from there, and this file deliberately does not repeat the number:
+it drifted here for six releases while it was hard-coded.
 
 ## Crypto stack
 
@@ -177,20 +179,22 @@ for the full module map and data flow.
 ## Dependencies
 
 Sigil implements **all cryptography itself** — there are no external crypto
-libraries. The complete dependency set (declared in [`cyrius.cyml`](cyrius.cyml))
-is the Cyrius standard library plus one AGNOS first-party crate (`sakshi`):
+libraries. The complete dependency set (declared in [`cyrius.cyml`](cyrius.cyml)
+`[deps].stdlib`) is the Cyrius standard library, taken from the pinned toolchain's
+snapshot:
 
-### Cyrius stdlib — pinned `6.5.3`
+### Cyrius stdlib — from the pinned toolchain's snapshot
 
 - **Auto-included** (cyrius pulls these on symbol reference — nothing for a
   consumer to do): `syscalls`, `alloc`, `freelist`, `assert`, `str`,
   `string`, `vec`, `hashmap`, `io`, `fs`, `fmt`, `result`, `fnptr`, `bayan`,
   `chrono`, `tagged`, `process`, `slice` (`bench` for the benchmark harness).
   (`json` + `bigint` were carved into `bayan` at cyrius 6.1.25; 6.2.x ships
-  neither standalone. The 6.5.3 snapshot carries **bayan 1.3.0**, whose
-  `u256_*` compat aliases back sigil's big-integer arithmetic — bayan is a
+  neither standalone. The snapshot sigil pins at 3.13.0 carries **bayan 1.5.6**,
+  whose `u256_*` compat aliases back sigil's big-integer arithmetic — bayan is a
   *stdlib module*, not a pinned `[deps.*]` entry, so its only machine-visible
-  trace is the `lib/bayan.cyr` hash in `cyrius.lock`.)
+  trace is the `lib/bayan.cyr` hash in `cyrius.lock`. `sys` (for `sys_uname`)
+  joined the set at 3.12.18.)
 - **Opt-in — the consumer MUST `include` these** (they are *not* in the
   cyrius auto-prepend union, and `dist/sigil.cyr` does not carry them):
   - `lib/ct.cyr` — constant-time compares (`ct_eq_bytes_lens` / `ct_select`),
@@ -208,16 +212,18 @@ is the Cyrius standard library plus one AGNOS first-party crate (`sakshi`):
   since 3.12.1 `src/crypto_scratch.cyr` claims its bank slot from the
   `thread_local_alloc` slot allocator, which landed in 6.4.65.
 
-### AGNOS first-party crate (git dep)
+### AGNOS first-party libraries — no git deps
 
-| Crate | Pin | Provides | Required by |
-|---|---|---|---|
-| [**sakshi**](https://github.com/MacCracken/sakshi) | `2.4.7` | structured tracing / spans (`dist/sakshi.cyr`) | `programs/smoke.cyr` and the full `src/lib.cyr` build — **not** referenced by the `dist/sigil.cyr` crypto bundle |
+[**sakshi**](https://github.com/MacCracken/sakshi) (structured tracing / spans)
+arrives with the toolchain snapshot as a `[deps].stdlib` entry — **2.5.2** in
+the snapshot sigil pins at 3.13.0. It moved there from a `[deps.sakshi]` git pin
+at 3.12.7, because that pin silently downgraded every consumer's `lib/sakshi.cyr`.
+Only `programs/smoke.cyr` and one test reference it; the `dist/sigil.cyr` bundle
+does not.
 
 > The former **agnosys** kernel-interface dep was **dropped at 3.8.1**: the
 > kernel-layer helpers it provided (the `agnosys_*` / `SYSE_*` surface) were
-> internalized into sigil's own `src/sys_error.cyr` / `src/sys_util.cyr`, so
-> `cyrius.cyml [deps]` now lists only `sakshi`.
+> internalized into sigil's own `src/sys_error.cyr` / `src/sys_util.cyr`.
 
 **`dist/sigil.cyr` is self-contained** beyond the five opt-in stdlib modules
 above: it references no *external* crate symbols (the `agnosys_*` helpers it

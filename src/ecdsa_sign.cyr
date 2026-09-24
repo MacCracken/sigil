@@ -21,6 +21,13 @@
 #   - The nonce k, the HMAC_DRBG state (K, V), the private scalar, and
 #     every (e + r·d) / k^(-1) intermediate live in `secret var` stack
 #     buffers, zeroized on scope exit. r and s are public outputs.
+#   - R = k·G runs through pt_scalarmul_secret / pt384_scalarmul_secret:
+#     the Montgomery ladder over the fixed-length k_hat = k + n (or k + 2n,
+#     picked by a constant-time mask), so every signature performs the
+#     same 257 / 385 ladder steps whatever bitlen(k) is. Laddering over k
+#     itself leaked bitlen(k) through timing (Minerva / TPM-Fail,
+#     CVE-2019-15809), enough to recover d by lattice reduction from
+#     timed signatures. n·G = O, so signatures are byte-identical.
 #   - Scalar inversion / multiply reuse the curve's existing mod-n
 #     primitives (fn_p256_inv / fn_p256_mul, etc.).
 #   - add-mod-n is carry-correct (the lib `u256_addmod` drops the
@@ -441,8 +448,9 @@ fn ecdsa_p256_sign(d_be, msg, msg_len, sig_out): i64 {
     if (_rfc6979_k_p256(d_be, h1oct, k) != 0) { memset(scb, 0, 416); _p256_scrub_secret_lanes(); return 0 - 1; }
     u256_load_be(kint, k);
 
-    # R = k·G ; r = R.x mod n.
-    pt_scalarmul(_ecs256_Rb, kint, _ecs256_G);
+    # R = k·G ; r = R.x mod n. Fixed-length ladder over k_hat = k + n / k + 2n, so the
+    # time does not track bitlen(k) (Minerva / CVE-2019-15809); R is unchanged.
+    pt_scalarmul_secret(_ecs256_Rb, kint, _ecs256_G);
     if (pt_is_infinity(_ecs256_Rb) == 1) { memset(scb, 0, 416); _p256_scrub_secret_lanes(); return 0 - 1; }
     pt_to_affine(Rx, Ry, _ecs256_Rb);
     fn_p256_reduce256(rint, Rx);
@@ -526,7 +534,8 @@ fn ecdsa_p384_sign(d_be, msg, msg_len, sig_out): i64 {
     if (_rfc6979_k_p384(d_be, h1oct, k) != 0) { memset(scb, 0, 624); _p384_scrub_secret_lanes(); return 0 - 1; }
     u384_load_be(kint, k);
 
-    pt384_scalarmul(_ecs384_Rb, kint, _ecs384_G);
+    # R = k·G via the fixed-length ladder (k_hat = k + n / k + 2n) — see ecdsa_p256_sign.
+    pt384_scalarmul_secret(_ecs384_Rb, kint, _ecs384_G);
     if (pt384_is_infinity(_ecs384_Rb) == 1) { memset(scb, 0, 624); _p384_scrub_secret_lanes(); return 0 - 1; }
     pt384_to_affine(Rx, Ry, _ecs384_Rb);
     fn_p384_reduce384(rint, Rx);

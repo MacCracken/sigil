@@ -12,12 +12,13 @@
 #   polyveck     — K (=6) × 2048 bytes; same scheme
 #   matrix A     — K · L × 2048 bytes; row i at base + i · L · 2048
 #
-# Hot paths (`polyvecl_pointwise_acc_montgomery`,
-# `polyvec_matrix_pointwise_montgomery`) promote their loop
-# state to module-level globals because cc5 clobbers locals
-# across deeply nested call chains (the matrix product goes
-# 3 levels deep into per-coefficient Montgomery reduces, same
-# call-depth pattern that bit sha256 / ed25519).
+# Every function here keeps its state in locals and the caller's
+# buffers: no module globals, so all of them are reentrant and safe
+# to call from concurrent threads. (Before the M11 fix the two hot paths,
+# `polyvecl_pointwise_acc_montgomery` and
+# `polyvec_matrix_pointwise_montgomery`, kept their loop state and a
+# 2 KB scratch poly in module globals — a cc5-era workaround — which
+# made concurrent ML-DSA signers corrupt each other's A·y product.)
 
 # ================================================================
 # Per-poly operations
@@ -274,42 +275,27 @@ fn mldsa_polyveck_chknorm(v, bound): i64 {
 # ================================================================
 # Accumulated pointwise product: w = Σ u[i] · v[i]
 # ================================================================
-# Scratch buffer + loop state promoted to globals (see header
-# comment). One-time alloc; reused across every acc call.
-
-var _mldsa_pac_scratch = 0;
-var _mldsa_pac_inited = 0;
-var _mldsa_pac_w = 0;
-var _mldsa_pac_u = 0;
-var _mldsa_pac_v = 0;
-var _mldsa_pac_i = 0;
-
-fn _mldsa_pac_init(): i64 {
-    if (_mldsa_pac_inited == 1) { return 0; }
-    _mldsa_pac_scratch = alloc(2048);
-    _mldsa_pac_inited = 1;
-    return 0;
-}
+# Accumulated coefficient by coefficient in a local, so no scratch
+# poly is needed: w[k] = Σ_j montgomery_reduce(u[j][k] · v[j][k]),
+# the same sum (integer adds are exact) the per-poly
+# pointwise-then-add formulation produces.
 
 # w = u[0]·v[0] + u[1]·v[1] + ... + u[L-1]·v[L-1] in NTT domain.
 # Each inner pointwise is a montgomery_reduce, so the sum is
-# already scaled by R^{-1}.
+# already scaled by R^{-1}. `w` may alias u[0] or v[0] (each w[k] is
+# written after its inputs are read). Reentrant. Returns 0.
 fn mldsa_polyvecl_pointwise_acc_montgomery(w, u, v): i64 {
-    _mldsa_pac_init();
-    _mldsa_pac_w = w;
-    _mldsa_pac_u = u;
-    _mldsa_pac_v = v;
-    # w = u[0] · v[0].
-    mldsa_poly_pointwise_montgomery(_mldsa_pac_w, _mldsa_pac_u, _mldsa_pac_v);
-    _mldsa_pac_i = 1;
-    while (_mldsa_pac_i < MLDSA65_L) {
-        mldsa_poly_pointwise_montgomery(
-          _mldsa_pac_scratch,
-          _mldsa_pac_u + _mldsa_pac_i * 2048,
-          _mldsa_pac_v + _mldsa_pac_i * 2048
-          );
-        mldsa_poly_add(_mldsa_pac_w, _mldsa_pac_w, _mldsa_pac_scratch);
-        _mldsa_pac_i = _mldsa_pac_i + 1;
+    var k = 0;
+    while (k < 256) {
+        var acc = 0;
+        var j = 0;
+        while (j < MLDSA65_L) {
+            var off = j * 2048 + k * 8;
+            acc = acc + mldsa_montgomery_reduce(load64(u + off) * load64(v + off));
+            j = j + 1;
+        }
+        store64(w + k * 8, acc);
+        k = k + 1;
     }
     return 0;
 }
@@ -322,26 +308,14 @@ fn mldsa_polyvecl_pointwise_acc_montgomery(w, u, v): i64 {
 # i · L · 2048 bytes from the matrix base. Each row is reduced
 # against v via polyvecl_pointwise_acc_montgomery.
 
-var _mldsa_mat_t = 0;
-var _mldsa_mat_A = 0;
-var _mldsa_mat_v = 0;
-var _mldsa_mat_i = 0;
-
 # t = Â · v in the NTT domain: t[i] = Σ_j A[i][j] · v[j] (Montgomery products) for the K rows
 # of the K×L matrix `A` against polyvecl `v`, into polyveck `t`. `t` must not overlap `v`
-# (re-read for every row). Loop state and scratch are module globals: not reentrant. Returns 0.
+# (re-read for every row). Locals only, so reentrant and thread-safe. Returns 0.
 fn mldsa_polyvec_matrix_pointwise_montgomery(t, A, v): i64 {
-    _mldsa_mat_t = t;
-    _mldsa_mat_A = A;
-    _mldsa_mat_v = v;
-    _mldsa_mat_i = 0;
-    while (_mldsa_mat_i < MLDSA65_K) {
-        mldsa_polyvecl_pointwise_acc_montgomery(
-          _mldsa_mat_t + _mldsa_mat_i * 2048,
-          _mldsa_mat_A + _mldsa_mat_i * MLDSA65_L * 2048,
-          _mldsa_mat_v
-          );
-        _mldsa_mat_i = _mldsa_mat_i + 1;
+    var i = 0;
+    while (i < MLDSA65_K) {
+        mldsa_polyvecl_pointwise_acc_montgomery(t + i * 2048, A + i * MLDSA65_L * 2048, v);
+        i = i + 1;
     }
     return 0;
 }

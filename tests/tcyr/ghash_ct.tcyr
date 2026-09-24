@@ -1,0 +1,531 @@
+# ghash_ct.tcyr — constant-time GHASH / software-AES regression (audit H5)
+#
+# src/aes_gcm.cyr branched on secret data in three places:
+#   - _ghash_mul: `if (mask == 1) { _ghash_xor_16(z, vb); }` on every
+#     bit of X (the H-dependent GHASH accumulator);
+#   - _ghash_shift_right_and_reduce: `if (lsb_set == 1) { v[0] ^= 0xE1 }`
+#     on the low bit of V (starts as the hash subkey H);
+#   - _aes_xtime: `if ((b & 0x80) != 0)` on AES state bytes (software
+#     AES path, taken on every non-AES-NI host).
+# There is no CLMUL path, so GHASH ran the branching code on every host.
+#
+# Branch-freedom is not directly observable from a unit test, so this
+# file pins the fix from three sides:
+#   1. DIFFERENTIAL — a bit-serial reference GF(2^128) multiply (the
+#      pre-fix branching algorithm, copied verbatim below) is compared
+#      with the production _ghash_mul over edge values, every
+#      basis-element product e_i * e_j (all 16384, which drives the
+#      reduction on every bit position), 2000 pseudo-random pairs and
+#      the McGrew-Viega GCM Test Case 2 intermediates; plus algebraic
+#      identities (unit, commutativity, distributivity) and output
+#      aliasing (z == x, z == h).
+#   2. EXHAUSTIVE xtime — all 256 inputs against an independent table
+#      (generated outside cyrius), FIPS 197 MixColumns column vectors,
+#      FIPS 197 C.1 / C.3 through _aes_encrypt_block_sw directly, a
+#      software-vs-AES-NI differential on random keys, and the NIST GCM
+#      KATs re-run with AES-NI forced off so the full software AES+GCM
+#      path is exercised on AES-NI hosts too.
+#   3. TIMING (coarse) — the pre-fix _ghash_mul did 128 extra 16-byte
+#      XORs for X = all-ones versus X = 0 (~1.6x the time). The median
+#      of paired (ABBA) batch-cost ratios must sit in 0.80x..1.25x for
+#      the X classes and for the H classes. This is a gross-leak
+#      detector, not a proof of constant time; it is the assertion that
+#      fails on the old code.
+
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fmt.cyr"
+include "lib/bayan.cyr"
+include "lib/sakshi.cyr"
+include "lib/chrono.cyr"
+
+include "lib/thread_local.cyr"
+include "src/crypto_scratch.cyr"
+include "src/types.cyr"
+include "src/error.cyr"
+include "src/sha256.cyr"
+include "src/hex.cyr"
+include "lib/ct.cyr"
+include "src/hmac.cyr"
+include "src/aes_gcm.cyr"
+
+# ================================================================
+# Reference implementations (the pre-fix, branching algorithms).
+# Test-only: they branch on their inputs by design.
+# ================================================================
+
+fn ref_shift_right_and_reduce(v): i64 {
+    var lsb_set = load8(v + 15) & 1;
+    var i = 15;
+    while (i > 0) {
+        var hi = (load8(v + i - 1) & 1) << 7;
+        var cur = ((load8(v + i) & 0xFF) >> 1) & 0x7F;
+        store8(v + i, (cur | hi) & 0xFF);
+        i = i - 1;
+    }
+    store8(v, ((load8(v) & 0xFF) >> 1) & 0x7F);
+    if (lsb_set == 1) {
+        store8(v, (load8(v) ^ 0xE1) & 0xFF);
+    }
+    return 0;
+}
+
+fn ref_xor_16(dst, src): i64 {
+    var i = 0;
+    while (i < 16) {
+        store8(dst + i, (load8(dst + i) ^ load8(src + i)) & 0xFF);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Z = X * H in GF(2^128), NIST SP 800-38D §6.3 Algorithm 1, bit-serial.
+fn ref_ghash_mul(z, x, h): i64 {
+    var v[16];
+    memcpy(&v, h, 16);
+    memset(z, 0, 16);
+    var byte = 0;
+    while (byte < 16) {
+        var b = load8(x + byte) & 0xFF;
+        var bit = 0;
+        while (bit < 8) {
+            if (((b >> (7 - bit)) & 1) == 1) {
+                ref_xor_16(z, &v);
+            }
+            ref_shift_right_and_reduce(&v);
+            bit = bit + 1;
+        }
+        byte = byte + 1;
+    }
+    return 0;
+}
+
+fn ref_xtime(b): i64 {
+    var shifted = (b << 1) & 0xFF;
+    if ((b & 0x80) != 0) {
+        return (shifted ^ 0x1b) & 0xFF;
+    }
+    return shifted;
+}
+
+# ================================================================
+# Helpers
+# ================================================================
+
+var _rng = 0x9E3779B97F4A7C15;
+
+# xorshift64 — deterministic, so a failure reproduces exactly.
+fn rng_next(): i64 {
+    var x = _rng;
+    x = x ^ (x << 13);
+    x = x ^ ((x >> 7) & 0x01FFFFFFFFFFFFFF);
+    x = x ^ (x << 17);
+    _rng = x;
+    return x;
+}
+
+fn rng_fill(buf, n): i64 {
+    var i = 0;
+    while (i < n) {
+        var w = rng_next();
+        var k = 0;
+        while (k < 8) {
+            if (i + k < n) { store8(buf + i + k, (w >> (k * 8)) & 0xFF); }
+            k = k + 1;
+        }
+        i = i + 8;
+    }
+    return 0;
+}
+
+fn bytes_eq(a, b, n): i64 {
+    var i = 0;
+    while (i < n) {
+        if ((load8(a + i) & 0xFF) != (load8(b + i) & 0xFF)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# Single-bit block e_i: GCM bit i (bit 0 = MSB of byte 0).
+fn set_basis(buf, i): i64 {
+    memset(buf, 0, 16);
+    store8(buf + (i / 8), (0x80 >> (i & 7)) & 0xFF);
+    return 0;
+}
+
+# 1 when production and reference agree on X * H, else 0.
+fn diff_one(x, h): i64 {
+    var zp[16];
+    var zr[16];
+    memset(&zp, 0xA5, 16);   # junk: production must overwrite all of z
+    _ghash_mul(&zp, x, h);
+    ref_ghash_mul(&zr, x, h);
+    return bytes_eq(&zp, &zr, 16);
+}
+
+# Decodes hex string a (alen chars) followed by b (blen chars).
+fn hex2(a, alen, b, blen): i64 {
+    var out = alloc((alen + blen) / 2);
+    memcpy(out, hex_decode(a, alen), alen / 2);
+    memcpy(out + alen / 2, hex_decode(b, blen), blen / 2);
+    return out;
+}
+
+# Decodes 64 hex chars (one 32-byte row of the xtime table) into dst.
+fn xt_row(dst, hex): i64 {
+    memcpy(dst, hex_decode(hex, 64), 32);
+    return 0;
+}
+
+fn time_ghash(z, x, h, n): i64 {
+    var t0 = clock_now_ns();
+    var i = 0;
+    while (i < n) {
+        _ghash_mul(z, x, h);
+        i = i + 1;
+    }
+    return clock_now_ns() - t0;
+}
+
+# Median over `rounds` of the paired cost ratio class B / class A,
+# scaled by 1000. Each round times A, B, B, A back to back (ABBA), so
+# drift and a preempted batch move one round's ratio, not the median.
+fn median_ratio_x1000(z, xa, ha, xb, hb, rounds): i64 {
+    var ratios = alloc(rounds * 8);
+    var k = 0;
+    while (k < rounds) {
+        var a1 = time_ghash(z, xa, ha, 64);
+        var b1 = time_ghash(z, xb, hb, 64);
+        var b2 = time_ghash(z, xb, hb, 64);
+        var a2 = time_ghash(z, xa, ha, 64);
+        var den = a1 + a2;
+        if (den < 1) { den = 1; }
+        var v = ((b1 + b2) * 1000) / den;
+        # insertion sort as the ratios arrive
+        var j = k;
+        var moving = 1;
+        while (moving == 1) {
+            if (j == 0) {
+                moving = 0;
+            } else {
+                if (load64(ratios + (j - 1) * 8) <= v) {
+                    moving = 0;
+                } else {
+                    store64(ratios + j * 8, load64(ratios + (j - 1) * 8));
+                    j = j - 1;
+                }
+            }
+        }
+        store64(ratios + j * 8, v);
+        k = k + 1;
+    }
+    return load64(ratios + (rounds / 2) * 8);
+}
+
+fn print_ratio(label, r): i64 {
+    print(label, strlen(label));
+    print(" median cost ratio x1000: ", 26);
+    fmt_int(r);
+    print("\n", 1);
+    return 0;
+}
+
+# 1 when lo <= v <= hi.
+fn in_band(v, lo, hi): i64 {
+    if (v < lo) { return 0; }
+    if (v > hi) { return 0; }
+    return 1;
+}
+
+fn main() {
+    alloc_init();
+    aes_gcm_global_init();
+
+    var x[16];
+    var h[16];
+    var z[16];
+    var t[16];
+    var u[16];
+    var mism = 0;
+
+    # ============================================================
+    # 1a. GHASH known answers (McGrew-Viega GCM spec, Test Case 2)
+    # ============================================================
+    test_group("GHASH KAT (GCM spec TC2 intermediates)");
+    var kh = hex_decode("66e94bd4ef8a2c3b884cfa59ca342b2e", 32);
+    var kc = hex_decode("0388dace60b6a392f328c2b971b2fe78", 32);
+    _ghash_mul(&z, kc, kh);
+    assert_streq(hex_encode(&z, 16), "5e2ec746917062882c85b0685353deb7", "X1 = C * H");
+    var ky[16];
+    memset(&ky, 0, 16);
+    _ghash_update(&ky, kh, kc, 16);
+    var klen = hex_decode("00000000000000000000000000000080", 32);
+    _ghash_update(&ky, kh, klen, 16);
+    assert_streq(hex_encode(&ky, 16), "f38cbb1ad69223dcc3457ae5b6b0f885", "GHASH(H, {}, C)");
+
+    # ============================================================
+    # 1b. Edge values, every ordered pair
+    # ============================================================
+    test_group("GHASH differential: edge values");
+    var edges = alloc(16 * 6);
+    memset(edges, 0, 96);                                  # 0
+    store8(edges + 16, 0x80);                              # GCM one (x^0)
+    store8(edges + 32 + 15, 0x01);                         # x^127
+    memset(edges + 48, 0xFF, 16);                          # all ones
+    store8(edges + 64, 0x80); store8(edges + 64 + 15, 1);  # x^0 + x^127
+    memset(edges + 80, 0x55, 16);                          # alternating
+    var ei = 0;
+    while (ei < 6) {
+        var ej = 0;
+        while (ej < 6) {
+            if (diff_one(edges + ei * 16, edges + ej * 16) == 0) { mism = mism + 1; }
+            ej = ej + 1;
+        }
+        ei = ei + 1;
+    }
+    assert_eq(mism, 0, "36 edge pairs match reference");
+    _ghash_mul(&z, edges, edges + 48);
+    assert_streq(hex_encode(&z, 16), "00000000000000000000000000000000", "0 * H = 0");
+    _ghash_mul(&z, edges + 48, edges + 16);
+    assert_streq(hex_encode(&z, 16), "ffffffffffffffffffffffffffffffff", "ones * 1 = ones");
+
+    # ============================================================
+    # 1c. All basis products e_i * e_j (exercises every reduction step)
+    # ============================================================
+    test_group("GHASH differential: all 128x128 basis products");
+    mism = 0;
+    var bi = 0;
+    while (bi < 128) {
+        set_basis(&x, bi);
+        var bj = 0;
+        while (bj < 128) {
+            set_basis(&h, bj);
+            if (diff_one(&x, &h) == 0) { mism = mism + 1; }
+            bj = bj + 1;
+        }
+        bi = bi + 1;
+    }
+    assert_eq(mism, 0, "16384 single-bit products match reference");
+
+    test_group("GHASH differential: single bit x random");
+    mism = 0;
+    bi = 0;
+    while (bi < 128) {
+        set_basis(&x, bi);
+        rng_fill(&h, 16);
+        if (diff_one(&x, &h) == 0) { mism = mism + 1; }
+        if (diff_one(&h, &x) == 0) { mism = mism + 1; }
+        bi = bi + 1;
+    }
+    assert_eq(mism, 0, "256 single-bit x random products match reference");
+
+    # ============================================================
+    # 1d. Pseudo-random pairs
+    # ============================================================
+    test_group("GHASH differential: 2000 random pairs");
+    mism = 0;
+    var ri = 0;
+    while (ri < 2000) {
+        rng_fill(&x, 16);
+        rng_fill(&h, 16);
+        if (diff_one(&x, &h) == 0) { mism = mism + 1; }
+        ri = ri + 1;
+    }
+    assert_eq(mism, 0, "2000 random products match reference");
+
+    # ============================================================
+    # 1e. Field identities on the production multiply
+    # ============================================================
+    test_group("GHASH field identities");
+    var bad_unit = 0;
+    var bad_comm = 0;
+    var bad_dist = 0;
+    var ai = 0;
+    while (ai < 200) {
+        rng_fill(&x, 16);
+        rng_fill(&h, 16);
+        _ghash_mul(&z, &x, edges + 16);            # x * 1
+        if (bytes_eq(&z, &x, 16) == 0) { bad_unit = bad_unit + 1; }
+        _ghash_mul(&z, &x, &h);
+        _ghash_mul(&t, &h, &x);
+        if (bytes_eq(&z, &t, 16) == 0) { bad_comm = bad_comm + 1; }
+        # (x ^ y) * h == x*h ^ y*h
+        rng_fill(&u, 16);
+        _ghash_mul(&t, &u, &h);
+        _ghash_xor_16(&t, &z);                     # t = u*h ^ x*h
+        _ghash_xor_16(&u, &x);                     # u = u ^ x
+        _ghash_mul(&z, &u, &h);
+        if (bytes_eq(&z, &t, 16) == 0) { bad_dist = bad_dist + 1; }
+        ai = ai + 1;
+    }
+    assert_eq(bad_unit, 0, "x * 1 == x");
+    assert_eq(bad_comm, 0, "x * h == h * x");
+    assert_eq(bad_dist, 0, "(x ^ u) * h == x*h ^ u*h");
+
+    # z may alias x or h (both are read in full before z is written).
+    rng_fill(&x, 16);
+    rng_fill(&h, 16);
+    ref_ghash_mul(&z, &x, &h);
+    memcpy(&t, &x, 16);
+    _ghash_mul(&t, &t, &h);
+    assert_eq(bytes_eq(&t, &z, 16), 1, "z aliasing x");
+    memcpy(&t, &h, 16);
+    _ghash_mul(&t, &x, &t);
+    assert_eq(bytes_eq(&t, &z, 16), 1, "z aliasing h");
+
+    # ============================================================
+    # 2a. xtime — exhaustive against an independent table
+    # ============================================================
+    # Table generated outside cyrius (Python, FIPS 197 §4.2.1 xtime).
+    test_group("xtime exhaustive (256 inputs)");
+    var xt = alloc(256);
+    xt_row(xt, "00020406080a0c0e10121416181a1c1e20222426282a2c2e30323436383a3c3e");
+    xt_row(xt + 32, "40424446484a4c4e50525456585a5c5e60626466686a6c6e70727476787a7c7e");
+    xt_row(xt + 64, "80828486888a8c8e90929496989a9c9ea0a2a4a6a8aaacaeb0b2b4b6b8babcbe");
+    xt_row(xt + 96, "c0c2c4c6c8caccced0d2d4d6d8dadcdee0e2e4e6e8eaeceef0f2f4f6f8fafcfe");
+    xt_row(xt + 128, "1b191f1d131117150b090f0d030107053b393f3d333137352b292f2d23212725");
+    xt_row(xt + 160, "5b595f5d535157554b494f4d434147457b797f7d737177756b696f6d63616765");
+    xt_row(xt + 192, "9b999f9d939197958b898f8d83818785bbb9bfbdb3b1b7b5aba9afada3a1a7a5");
+    xt_row(xt + 224, "dbd9dfddd3d1d7d5cbc9cfcdc3c1c7c5fbf9fffdf3f1f7f5ebe9efede3e1e7e5");
+    var bad_tab = 0;
+    var bad_ref = 0;
+    var xb = 0;
+    while (xb < 256) {
+        var got = _aes_xtime(xb);
+        if (got != (load8(xt + xb) & 0xFF)) { bad_tab = bad_tab + 1; }
+        if (got != ref_xtime(xb)) { bad_ref = bad_ref + 1; }
+        xb = xb + 1;
+    }
+    assert_eq(bad_tab, 0, "xtime matches independent table for all 256 bytes");
+    assert_eq(bad_ref, 0, "xtime matches branching reference for all 256 bytes");
+
+    # ============================================================
+    # 2b. MixColumns column vectors (FIPS 197 §5.1.3 examples)
+    # ============================================================
+    test_group("MixColumns column vectors");
+    var mc = hex_decode("db135345f20a225c01010101d4d4d4d5", 32);
+    _aes_mix_columns(mc);
+    assert_streq(hex_encode(mc, 16), "8e4da1bc9fdc589d01010101d5d5d7d6", "4 columns");
+    var mc2 = hex_decode("c6c6c6c62d26314c8080808000000000", 32);
+    _aes_mix_columns(mc2);
+    assert_streq(hex_encode(mc2, 16), "c6c6c6c64d7ebdf88080808000000000", "4 more columns");
+
+    # ============================================================
+    # 2c. Software AES block path, direct (FIPS 197 C.1 / C.3)
+    # ============================================================
+    test_group("software AES block (FIPS 197 C.1 / C.3)");
+    var fk = alloc(32);
+    var fi = 0;
+    while (fi < 32) { store8(fk + fi, fi); fi = fi + 1; }
+    var fpt = hex_decode("00112233445566778899aabbccddeeff", 32);
+    var rk = fl_alloc(240);
+    var fout[16];
+    aes256_key_expand(fk, rk);
+    _aes_encrypt_block_sw(rk, fpt, &fout, 14);
+    assert_streq(hex_encode(&fout, 16), "8ea2b7ca516745bfeafc49904b496089", "AES-256 C.3 sw");
+    aes_128_key_expand(fk, rk);
+    _aes_encrypt_block_sw(rk, fpt, &fout, 10);
+    assert_streq(hex_encode(&fout, 16), "69c4e0d86a7b0430d8cdb78070b4c55a", "AES-128 C.1 sw");
+
+    # Software vs AES-NI on random keys + blocks (two independent
+    # implementations). Only meaningful where AES-NI is live.
+    if (aes_ni_available() == 1) {
+        test_group("software vs AES-NI differential (200 keys)");
+        var bad_ni = 0;
+        var nk = alloc(32);
+        var nb[16];
+        var o_sw[16];
+        var o_ni[16];
+        var ni = 0;
+        while (ni < 200) {
+            rng_fill(nk, 32);
+            rng_fill(&nb, 16);
+            aes256_key_expand(nk, rk);
+            _aes_encrypt_block_sw(rk, &nb, &o_sw, 14);
+            aes256_encrypt_block_ni(rk, &nb, &o_ni);
+            if (bytes_eq(&o_sw, &o_ni, 16) == 0) { bad_ni = bad_ni + 1; }
+            aes_128_key_expand(nk, rk);
+            _aes_encrypt_block_sw(rk, &nb, &o_sw, 10);
+            aes128_encrypt_block_ni(rk, &nb, &o_ni);
+            if (bytes_eq(&o_sw, &o_ni, 16) == 0) { bad_ni = bad_ni + 1; }
+            ni = ni + 1;
+        }
+        assert_eq(bad_ni, 0, "software AES == AES-NI (AES-256 and AES-128)");
+    }
+    memset(rk, 0, 240);
+    fl_free(rk);
+
+    # ============================================================
+    # 2d. GCM KATs with AES-NI forced off (full software path)
+    # ============================================================
+    test_group("GCM KATs, software AES forced");
+    var saved_ni = aes_ni_available();
+    _aes_ni_cache = 0;
+    var gk256 = hex2("feffe9928665731c6d6a8f9467308308", 32,
+      "feffe9928665731c6d6a8f9467308308", 32);
+    var gk128 = hex_decode("feffe9928665731c6d6a8f9467308308", 32);
+    var giv = hex_decode("cafebabefacedbaddecaf888", 24);
+    var gaad = hex_decode("feedfacedeadbeeffeedfacedeadbeefabaddad2", 40);
+    var gpt = hex2("d9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a31", 60,
+      "8a721c3c0c95956809532fcf0e2449a6b525b16aedf5aa0de657ba637b39", 60);
+    var gct = alloc(64);
+    var gtag = alloc(16);
+    var gdec = alloc(64);
+    var rc = 0;
+    aes_gcm_encrypt(gk256, giv, gaad, 20, gpt, 60, gct, gtag);
+    assert_streq(hex_encode(gct, 30),
+      "522dc1f099567d07f47f37a32a84427d643a8cdcbfe5c0c97598a2bd2555", "AES-256 TC15 ct lo (sw)");
+    assert_streq(hex_encode(gct + 30, 30),
+      "d1aa8cb08e48590dbb3da7b08b1056828838c5f61e6393ba7a0abcc9f662", "AES-256 TC15 ct hi (sw)");
+    assert_streq(hex_encode(gtag, 16), "76fc6ece0f4e1768cddf8853bb2d551b", "AES-256 TC15 tag (sw)");
+    rc = aes_gcm_decrypt(gk256, giv, gaad, 20, gct, 60, gtag, gdec);
+    assert_eq(rc, SIGIL_ERR_NONE, "AES-256 TC15 decrypt (sw)");
+    assert_eq(bytes_eq(gdec, gpt, 60), 1, "AES-256 TC15 plaintext (sw)");
+    store8(gtag + 15, (load8(gtag + 15) ^ 1) & 0xFF);
+    rc = aes_gcm_decrypt(gk256, giv, gaad, 20, gct, 60, gtag, gdec);
+    assert_eq(rc, SIGIL_ERR_INTEGRITY_MISMATCH, "AES-256 forged tag rejected (sw)");
+
+    aes_128_gcm_encrypt(gk128, giv, gaad, 20, gpt, 60, gct, gtag);
+    assert_streq(hex_encode(gct, 30),
+      "42831ec2217774244b7221b784d0d49ce3aa212f2c02a4e035c17e2329ac", "AES-128 TC4 ct lo (sw)");
+    assert_streq(hex_encode(gct + 30, 30),
+      "a12e21d514b25466931c7d8f6a5aac84aa051ba30b396a0aac973d58e091", "AES-128 TC4 ct hi (sw)");
+    assert_streq(hex_encode(gtag, 16), "5bc94fbc3221a5db94fae95ae7121a47", "AES-128 TC4 tag (sw)");
+    rc = aes_128_gcm_decrypt(gk128, giv, gaad, 20, gct, 60, gtag, gdec);
+    assert_eq(rc, SIGIL_ERR_NONE, "AES-128 TC4 decrypt (sw)");
+
+    var giv60 = hex2("9313225df88406e555909c5aff5269aa6a7a9538534f7da1e4c303d2a318", 60,
+      "a728c3c0c95156809539fcf0e2429a6b525416aedbf5a0de6a57a637b39b", 60);
+    aes_gcm_encrypt_iv(gk256, giv60, 60, gaad, 20, gpt, 60, gct, gtag);
+    assert_streq(hex_encode(gtag, 16), "a44a8266ee1c8eb0c8b5d4cf5ae9f19a", "AES-256 TC18 tag (sw)");
+    _aes_ni_cache = saved_ni;
+
+    # ============================================================
+    # 3. Coarse timing: X class and H class must not move the cost
+    # ============================================================
+    # The pre-fix code costs ~1.6x more for X = all-ones than X = 0
+    # (128 extra 16-byte XORs). Pass band 0.80x .. 1.25x.
+    test_group("GHASH timing classes (coarse)");
+    var zero16 = edges;
+    var ones16 = edges + 48;
+    rng_fill(&h, 16);
+    rng_fill(&x, 16);
+    var rx = median_ratio_x1000(&z, zero16, &h, ones16, &h, 51);
+    var rh = median_ratio_x1000(&z, &x, zero16, &x, ones16, 51);
+    print_ratio("X=ones / X=0", rx);
+    print_ratio("H=ones / H=0", rh);
+    assert_eq(in_band(rx, 800, 1250), 1, "cost independent of X (0.80x..1.25x)");
+    assert_eq(in_band(rh, 800, 1250), 1, "cost independent of H (0.80x..1.25x)");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+sys_exit(exit_code);

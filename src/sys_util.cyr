@@ -57,20 +57,22 @@ fn agnosys_cstr_starts_with(str, prefix): i64 {
     return 1;
 }
 
+# ⚠ BOUNDED AND STATUS-CHECKED (M10). This delegated to the stdlib's
+# `exec_capture`, which is unbounded and DISCARDS the child's exit status, so a
+# missing or failing tool came back as Ok(bytes) — fail open. It now delegates
+# to `agnosys_run_capture_timeout` with the default bound, the same move
+# `agnosys_run_checked` made in 3.12.13; on agnos / Windows that refuses with
+# not_supported instead of pretending a tool ran.
 # Run a subprocess (cstr argv vec) and capture stdout into a caller buffer.
-# Returns Ok(bytes_read) or Err(errmsg) on exec failure. `errmsg` is the
-# per-tool diagnostic. Shared by dmverity/luks/tpm `*_run_capture`.
+# Returns Ok(bytes_read) only when the child exited 0 within the default bound;
+# Err(errmsg) otherwise. Shared by dmverity/luks `*_run_capture`.
 fn agnosys_run_capture(args, buf, buflen, errmsg): i64 {
-    var n = exec_capture(args, buf, buflen);
-    if (n < 0) {
-        return sigil_err_unknown(errmsg);
-    }
-    return Ok(n);
+    return agnosys_run_capture_timeout(args, buf, buflen, 0, errmsg);
 }
 
 # ⚠ BOUNDED, STATUS-CHECKED CAPTURE. 3.12.11 — kybernet audit MEDIUM-8.
 #
-# `agnosys_run_capture` above delegates to the cyrius stdlib's `exec_capture`,
+# `agnosys_run_capture` above delegated (until M10) to the stdlib's `exec_capture`,
 # which has two properties that are fine for a CLI and wrong for an init system:
 #
 #   1. IT IS UNBOUNDED. The drain is a blocking `sys_read` loop and the reap is

@@ -24,7 +24,7 @@
 var MLDSA_N = 256;                  # ring poly degree (also SHAKE sample count per poly)
 var MLDSA_Q = 8380417;              # prime modulus = 2^23 - 2^13 + 1
 var MLDSA_D = 13;                   # Power2Round drops the bottom d bits of t
-var MLDSA_ROOT_OF_UNITY = 1753;     # primitive 512th root of unity mod Q, Montgomery form
+var MLDSA_ROOT_OF_UNITY = 1753;     # primitive 512th root of unity mod Q (plain, not Montgomery)
 
 # Seed-level sizes
 var MLDSA_SEEDBYTES = 32;           # ξ, ρ, rnd: 32-byte inputs to SHAKE

@@ -27,6 +27,8 @@
 # ================================================================
 
 var _mldsa_zetas = 0;           # alloc'd, 256 * 8 = 2048 bytes, sign-extended i64
+# Init state, advanced only by atomics: 0 = not built, 1 = one thread is
+# building it, 2 = `_mldsa_zetas` is published and read-only forever.
 var _mldsa_ntt_inited = 0;
 
 # ================================================================
@@ -75,18 +77,34 @@ fn _mldsa_decode_i32_le(hex_str, idx): i64 {
 # ================================================================
 
 # Decode the 256 zetas (ζ^brv8(k) · 2^32 mod Q, centered, ζ = 1753) into a 2048-byte
-# `alloc`'d table on first call; later calls return at once. Returns 0. Unsynchronised
-# check-then-set: the first call must not race another thread.
+# `alloc`'d table on first call; later calls return at once. Returns 0. Thread-safe: the
+# builder wins a 0 → 1 CAS, and racing first callers spin until it publishes state 2.
 fn mldsa_ntt_init(): i64 {
-    if (_mldsa_ntt_inited == 1) { return 0; }
-    _mldsa_zetas = alloc(256 * 8);
-    var hex = _mldsa_zetas_hex();
-    var i = 0;
-    while (i < 256) {
-        store64(_mldsa_zetas + i * 8, _mldsa_decode_i32_le(hex, i));
-        i = i + 1;
+    if (atomic_load(&_mldsa_ntt_inited) == 2) {
+        # x86 loads are acquire already; aarch64 needs the barrier so
+        # the table reads below cannot pass the flag read.
+        #ifdef CYRIUS_ARCH_AARCH64
+        atomic_fence();
+        #endif
+        return 0;
     }
-    _mldsa_ntt_inited = 1;
+    if (atomic_cas(&_mldsa_ntt_inited, 0, 1) == 1) {
+        var tab = alloc(256 * 8);
+        var hex = _mldsa_zetas_hex();
+        var i = 0;
+        while (i < 256) {
+            store64(tab + i * 8, _mldsa_decode_i32_le(hex, i));
+            i = i + 1;
+        }
+        _mldsa_zetas = tab;
+        # Publish: every table store is visible before state 2 is.
+        atomic_fence();
+        atomic_store(&_mldsa_ntt_inited, 2);
+        return 0;
+    }
+    # Lost the race: another thread is building the table (a few µs).
+    while (atomic_load(&_mldsa_ntt_inited) != 2) { }
+    atomic_fence();
     return 0;
 }
 

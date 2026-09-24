@@ -1,0 +1,272 @@
+# policy_hardening.tcyr — H6 (revocation files > 64 KiB silently truncated) and M6 (loose
+# integer parsing in the revocation / CRL JSONL readers) regression tests.
+
+# Stdlib
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fmt.cyr"
+include "lib/bayan.cyr"
+include "lib/sakshi.cyr"
+include "lib/chrono.cyr"
+
+# Sigil modules
+include "lib/thread_local.cyr"
+include "src/crypto_scratch.cyr"
+include "src/mul64.cyr"
+include "src/types.cyr"
+include "src/error.cyr"
+include "lib/random.cyr"
+include "src/random.cyr"
+include "src/sha256.cyr"
+include "src/hex.cyr"
+include "lib/ct.cyr"
+include "src/hmac.cyr"
+include "src/sha512.cyr"
+include "src/bigint_ext.cyr"
+include "src/ed25519.cyr"
+include "src/trust.cyr"
+include "src/integrity.cyr"
+include "src/policy.cyr"
+
+# "<prefix><i>" as a fresh NUL-terminated C-string.
+fn _ph_id(prefix, i): i64 {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, prefix);
+    str_builder_add_int(sb, i);
+    var total = load64(sb + 8);
+    var out = alloc(total + 1);
+    memcpy(out, load64(sb), total);
+    store8(out + total, 0);
+    return out;
+}
+
+# rl_from_jsonl over a C-string literal.
+fn _ph_rl(s): i64 { return rl_from_jsonl(s, strlen(s)); }
+# crl_from_jsonl over a C-string literal.
+fn _ph_crl(s): i64 { return crl_from_jsonl(s, strlen(s)); }
+
+# 1 if a one-line CRL whose header carries `hdr` parses, else 0.
+fn _ph_hdr_ok(hdr): i64 {
+    if (_ph_crl(hdr) == 0) { return 0; }
+    return 1;
+}
+
+fn main() {
+    alloc_init();
+
+    # ============================================================
+    # H6 — a revocation list well past 64 KiB loads in full
+    # ============================================================
+    test_group("H6 rl_load > 64 KiB");
+    var big = revocation_list_new();
+    var n_big = 1500;
+    var i = 0;
+    while (i < n_big) {
+        var e = revocation_entry_new(_ph_id("policy_hardening_key_", i), 0,
+            "key compromised in the field", "root_of_trust_admin");
+        rl_add(big, e);
+        i = i + 1;
+    }
+    var big_jsonl = rl_to_jsonl(big);
+    assert(strlen(big_jsonl) > 65536 * 2, "fixture is well past 64 KiB");
+    var rl_path = "/tmp/sigil_policy_hardening_rl.jsonl";
+    assert_eq(rl_save(big, rl_path), SIGIL_ERR_NONE, "rl_save big ok");
+    var big_loaded = rl_load(rl_path);
+    assert(big_loaded != 0, "rl_load big non-null");
+    if (big_loaded != 0) {
+        assert_eq(rl_len(big_loaded), n_big, "rl_load big: every entry loaded");
+        assert_eq(rl_load_bad_count(), 0, "rl_load big: no line rejected");
+        assert_eq(rl_is_key_revoked(big_loaded, "policy_hardening_key_0"), 1,
+            "first key revoked");
+        assert_eq(rl_is_key_revoked(big_loaded, "policy_hardening_key_1499"), 1,
+            "LAST key revoked");
+        assert_eq(rl_is_key_revoked(big_loaded, "policy_hardening_key_1000"), 1,
+            "key past 64 KiB revoked");
+    }
+    xunlink(rl_path);
+    assert_eq(rl_load("/tmp/sigil_policy_hardening_missing.jsonl"), 0,
+        "rl_load missing file -> 0");
+
+    # CRL load past 64 KiB
+    test_group("H6 crl_load > 64 KiB");
+    var bigc = crl_new(3, "root_of_trust");
+    crl_set_next_update(bigc, 9999999999);
+    i = 0;
+    while (i < n_big) {
+        crl_add_entry(bigc, revocation_entry_new(_ph_id("policy_hardening_crl_", i), 0,
+            "superseded by rotation", "root_of_trust_admin"));
+        i = i + 1;
+    }
+    var crl_path = "/tmp/sigil_policy_hardening_crl.jsonl";
+    assert_eq(crl_save(bigc, crl_path), SIGIL_ERR_NONE, "crl_save big ok");
+    var bigc_loaded = crl_load(crl_path);
+    assert(bigc_loaded != 0, "crl_load big non-null");
+    if (bigc_loaded != 0) {
+        assert_eq(vec_len(crl_entries(bigc_loaded)), n_big, "crl_load big: every entry");
+        var rl_from_crl = revocation_list_new();
+        assert_eq(crl_apply_to(bigc_loaded, rl_from_crl), n_big, "crl apply: every entry");
+        assert_eq(rl_is_key_revoked(rl_from_crl, "policy_hardening_crl_1499"), 1,
+            "crl LAST key revoked");
+    }
+    xunlink(crl_path);
+
+    # ============================================================
+    # H6 — a cut final line is counted bad, never loaded as an entry
+    # ============================================================
+    test_group("H6 truncated final line");
+    var good = "{\"key_id\":\"kid_ok\",\"content_hash\":null,\"reason\":\"r\",\"revoked_at\":5,\"revoked_by\":\"a\",\"revoked_after\":0}\n";
+    var r1 = _ph_rl("{\"key_id\":\"kid_ok\",\"content_hash\":null,\"reason\":\"r\",\"revoked_at\":5,\"revoked_by\":\"a\",\"revoked_after\":0}\n{\"key_id\":\"kid_cu");
+    assert_eq(rl_len(r1), 1, "cut in key string: only the full line loads");
+    assert_eq(rl_load_bad_count(), 1, "cut in key string: counted bad");
+    assert_eq(rl_is_key_revoked(r1, "kid_cu"), 0, "cut key id not an entry");
+    var r2 = _ph_rl("{\"key_id\":\"kid_cut\",\"content_hash\":null,\"reason\":\"r\",\"revoked_at\":17");
+    assert_eq(rl_len(r2), 0, "cut in number: no entry");
+    assert_eq(rl_load_bad_count(), 1, "cut in number: counted bad");
+    var r3 = _ph_rl("{\"key_id\":\"kid_cut\",\"content_hash\":null");
+    assert_eq(rl_len(r3), 0, "cut after a value (no closing brace): no entry");
+    assert_eq(rl_load_bad_count(), 1, "cut after a value: counted bad");
+    var r4 = _ph_rl("{\"key_id\":\"kid_cut\"");
+    assert_eq(rl_len(r4), 0, "cut after key value: no entry");
+    assert_eq(rl_load_bad_count(), 1, "cut after key value: counted bad");
+    var r5 = _ph_rl(good);
+    assert_eq(rl_len(r5), 1, "a complete line still loads");
+    assert_eq(rl_load_bad_count(), 0, "complete line: nothing bad");
+    var r6 = _ph_rl("junk{\"key_id\":\"kid_j\",\"revoked_at\":1}");
+    assert_eq(rl_len(r6), 0, "leading junk before '{' rejected");
+    var r7 = _ph_rl("{\"key_id\":\"kid_j\",\"revoked_at\":1} trailing");
+    assert_eq(rl_len(r7), 0, "trailing junk after '}' rejected");
+    var r8 = _ph_rl("  {\"key_id\":\"kid_ws\", \"revoked_at\" : 1 }  \r\n");
+    assert_eq(rl_len(r8), 1, "JSON whitespace around tokens accepted");
+    assert_eq(rl_load_bad_count(), 0, "JSON whitespace: nothing bad");
+    var r9 = _ph_rl("{\"key_id\":\"kid_u\",\"extra\":true,\"more\":null,\"n\":3,\"s\":\"x\"}");
+    assert_eq(rl_len(r9), 1, "unknown scalar fields ignored");
+    var r10 = _ph_rl("{\"key_id\":\"kid_n\",\"extra\":[1,2]}");
+    assert_eq(rl_len(r10), 0, "nested array value rejected");
+    var r11 = _ph_rl("{\"key_id\":nullx,\"content_hash\":\"h\"}");
+    assert_eq(rl_len(r11), 0, "junk after null rejected");
+    var r12 = _ph_rl("{\"key_id\" \"kid_c\"}");
+    assert_eq(rl_len(r12), 0, "missing colon rejected");
+    var r13 = _ph_rl("{\"key_id\":\"kid_a\" \"content_hash\":\"h\"}");
+    assert_eq(rl_len(r13), 0, "missing comma rejected");
+    assert_eq(_ph_crl("{}"), 0, "empty header (no issuer) rejected");
+
+    # ============================================================
+    # M6 — CRL header numbers
+    # ============================================================
+    test_group("M6 CRL header numbers");
+    var h1 = _ph_crl("{\"version\":1,\"issuer\":\"x\",\"issued_at\":5,\"next_update\": 1700000000 }\n");
+    assert(h1 != 0, "space after next_update parses");
+    if (h1 != 0) {
+        assert_eq(crl_next_update(h1), 1700000000, "next_update exact with trailing space");
+        assert_eq(crl_is_stale(h1), 1, "past next_update is stale");
+    }
+    var h2 = _ph_crl("{\"version\" : 2 , \"issuer\" : \"x\" , \"issued_at\" : 7 , \"next_update\" : 1700000001 }");
+    assert(h2 != 0, "whitespace everywhere parses");
+    if (h2 != 0) {
+        assert_eq(crl_version(h2), 2, "version with whitespace");
+        assert_eq(crl_issued_at(h2), 7, "issued_at with whitespace");
+        assert_eq(crl_next_update(h2), 1700000001, "next_update with whitespace");
+    }
+    var h3 = _ph_crl("{\"version\":1,\"issuer\":\"x\",\"issued_at\":5,\"next_update\":9223372036854775807}");
+    assert(h3 != 0, "i64 max accepted");
+    if (h3 != 0) { assert_eq(crl_next_update(h3), 9223372036854775807, "i64 max exact"); }
+    assert_eq(_ph_hdr_ok("{\"version\":1,\"issuer\":\"x\",\"next_update\":17x}"), 0,
+        "junk digit rejected");
+    assert_eq(_ph_hdr_ok("{\"version\":1,\"issuer\":\"x\",\"next_update\":17 00}"), 0,
+        "space inside number rejected");
+    assert_eq(_ph_hdr_ok("{\"version\":1,\"issuer\":\"x\",\"next_update\":9223372036854775808}"),
+        0, "i64 overflow rejected");
+    assert_eq(_ph_hdr_ok("{\"version\":1,\"issuer\":\"x\",\"next_update\":99999999999999999999}"),
+        0, "20-digit overflow rejected");
+    assert_eq(_ph_hdr_ok("{\"version\":1,\"issuer\":\"x\",\"next_update\":1.5}"), 0,
+        "fraction rejected");
+    assert_eq(_ph_hdr_ok("{\"version\":1,\"issuer\":\"x\",\"next_update\":1e9}"), 0,
+        "exponent rejected");
+    assert_eq(_ph_hdr_ok("{\"version\":1,\"issuer\":\"x\",\"next_update\":-}"), 0,
+        "bare minus rejected");
+    assert_eq(_ph_hdr_ok("{\"version\":1,\"issuer\":\"x\",\"next_update\":+5}"), 0,
+        "leading plus rejected");
+    assert_eq(_ph_hdr_ok("{\"version\":1,\"issuer\":\"x\",\"next_update\":0123}"), 0,
+        "leading zero rejected");
+    assert_eq(_ph_hdr_ok("{\"version\":1,\"issuer\":\"x\",\"next_update\":}"), 0,
+        "empty number rejected");
+    assert_eq(_ph_hdr_ok("{\"version\":1,\"issuer\":\"x\",\"next_update\":null}"), 0,
+        "null next_update rejected");
+    assert_eq(_ph_hdr_ok("{\"version\":1,\"issuer\":\"x\",\"next_update\":\"1700000000\"}"), 0,
+        "string next_update rejected");
+    assert_eq(_ph_hdr_ok("{\"version\":x1,\"issuer\":\"x\",\"next_update\":1}"), 0,
+        "junk version rejected");
+    assert_eq(_ph_hdr_ok("{\"version\":1,\"issuer\":\"x\",\"issued_at\":5z,\"next_update\":1}"),
+        0, "junk issued_at rejected");
+    assert_eq(_ph_hdr_ok("{\"version\":1,\"issuer\":\"x\",\"next_update\":1"), 0,
+        "header without closing brace rejected");
+    assert_eq(_ph_hdr_ok("{\"version\":1,\"issuer\":\"x"), 0,
+        "header with unterminated issuer rejected");
+    assert_eq(_ph_hdr_ok("{\"version\":1,\"issuer\":\"x\",\"next_update\":0}"), 1,
+        "zero next_update still accepted (= none)");
+
+    # ============================================================
+    # M6 — entry numbers
+    # ============================================================
+    test_group("M6 entry numbers");
+    var e1 = _ph_rl("{\"key_id\":\"k1\",\"revoked_at\":12x,\"revoked_after\":0}");
+    assert_eq(rl_len(e1), 0, "junk revoked_at: no entry");
+    assert_eq(rl_load_bad_count(), 1, "junk revoked_at: counted bad");
+    var e2 = _ph_rl("{\"key_id\":\"k2\",\"revoked_at\":1,\"revoked_after\":99999999999999999999}");
+    assert_eq(rl_len(e2), 0, "overflowing revoked_after: no entry");
+    assert_eq(rl_load_bad_count(), 1, "overflowing revoked_after: counted bad");
+    var e3 = _ph_rl("{\"key_id\":\"k3\",\"revoked_at\":1,\"revoked_after\":\"5\"}");
+    assert_eq(rl_len(e3), 0, "string revoked_after: no entry");
+    var e4 = _ph_rl("{\"key_id\":\"k4\",\"revoked_at\":1,\"revoked_after\":1.0}");
+    assert_eq(rl_len(e4), 0, "fractional revoked_after: no entry");
+    var e5 = _ph_rl("{\"key_id\":\"k5\",\"revoked_at\": 123 ,\"revoked_after\": 456 }");
+    assert_eq(rl_len(e5), 1, "whitespace around entry numbers accepted");
+    if (rl_len(e5) == 1) {
+        var ee5 = vec_get(load64(e5), 0);
+        assert_eq(rev_at(ee5), 123, "revoked_at exact");
+        assert_eq(rev_after(ee5), 456, "revoked_after exact");
+    }
+
+    # Negative / extreme values the writer can emit still round-trip.
+    var rl_neg = revocation_list_new();
+    var en1 = revocation_entry_new("kneg", 0, "r", "a");
+    rev_set_after(en1, 0 - 5);
+    rl_add(rl_neg, en1);
+    var en2 = revocation_entry_new("kmin", 0, "r", "a");
+    rev_set_after(en2, 0 - 9223372036854775807 - 1);
+    rl_add(rl_neg, en2);
+    var en3 = revocation_entry_new("kmax", 0, "r", "a");
+    rev_set_after(en3, 9223372036854775807);
+    rl_add(rl_neg, en3);
+    var neg_jsonl = rl_to_jsonl(rl_neg);
+    var neg_loaded = rl_from_jsonl(neg_jsonl, strlen(neg_jsonl));
+    assert_eq(rl_load_bad_count(), 0, "extreme values: nothing bad");
+    assert_eq(rl_len(neg_loaded), 3, "extreme values: 3 entries");
+    if (rl_len(neg_loaded) == 3) {
+        var ents = load64(neg_loaded);
+        assert_eq(rev_after(vec_get(ents, 0)), 0 - 5, "negative revoked_after round-trips");
+        assert_eq(rev_after(vec_get(ents, 1)), 0 - 9223372036854775807 - 1,
+            "i64 min round-trips");
+        assert_eq(rev_after(vec_get(ents, 2)), 9223372036854775807, "i64 max round-trips");
+    }
+    var e6 = _ph_rl("{\"key_id\":\"k6\",\"revoked_at\":1,\"revoked_after\":-9223372036854775809}");
+    assert_eq(rl_len(e6), 0, "negative overflow rejected");
+
+    # A CRL whose entry has a junk number drops that entry; good entries survive.
+    var c1 = _ph_crl("{\"version\":1,\"issuer\":\"x\",\"issued_at\":1,\"next_update\":2}\n{\"key_id\":\"kc1\",\"revoked_at\":1x}\n{\"key_id\":\"kc2\",\"revoked_at\":1}\n");
+    assert(c1 != 0, "crl with one bad entry still parses its header");
+    if (c1 != 0) {
+        assert_eq(vec_len(crl_entries(c1)), 1, "crl junk-number entry dropped");
+    }
+
+    return assert_summary();
+}
+
+var exit_code = main();
+sys_exit(exit_code);

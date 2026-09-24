@@ -1,0 +1,100 @@
+# ima_policy_rules.tcyr — IMA policy rules are validated before they reach the kernel.
+#
+# 3.13.0 (audit N1). `ima_rule_validate` checked fsuuid and mask but never obj_type, and
+# `ima_rule_to_policy_line` copies obj_type into a fixed alloc(512) line:
+#   - a long obj_type overflowed that heap block (and `ima_write_policy`'s count * 512
+#     policy buffer after it);
+#   - a newline in obj_type ended the rule early and INJECTED whatever followed as extra
+#     kernel IMA policy rules — e.g. "x\ndont_measure func=BPRM_CHECK" switches measurement
+#     off for every exec.
+# obj_type is now an SELinux type identifier ([A-Za-z0-9_.-], 1..255 bytes), and the line and
+# policy buffers are sized from what they hold rather than a fixed 512 per rule.
+
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/string.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fs.cyr"
+include "lib/fmt.cyr"
+include "lib/bayan.cyr"
+include "lib/sakshi.cyr"
+include "lib/chrono.cyr"
+include "lib/tagged.cyr"
+include "lib/process.cyr"
+include "lib/slice.cyr"
+include "lib/sys.cyr"
+
+include "src/error.cyr"
+include "src/sys_error.cyr"
+include "src/sys_util.cyr"
+include "src/ima_core.cyr"
+
+fn rule_with_obj_type(ot): i64 {
+    var r = ima_rule_new(IMA_MEASURE, IMA_FILE_CHECK);
+    ima_rule_set_obj_type(r, ot);
+    return r;
+}
+
+fn obj_type_rejected(ot): i64 {
+    var t, v = ima_rule_validate(rule_with_obj_type(ot));
+    return is_err_result(t);
+}
+
+# A C-string of `n` copies of 'a'.
+fn run_of(n): i64 {
+    var s = alloc(n + 1);
+    memset(s, 97, n);
+    store8(s + n, 0);
+    return s;
+}
+
+fn main() {
+    alloc_init();
+
+    test_group("obj_type: valid SELinux type identifiers");
+    assert_eq(obj_type_rejected("sshd_exec_t"), 0, "sshd_exec_t accepted");
+    assert_eq(obj_type_rejected("system_u.x-y_t"), 0, "dots and dashes accepted");
+    assert_eq(obj_type_rejected(run_of(255)), 0, "255 bytes accepted");
+    var lt, line = ima_rule_to_policy_line(rule_with_obj_type("sshd_exec_t"));
+    assert_eq(is_err_result(lt), 0, "valid rule renders");
+    if (is_err_result(lt) == 0) {
+        assert_eq(streq(line, "measure func=FILE_CHECK obj_type=sshd_exec_t"), 1,
+          "rendered line is exact");
+    }
+
+    test_group("obj_type: policy-line injection refused");
+    assert_eq(obj_type_rejected("x\ndont_measure func=BPRM_CHECK"), 1,
+      "a newline cannot inject a second rule");
+    assert_eq(obj_type_rejected("x dont_measure"), 1, "a space cannot add a clause");
+    assert_eq(obj_type_rejected("a\tb"), 1, "a tab is refused");
+    assert_eq(obj_type_rejected("a=b"), 1, "an '=' is refused");
+    assert_eq(obj_type_rejected("a\rb"), 1, "a carriage return is refused");
+    assert_eq(obj_type_rejected(""), 1, "an empty obj_type is refused");
+
+    test_group("obj_type: length bounded");
+    assert_eq(obj_type_rejected(run_of(256)), 1, "256 bytes refused");
+    assert_eq(obj_type_rejected(run_of(4096)), 1, "4 KiB refused (used to overflow the line)");
+
+    test_group("rendered line fits every legal field combination");
+    var r = rule_with_obj_type(run_of(255));
+    ima_rule_set_uid(r, 0 - 9223372036854775807 - 1);
+    ima_rule_set_fowner(r, 9223372036854775807);
+    ima_rule_set_fsuuid(r, "0123456789abcdef0123456789abcdef");
+    ima_rule_set_mask(r, "MAY_APPEND");
+    var bt, big = ima_rule_to_policy_line(r);
+    assert_eq(is_err_result(bt), 0, "maximal legal rule renders");
+    if (is_err_result(bt) == 0) {
+        assert(strlen(big) > 300, "and carries every clause");
+        assert_eq(load8(big + strlen(big)), 0, "NUL-terminated");
+    }
+
+    return assert_summary();
+}
+
+var exit_code = main();
+sys_exit(exit_code);

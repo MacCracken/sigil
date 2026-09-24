@@ -15,11 +15,13 @@
 #
 # Constant-time discipline:
 #   • Verify takes only public inputs (msg, pk, sig). No secret-data
-#     branches exist on this path. The Montgomery-ladder scalar
-#     multiplication is still used because (a) it's the same shape a
-#     future sign path would need and (b) defense in depth — any
-#     future caller composing internal sign / DH against the same
-#     point-mul primitive inherits constant-time behaviour for free.
+#     branches exist on this path; it uses the non-CT comb / window
+#     scalar muls below.
+#   • A SECRET scalar (the ECDSA sign nonce) goes through
+#     `pt_scalarmul_secret` — the Montgomery ladder over a fixed-length
+#     k_hat (k + n or k + 2n), so the point-op count does not depend on
+#     bitlen(k) (Minerva / CVE-2019-15809). Plain `pt_scalarmul` ladders
+#     over k itself and is for public scalars only.
 #   • Final r comparison uses OR-accumulation (`ct_eq_bytes_lens`
 #     from `lib/ct.cyr`), matching the pattern in `ed25519.cyr`.
 #
@@ -1201,9 +1203,9 @@ fn pt_add_mixed(out, p, qx, qy): i64 {
 }
 
 # ----------------------------------------------------------------
-# Constant-time scalar multiplication via Montgomery ladder.
+# Scalar multiplication via Montgomery ladder.
 #   R0 = O, R1 = P, prev = 0
-#   for i = 255 .. 0:
+#   for i = top .. 0:
 #       bit = scalar bit i
 #       cswap(R0, R1, prev XOR bit)   # bring "double target" to R0
 #       R1 = R0 + R1
@@ -1212,10 +1214,15 @@ fn pt_add_mixed(out, p, qx, qy): i64 {
 #   cswap(R0, R1, prev)               # final unswap
 #   return R0
 #
-# Branches only on public swap masks; field/point ops always run in
-# fixed sequence. Defense-in-depth: ECDSA verify inputs are public,
-# but any future sign / DH path through this primitive inherits the
-# constant-time behaviour for free.
+# The swap is a branch-free mask and the point ops run in a fixed
+# sequence, BUT pt_add / pt_double return early on an infinity operand,
+# and R0 is infinity for every leading zero bit of the scalar. Laddered
+# over k itself (pt_scalarmul) the run time therefore tracks bitlen(k):
+# the Minerva / TPM-Fail leak (CVE-2019-15809), which recovers an ECDSA
+# key from timed signatures by lattice reduction. A SECRET scalar must go
+# through pt_scalarmul_secret, which ladders over the fixed-length
+# k_hat = k + n or k + 2n (bit 256 always set; n·P = O, so k_hat·P ==
+# k·P): 257 iterations every call, R0/R1 at infinity only in the first.
 # ----------------------------------------------------------------
 
 var _ptm_r0 = 0;
@@ -1234,8 +1241,9 @@ fn _ptm_init(): i64 {
     return 0;
 }
 
-# out = k * P, where k is a 256-bit scalar (LE limbs) and P is Jacobian.
-fn pt_scalarmul(out, k, P): i64 {
+# Ladder core: out = k * P over scalar bits top..0 (k is LE limbs covering bit `top`; P, out
+# Jacobian). Shared by pt_scalarmul (top 255) and pt_scalarmul_secret (top 256, fixed length).
+fn _pt_ladder(out, k, top, P): i64 {
     _p256_init();
     _ptm_init();
     var bk = cbank();
@@ -1249,7 +1257,7 @@ fn pt_scalarmul(out, k, P): i64 {
 
     var scalar = k;
     var prev = 0;
-    var i = 255;
+    var i = top;
     while (i >= 0) {
         var limb_idx = i / 64;
         var bit_idx  = i & 63;
@@ -1270,16 +1278,81 @@ fn pt_scalarmul(out, k, P): i64 {
     return 0;
 }
 
+# out = k * P, where k is a 256-bit scalar (LE limbs) and P is Jacobian. PUBLIC scalars only:
+# the ladder runs over k itself, so its time leaks bitlen(k) — use pt_scalarmul_secret for a
+# secret k (an ECDSA nonce, a DH key).
+fn pt_scalarmul(out, k, P): i64 {
+    return _pt_ladder(out, k, 255, P);
+}
+
+# kh (5 LE limbs, 40 B) = the fixed-length ladder scalar for a 256-bit k: k + n when that sum
+# reaches 2^256, else k + 2n. For every k < 2^256 the result has limb 4 == 1 exactly (bit 256
+# set, n > 2^255), and kh == k mod n. Both candidates are always computed and one is picked by
+# an all-ones/zero mask: no branch, no early exit, no secret-indexed access. The carry is the
+# branch-free majority form MSB((a & b) | ((a | b) & ~s)).
+fn _p256_khat(kh, k): i64 {
+    _p256_init();
+    var t2[40];                     # k + 2n candidate — stack local, wiped before return
+    var ones = 0 - 1;
+    var c = 0;
+    var i = 0;
+    while (i < 4) {                 # kh = k + n, carry into limb 4
+        var a = load64(k + i * 8);
+        var b = load64(_p256_n + i * 8);
+        var s = a + b + c;
+        c = (((a & b) | ((a | b) & (s ^ ones))) >> 63) & 1;
+        store64(kh + i * 8, s);
+        i = i + 1;
+    }
+    store64(kh + 32, c);
+    c = 0;
+    i = 0;
+    while (i < 4) {                 # t2 = kh + n = k + 2n
+        var a = load64(kh + i * 8);
+        var b = load64(_p256_n + i * 8);
+        var s = a + b + c;
+        c = (((a & b) | ((a | b) & (s ^ ones))) >> 63) & 1;
+        store64(&t2 + i * 8, s);
+        i = i + 1;
+    }
+    store64(&t2 + 32, load64(kh + 32) + c);
+    # mask = all ones iff k + n already reached bit 256 (keep it), else take k + 2n.
+    var mask = 0 - (load64(kh + 32) & 1);
+    i = 0;
+    while (i < 5) {
+        var x = load64(kh + i * 8);
+        var y = load64(&t2 + i * 8);
+        store64(kh + i * 8, y ^ (mask & (x ^ y)));
+        i = i + 1;
+    }
+    memset(&t2, 0, 40);
+    return 0;
+}
+
+# out = k * P for a SECRET 256-bit scalar k (LE limbs; P a point of order n, out Jacobian) — the
+# ECDSA sign k·G entry. Ladders over the fixed-length k_hat from _p256_khat (257 iterations for
+# every k), so the point-op sequence no longer depends on bitlen(k): the Minerva /
+# CVE-2019-15809 fix. Result equals pt_scalarmul(out, k, P) since n·P = O. The field arithmetic
+# underneath still has data-dependent reduction branches; the k_hat copy is wiped on return.
+fn pt_scalarmul_secret(out, k, P): i64 {
+    var kh[40];                     # stack local (per-call, per-thread), wiped before return
+    _p256_khat(&kh, k);
+    _pt_ladder(out, &kh, 256, P);
+    memset(&kh, 0, 40);
+    return 0;
+}
+
 # ================================================================
 # Fixed-base comb for the generator G (verify-only, NON-constant-time)
 #
 # G is a public constant, and `ecdsa_p256_verify` consumes only public
 # data (digest, signature, public key), so the `u1·G` term can use a
-# fast table-indexed comb instead of the constant-time Montgomery ladder
+# fast table-indexed comb instead of the Montgomery ladder
 # (`pt_scalarmul`). **This must never be used on a secret scalar** — the
 # table index leaks the scalar nibble via cache timing. The signing path
-# (`ecdsa_sign.cyr`, secret nonce k·G) deliberately stays on
-# `pt_scalarmul`; only the verify `u1·G` site calls this.
+# (`ecdsa_sign.cyr`, secret nonce k·G) deliberately stays on the
+# fixed-length ladder `pt_scalarmul_secret`; only the verify `u1·G` site
+# calls this.
 #
 # 4-bit windowed comb (the same shape ed25519 uses for its base point):
 #   table[i][k] = k · 16^i · G   for window i ∈ [0,64), digit k ∈ [0,16)
@@ -1365,13 +1438,13 @@ fn p256_scalarmul_base(out, k): i64 {
 #
 # Q (the public key) changes every verify, so a fixed-base comb does
 # not apply — but the scalar (u2) and Q are still public, so we replace
-# the constant-time Montgomery ladder (`pt_scalarmul`, 256 adds + 256
+# the Montgomery ladder (`pt_scalarmul`, 256 adds + 256
 # doubles) with a 4-bit left-to-right windowed double-and-add:
 #   precompute Qtab[k] = k·Q for k ∈ [0,16)   (15 adds, once per call)
 #   acc = O; for nibble i = 63..0: acc = 16·acc + Qtab[nibble_i]
 # Cost: 256 doubles + 64 adds + 15 precompute ≈ 1.5× fewer point ops
 # than the ladder. **Public data only** (table index leaks the nibble);
-# the secret-nonce signing path stays on `pt_scalarmul`.
+# the secret-nonce signing path stays on `pt_scalarmul_secret`.
 # ================================================================
 
 var _ecq_tab    = 0;    # 16 Jacobian multiples k·Q (96 B each), build scratch
@@ -1397,7 +1470,7 @@ fn _ecq_init(): i64 {
 }
 
 # out = k · Q for a VARIABLE affine point Q = (qx, qy), verify-only / non-CT
-# (the secret-nonce signing path stays on the CT ladder pt_scalarmul).
+# (the secret-nonce signing path stays on the fixed-length ladder pt_scalarmul_secret).
 #
 # 4-bit window: build Qtab[1..15] = k·Q (mixed adds, Q affine), batch-invert
 # their 15 Z-coordinates with Montgomery's trick (1 field inversion + ~3·14

@@ -1,0 +1,297 @@
+# trust_hardening.tcyr — keyring chain issuance signatures (M1) + hash_file read errors (M9).
+#
+# M1: keyring_validate_chain was documented as "verify each key was issued by its parent" but
+# only checked that keyring_get_chain ended at a KEY_ROLE_ROOT key. Nothing ever set or read
+# KeyVersion.issuer_sig, so any key claiming `issued_by = <root id>` validated. The fix signs a
+# canonical, domain-separated issuance message (kv_issuance_message_into) with the parent's
+# Ed25519 key (keyring_sign_issuance) and verifies every non-root link, fail-closed.
+#
+# M9: hash_file / hash_file_into / hash_file_with looped `while (n > 0)`, so a NEGATIVE read
+# (EISDIR, EIO) ended the stream as if at EOF and returned the digest of the prefix read so far
+# — on a directory, SHA-256 of the empty string. A failed read must return 0.
+
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fmt.cyr"
+include "lib/bayan.cyr"
+include "lib/sakshi.cyr"
+include "lib/chrono.cyr"
+
+include "lib/thread_local.cyr"
+include "src/crypto_scratch.cyr"
+include "src/mul64.cyr"
+include "src/types.cyr"
+include "src/error.cyr"
+include "lib/random.cyr"
+include "src/random.cyr"
+include "src/sha256.cyr"
+include "src/hex.cyr"
+include "lib/ct.cyr"
+include "src/hmac.cyr"
+include "src/sha512.cyr"
+include "src/bigint_ext.cyr"
+include "src/ed25519.cyr"
+include "src/trust.cyr"
+
+# Key material for four identities: root, intermediate, publisher, rogue (never in a keyring).
+var g_sk_r = 0;
+var g_sk_i = 0;
+var g_sk_p = 0;
+var g_sk_x = 0;
+var g_kid_r = 0;
+var g_kid_i = 0;
+var g_kid_p = 0;
+var g_kid_x = 0;
+var g_hex_r = 0;
+var g_hex_i = 0;
+var g_hex_p = 0;
+var g_hex_x = 0;
+
+# The three KeyVersions of the most recent build_chain().
+var g_kv_r = 0;
+var g_kv_i = 0;
+var g_kv_p = 0;
+
+fn mk_identity(sk_out): i64 {
+    var pk = alloc(32);
+    var kid = generate_keypair(sk_out, pk);
+    assert(kid != 0, "generate_keypair");
+    return kid;
+}
+
+fn pk_hex_of(sk): i64 { return hex_encode(sk + 32, 32); }
+
+fn mk_kv(kid, pkhex, role, issuer): i64 {
+    var kv = key_version_new(kid, pkhex);
+    kv_set_role(kv, role);
+    kv_set_issued_by(kv, issuer);
+    kv_set_valid_from(kv, clock_epoch_secs() - 100);
+    return kv;
+}
+
+# root -> intermediate -> publisher, every link signed by its parent. Returns the keyring.
+fn build_chain(): i64 {
+    var kr = keyring_new(0);
+    g_kv_r = mk_kv(g_kid_r, g_hex_r, KEY_ROLE_ROOT, 0);
+    g_kv_i = mk_kv(g_kid_i, g_hex_i, KEY_ROLE_INTERMEDIATE, g_kid_r);
+    g_kv_p = mk_kv(g_kid_p, g_hex_p, KEY_ROLE_PUBLISHER, g_kid_i);
+    kv_set_valid_until(g_kv_p, clock_epoch_secs() + 86400);
+    kv_add_allowed_type(g_kv_p, ARTIFACT_PACKAGE);
+    kv_set_pub_name(g_kv_p, "Acme Packages");
+    assert_eq(keyring_sign_issuance(g_sk_r, g_kv_i), 1, "sign intermediate by root");
+    assert_eq(keyring_sign_issuance(g_sk_i, g_kv_p), 1, "sign publisher by intermediate");
+    keyring_add_key(kr, g_kv_r);
+    keyring_add_key(kr, g_kv_i);
+    keyring_add_key(kr, g_kv_p);
+    return kr;
+}
+
+fn main(): i64 {
+    alloc_init();
+    ed25519_init();
+
+    g_sk_r = alloc(64); g_kid_r = mk_identity(g_sk_r); g_hex_r = pk_hex_of(g_sk_r);
+    g_sk_i = alloc(64); g_kid_i = mk_identity(g_sk_i); g_hex_i = pk_hex_of(g_sk_i);
+    g_sk_p = alloc(64); g_kid_p = mk_identity(g_sk_p); g_hex_p = pk_hex_of(g_sk_p);
+    g_sk_x = alloc(64); g_kid_x = mk_identity(g_sk_x); g_hex_x = pk_hex_of(g_sk_x);
+
+    # ------------------------------------------------------------
+    test_group("valid 3-level chain");
+    var kr = build_chain();
+    assert_eq(keyring_validate_chain(kr, g_kid_p), 1, "publisher chain validates");
+    assert_eq(keyring_validate_chain(kr, g_kid_i), 1, "intermediate chain validates");
+    assert_eq(keyring_validate_chain(kr, g_kid_r), 1, "root alone validates");
+    assert_eq(kv_issuer_sig_len(g_kv_p), 64, "issuer_sig_len is 64");
+    assert(kv_issuer_sig(g_kv_p) != 0, "issuer_sig attached");
+    assert_eq(keyring_validate_chain(kr, "nope"), 0, "unknown key fails");
+
+    # ------------------------------------------------------------
+    test_group("issuance message");
+    var mlen = kv_issuance_message_len(g_kv_p);
+    assert_gt(mlen, 0, "message length positive");
+    var mbuf = alloc(mlen + 16);
+    assert_eq(kv_issuance_message_into(g_kv_p, mbuf), mlen, "into writes len bytes");
+    assert_eq(memeq(mbuf, "SIGIL-KEY-ISSUANCE-V1", 21), 1, "domain tag prefix");
+    assert_eq(load8(mbuf + 21) & 0xFF, 0, "domain tag NUL-terminated");
+    # A malformed public key has no canonical message (and cannot be signed).
+    var kv_bad = mk_kv(g_kid_x, "zz", KEY_ROLE_PUBLISHER, g_kid_i);
+    assert_eq(kv_issuance_message_len(kv_bad), -1, "bad pk hex -> no message");
+    assert_eq(keyring_sign_issuance(g_sk_i, kv_bad), 0, "bad pk hex -> sign fails");
+    var kv_nop = mk_kv(g_kid_x, g_hex_x, KEY_ROLE_PUBLISHER, 0);
+    assert_eq(keyring_sign_issuance(g_sk_i, kv_nop), 0, "no issued_by -> sign fails");
+
+    # ------------------------------------------------------------
+    test_group("unsigned link fails");
+    var kr2 = keyring_new(0);
+    var r2 = mk_kv(g_kid_r, g_hex_r, KEY_ROLE_ROOT, 0);
+    var i2 = mk_kv(g_kid_i, g_hex_i, KEY_ROLE_INTERMEDIATE, g_kid_r);
+    keyring_add_key(kr2, r2);
+    keyring_add_key(kr2, i2);
+    assert_eq(keyring_validate_chain(kr2, g_kid_i), 0, "unsigned intermediate rejected");
+    # Signed intermediate, unsigned publisher under it.
+    keyring_sign_issuance(g_sk_r, i2);
+    assert_eq(keyring_validate_chain(kr2, g_kid_i), 1, "now-signed intermediate ok");
+    var p2 = mk_kv(g_kid_p, g_hex_p, KEY_ROLE_PUBLISHER, g_kid_i);
+    keyring_add_key(kr2, p2);
+    assert_eq(keyring_validate_chain(kr2, g_kid_p), 0, "unsigned publisher rejected");
+
+    # ------------------------------------------------------------
+    test_group("short / missing signature");
+    kr = build_chain();
+    var sig_ptr = kv_issuer_sig(g_kv_p);
+    kv_set_issuer_sig(g_kv_p, sig_ptr, 63);
+    assert_eq(keyring_validate_chain(kr, g_kid_p), 0, "63-byte sig rejected");
+    kv_set_issuer_sig(g_kv_p, sig_ptr, 65);
+    assert_eq(keyring_validate_chain(kr, g_kid_p), 0, "65-byte sig rejected");
+    kv_set_issuer_sig(g_kv_p, 0, 64);
+    assert_eq(keyring_validate_chain(kr, g_kid_p), 0, "null sig ptr rejected");
+    kv_set_issuer_sig(g_kv_p, sig_ptr, 64);
+    assert_eq(keyring_validate_chain(kr, g_kid_p), 1, "restored sig validates");
+    # Flip one signature bit.
+    store8(sig_ptr + 10, load8(sig_ptr + 10) ^ 1);
+    assert_eq(keyring_validate_chain(kr, g_kid_p), 0, "bit-flipped sig rejected");
+
+    # ------------------------------------------------------------
+    test_group("forged link (signed by a non-parent)");
+    kr = build_chain();
+    keyring_sign_issuance(g_sk_x, g_kv_p);     # rogue key, not in keyring
+    assert_eq(keyring_validate_chain(kr, g_kid_p), 0, "rogue-signed publisher rejected");
+    kr = build_chain();
+    keyring_sign_issuance(g_sk_r, g_kv_p);     # root signs, but issued_by names intermediate
+    assert_eq(keyring_validate_chain(kr, g_kid_p), 0, "grandparent-signed link rejected");
+    kr = build_chain();
+    keyring_sign_issuance(g_sk_x, g_kv_i);     # break the upper link only
+    assert_eq(keyring_validate_chain(kr, g_kid_p), 0, "forged upper link rejected");
+
+    # ------------------------------------------------------------
+    test_group("tampered child after signing");
+    kr = build_chain();
+    kv_set_role(g_kv_p, KEY_ROLE_INTERMEDIATE);
+    assert_eq(keyring_validate_chain(kr, g_kid_p), 0, "role escalation rejected");
+    kv_set_role(g_kv_p, KEY_ROLE_PUBLISHER);
+    assert_eq(keyring_validate_chain(kr, g_kid_p), 1, "role restored validates");
+    kv_add_allowed_type(g_kv_p, ARTIFACT_BOOT_COMPONENT);
+    assert_eq(keyring_validate_chain(kr, g_kid_p), 0, "added allowed type rejected");
+    kr = build_chain();
+    kv_clear_allowed_types(g_kv_p);
+    assert_eq(keyring_validate_chain(kr, g_kid_p), 0, "cleared type limit rejected");
+    kr = build_chain();
+    kv_set_valid_until(g_kv_p, 0);
+    assert_eq(keyring_validate_chain(kr, g_kid_p), 0, "expiry removal rejected");
+    kr = build_chain();
+    kv_set_valid_from(g_kv_p, clock_epoch_secs() - 1000);
+    assert_eq(keyring_validate_chain(kr, g_kid_p), 0, "valid_from change rejected");
+    kr = build_chain();
+    store64(g_kv_p + 24, g_hex_x);             # swap the child public key (no setter)
+    assert_eq(keyring_validate_chain(kr, g_kid_p), 0, "public key swap rejected");
+    kr = build_chain();
+    kv_set_pub_name(g_kv_p, "Evil Corp");
+    assert_eq(keyring_validate_chain(kr, g_kid_p), 0, "publisher name change rejected");
+    kr = build_chain();
+    kv_set_role(g_kv_i, KEY_ROLE_ROOT);        # intermediate claims to be a root
+    assert_eq(keyring_validate_chain(kr, g_kid_p), 0, "rooted-intermediate claim rejected");
+
+    # ------------------------------------------------------------
+    test_group("cycle");
+    var kr3 = keyring_new(0);
+    var ca = mk_kv(g_kid_i, g_hex_i, KEY_ROLE_INTERMEDIATE, g_kid_p);
+    var cb = mk_kv(g_kid_p, g_hex_p, KEY_ROLE_INTERMEDIATE, g_kid_i);
+    keyring_sign_issuance(g_sk_p, ca);
+    keyring_sign_issuance(g_sk_i, cb);
+    keyring_add_key(kr3, ca);
+    keyring_add_key(kr3, cb);
+    assert_eq(keyring_validate_chain(kr3, g_kid_i), 0, "2-cycle rejected (from A)");
+    assert_eq(keyring_validate_chain(kr3, g_kid_p), 0, "2-cycle rejected (from B)");
+    var kr3b = keyring_new(0);
+    var cs = mk_kv(g_kid_i, g_hex_i, KEY_ROLE_INTERMEDIATE, g_kid_i);   # self-issued non-root
+    keyring_sign_issuance(g_sk_i, cs);
+    keyring_add_key(kr3b, cs);
+    assert_eq(keyring_validate_chain(kr3b, g_kid_i), 0, "self-issued intermediate rejected");
+
+    # ------------------------------------------------------------
+    test_group("non-root terminus");
+    var kr4 = keyring_new(0);
+    var t_i = mk_kv(g_kid_i, g_hex_i, KEY_ROLE_INTERMEDIATE, 0);        # top has no issuer
+    var t_p = mk_kv(g_kid_p, g_hex_p, KEY_ROLE_PUBLISHER, g_kid_i);
+    keyring_sign_issuance(g_sk_i, t_p);
+    keyring_add_key(kr4, t_i);
+    keyring_add_key(kr4, t_p);
+    assert_eq(keyring_validate_chain(kr4, g_kid_p), 0, "chain topped by intermediate rejected");
+    assert_eq(keyring_validate_chain(kr4, g_kid_i), 0, "lone intermediate rejected");
+    var kr4b = keyring_new(0);
+    var lone_p = mk_kv(g_kid_p, g_hex_p, KEY_ROLE_PUBLISHER, 0);
+    keyring_add_key(kr4b, lone_p);
+    assert_eq(keyring_validate_chain(kr4b, g_kid_p), 0, "lone publisher rejected");
+    # A Root that names some other issuer is not a trust anchor.
+    var kr4c = keyring_new(0);
+    var rr = mk_kv(g_kid_r, g_hex_r, KEY_ROLE_ROOT, g_kid_x);
+    keyring_add_key(kr4c, rr);
+    assert_eq(keyring_validate_chain(kr4c, g_kid_r), 0, "root with foreign issuer rejected");
+    # A self-issued Root is still an anchor.
+    var kr4d = keyring_new(0);
+    var rs = mk_kv(g_kid_r, g_hex_r, KEY_ROLE_ROOT, g_kid_r);
+    keyring_add_key(kr4d, rs);
+    assert_eq(keyring_validate_chain(kr4d, g_kid_r), 1, "self-issued root validates");
+
+    # ------------------------------------------------------------
+    test_group("parent missing / expired / not an issuer");
+    var kr5 = keyring_new(0);
+    var orphan = mk_kv(g_kid_p, g_hex_p, KEY_ROLE_PUBLISHER, g_kid_i);
+    keyring_sign_issuance(g_sk_i, orphan);
+    keyring_add_key(kr5, orphan);
+    assert_eq(keyring_validate_chain(kr5, g_kid_p), 0, "parent not in keyring rejected");
+    kr = build_chain();
+    kv_set_valid_until(g_kv_i, clock_epoch_secs() - 10);   # parent expired
+    assert_eq(keyring_validate_chain(kr, g_kid_p), 0, "expired parent rejected");
+    kr = build_chain();
+    kv_set_valid_until(g_kv_r, clock_epoch_secs() - 10);   # root expired
+    assert_eq(keyring_validate_chain(kr, g_kid_p), 0, "expired root rejected");
+    # A Publisher key cannot issue keys.
+    kr = build_chain();
+    var sub = mk_kv(g_kid_x, g_hex_x, KEY_ROLE_PUBLISHER, g_kid_p);
+    keyring_sign_issuance(g_sk_p, sub);
+    keyring_add_key(kr, sub);
+    assert_eq(keyring_validate_chain(kr, g_kid_x), 0, "publisher-issued key rejected");
+
+    # ------------------------------------------------------------
+    test_group("rotated parent (overlap) still validates");
+    kr = build_chain();
+    # New intermediate version with a different key; the old version stays valid (overlap).
+    var i_new = mk_kv(g_kid_i, g_hex_x, KEY_ROLE_INTERMEDIATE, g_kid_r);
+    keyring_sign_issuance(g_sk_r, i_new);
+    keyring_add_key(kr, i_new);
+    assert_eq(keyring_validate_chain(kr, g_kid_p), 1, "child of overlapping old version ok");
+    kv_set_valid_until(g_kv_i, clock_epoch_secs() - 10);   # old version retires
+    assert_eq(keyring_validate_chain(kr, g_kid_p), 0, "child of retired version rejected");
+
+    # ------------------------------------------------------------
+    test_group("hash_file read error is not EOF");
+    assert_eq(hash_file("/tmp"), 0, "hash_file(dir) -> 0");
+    assert_eq(hash_file_with("/tmp", HASH_ALG_SHA256), 0, "hash_file_with(dir, sha256) -> 0");
+    assert_eq(hash_file_with("/tmp", HASH_ALG_SHA512), 0, "hash_file_with(dir, sha512) -> 0");
+    var hex_out = alloc(80);
+    var ctx_buf = alloc(160);
+    assert_eq(hash_file_into("/tmp", hex_out, ctx_buf), 0, "hash_file_into(dir) -> 0");
+    # Regular files still hash.
+    var fpath = "/tmp/sigil_trust_hardening.txt";
+    var fd = file_open(fpath, O_WRONLY | O_CREAT | O_TRUNC, 420);
+    file_write(fd, "hello world", 11);
+    file_close(fd);
+    var hw = "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9";
+    assert_streq(hash_file(fpath), hw, "hash_file(regular) ok");
+    assert_eq(hash_file_into(fpath, hex_out, ctx_buf), 1, "hash_file_into(regular) ok");
+    assert_streq(hex_out, hw, "hash_file_into digest");
+    assert(hash_file_with(fpath, HASH_ALG_SHA512) != 0, "hash_file_with sha512 regular ok");
+    xunlink(fpath);
+
+    return assert_summary();
+}
+
+var exit_code = main();
+sys_exit(exit_code);

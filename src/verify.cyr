@@ -21,7 +21,8 @@
 #   +392  vec_hdr (24)        vec struct { data, len=0, cap=16 }
 #   +416  vec_data[128]       16 × i64 (pre-allocated cap, never grows)
 #   +544  sha256_ctx[144]     SHA-256 streaming context
-#   +688  reserved/pad to 768
+#   +688  sig_state (8)       0 = no signature, 1 = valid, 2 = present but not verified
+#   +696  reserved/pad to 768
 #
 # Cap of 8 TrustCheck slots: `sv_verify_artifact` today emits up
 # to 7 checks per call (file_readable, trust_store, signature,
@@ -39,6 +40,7 @@ var _VSC_CHECK_IDX  = 384;
 var _VSC_VEC_HDR    = 392;
 var _VSC_VEC_DATA   = 416;
 var _VSC_SHA_CTX    = 544;
+var _VSC_SIG_STATE  = 688;
 var _VSC_SIZE       = 768;
 var _VSC_MAX_CHECKS = 8;
 
@@ -341,18 +343,31 @@ fn sv_sign_artifact(sv, path, secret_key, key_id, artifact_type): i64 {
 # directly should migrate to the `_init`-into-slot pattern. See
 # `docs/development/roadmap.md` § "Towards v4.0".
 fn sv_verify_artifact(sv, path, artifact_type): i64 {
-    var s = verify_scratch_new();
-    var vr = sv_verify_artifact_into(sv, path, artifact_type, s);
+    var vr = _sv_verify_unaudited(sv, path, artifact_type);
     # Audit lives on the wrapper so `_into` stays alloc-free for
     # the parallel-batch path. Single-threaded callers (this one)
     # incur no contention.
+    _sv_audit_verified(sv, path, artifact_type, vr);
+    return vr;
+}
+
+# One-shot verify into a fresh VerifyScratch, WITHOUT the audit event. sv_verify_agent and
+# sv_verify_package layer extra checks on top and audit only once the outcome is final.
+fn _sv_verify_unaudited(sv, path, artifact_type): i64 {
+    var s = verify_scratch_new();
+    return sv_verify_artifact_into(sv, path, artifact_type, s);
+}
+
+# Records the AUDIT_ARTIFACT_VERIFIED event for `vr`. 3.13.0 (M7): callers invoke this
+# AFTER every check that can clear `passed`, so the log never says PASS for a failure.
+fn _sv_audit_verified(sv, path, artifact_type, vr): i64 {
     var a = vresult_artifact(vr);
     var ae = audit_artifact_verified(path, artifact_type,
       artifact_trust_level(a),
       vresult_passed(vr),
       artifact_content_hash(a));
     alog_record(load64(sv + 48), ae);
-    return vr;
+    return 0;
 }
 
 # Alloc-free verify orchestrator (3.2.0). Runs the full check
@@ -370,6 +385,7 @@ fn sv_verify_artifact(sv, path, artifact_type): i64 {
 # documents and relies on that contract.
 fn sv_verify_artifact_into(sv, path, artifact_type, scratch): i64 {
     _verify_scratch_reset(scratch);
+    store64(scratch + _VSC_SIG_STATE, 0);
     var policy = load64(sv + 8);
 
     # 1. Hash the file directly into the scratch hex slot.
@@ -427,11 +443,14 @@ fn sv_verify_artifact_into(sv, path, artifact_type, scratch): i64 {
         _vresult_add_check_scratch(scratch, "trust_store", 0, "Not in trust store");
     }
 
-    # Check: signature verification
+    # Check: signature verification. sig_state: 0 = no signature, 1 = valid, 2 = a
+    # signature is present but could not be verified (any failure branch below).
+    var sig_state = 0;
     if (stored != 0) {
         var sig = artifact_signature(stored);
         var signer = artifact_signer_key_id(stored);
         if (sig != 0) {
+            sig_state = 2;
             if (signer != 0) {
                 var kr = load64(sv);
                 var kv = keyring_get_current(kr, signer);
@@ -450,6 +469,7 @@ fn sv_verify_artifact_into(sv, path, artifact_type, scratch): i64 {
                             } else {
                                 var valid = verify_data(chash, strlen(chash), sig, scratch + _VSC_PK);
                                 if (valid == 1) {
+                                    sig_state = 1;
                                     if (trust_level_rank(trust_level) < trust_level_rank(TRUST_VERIFIED)) {
                                         trust_level = TRUST_VERIFIED;
                                     }
@@ -474,6 +494,22 @@ fn sv_verify_artifact_into(sv, path, artifact_type, scratch): i64 {
         }
     } else {
         _vresult_add_check_scratch(scratch, "signature", 0, "Not in trust store");
+    }
+    store64(scratch + _VSC_SIG_STATE, sig_state);
+
+    # 3.13.0 (M8): enforce allow_unsigned here, not only in sv_verify_agent. Without a
+    # verified signature and with allow_unsigned = 0, the stored trust level no longer
+    # counts: the artifact drops to Unverified and the policy check below fails. Before
+    # 3.13.0 the "No signature" branch kept the stored level, so an unsigned artifact
+    # registered at Verified passed a strict policy.
+    var unsigned_denied = 0;
+    if (sig_state != 1) {
+        if (policy_allow_unsigned(policy) == 0) {
+            unsigned_denied = 1;
+            if (trust_level_rank(trust_level) > trust_level_rank(TRUST_UNVERIFIED)) {
+                trust_level = TRUST_UNVERIFIED;
+            }
+        }
     }
 
     # Check: revocation
@@ -529,9 +565,7 @@ fn sv_verify_artifact_into(sv, path, artifact_type, scratch): i64 {
     var min_trust = policy_min_trust(policy);
     var enforcement = policy_enforcement(policy);
     var meets_min = trust_level_ge(trust_level, min_trust);
-    if (meets_min == 1) {
-        _vresult_add_check_scratch(scratch, "policy", 1, "Meets minimum trust level");
-    } else {
+    if (meets_min == 0) {
         if (enforcement == ENFORCE_STRICT) {
             _vresult_add_check_scratch(scratch, "policy", 0, "Below minimum trust level");
             vresult_set_passed(vr, 0);
@@ -540,6 +574,18 @@ fn sv_verify_artifact_into(sv, path, artifact_type, scratch): i64 {
         } else {
             _vresult_add_check_scratch(scratch, "policy", 0, "Below minimum (audit only)");
         }
+    } elif (unsigned_denied == 1) {
+        # Reached only when min_trust is Unverified or lower: unsigned still fails.
+        if (enforcement == ENFORCE_STRICT) {
+            _vresult_add_check_scratch(scratch, "policy", 0, "Unsigned artifacts not allowed");
+            vresult_set_passed(vr, 0);
+        } elif (enforcement == ENFORCE_PERMISSIVE) {
+            _vresult_add_check_scratch(scratch, "policy", 0, "Unsigned (permissive)");
+        } else {
+            _vresult_add_check_scratch(scratch, "policy", 0, "Unsigned (audit only)");
+        }
+    } else {
+        _vresult_add_check_scratch(scratch, "policy", 1, "Meets minimum trust level");
     }
 
     artifact_set_trust_level(scratch + _VSC_ARTIFACT, trust_level);
@@ -561,13 +607,14 @@ fn sv_verify_artifact_into(sv, path, artifact_type, scratch): i64 {
 # Convenience: verify agent binary
 # ================================================================
 
-# Verifies the agent binary at `path` via sv_verify_artifact (ARTIFACT_AGENT_BINARY). If the
+# Verifies the agent binary at `path` like sv_verify_artifact (ARTIFACT_AGENT_BINARY). If the
 # policy disallows unsigned artifacts and no "signature" check passed, appends a failed
-# "unsigned_agent" check and clears `passed`. Returns the VerificationResult (caller does
-# not free).
+# "unsigned_agent" check and clears `passed` under every enforcement mode. The audit event
+# is recorded after that, with the final outcome. Returns the VerificationResult (caller
+# does not free).
 fn sv_verify_agent(sv, path): i64 {
     var policy = load64(sv + 8);
-    var vr = sv_verify_artifact(sv, path, ARTIFACT_AGENT_BINARY);
+    var vr = _sv_verify_unaudited(sv, path, ARTIFACT_AGENT_BINARY);
 
     # Additional check: unsigned agents
     if (policy_allow_unsigned(policy) == 0) {
@@ -587,6 +634,7 @@ fn sv_verify_agent(sv, path): i64 {
             vresult_set_passed(vr, 0);
         }
     }
+    _sv_audit_verified(sv, path, ARTIFACT_AGENT_BINARY, vr);
     return vr;
 }
 
@@ -606,12 +654,16 @@ fn sv_verify_agent(sv, path): i64 {
 # (argonaut/ark) enforce it themselves before calling in.
 # ================================================================
 
-# Verifies the package at `path` via sv_verify_artifact (ARTIFACT_PACKAGE); a non-zero
+# Verifies the package at `path` like sv_verify_artifact (ARTIFACT_PACKAGE); a non-zero
 # `expected_hash` hex C-string must also match the content hash (constant-time compare) or
-# `passed` is cleared. Returns the VerificationResult (caller does not free).
+# `passed` is cleared. The audit event is recorded after the hash check, with the final
+# outcome. Returns the VerificationResult (caller does not free).
 fn sv_verify_package(sv, path, expected_hash): i64 {
-    var vr = sv_verify_artifact(sv, path, ARTIFACT_PACKAGE);
-    if (expected_hash == 0) { return vr; }
+    var vr = _sv_verify_unaudited(sv, path, ARTIFACT_PACKAGE);
+    if (expected_hash == 0) {
+        _sv_audit_verified(sv, path, ARTIFACT_PACKAGE, vr);
+        return vr;
+    }
 
     var artifact = vresult_artifact(vr);
     var actual = artifact_content_hash(artifact);
@@ -627,6 +679,7 @@ fn sv_verify_package(sv, path, expected_hash): i64 {
         vresult_add_check(vr, trust_check_new("expected_hash", 0, "Hash mismatch"));
         vresult_set_passed(vr, 0);
     }
+    _sv_audit_verified(sv, path, ARTIFACT_PACKAGE, vr);
     return vr;
 }
 
@@ -934,15 +987,23 @@ fn sv_diff_trust_store(sv, old_snap): i64 {
 # sv_load_trust_store(sv, path) — inverse of sv_save_trust_store
 #
 # Reads the JSON array written by sv_save_trust_store and installs
-# every {hash, path, type, trust} record into the verifier's trust
-# store. Returns the number of artifacts loaded, or 0 on IO/parse
-# failure.
+# every {hash, path, type, trust[, sig, signer]} record into the
+# verifier's trust store. Returns the number of artifacts loaded, or
+# 0 on IO failure / an empty file.
 #
-# Signatures and signer_key_id are NOT persisted by the save path —
-# the serialized form is an inventory of trusted artifacts, not a
-# re-verifiable archive. Loaded artifacts come back with signature
-# = 0, signer = 0, trust level preserved. A subsequent
-# sv_verify_artifact call will treat them as present-but-unsigned.
+# 3.13.0 (H6, M8):
+#   - The whole file is read (file_read_whole) — the pre-3.13.0 path
+#     read at most 64 KiB and silently dropped every later record.
+#   - A record is installed only when it is complete: its closing
+#     '}' was seen, it has a non-empty "hash" AND a non-empty "path",
+#     and any "sig" field is exactly 128 hex chars. Anything else is
+#     skipped, so a truncated tail or a path-less record can no longer
+#     put a NULL path into the store (which crashed save/boot-chain).
+#   - "sig" (64-byte Ed25519 signature, hex) and "signer" (key id) are
+#     restored, so a saved-then-loaded store re-verifies. A store
+#     written before 3.13.0 has neither field: its artifacts load
+#     unsigned and therefore FAIL verification under a policy with
+#     allow_unsigned = 0 (fail closed).
 #
 # `_rj_parse_string` is reused from policy.cyr — same compilation
 # unit, handles the same escape set (\" \\ \n \r \t \b \f \u00XX)
@@ -951,11 +1012,13 @@ fn sv_diff_trust_store(sv, old_snap): i64 {
 
 # Loads the JSON array at `path` (sv_save_trust_store's format; see the block above) into
 # the trust store, adding or replacing entries by hash with the saved trust level as-is,
-# SystemCore included. Reads at most the first 64 KiB. Returns the number of artifacts
-# loaded (0 on IO failure or an empty file).
+# SystemCore included, plus the saved signature and signer when present. Incomplete or
+# malformed records are skipped. Returns the number of artifacts loaded (0 on IO failure
+# or an empty file).
 fn sv_load_trust_store(sv, path): i64 {
-    var buf = alloc(65536);
-    var n = file_read_all(path, buf, 65536);
+    var n = 0;
+    var buf = file_read_whole(path, &n);
+    if (buf == 0) { return 0; }
     if (n <= 0) { return 0; }
     var store = load64(sv + 32);
 
@@ -975,10 +1038,13 @@ fn sv_load_trust_store(sv, path): i64 {
         var apath = 0;
         var atype = ARTIFACT_AGENT_BINARY;   # default; overwritten when the JSON object provides "type"
         var trust = TRUST_UNVERIFIED;
+        var sighex = 0;
+        var signer = 0;
+        var closed = 0;
 
         while (pos < n) {
             var c = load8(buf + pos) & 0xFF;
-            if (c == 125) { pos = pos + 1; break; }
+            if (c == 125) { pos = pos + 1; closed = 1; break; }
             if (c != 34) { pos = pos + 1; }
             else {
                 pos = _rj_parse_string(buf, pos, n);
@@ -1003,6 +1069,8 @@ fn sv_load_trust_store(sv, path): i64 {
                     var v = _rj_out_ptr;
                     if (streq(k, "hash") == 1) { hash = v; }
                     elif (streq(k, "path") == 1) { apath = v; }
+                    elif (streq(k, "sig") == 1) { sighex = v; }
+                    elif (streq(k, "signer") == 1) { signer = v; }
                 } else {
                     var vs = pos;
                     while (pos < n) {
@@ -1026,9 +1094,28 @@ fn sv_load_trust_store(sv, path): i64 {
             }
         }
 
-        if (hash != 0) {
+        # Install only a complete record: closed, with a hash AND a path, and a well-formed
+        # signature when one is given.
+        var ok = closed;
+        if (hash == 0) { ok = 0; }
+        elif (strlen(hash) == 0) { ok = 0; }
+        if (apath == 0) { ok = 0; }
+        elif (strlen(apath) == 0) { ok = 0; }
+        var sig = 0;
+        if (ok == 1) {
+            if (sighex != 0) {
+                if (strlen(sighex) != 128) { ok = 0; }
+                else {
+                    sig = alloc(64);
+                    if (hex_decode_into(sighex, 128, sig) == 0) { ok = 0; }
+                }
+            }
+        }
+        if (ok == 1) {
             var art = trusted_artifact_new(apath, atype, hash);
             artifact_set_trust_level(art, trust);
+            if (sig != 0) { artifact_set_signature(art, sig); }
+            if (signer != 0) { artifact_set_signer(art, signer); }
             map_set(store, hash, art);
             loaded = loaded + 1;
         }
@@ -1048,7 +1135,8 @@ fn sv_load_trust_store(sv, path): i64 {
 }
 
 # Writes the trust store to `path` as a JSON array of {hash, path, type, trust} objects,
-# creating or truncating the file (mode 0644); signatures and signers are not saved.
+# plus "sig" (the 64-byte signature as 128 lowercase hex chars) and "signer" for a signed
+# artifact, creating or truncating the file (mode 0644). A NULL path is written as "".
 # Returns SIGIL_ERR_NONE, or SIGIL_ERR_IO if the file cannot be opened (the individual
 # write results are not checked).
 fn sv_save_trust_store(sv, path): i64 {
@@ -1062,6 +1150,7 @@ fn sv_save_trust_store(sv, path): i64 {
     file_write(fd, "[", 1);
     var i = 0;
     var nbuf[24];
+    var hx[128];
     while (i < klen) {
         var chash = vec_get(keys, i);
         var art = map_get(store, chash);
@@ -1070,7 +1159,7 @@ fn sv_save_trust_store(sv, path): i64 {
         json_write_escaped(fd, chash, strlen(chash));
         file_write(fd, "\",\"path\":\"", 10);
         var ap = artifact_path(art);
-        json_write_escaped(fd, ap, strlen(ap));
+        if (ap != 0) { json_write_escaped(fd, ap, strlen(ap)); }
         file_write(fd, "\",\"type\":", 9);
         # fmt_int prints to stdout — use fmt_int_buf for file output.
         memset(&nbuf, 0, 24);
@@ -1080,6 +1169,26 @@ fn sv_save_trust_store(sv, path): i64 {
         memset(&nbuf, 0, 24);
         nlen = fmt_int_buf(artifact_trust_level(art), &nbuf);
         file_write(fd, &nbuf, nlen);
+        # 3.13.0 (M8): persist the signature and signer so a reloaded store re-verifies.
+        var sig = artifact_signature(art);
+        if (sig != 0) {
+            var hi = 0;
+            while (hi < 64) {
+                var b = load8(sig + hi) & 0xFF;
+                store8(&hx + hi * 2, load8("0123456789abcdef" + (b >> 4)));
+                store8(&hx + hi * 2 + 1, load8("0123456789abcdef" + (b & 15)));
+                hi = hi + 1;
+            }
+            file_write(fd, ",\"sig\":\"", 8);
+            file_write(fd, &hx, 128);
+            file_write(fd, "\"", 1);
+        }
+        var signer = artifact_signer_key_id(art);
+        if (signer != 0) {
+            file_write(fd, ",\"signer\":\"", 11);
+            json_write_escaped(fd, signer, strlen(signer));
+            file_write(fd, "\"", 1);
+        }
         file_write(fd, "}", 1);
         i = i + 1;
     }
@@ -1312,41 +1421,125 @@ fn sv_verify_batch(sv, artifacts, count): i64 {
 # Boot chain verification
 # ================================================================
 
-# Checks boot-component integrity: for each path in `components` (a vec of C-strings), every
-# trust-store artifact with exactly that path becomes an expected-hash measurement, the
-# verifier's integrity policy is replaced by them, and iv_verify_all re-hashes each file.
-# Returns that IntegrityReport, or a fresh empty one when the policy's verify_on_boot is off.
-# Hash integrity only: trust levels, signatures and revocations are not consulted, and a
-# component with no trust-store entry adds no measurement (so it is not reported at all).
-fn sv_verify_boot_chain(sv, components): i64 {
-    var policy = load64(sv + 8);
-    if (policy_verify_on_boot(policy) == 0) {
-        return integrity_report_new();
-    }
+# 3.13.0 (M2): one boot component through the full check chain. Returns the
+# MeasurementStatus: VERIFIED, FILE_NOT_FOUND (unreadable), MISMATCH (content not trusted
+# for this path), or ERROR (no trust-store entry for the path, or a trust check failed).
+# `*expected_out` receives the hash to report (the matched entry's, else the first entry
+# registered for `path`, else ""). `s` is a VerifyScratch the caller owns.
+fn _sv_boot_component(sv, path, s, expected_out): i64 {
+    store64(expected_out, "");
+    if (path == 0) { return MSTATUS_ERROR; }
+    var store = load64(sv + 32);
 
-    var iv = load64(sv + 24);
-    var ipol = integrity_policy_new();
+    # Current content hash of the component, into the scratch hex slot.
+    if (hash_file_into(path, s + _VSC_HASH, s + _VSC_SHA_CTX) == 0) {
+        store64(expected_out, _sv_first_hash_for_path(store, path));
+        return MSTATUS_FILE_NOT_FOUND;
+    }
+    var stored = map_get(store, s + _VSC_HASH);
+    var path_ok = 0;
+    if (stored != 0) {
+        var sp = artifact_path(stored);
+        if (sp != 0) { path_ok = streq(sp, path); }
+    }
+    if (path_ok == 0) {
+        # Not the content of any trust-store version of THIS path (unknown content, or
+        # content registered under a different path — a substitution).
+        var first = _sv_first_hash_for_path(store, path);
+        store64(expected_out, first);
+        if (strlen(first) == 0) { return MSTATUS_ERROR; }   # component unknown
+        return MSTATUS_MISMATCH;
+    }
+    var shash = artifact_content_hash(stored);
+    store64(expected_out, shash);
+    # A stored Revoked entry fails outright: sv_verify_artifact_into lets a valid signature
+    # lift the working level to Verified, so its result alone would not catch this.
+    if (artifact_trust_level(stored) == TRUST_REVOKED) { return MSTATUS_ERROR; }
+
+    # Same check chain as sv_verify_artifact, with the stored entry's artifact type.
+    var vr = sv_verify_artifact_into(sv, path, artifact_type(stored), s);
+    var a = vresult_artifact(vr);
+    # The file was re-read: it must still be the matched version.
+    if (streq(artifact_content_hash(a), shash) == 0) { return MSTATUS_MISMATCH; }
+    if (vresult_passed(vr) == 0) { return MSTATUS_ERROR; }
+    if (artifact_trust_level(a) == TRUST_REVOKED) { return MSTATUS_ERROR; }
+    # Every check must pass. The one exception is the signature check of an artifact
+    # that carries no signature at all, when the policy allows unsigned artifacts.
+    var allow_unsigned = policy_allow_unsigned(load64(sv + 8));
+    var sig_state = load64(s + _VSC_SIG_STATE);
+    var checks = vresult_checks(vr);
+    var clen = vec_len(checks);
+    var ci = 0;
+    while (ci < clen) {
+        var tc = vec_get(checks, ci);
+        if (check_passed(tc) != 1) {
+            var tolerated = 0;
+            if (streq(check_name(tc), "signature") == 1) {
+                if (sig_state == 0) {
+                    if (allow_unsigned == 1) { tolerated = 1; }
+                }
+            }
+            if (tolerated == 0) { return MSTATUS_ERROR; }
+        }
+        ci = ci + 1;
+    }
+    return MSTATUS_VERIFIED;
+}
+
+# Content hash of the first trust-store entry (map_keys order) whose path is `path`, or "".
+fn _sv_first_hash_for_path(store, path): i64 {
+    var keys = map_keys(store);
+    var klen = vec_len(keys);
+    var j = 0;
+    while (j < klen) {
+        var chash = vec_get(keys, j);
+        var ap = artifact_path(map_get(store, chash));
+        if (ap != 0) {
+            if (streq(ap, path) == 1) { return chash; }
+        }
+        j = j + 1;
+    }
+    return "";
+}
+
+# Verifies each boot component in `components` (a vec of path C-strings) and returns a new
+# IntegrityReport: total = component count, verified = components that passed, mismatches =
+# MSTATUS_MISMATCH (file content is not a trusted version of that path), errors =
+# MSTATUS_FILE_NOT_FOUND (unreadable) or MSTATUS_ERROR (no trust-store entry for the path,
+# or a trust check failed). Fails closed: an unknown component is an error, never skipped.
+# A component passes only if its current content hash is a trust-store entry registered
+# for that exact path AND that entry passes the sv_verify_artifact check chain (signature,
+# revocation list, stored level not Revoked, key pin, allowed type, policy) with every check
+# passing — a missing signature is tolerated only when the policy allows unsigned artifacts.
+# Several entries for one path (old + new versions) are resolved by content: the entry whose
+# hash equals the file's is used and the others are ignored; retire an old version by
+# revoking it. The verifier's integrity verifier (policy and last report) is not touched.
+# Returns an empty report when the policy's verify_on_boot is off.
+fn sv_verify_boot_chain(sv, components): i64 {
+    var report = integrity_report_new();
+    var policy = load64(sv + 8);
+    if (policy_verify_on_boot(policy) == 0) { return report; }
 
     var clen = vec_len(components);
+    store64(report, clen);
+    var verified = 0;
+    var s = verify_scratch_new();
+    var expected = 0;
     var i = 0;
     while (i < clen) {
         var path = vec_get(components, i);
-        var store = load64(sv + 32);
-        # Look for artifact by path in trust store
-        var keys = map_keys(store);
-        var klen = vec_len(keys);
-        var j = 0;
-        while (j < klen) {
-            var chash = vec_get(keys, j);
-            var artifact = map_get(store, chash);
-            if (streq(artifact_path(artifact), path) == 1) {
-                ipolicy_add(ipol, path, chash);
-            }
-            j = j + 1;
+        var st = _sv_boot_component(sv, path, s, &expected);
+        if (st == MSTATUS_VERIFIED) {
+            verified = verified + 1;
+        } else {
+            var rm = measurement_new(path, expected);
+            store64(rm + 16, st);
+            if (st == MSTATUS_MISMATCH) { vec_push(load64(report + 16), rm); }
+            else { vec_push(load64(report + 24), rm); }
         }
         i = i + 1;
     }
-
-    iv_set_policy(iv, ipol);
-    return iv_verify_all(iv);
+    fl_free(s);
+    store64(report + 8, verified);
+    return report;
 }

@@ -181,6 +181,14 @@ fn alog_clear(log): i64 {
 # crl_save / sv_save_trust_store vocabulary. Still O_APPEND under
 # the hood — the name reflects the contract (persist to disk),
 # not the write mode.
+#
+# 3.13.0 (H3): every string field (path / key_id / content_hash) is JSON-escaped with the
+# trust.cyr json_write_escaped set (`"`, `\`, control bytes; \u00XX for those without a
+# short form), which alog_load's _rj_parse_string decodes back byte-for-byte, so a crafted
+# path can no longer inject a forged event line. Each line is built in a per-event fl_alloc
+# buffer sized from the escaped field lengths (was a fixed alloc(512) that a long field
+# overflowed, and that leaked 512 B per event) and still goes out in ONE write, so two
+# O_APPEND writers cannot interleave inside a line. Ordinary fields serialize unchanged.
 fn alog_save(log, path): i64 {
     # 3.13.0: named per-target flags, not the x86_64-Linux literal 1089. On Darwin 1089 is
     # O_WRONLY|O_ASYNC|O_TRUNC — no O_CREAT and no O_APPEND — so every save TRUNCATED the
@@ -192,26 +200,34 @@ fn alog_save(log, path): i64 {
     var i = 0;
     while (i < elen) {
         var e = vec_get(events, i);
+        var tname = audit_event_name(ae_type(e));
+        # Upper bound: the fixed keys and punctuation (80 B), a <= 20-digit timestamp, the
+        # type name, and each string field at its escaped length.
+        var cap = 128 + strlen(tname);
+        if (ae_path(e) != 0) { cap = cap + _alog_esc_len(ae_path(e)); }
+        if (ae_key_id(e) != 0) { cap = cap + _alog_esc_len(ae_key_id(e)); }
+        if (ae_content_hash(e) != 0) { cap = cap + _alog_esc_len(ae_content_hash(e)); }
+        var line = fl_alloc(cap);
+        if (line == 0) { file_close(fd); return SIGIL_ERR_IO; }
         # Simple JSON line: {"type":"...","timestamp":...}
-        var line = alloc(512);
         var pos = 0;
         pos = pos + _alog_write_str(line + pos, "{\"type\":\"");
-        pos = pos + _alog_write_str(line + pos, audit_event_name(ae_type(e)));
+        pos = pos + _alog_write_str(line + pos, tname);
         pos = pos + _alog_write_str(line + pos, "\",\"timestamp\":");
         pos = pos + _alog_write_int(line + pos, ae_timestamp(e));
         if (ae_path(e) != 0) {
             pos = pos + _alog_write_str(line + pos, ",\"path\":\"");
-            pos = pos + _alog_write_str(line + pos, ae_path(e));
+            pos = pos + _alog_write_esc(line + pos, ae_path(e));
             pos = pos + _alog_write_str(line + pos, "\"");
         }
         if (ae_key_id(e) != 0) {
             pos = pos + _alog_write_str(line + pos, ",\"key_id\":\"");
-            pos = pos + _alog_write_str(line + pos, ae_key_id(e));
+            pos = pos + _alog_write_esc(line + pos, ae_key_id(e));
             pos = pos + _alog_write_str(line + pos, "\"");
         }
         if (ae_content_hash(e) != 0) {
             pos = pos + _alog_write_str(line + pos, ",\"content_hash\":\"");
-            pos = pos + _alog_write_str(line + pos, ae_content_hash(e));
+            pos = pos + _alog_write_esc(line + pos, ae_content_hash(e));
             pos = pos + _alog_write_str(line + pos, "\"");
         }
         if (ae_passed(e) != (0 - 1)) {
@@ -220,8 +236,8 @@ fn alog_save(log, path): i64 {
             else { pos = pos + _alog_write_str(line + pos, "false"); }
         }
         pos = pos + _alog_write_str(line + pos, "}\n");
-        store8(line + pos, 0);
         file_write(fd, line, pos);
+        fl_free(line);
         i = i + 1;
     }
     file_close(fd);
@@ -232,6 +248,68 @@ fn _alog_write_str(dst, src): i64 {
     var len = strlen(src);
     memcpy(dst, src, len);
     return len;
+}
+
+# The short escape letter for byte `c` inside a JSON string ('"', '\\', b t n f r), 0 if
+# `c` has none. Same set and spelling as trust.cyr json_write_escaped.
+fn _alog_esc_short(c): i64 {
+    if (c == 34) { return 34; }
+    if (c == 92) { return 92; }
+    if (c == 8) { return 98; }
+    if (c == 9) { return 116; }
+    if (c == 10) { return 110; }
+    if (c == 12) { return 102; }
+    if (c == 13) { return 114; }
+    return 0;
+}
+
+# Byte length of C-string `s` once JSON-escaped by _alog_write_esc: 2 for a short escape,
+# 6 for any other control byte (\u00xx), 1 otherwise.
+fn _alog_esc_len(s): i64 {
+    var n = 0;
+    var i = 0;
+    var c = load8(s) & 0xFF;
+    while (c != 0) {
+        if (_alog_esc_short(c) != 0) { n = n + 2; }
+        elif (c < 32) { n = n + 6; }
+        else { n = n + 1; }
+        i = i + 1;
+        c = load8(s + i) & 0xFF;
+    }
+    return n;
+}
+
+# Writes C-string `s` JSON-escaped to `dst` (no quotes, no NUL): `"` `\` and the control
+# bytes b t n f r as two-byte escapes, every other byte < 0x20 as \u00xx, all bytes >= 0x20
+# (UTF-8 included) verbatim. Returns the byte count, which equals _alog_esc_len(s).
+fn _alog_write_esc(dst, s): i64 {
+    var w = 0;
+    var i = 0;
+    var c = load8(s) & 0xFF;
+    while (c != 0) {
+        var sc = _alog_esc_short(c);
+        if (sc != 0) {
+            store8(dst + w, 92);
+            store8(dst + w + 1, sc);
+            w = w + 2;
+        } elif (c < 32) {
+            store8(dst + w, 92);
+            store8(dst + w + 1, 117);   # u
+            store8(dst + w + 2, 48);
+            store8(dst + w + 3, 48);
+            store8(dst + w + 4, 48 + ((c >> 4) & 0xF));   # high nibble is 0 or 1
+            var lo = c & 0xF;
+            if (lo < 10) { store8(dst + w + 5, 48 + lo); }
+            else { store8(dst + w + 5, 87 + lo); }
+            w = w + 6;
+        } else {
+            store8(dst + w, c);
+            w = w + 1;
+        }
+        i = i + 1;
+        c = load8(s + i) & 0xFF;
+    }
+    return w;
 }
 
 # ================================================================
@@ -336,13 +414,53 @@ fn _alog_parse_one_line(log, line, llen): i64 {
     return 1;
 }
 
+# 1 if bytes 0 through `llen`-1 of `line` hold one complete JSON object: after optional
+# leading space / tab / CR the first byte is '{', every string literal is closed (a
+# backslash escapes the next byte), and the last byte outside a string, ignoring trailing
+# space / tab / CR, is '}'. 0 otherwise, e.g. a line torn by a crash mid-append.
+fn _alog_line_complete(line, llen): i64 {
+    var i = 0;
+    while (i < llen) {
+        var lc = load8(line + i) & 0xFF;
+        if (lc == 32) { i = i + 1; }
+        elif (lc == 9) { i = i + 1; }
+        elif (lc == 13) { i = i + 1; }
+        else { break; }
+    }
+    if (i >= llen) { return 0; }
+    if ((load8(line + i) & 0xFF) != 123) { return 0; }   # {
+    var in_str = 0;
+    var last = 0;
+    while (i < llen) {
+        var c = load8(line + i) & 0xFF;
+        if (in_str == 1) {
+            if (c == 92) {
+                if (i + 1 >= llen) { return 0; }   # escape runs off the end
+                i = i + 2;
+            } else {
+                if (c == 34) { in_str = 0; last = 34; }
+                i = i + 1;
+            }
+        } else {
+            if (c == 34) { in_str = 1; }
+            if (c != 32) { if (c != 9) { if (c != 13) { last = c; } } }
+            i = i + 1;
+        }
+    }
+    if (in_str == 1) { return 0; }
+    if (last != 125) { return 0; }   # }
+    return 1;
+}
+
 # Appends the events in the JSONL journal at `path` to `log` (format notes in the alog_load
-# block above). Reads at most the first 64 KiB of the file. Returns the number of events
-# appended, or -1 if the file cannot be opened or read.
+# block above). Reads the WHOLE file (3.13.0, H6: was silently capped at the first 64 KiB).
+# A line that is not one complete JSON object (a torn final append, an unterminated string)
+# is skipped rather than loaded as a partial event. Returns the number of events appended,
+# or -1 if the file cannot be opened or read.
 fn alog_load(log, path): i64 {
-    var buf = alloc(65536);
-    var n = file_read_all(path, buf, 65536);
-    if (n < 0) { return (0 - 1); }
+    var n = 0;
+    var buf = file_read_whole(path, &n);
+    if (buf == 0) { return (0 - 1); }
     var loaded = 0;
     var pos = 0;
     while (pos < n) {
@@ -352,7 +470,7 @@ fn alog_load(log, path): i64 {
             pos = pos + 1;
         }
         var llen = pos - start;
-        if (llen > 0) {
+        if (_alog_line_complete(buf + start, llen) == 1) {
             if (_alog_parse_one_line(log, buf + start, llen) == 1) {
                 loaded = loaded + 1;
             }

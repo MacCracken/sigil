@@ -1,0 +1,319 @@
+# ed25519_strict.tcyr — RFC 8032 strict point decoding (§5.1.3) and the
+# signing-side public-key consistency check (the "double public key" oracle).
+#
+# Decoding (M3): ge_from_bytes must FAIL (return -1, point zeroed) for
+#   - a non-canonical y (y >= p, i.e. y in [p, 2^255 - 1]),
+#   - a y for which x^2 = (y^2 - 1)/(d y^2 + 1) has no square root,
+#   - x == 0 with the sign bit set,
+# and ed25519_verify must return 0 (invalid) whenever A fails to decode.
+# The forged signatures below are R = enc(B), S = 1: they verify iff
+# [h]A == identity, which is what the pre-fix decoder produced for the
+# non-canonical / sign-bit-set encodings of the identity and of the small-
+# order points (0, -1) and (sqrt(-1), 0). Vectors computed offline with the
+# RFC 8032 §6 Python reference, extended with the §5.1.3 failure checks.
+#
+# Signing (M4): ed25519_sign must re-derive A = [a]B from the seed, compare
+# it with sk[32..64] in constant time, and on mismatch zero sig_out and
+# return -1. Hashing an unchecked public half lets two signatures of one
+# message under one seed with different public halves share R and give
+# S1 - S2 = (h1 - h2) * a mod L, which recovers the secret scalar a.
+
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fmt.cyr"
+include "lib/bayan.cyr"
+include "lib/sakshi.cyr"
+include "lib/chrono.cyr"
+
+include "lib/thread_local.cyr"
+include "src/crypto_scratch.cyr"
+include "src/mul64.cyr"
+include "src/types.cyr"
+include "src/error.cyr"
+include "lib/random.cyr"
+include "src/random.cyr"
+include "src/sha256.cyr"
+include "src/hex.cyr"
+include "lib/ct.cyr"
+include "src/sha512.cyr"
+include "src/bigint_ext.cyr"
+include "src/ed25519.cyr"
+
+# 1 iff every one of the n bytes at buf is `v`.
+fn _all_bytes(buf, n, v): i64 {
+    var i = 0;
+    while (i < n) {
+        if ((load8(buf + i) & 0xFF) != v) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# 64-byte signature from the 64-char hex encodings of R and S.
+fn _sig_from(r_hex, s_hex): i64 {
+    var out = alloc(64);
+    memcpy(out, hex_decode(r_hex, 64), 32);
+    memcpy(out + 32, hex_decode(s_hex, 64), 32);
+    return out;
+}
+
+# Assert the 64-byte `sig` equals R || S given as 64-char hex halves.
+fn _check_sig(sig, r_hex, s_hex, name): i64 {
+    assert_streq(hex_encode(sig, 32), r_hex, name);
+    assert_streq(hex_encode(sig + 32, 32), s_hex, name);
+    return 0;
+}
+
+# Decode the 64-char hex encoding `h`, then assert ge_from_bytes accepts it
+# and ge_to_bytes re-encodes it byte-for-byte (canonical round trip).
+fn _check_roundtrip(h, name): i64 {
+    var enc = hex_decode(h, 64);
+    var pt = alloc(128);
+    var out = alloc(32);
+    assert_eq(ge_from_bytes(pt, enc), 0, name);
+    ge_to_bytes(out, pt);
+    assert_streq(hex_encode(out, 32), h, name);
+    return 0;
+}
+
+# Assert ge_from_bytes rejects the 64-char hex encoding `h`: returns -1 and
+# leaves the output point zeroed (pre-filled with 0xAA to prove the wipe).
+fn _check_reject(h, name): i64 {
+    var enc = hex_decode(h, 64);
+    var pt = alloc(128);
+    memset(pt, 0xAA, 128);
+    assert_eq(ge_from_bytes(pt, enc), 0 - 1, name);
+    assert_eq(_all_bytes(pt, 128, 0), 1, name);
+    return 0;
+}
+
+# Assert ed25519_verify rejects the all-zero signature `zsig` (R = 00..00,
+# S = 0) under the malformed public key given as the 64-char hex `h`, for
+# two different messages.
+fn _check_zero_sig(h, zsig, name): i64 {
+    var pk = hex_decode(h, 64);
+    assert_eq(ed25519_verify(pk, "", 0, zsig), 0, name);
+    assert_eq(ed25519_verify(pk, "forge0", 6, zsig), 0, name);
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    ed25519_init();
+
+    # RFC 8032 §7.1 TEST 1 / TEST 2 keys and signatures.
+    var seed1_hex = "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60";
+    var pk1_hex   = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a";
+    var sig1_r    = "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e06522490155";
+    var sig1_s    = "5fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b";
+    var seed2_hex = "4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb";
+    var pk2_hex   = "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c";
+    var sig2_r    = "92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69da";
+    var sig2_s    = "085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00";
+
+    # Point encodings (little-endian y, x sign in bit 255).
+    var enc_b      = "5866666666666666666666666666666666666666666666666666666666666666";
+    var enc_id     = "0100000000000000000000000000000000000000000000000000000000000000";
+    var enc_id_s1  = "0100000000000000000000000000000000000000000000000000000000000080";
+    var enc_pm1    = "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f";
+    var enc_pm1_s1 = "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+    var enc_y0     = "0000000000000000000000000000000000000000000000000000000000000000";
+    var enc_y0_s1  = "0000000000000000000000000000000000000000000000000000000000000080";
+    var enc_p      = "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f";
+    var enc_p_s1   = "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+    var enc_pp1    = "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f";
+    var enc_2e255  = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f";
+    var enc_ones   = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+    var enc_y2     = "0200000000000000000000000000000000000000000000000000000000000000";
+    var enc_y2_s1  = "0200000000000000000000000000000000000000000000000000000000000080";
+    var enc_y7     = "0700000000000000000000000000000000000000000000000000000000000000";
+    var enc_y17    = "1100000000000000000000000000000000000000000000000000000000000000";
+    var s_one      = "0100000000000000000000000000000000000000000000000000000000000000";
+
+    # ============================================================
+    # RFC 8032 vectors still pass (sign rc = 0 on a consistent key)
+    # ============================================================
+    test_group("rfc8032 vectors");
+    var seed1 = hex_decode(seed1_hex, 64);
+    var sk1 = alloc(64);
+    var pk1 = alloc(32);
+    ed25519_keypair(seed1, sk1, pk1);
+    assert_streq(hex_encode(pk1, 32), pk1_hex, "TEST 1 pk");
+    var sig1 = alloc(64);
+    assert_eq(ed25519_sign(sk1, "", 0, sig1), 0, "TEST 1 sign rc = 0");
+    _check_sig(sig1, sig1_r, sig1_s, "TEST 1 sig");
+    assert_eq(ed25519_verify(pk1, "", 0, sig1), 1, "TEST 1 verify");
+
+    var seed2 = hex_decode(seed2_hex, 64);
+    var sk2 = alloc(64);
+    var pk2 = alloc(32);
+    ed25519_keypair(seed2, sk2, pk2);
+    assert_streq(hex_encode(pk2, 32), pk2_hex, "TEST 2 pk");
+    var msg2 = hex_decode("72", 2);
+    var sig2 = alloc(64);
+    assert_eq(ed25519_sign(sk2, msg2, 1, sig2), 0, "TEST 2 sign rc = 0");
+    _check_sig(sig2, sig2_r, sig2_s, "TEST 2 sig");
+    assert_eq(ed25519_verify(pk2, msg2, 1, sig2), 1, "TEST 2 verify");
+
+    # ============================================================
+    # ge_from_bytes: canonical encodings decode and round-trip.
+    # pk1 takes the x*sqrt(-1) branch, pk2 and B the direct branch;
+    # y = 1 and y = p - 1 give x = 0 (sign bit clear, so valid);
+    # y = 0 gives x = +-sqrt(-1) (either sign bit is valid).
+    # ============================================================
+    test_group("ge_from_bytes canonical");
+    _check_roundtrip(pk1_hex, "pk1 (sqrt(-1) branch)");
+    _check_roundtrip(pk2_hex, "pk2 (direct branch)");
+    _check_roundtrip(enc_b, "base point B");
+    _check_roundtrip(enc_id, "identity y = 1");
+    _check_roundtrip(enc_pm1, "y = p - 1, x = 0");
+    _check_roundtrip(enc_y0, "y = 0, sign 0");
+    _check_roundtrip(enc_y0_s1, "y = 0, sign 1");
+
+    # ============================================================
+    # ge_from_bytes: non-canonical y (y >= p) must fail
+    # ============================================================
+    test_group("ge_from_bytes non-canonical y");
+    _check_reject(enc_p, "y = p");
+    _check_reject(enc_pp1, "y = p + 1");
+    _check_reject(enc_2e255, "y = 2^255 - 1");
+    _check_reject(enc_p_s1, "y = p, sign 1");
+    _check_reject(enc_ones, "all-ones");
+
+    # ============================================================
+    # ge_from_bytes: y with no square root for x must fail
+    # (u/v is a quadratic non-residue for y = 2, 7, 17)
+    # ============================================================
+    test_group("ge_from_bytes non-square");
+    _check_reject(enc_y2, "y = 2");
+    _check_reject(enc_y2_s1, "y = 2, sign 1");
+    _check_reject(enc_y7, "y = 7");
+    _check_reject(enc_y17, "y = 17");
+
+    # ============================================================
+    # ge_from_bytes: x == 0 with the sign bit set must fail
+    # ============================================================
+    test_group("ge_from_bytes x=0 sign bit");
+    _check_reject(enc_id_s1, "y = 1, sign 1");
+    _check_reject(enc_pm1_s1, "y = p - 1, sign 1");
+
+    # ============================================================
+    # ed25519_verify: forgery R = enc(B), S = 1 under a malformed A.
+    # The first four verified under the pre-fix decoder ([h]A == identity).
+    # ============================================================
+    test_group("verify rejects malformed A");
+    var forge = _sig_from(enc_b, s_one);
+    var pk_bad = hex_decode(enc_id_s1, 64);
+    assert_eq(ed25519_verify(pk_bad, "forge0", 6, forge), 0, "A = identity, sign bit set");
+    pk_bad = hex_decode(enc_pp1, 64);
+    assert_eq(ed25519_verify(pk_bad, "forge0", 6, forge), 0, "A = identity, y = p + 1");
+    # (sqrt(-1), 0) has order 4; h = H(R || A || "forge0") = 0 mod 4.
+    pk_bad = hex_decode(enc_p, 64);
+    assert_eq(ed25519_verify(pk_bad, "forge0", 6, forge), 0, "A = order-4, y = p");
+    # (0, -1) has order 2; h = H(R || A || "forge0") is even.
+    pk_bad = hex_decode(enc_pm1_s1, 64);
+    assert_eq(ed25519_verify(pk_bad, "forge0", 6, forge), 0, "A = order-2, sign bit set");
+    # Characterization only: these two already returned 0 before the fix
+    # (y = 2 decoded to an off-curve point, and TEST 1's genuine signature
+    # never verifies under another key). The non-square check is guarded
+    # by the decoder groups above and the zero-signature group below.
+    pk_bad = hex_decode(enc_y2, 64);
+    assert_eq(ed25519_verify(pk_bad, "forge0", 6, forge), 0, "A = non-square y");
+    # All-ones: y = 2^255 - 1 >= p with the sign bit set.
+    pk_bad = hex_decode(enc_ones, 64);
+    assert_eq(ed25519_verify(pk_bad, "", 0, sig1), 0, "A = all-ones");
+
+    # ============================================================
+    # ed25519_verify: the all-zero signature R = 00..00, S = 0 under
+    # every malformed A. A failed decode leaves A zeroed (Z = 0); a
+    # Z = 0 point absorbs every ge_add, so [S]B - [h]A would encode as
+    # 00..00 and a verify that ignored ge_from_bytes's -1 would accept
+    # this signature for any message and any undecodable key. This
+    # guards the rc check in ed25519_verify itself. (Pre-fix, y = p
+    # also accepted it: the old decoder aliased y = p to y = 0.)
+    # ============================================================
+    test_group("verify checks the A decode result");
+    var zsig = alloc(64);
+    memset(zsig, 0, 64);
+    _check_zero_sig(enc_p, zsig, "zero sig, A: y = p");
+    _check_zero_sig(enc_pp1, zsig, "zero sig, A: y = p + 1");
+    _check_zero_sig(enc_2e255, zsig, "zero sig, A: y = 2^255 - 1");
+    _check_zero_sig(enc_p_s1, zsig, "zero sig, A: y = p, sign 1");
+    _check_zero_sig(enc_ones, zsig, "zero sig, A: all-ones");
+    _check_zero_sig(enc_y2, zsig, "zero sig, A: y = 2");
+    _check_zero_sig(enc_y2_s1, zsig, "zero sig, A: y = 2, sign 1");
+    _check_zero_sig(enc_y7, zsig, "zero sig, A: y = 7");
+    _check_zero_sig(enc_y17, zsig, "zero sig, A: y = 17");
+    _check_zero_sig(enc_id_s1, zsig, "zero sig, A: y = 1, sign 1");
+    _check_zero_sig(enc_pm1_s1, zsig, "zero sig, A: y = p - 1, sign 1");
+    # Control: a valid key does not accept the zero signature either.
+    assert_eq(ed25519_verify(pk1, "forge0", 6, zsig), 0, "zero sig, A: TEST 1 pk");
+
+    # ============================================================
+    # ed25519_verify: R is compared by canonical encoding, so a
+    # non-canonical R (RFC 8032 §5.1.7 decode failure) never verifies.
+    # All three signatures are S = h * a mod L under TEST 1's key, so
+    # [S]B - [h]A = identity; only the canonical R = identity is valid.
+    # Characterization only: R is not decoded and this path is unchanged
+    # by the fix, so all three already held before it.
+    # ============================================================
+    test_group("verify rejects malformed R");
+    var sig_r = _sig_from(enc_id,
+        "6d722a1d3898e328205c46314ac88395fa59dc000fc705268287642e4b8e4909");
+    assert_eq(ed25519_verify(pk1, "R canon", 7, sig_r), 1, "R = identity (canonical) valid");
+    sig_r = _sig_from(enc_id_s1,
+        "f6bf72798b61d4a44e5f541818ae0fdbacefb4c1023b107142b21de63207fa09");
+    assert_eq(ed25519_verify(pk1, "R canon", 7, sig_r), 0, "R = identity, sign bit set");
+    sig_r = _sig_from(enc_pp1,
+        "0a0d374aa791528b147965a15a65b769229b649dfb3b0451eadfca0643b4650d");
+    assert_eq(ed25519_verify(pk1, "R canon", 7, sig_r), 0, "R = identity, y = p + 1");
+
+    # ============================================================
+    # ed25519_sign: mismatched public half -> rc -1, no signature
+    # ============================================================
+    test_group("sign rejects mismatched pk half");
+    var sk_bad = alloc(64);
+    memcpy(sk_bad, seed1, 32);
+    memcpy(sk_bad + 32, pk2, 32);            # TEST 1 seed || TEST 2 pk
+    var sig_bad = alloc(64);
+    memset(sig_bad, 0xAA, 64);
+    assert_eq(ed25519_sign(sk_bad, "", 0, sig_bad), 0 - 1, "seed1 || pk2: rc = -1");
+    assert_eq(_all_bytes(sig_bad, 64, 0), 1, "seed1 || pk2: sig_out zeroed");
+
+    # The double-public-key oracle: same seed, same message, second
+    # public half. Pre-fix this emitted a second S sharing R with sig1.
+    memset(sig_bad, 0xAA, 64);
+    memcpy(sk_bad + 32, pk1, 32);
+    store8(sk_bad + 63, (load8(sk_bad + 63) & 0xFF) ^ 0x80);   # flip x sign bit
+    assert_eq(ed25519_sign(sk_bad, "", 0, sig_bad), 0 - 1, "pk sign-bit flip: rc = -1");
+    assert_eq(_all_bytes(sig_bad, 64, 0), 1, "pk sign-bit flip: sig_out zeroed");
+
+    memset(sig_bad, 0xAA, 64);
+    memcpy(sk_bad + 32, pk1, 32);
+    store8(sk_bad + 32, (load8(sk_bad + 32) & 0xFF) ^ 0x01);   # flip lowest y bit
+    assert_eq(ed25519_sign(sk_bad, "", 0, sig_bad), 0 - 1, "pk low-bit flip: rc = -1");
+    assert_eq(_all_bytes(sig_bad, 64, 0), 1, "pk low-bit flip: sig_out zeroed");
+
+    memset(sig_bad, 0xAA, 64);
+    memset(sk_bad + 32, 0, 32);
+    assert_eq(ed25519_sign(sk_bad, "", 0, sig_bad), 0 - 1, "pk half all-zero: rc = -1");
+    assert_eq(_all_bytes(sig_bad, 64, 0), 1, "pk half all-zero: sig_out zeroed");
+
+    # A failed sign leaves no state behind: the consistent key still
+    # reproduces the RFC vector byte-for-byte afterwards.
+    test_group("sign after rejection");
+    var sig1b = alloc(64);
+    assert_eq(ed25519_sign(sk1, "", 0, sig1b), 0, "TEST 1 re-sign rc = 0");
+    _check_sig(sig1b, sig1_r, sig1_s, "TEST 1 re-sign matches RFC");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+sys_exit(exit_code);

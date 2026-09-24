@@ -350,11 +350,15 @@ fn ge_to_bytes(out, p): i64 {
 # curve constants.
 var _ed_decomp_exp = 0;
 
-# Decompress the 32-byte RFC 8032 encoding `s` into extended point `p` (Z = 1,
-# T = xy), recovering x from x^2 = (y^2-1)/(dy^2+1) and its sign from bit 255.
-# Always returns 0 — there is no decode-failure result: y >= p, a y with no
-# square root, or x = 0 with the sign bit set is not rejected. Variable-time
-# (branches on the decoded value). Calls ed25519_init().
+# Decode the 32-byte RFC 8032 encoding `s` into extended point `p` (Z = 1,
+# T = xy) per RFC 8032 §5.1.3: y is bits 0..254, x's low bit is bit 255, and x
+# comes from x^2 = (y^2-1)/(dy^2+1). Returns 0 on success, or -1 with `p`
+# zeroed (not a usable point) when y >= p (non-canonical), when neither
+# v*x^2 == u nor v*x^2 == -u (no square root), or when x == 0 with the sign
+# bit set. Callers MUST check the result: the zeroed point (Z = 0) absorbs
+# every ge_add and encodes as 00..00, so a verifier that used it anyway would
+# accept R = 00..00 with any S < L for any message. Variable-time (branches on
+# the decoded value): public inputs only. Calls ed25519_init().
 fn ge_from_bytes(p, s): i64 {
     ed25519_init();
 
@@ -363,6 +367,7 @@ fn ge_from_bytes(p, s): i64 {
     # worker decompresses into its own 32-byte lanes. One `cbank()`
     # read per call.  (32 * SIGIL_CRYPTO_BANKS each.)
     var bk = cbank();
+    var negu[2048];   var negub = &negu + bk * 32;
     var u[2048];      var ub = &u + bk * 32;
     var v[2048];      var vb = &v + bk * 32;
     var y2[2048];     var y2b = &y2 + bk * 32;
@@ -389,6 +394,14 @@ fn ge_from_bytes(p, s): i64 {
     # Load y as u256 from little-endian bytes
     u256_load_le(yb, s_copyb);
 
+    # RFC 8032 §5.1.3 step 1: y >= p is a decoding failure. Without this a
+    # non-canonical y in [p, 2^255 - 1] aliases y - p (e.g. y = p + 1 is a
+    # second encoding of the identity) and reaches the fp_* ops unreduced.
+    if (u256_cmp(yb, _ed_p) >= 0) {
+        memset(p, 0, 128);
+        return 0 - 1;
+    }
+
     # u = y^2 - 1
     fp_sq(y2b, yb);
     fp_sub(ub, y2b, oneb);
@@ -414,9 +427,25 @@ fn ge_from_bytes(p, s): i64 {
     fp_sq(vx2b, xb);
     fp_mul(checkb, vb, vx2b);
 
-    # If check != u, try x * sqrt(-1)
+    # RFC 8032 §5.1.3 step 3: v*x^2 == u -> x is a root; v*x^2 == -u ->
+    # x * sqrt(-1) is; anything else means u/v is a non-residue, i.e. no
+    # point on the curve has this y, and decoding fails.
     if (u256_eq(checkb, ub) == 0) {
+        fp_neg(negub, ub);
+        if (u256_eq(checkb, negub) == 0) {
+            memset(p, 0, 128);
+            return 0 - 1;
+        }
         fp_mul(xb, xb, _ed_sqrtm1);
+    }
+
+    # RFC 8032 §5.1.3 step 4: x == 0 with the sign bit set has no
+    # negation to select, so it is a decoding failure.
+    if (u256_is_zero(xb) == 1) {
+        if (x_sign == 1) {
+            memset(p, 0, 128);
+            return 0 - 1;
+        }
     }
 
     # Adjust sign
@@ -627,9 +656,13 @@ fn ed25519_keypair(seed, sk_out, pk_out): i64 {
 
 # Sign `msg_len` bytes at `msg` with the 64-byte secret key `sk` (seed || pk, as
 # written by ed25519_keypair); writes the 64-byte signature R || S (RFC 8032
-# §5.1.6, deterministic nonce) to `sig_out`. sk[32..64] is hashed into h as-is,
-# not re-derived from the seed, so it must be the seed's own public key. Zeroes
-# its expanded-key, nonce and scalar buffers before returning. Returns 0.
+# §5.1.6, deterministic nonce) to `sig_out`. The public key A = [a]B is
+# re-derived from the seed and compared in constant time with sk[32..64]; on a
+# mismatch no nonce is derived, `sig_out` is zeroed and -1 is returned (a
+# signature over an unchecked public half is the "double public key" oracle:
+# two such signatures of one message share R and yield a from S1 - S2). Zeroes
+# its expanded-key, nonce and scalar buffers before returning. Returns 0 on
+# success, -1 on a public-half mismatch.
 fn ed25519_sign(sk, msg, msg_len, sig_out): i64 {
     ed25519_init();
     # Per-worker banked scratch (3.9.6 — concurrent-TLS-handshake fix).
@@ -665,10 +698,29 @@ fn ed25519_sign(sk, msg, msg_len, sig_out): i64 {
     # + the `_into` variant (the same alloc-free pattern the batch-verify
     # workers use), reused for the two sequential hashes below.
     var sctx[13312];     var sctxb     = &sctx     + bk * 208;  # 208 * SIGIL_CRYPTO_BANKS
+    # Re-derived public key A = [a]B. The extended (projective) point is
+    # wiped after encoding — its Z coordinate is a function of the secret
+    # scalar a. The 32-byte encoding is the public key itself.
+    var A_point[8192];   var A_pointb  = &A_point  + bk * 128;  # 128 * SIGIL_CRYPTO_BANKS
+    var A_bytes[2048];   var A_bytesb  = &A_bytes  + bk * 32;   # 32 * SIGIL_CRYPTO_BANKS
 
     sha512(sk, 32, azb);
     store8(azb, load8(azb) & 0xF8);
     store8(azb + 31, (load8(azb + 31) & 0x7F) | 0x40);
+
+    # A = [a]B from the seed (RFC 8032 §5.1.5), compared with the stored
+    # public half in constant time. Only the match bit — which is public
+    # (it is the return value) — is branched on, and on a mismatch we exit
+    # before the nonce r is derived, so nothing seed-dependent is emitted.
+    ge_scalarmult_base(A_pointb, azb);
+    ge_to_bytes(A_bytesb, A_pointb);
+    memset(A_pointb, 0, 128);
+    var pk_ok = ct_eq_bytes(A_bytesb, sk + 32, 32);
+    if (pk_ok == 0) {
+        memset(sig_out, 0, 64);
+        memset(azb, 0, 64);
+        return 0 - 1;
+    }
 
     # r = SHA-512(az[32..64] || msg) mod L
     sha512_init_into(sctxb);
@@ -682,10 +734,11 @@ fn ed25519_sign(sk, msg, msg_len, sig_out): i64 {
     ge_scalarmult_base(R_pointb, r_scalarb);
     ge_to_bytes(sig_out, R_pointb);
 
-    # h = SHA-512(R || pk || msg) mod L  (reuse the banked ctx)
+    # h = SHA-512(R || A || msg) mod L  (reuse the banked ctx). A is the
+    # re-derived key, equal to sk[32..64] after the check above.
     sha512_init_into(sctxb);
     sha512_update(sctxb, sig_out, 32);
-    sha512_update(sctxb, sk + 32, 32);
+    sha512_update(sctxb, A_bytesb, 32);
     sha512_update(sctxb, msg, msg_len);
     sha512_finalize(sctxb, hramb);
 
@@ -713,6 +766,13 @@ fn ed25519_sign(sk, msg, msg_len, sig_out): i64 {
 # Ed25519 verify: pk (32b), msg, msg_len, sig (64b) -> 0/1
 # ================================================================
 
+# Verify the 64-byte signature `sig` = R || S over `msg_len` bytes at `msg`
+# against the 32-byte public key `pk` (RFC 8032 §5.1.7, cofactorless).
+# Returns 1 if valid, 0 otherwise — including when `pk` fails to decode
+# (ge_from_bytes, §5.1.3) or S >= L. R is not decoded: [S]B - [h]A is
+# re-encoded canonically and compared byte-for-byte with sig[0..32], so a
+# non-canonical or undecodable R never matches.
+#
 # 3.3: alloc-free on the hot path — no bump-allocator calls in the
 # verify body (the stdlib allocator is not thread-safe, quirk #7).
 # 3.6: every per-call buffer below is banked per thread. A `var X[N]`
@@ -734,7 +794,8 @@ fn ed25519_verify(pk, msg, msg_len, sig): i64 {
     var hA[8192];      var hAb = &hA + bk * 128;
     var R_check[8192]; var R_checkb = &R_check + bk * 128;
 
-    ge_from_bytes(Ab, pk);
+    # RFC 8032 §5.1.7: if A fails to decode the signature is invalid.
+    if (ge_from_bytes(Ab, pk) != 0) { return 0; }
 
     # h = SHA-512(R || pk || msg) mod L. Stack-allocated (banked)
     # SHA-512 context — sha512_init() would fl_alloc, which is not

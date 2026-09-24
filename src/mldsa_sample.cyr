@@ -14,75 +14,72 @@
 # directly so the absorb step runs once per seed/nonce and each
 # rejection-sampling block squeezes the minimum bytes it needs.
 #
-# Scratch: a single module-level 200-byte Keccak state buffer
-# plus two squeeze buffers (one per rate) are allocated at first
-# use. These are *public* across calls — the sampling driver
-# resets them per operation, so any hypothetical leak would
-# already be public (seed + nonce + produced output).
+# Scratch: every driver keeps its Keccak state, its seed ‖ nonce
+# absorb buffer, its squeeze buffer and its loop counters in its OWN
+# frame — array locals inside the 122,880-byte per-fn budget are
+# per-call and per-thread (CLAUDE.md quirk #1), and the largest here
+# is ~1.1 KB. Nothing is shared between calls or threads, so every
+# driver is reentrant and safe to call concurrently. Before the M11 fix the
+# state and buffers were module globals, which raced concurrent
+# signers and left ρ'-derived (secret) Keccak state behind.
+#
+# Zeroization: ExpandS (s1, s2) and ExpandMask (y) absorb the SECRET
+# seed ρ' / ρ'', so their Keccak state, absorb buffer and squeeze
+# buffer are wiped (`_mldsa_wipe`) before return. ExpandA (ρ) and
+# SampleInBall (c̃) consume public inputs and are not wiped.
 
-# ================================================================
-# Module state
-# ================================================================
 # SHAKE-128 rate: 168 bytes. SHAKE-256 rate: 136 bytes.
 # Initial-squeeze sizes (matching pq-crystals `POLY_UNIFORM_*_NBLOCKS`):
 #   uniform   (A): 5 blocks × 168 = 840 bytes  (covers 256-coeff w.h.p.)
 #   uniform_eta:   2 blocks × 136 = 272 bytes  (η=4 needs 227)
 #   uniform_gamma1:5 blocks × 136 = 680 bytes  (exactly POLYZ_PACKEDBYTES)
 
-var _mldsa_sample_inited = 0;
-var _mldsa_sample_state = 0;        # 200 bytes, Keccak state
-var _mldsa_sample_absorb = 0;       # 80 bytes, seed (<=64) + nonce (2) scratch
-var _mldsa_sample_buf128 = 0;       # 5 × 168 + 2 bytes (uniform)
-var _mldsa_sample_buf256 = 0;       # 5 × 136 bytes (eta + gamma1 + challenge)
-
-fn _mldsa_sample_init(): i64 {
-    if (_mldsa_sample_inited == 1) { return 0; }
-    _mldsa_sample_state = alloc(200);
-    _mldsa_sample_absorb = alloc(80);
-    _mldsa_sample_buf128 = alloc(5 * 168 + 2);
-    _mldsa_sample_buf256 = alloc(5 * 136);
-    _mldsa_sample_inited = 1;
+# Zero n bytes at p, eight at a time. Used on every ML-DSA secret
+# buffer before it is released (a byte-loop memset over the ~94 KB
+# sign workspace is 8x slower for no benefit).
+fn _mldsa_wipe(p, n): i64 {
+    var i = 0;
+    var n8 = n - (n % 8);
+    while (i < n8) {
+        store64(p + i, 0);
+        i = i + 8;
+    }
+    while (i < n) {
+        store8(p + i, 0);
+        i = i + 1;
+    }
     return 0;
 }
 
 # ================================================================
 # SHAKE streaming wrappers (one absorb + repeated squeeze)
 # ================================================================
-# Absorb = pq-crystals dilithium_shake128_stream_init: absorb seed
-# then a little-endian 2-byte nonce, finalize. The shared state
-# buffer is zeroed first so back-to-back sampling calls don't
-# carry over residue.
+# Absorb = pq-crystals dilithium_shake{128,256}_stream_init: absorb
+# seed then a little-endian 2-byte nonce, finalize. `st` (200 B) and
+# `ab` (>= seedlen + 2 B) are the caller's per-call scratch; `st` is
+# zeroed first so it never carries residue into the sponge.
 
-fn _mldsa_shake128_stream_init(seed, seedlen, nonce): i64 {
-    memset(_mldsa_sample_state, 0, 200);
-    memcpy(_mldsa_sample_absorb, seed, seedlen);
-    store8(_mldsa_sample_absorb + seedlen, nonce & 0xFF);
-    store8(_mldsa_sample_absorb + seedlen + 1, (nonce >> 8) & 0xFF);
-    _keccak_absorb(_mldsa_sample_state, _mldsa_sample_absorb, seedlen + 2, 168, 0x1F);
+fn _mldsa_shake_stream_init(st, ab, seed, seedlen, nonce, rate): i64 {
+    memset(st, 0, 200);
+    memcpy(ab, seed, seedlen);
+    store8(ab + seedlen, nonce & 0xFF);
+    store8(ab + seedlen + 1, (nonce >> 8) & 0xFF);
+    _keccak_absorb(st, ab, seedlen + 2, rate, 0x1F);
     return 0;
 }
 
-fn _mldsa_shake256_stream_init(seed, seedlen, nonce): i64 {
-    memset(_mldsa_sample_state, 0, 200);
-    memcpy(_mldsa_sample_absorb, seed, seedlen);
-    store8(_mldsa_sample_absorb + seedlen, nonce & 0xFF);
-    store8(_mldsa_sample_absorb + seedlen + 1, (nonce >> 8) & 0xFF);
-    _keccak_absorb(_mldsa_sample_state, _mldsa_sample_absorb, seedlen + 2, 136, 0x1F);
-    return 0;
-}
-
-# Squeeze `nblocks` × `rate` bytes into `out`, permuting the state
+# Squeeze `nblocks` × `rate` bytes of state `st` into `out`, permuting
 # between blocks. After the last squeeze, state is left ready for
 # one more block (i.e. the f1600 call is eager).
-fn _mldsa_shake_squeeze_blocks(out, nblocks, rate): i64 {
+fn _mldsa_shake_squeeze_blocks(st, out, nblocks, rate): i64 {
     var b = 0;
     while (b < nblocks) {
         var i = 0;
         while (i < rate) {
-            store8(out + b * rate + i, load8(_mldsa_sample_state + i));
+            store8(out + b * rate + i, load8(st + i));
             i = i + 1;
         }
-        _keccak_f1600(_mldsa_sample_state);
+        _keccak_f1600(st);
         b = b + 1;
     }
     return 0;
@@ -160,45 +157,30 @@ fn mldsa_rej_eta(a, len, buf, buflen): i64 {
 # Callers for ExpandA set nonce = (row << 8) | col; nonce is an
 # i64 here but only the low 16 bits matter.
 
-# State globals: the sampling chain calls through multiple
-# helpers, each with their own locals. Promote the loop state
-# to module-level to survive cc5 clobbering.
-var _mldsa_pu_ctr = 0;
-var _mldsa_pu_off = 0;
-var _mldsa_pu_buflen = 0;
-var _mldsa_pu_a = 0;
-
 # RejNTTPoly: fill `a` (256 coeffs) with uniform values in [0, Q), used as an NTT-domain
-# entry of Â, from SHAKE-128(seed[32] ‖ nonce as 2 LE bytes). Shared module state, so not
-# reentrant. Returns 0.
+# entry of Â, from SHAKE-128(seed[32] ‖ nonce as 2 LE bytes). Per-call scratch only, so it
+# is reentrant and thread-safe. ρ is public, so the scratch is not wiped. Returns 0.
 fn mldsa_poly_uniform(a, seed, nonce): i64 {
-    _mldsa_sample_init();
-    _mldsa_pu_a = a;
-    _mldsa_shake128_stream_init(seed, MLDSA_SEEDBYTES, nonce);
+    var st[200];
+    var ab[80];
+    var buf[842];                   # 5 × 168 + 2 (carry-over bytes)
+    _mldsa_shake_stream_init(&st, &ab, seed, MLDSA_SEEDBYTES, nonce, 168);
     # Initial 5-block squeeze — enough for 256 coeffs ~99% of the time.
-    _mldsa_shake_squeeze_blocks(_mldsa_sample_buf128, 5, 168);
-    _mldsa_pu_buflen = 5 * 168;
-    _mldsa_pu_ctr = mldsa_rej_uniform(_mldsa_pu_a, 256, _mldsa_sample_buf128, _mldsa_pu_buflen);
+    _mldsa_shake_squeeze_blocks(&st, &buf, 5, 168);
+    var buflen = 5 * 168;
+    var ctr = mldsa_rej_uniform(a, 256, &buf, buflen);
     # Fallback loop: carry over partial bytes, squeeze one more block.
-    while (_mldsa_pu_ctr < 256) {
-        _mldsa_pu_off = _mldsa_pu_buflen % 3;
+    while (ctr < 256) {
+        var off = buflen % 3;
         var i = 0;
-        while (i < _mldsa_pu_off) {
-            store8(
-              _mldsa_sample_buf128 + i,
-              load8(_mldsa_sample_buf128 + _mldsa_pu_buflen - _mldsa_pu_off + i)
-              );
+        while (i < off) {
+            store8(&buf + i, load8(&buf + buflen - off + i));
             i = i + 1;
         }
         # Squeeze one block at offset `off`.
-        _mldsa_shake_squeeze_blocks(_mldsa_sample_buf128 + _mldsa_pu_off, 1, 168);
-        _mldsa_pu_buflen = 168 + _mldsa_pu_off;
-        _mldsa_pu_ctr = _mldsa_pu_ctr + mldsa_rej_uniform(
-          _mldsa_pu_a + _mldsa_pu_ctr * 8,
-          256 - _mldsa_pu_ctr,
-          _mldsa_sample_buf128,
-          _mldsa_pu_buflen
-          );
+        _mldsa_shake_squeeze_blocks(&st, &buf + off, 1, 168);
+        buflen = 168 + off;
+        ctr = ctr + mldsa_rej_uniform(a + ctr * 8, 256 - ctr, &buf, buflen);
     }
     return 0;
 }
@@ -209,30 +191,25 @@ fn mldsa_poly_uniform(a, seed, nonce): i64 {
 # Fills `a` with 256 coefficients in [-η, η] via rejection on a
 # SHAKE-256(ρ' ‖ nonce) stream.
 
-var _mldsa_pe_ctr = 0;
-var _mldsa_pe_a = 0;
-
 # RejBoundedPoly (η = 4): fill `a` (256 coeffs) with values in [−4, 4] from
-# SHAKE-256(seed[64] ‖ nonce as 2 LE bytes). Shared module state, so not reentrant. Returns 0.
+# SHAKE-256(seed[64] ‖ nonce as 2 LE bytes). Per-call scratch, wiped before return (the
+# seed is the secret ρ'), so reentrant and thread-safe. Returns 0.
 fn mldsa_poly_uniform_eta(a, seed, nonce): i64 {
-    _mldsa_sample_init();
-    _mldsa_pe_a = a;
-    _mldsa_shake256_stream_init(seed, MLDSA_CRHBYTES, nonce);
-    # η=4 needs ≈ 256·(16/9) ≈ 455 bytes → 4 blocks = 544 bytes
-    # (pq-crystals picks 2 blocks then loops; we do the same with
-    # a 2-block initial + 1-block fallback to stay within
-    # buf256's 5-block capacity).
-    _mldsa_shake_squeeze_blocks(_mldsa_sample_buf256, 2, 136);
-    _mldsa_pe_ctr = mldsa_rej_eta(_mldsa_pe_a, 256, _mldsa_sample_buf256, 2 * 136);
-    while (_mldsa_pe_ctr < 256) {
-        _mldsa_shake_squeeze_blocks(_mldsa_sample_buf256, 1, 136);
-        _mldsa_pe_ctr = _mldsa_pe_ctr + mldsa_rej_eta(
-          _mldsa_pe_a + _mldsa_pe_ctr * 8,
-          256 - _mldsa_pe_ctr,
-          _mldsa_sample_buf256,
-          136
-          );
+    var st[200];
+    var ab[80];
+    var buf[272];                   # 2 × 136
+    _mldsa_shake_stream_init(&st, &ab, seed, MLDSA_CRHBYTES, nonce, 136);
+    # η=4 needs ≈ 256·(16/9) ≈ 455 bytes on average. pq-crystals
+    # squeezes 2 blocks then loops one block at a time; same here.
+    _mldsa_shake_squeeze_blocks(&st, &buf, 2, 136);
+    var ctr = mldsa_rej_eta(a, 256, &buf, 2 * 136);
+    while (ctr < 256) {
+        _mldsa_shake_squeeze_blocks(&st, &buf, 1, 136);
+        ctr = ctr + mldsa_rej_eta(a + ctr * 8, 256 - ctr, &buf, 136);
     }
+    _mldsa_wipe(&st, 200);
+    _mldsa_wipe(&ab, 80);
+    _mldsa_wipe(&buf, 272);
     return 0;
 }
 
@@ -245,12 +222,18 @@ fn mldsa_poly_uniform_eta(a, seed, nonce): i64 {
 # is exact.
 
 # One ExpandMask poly: unpack the first 640 bytes of SHAKE-256(seed[64] ‖ nonce as 2 LE
-# bytes) as 20-bit values into `a`, coeffs in [1 − γ1, γ1]. Shared module state. Returns 0.
+# bytes) as 20-bit values into `a`, coeffs in [1 − γ1, γ1]. Per-call scratch, wiped before
+# return (the seed is the secret ρ''), so reentrant and thread-safe. Returns 0.
 fn mldsa_poly_uniform_gamma1(a, seed, nonce): i64 {
-    _mldsa_sample_init();
-    _mldsa_shake256_stream_init(seed, MLDSA_CRHBYTES, nonce);
-    _mldsa_shake_squeeze_blocks(_mldsa_sample_buf256, 5, 136);
-    _mldsa_polyz_unpack(a, _mldsa_sample_buf256);
+    var st[200];
+    var ab[80];
+    var buf[680];                   # 5 × 136
+    _mldsa_shake_stream_init(&st, &ab, seed, MLDSA_CRHBYTES, nonce, 136);
+    _mldsa_shake_squeeze_blocks(&st, &buf, 5, 136);
+    _mldsa_polyz_unpack(a, &buf);
+    _mldsa_wipe(&st, 200);
+    _mldsa_wipe(&ab, 80);
+    _mldsa_wipe(&buf, 680);
     return 0;
 }
 
@@ -262,60 +245,54 @@ fn mldsa_poly_uniform_gamma1(a, seed, nonce): i64 {
 # bytes drive the Fisher-Yates-like swap that places TAU non-zero
 # coefficients in the last TAU positions, shuffled earlier.
 
-var _mldsa_ch_c = 0;
-var _mldsa_ch_pos = 0;
-var _mldsa_ch_signs = 0;
-var _mldsa_ch_i = 0;
-
 # SampleInBall: expand c̃ (`seed`, CTILDEBYTES = 48) via SHAKE-256 into `c` with exactly
-# τ = 49 coeffs in {−1, +1} (signed i64) and the rest 0. Shared module state. Returns 0.
+# τ = 49 coeffs in {−1, +1} (signed i64) and the rest 0. Per-call scratch, so reentrant and
+# thread-safe; c̃ is public, so the scratch is not wiped. Returns 0.
 fn mldsa_poly_challenge(c, seed): i64 {
-    _mldsa_sample_init();
-    _mldsa_ch_c = c;
-    # Absorb c̃ via the stream wrapper with nonce=0 would append two
-    # extra bytes; FIPS 204 SampleInBall has no nonce. Call the
-    # lower-level absorb directly with only `seed` as input.
-    memset(_mldsa_sample_state, 0, 200);
-    _keccak_absorb(_mldsa_sample_state, seed, MLDSA65_CTILDEBYTES, 136, 0x1F);
-    _mldsa_shake_squeeze_blocks(_mldsa_sample_buf256, 1, 136);
+    var st[200];
+    var buf[136];
+    # FIPS 204 SampleInBall has no nonce, so absorb c̃ directly rather
+    # than through the seed ‖ nonce stream wrapper.
+    memset(&st, 0, 200);
+    _keccak_absorb(&st, seed, MLDSA65_CTILDEBYTES, 136, 0x1F);
+    _mldsa_shake_squeeze_blocks(&st, &buf, 1, 136);
 
     # Collect 64 sign bits from the first 8 bytes.
-    _mldsa_ch_signs = 0;
+    var signs = 0;
     var si = 0;
     while (si < 8) {
-        _mldsa_ch_signs = _mldsa_ch_signs | ((load8(_mldsa_sample_buf256 + si) & 0xFF) << (si * 8));
+        signs = signs | ((load8(&buf + si) & 0xFF) << (si * 8));
         si = si + 1;
     }
-    _mldsa_ch_pos = 8;
+    var pos = 8;
 
     # Zero the output poly.
     var z = 0;
     while (z < 256) {
-        store64(_mldsa_ch_c + z * 8, 0);
+        store64(c + z * 8, 0);
         z = z + 1;
     }
 
     # Place ±1 at TAU positions via the swap walk.
-    _mldsa_ch_i = 256 - MLDSA65_TAU;
-    while (_mldsa_ch_i < 256) {
+    var i = 256 - MLDSA65_TAU;
+    while (i < 256) {
         # Sample a uniform byte b ∈ [0, i] via rejection.
         var b = 0;
         var accepted = 0;
         while (accepted == 0) {
-            if (_mldsa_ch_pos >= 136) {
-                _mldsa_shake_squeeze_blocks(_mldsa_sample_buf256, 1, 136);
-                _mldsa_ch_pos = 0;
+            if (pos >= 136) {
+                _mldsa_shake_squeeze_blocks(&st, &buf, 1, 136);
+                pos = 0;
             }
-            b = load8(_mldsa_sample_buf256 + _mldsa_ch_pos) & 0xFF;
-            _mldsa_ch_pos = _mldsa_ch_pos + 1;
-            if (b <= _mldsa_ch_i) { accepted = 1; }
+            b = load8(&buf + pos) & 0xFF;
+            pos = pos + 1;
+            if (b <= i) { accepted = 1; }
         }
         # c[i] = c[b]; c[b] = 1 - 2·(signs & 1); signs >>= 1
-        store64(_mldsa_ch_c + _mldsa_ch_i * 8, load64(_mldsa_ch_c + b * 8));
-        var sign_val = 1 - 2 * (_mldsa_ch_signs & 1);
-        store64(_mldsa_ch_c + b * 8, sign_val);
-        _mldsa_ch_signs = _mldsa_ch_signs >> 1;
-        _mldsa_ch_i = _mldsa_ch_i + 1;
+        store64(c + i * 8, load64(c + b * 8));
+        store64(c + b * 8, 1 - 2 * (signs & 1));
+        signs = signs >> 1;
+        i = i + 1;
     }
     return 0;
 }
@@ -365,7 +342,8 @@ fn mldsa_polyveck_uniform_eta(v, seed, nonce_base): i64 {
     return 0;
 }
 
-# ExpandMask: sign-time mask y (L polys), nonces L·κ + ℓ.
+# ExpandMask(ρ'', κ): the sign-time mask y (L polys), poly ℓ from nonce κ + ℓ. The caller
+# owns κ and must advance it by L (not by 1) per rejection-loop attempt (FIPS 204 Alg. 7).
 fn mldsa_polyvecl_uniform_gamma1(v, seed, nonce_base): i64 {
     var i = 0;
     while (i < MLDSA65_L) {

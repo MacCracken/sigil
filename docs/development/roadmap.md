@@ -4,43 +4,9 @@ Forward-looking work only. For shipped items and per-version detail see
 [CHANGELOG.md](../../CHANGELOG.md) and [state.md](state.md) ("Recently
 shipped").
 
-## Moving the cyrius pin to 6.6.5
-
-⛔ Before bumping the pin to 6.6.5: the doc gate
-`cyrius doc --check dist/sigil.cyr` (`.github/workflows/ci.yml:165`) goes
-red. The fixed cyrdoc reads ALL of `dist/sigil.cyr` (1,106,698 bytes) and
-finds **429 of 1,168** fns undocumented. The old one read only the first
-64 KB and judged 69 fns. Document them or re-baseline the gate before
-bumping.
-
-cyrius 6.6.5 is not tagged yet. Nothing below can land against the pin
-until it is, except items marked **(can land now)**. The pin is 6.6.4
-today, and this section lists only what 6.6.5 itself changes.
-
-- [ ] ⛔ Doc comments for the 429 undocumented fns in `src/`, then
-      `cyrius distlib`. **(can land now)** — a doc comment does not depend
-      on the toolchain. If they do not all land first, re-baseline the gate
-      in the bump commit instead. See the cyrius CHANGELOG [6.6.5] entry
-      "cyrlint read every rule ONE PHYSICAL LINE at a time" (part 6,
-      cyrdoc).
-- [ ] The old note text is quoted at `src/bignum.cyr:70`,
-      `src/rsa.cyr:58-59`, `CLAUDE.md:161` and in the 3.13.0 *Method*
-      bullet below ("Check the 122,880 B per-fn cumulative stack budget").
-      From 6.6.5 it is a `warning:` that names the declaration's file:line
-      and says an array local over the per-fn frame budget gets STATIC
-      storage, one buffer shared by all calls and all threads. A grep for
-      the old `note: oversized array local` text finds nothing. See the
-      CHANGELOG [6.6.5] entry "A fn-local STATIC array no longer takes a
-      program-wide global name".
-- [ ] The citation of cyrius `src/frontend/parse_decl.cyr:89`
-      (`src/rsa.cyr:57`, `CLAUDE.md:161`) is now `:122`.
-- [ ] At the bump, re-run `cyrius deps` — the aarch64 syscall peer moved
-      SYS_UNLINKAT 35 → 263, so an un-re-vendored peer's sys_unlink would
-      run nanosleep.
-
 ## Outstanding work
 
-**One scheduled cycle — [3.13.0, retire `cbank()`](#planned--3130--retire-cbank)
+**One scheduled cycle — [3.14.0, retire `cbank()`](#planned--3140--retire-cbank)
 — plus parked / gated / verification-only items.** The 3.6 TLS arc,
 the 3.7 perf cycle, and the 3.8 / 3.9 thread-safety + decomposition cycles have
 all shipped — see "Closed cycles" below + [CHANGELOG](../../CHANGELOG.md).
@@ -49,12 +15,15 @@ all shipped — see "Closed cycles" below + [CHANGELOG](../../CHANGELOG.md).
 concurrent-TLS-handshake crash (3.9.6) and the full thread-safety banking (3.9.7)
 are done; see the **3.9** closed-cycle entry below. **3.12.3–3.12.9 then went
 further and took the whole asymmetric stack off banking altogether**, after two
-authentication bypasses traced to shared lanes; 3.13.0 finishes that for the
+authentication bypasses traced to shared lanes; 3.14.0 finishes that for the
 symmetric/EC scratch.
 
-### Planned — 3.13.0 — retire `cbank()`
+### Planned — 3.14.0 — retire `cbank()`
 
-**Status: scheduled, not started. Assigned the 3.13.0 minor; date TBD.**
+**Status: scheduled, not started. Assigned the 3.14.0 minor; date TBD.**
+**Re-slotted from 3.13.0 by the maintainer on 2026-09-23.** 3.13.0 became the
+toolchain-6.6.6 + `defer`-repair + raw-syscall + security-fix release instead;
+this cycle moved one minor later, scope and method unchanged.
 
 3.12.9 localised the whole **asymmetric** stack — RSA sign + verify, PSS, and the
 bignum engine — so no signature path uses a lane any more. This cycle finishes
@@ -97,7 +66,8 @@ the job on the **symmetric and EC** scratch and then deletes the mechanism.
   3.12.9 used on the sign path and it is the only reason the Bellcore hazard was
   caught rather than assumed absent.
 - **Check the 122,880 B per-fn cumulative stack budget on every bite.** If the
-  compiler emits `note: oversized array local kept in shared global`, that
+  compiler warns `array local over the per-fn frame budget gets STATIC storage`
+  (cyrius 6.6.5+; it was `note: oversized array local kept in shared global`), that
   buffer did *not* localise — that note is the only reliable signal (quirk #1).
   The EC modules are the risk here: `ecdsa_p256` alone has ~100 buffers.
 - **Preserve zeroization semantics.** Per-lane wipes become per-call wipes on
@@ -107,7 +77,7 @@ the job on the **symmetric and EC** scratch and then deletes the mechanism.
 - **`crypto_scratch.cyr` goes last**, once nothing references it.
 
 **Prerequisite:** CLAUDE.md's closeout pass runs before any minor bump and ships
-as the **last 3.12.x patch** — full suite, benchmark baseline vs
+as the **last 3.13.x patch** — full suite, benchmark baseline vs
 `benches/history.csv`, dead-code audit, stale-comment sweep, security re-scan,
 downstream check, docs sync, clean build.
 
@@ -171,7 +141,7 @@ footprint and API-surface work, and it is scheduled rather than urgent.
       locals to per-thread stack slots — a plain function-local array is already
       the thread-local array this item was waiting for, as 3.12.3–3.12.9 proved
       across the entire asymmetric stack. No `threadlocal` qualifier is needed.
-      Folded into **[3.13.0](#planned--3130--retire-cbank)**, which retires
+      Folded into **[3.14.0](#planned--3140--retire-cbank)**, which retires
       `cbank()` and deletes `src/crypto_scratch.cyr` outright.
 
 - [ ] **Scatter-store for the fixed-base comb** (cache-timing) — **parked;
@@ -229,7 +199,7 @@ footprint and API-surface work, and it is scheduled rather than urgent.
       for a fraction of the remaining win. Only if a consumer needs it.
 
 **Opened by 3.12.9** — the `cbank()` retirement is scheduled as its own cycle;
-see **[Planned — 3.13.0](#planned--3130--retire-cbank)** above.
+see **[Planned — 3.14.0](#planned--3140--retire-cbank)** above.
 
 **Opened by 3.12.8** (named here so they are not buried in a CHANGELOG entry)
 
@@ -370,94 +340,35 @@ audits in [`docs/audit/`](../audit/).
 
 ---
 
-## Moving the cyrius pin to 6.6.6
+## After the 6.6.6 pin (moved at 3.13.0) — open verification
 
-**Current pin:** `cyrius = "6.6.4"` (`cyrius.cyml`).
+The pin moved **6.6.4 → 6.6.6 at 3.13.0**. Everything that could be done on the
+Linux dev host was done and is in the CHANGELOG; what remains needs other hardware
+or other repos, and stays open until it runs.
 
-⛔ **Windows first: `alog_save` has been destroying the audit log on every PE
-build, and 6.6.6 is the fix.** `src/audit.cyr:147` opens with
-`file_open(path, 1089, 420)` — `O_WRONLY|O_CREAT|O_APPEND`. Before 6.6.6 a PE
-build's `O_APPEND` **did not append; it wrote from offset 0**. So on Windows every
-`alog_save()` call overwrote the audit journal from the top with only the events
-held in the current `AuditLog`, silently discarding everything persisted before
-it. For a trust-verification library whose whole job is a tamper-evident record,
-this is the worst instance of the bug in the ecosystem. No sigil source change is
-needed — the pin fixes it — but the pin is the fix, so it should not wait.
+Why it matters on Windows: before 6.6.6 a PE build's `O_APPEND` did not append (it
+wrote from offset 0) and `O_TRUNC` did not truncate. So on every PE build
+`alog_save()` overwrote the audit journal from the top, and a trust-store save
+that shrank kept the old tail. The pin is the fix; no sigil source change was
+needed for it. (Separately, 3.13.0 replaced the numeric open flags — `1089`,
+`577` — with per-target `O_*` names, which fixed the same two writers on
+**macOS**, where those literals meant `O_WRONLY|O_ASYNC|O_TRUNC` and
+`O_WRONLY|O_ASYNC|O_CREAT`.) sigil is in mabda's and yukti's closure, so their
+Windows builds carry these bodies too.
 
-Sigil is genuinely a PE target, so this is live and not hypothetical:
-`src/sys_util.cyr:141/145` and `:274/278` carry `CYRIUS_TARGET_WIN` arms, and
-`docs/development/roadmap.md:121-130` tracks the Windows-entropy item as verified
-under wine/ProcessPrng with `cass` acceptance outstanding. The blast radius is
-wider than sigil: the note at `src/sys_util.cyr:135` records that **sigil is in
-mabda's and yukti's closure, so their Windows builds carry these bodies too** —
-they inherit both the bug and the fix.
-
-The same PE defect's `O_TRUNC` half (a rewritten file kept its old tail) reaches
-three more sigil writers, all unguarded and all compiled into a PE build:
-
-- `src/trust.cyr:361` — `file_open(path, 577, 420)`, the trust-store save. A
-  store that shrinks (a revoked key removed) kept a fragment of the larger
-  previous store on disk. This is the second-worst one after the audit log.
-- `src/tpm_core.cyr:403` — `sys_open(input_file, O_WRONLY|O_CREAT|O_TRUNC, 384)`.
-- The 2 `file_write_all` call sites — `lib/io.cyr:546` opens
-  `O_WRONLY|O_CREAT|O_TRUNC`, so they carry the same hazard.
-- `src/luks.cyr:359-360` is the low-risk one: its flags include `O_EXCL`, so the
-  file is always fresh and there is no stale tail to keep.
-
-Also now correct on PE: the 8 `file_exists` / `file_read_all` sites. Both open
-read-only (`lib/io.cyr:503`, `:836`), and 6.6.6 stops PE requesting write access
-for a read — so they begin **succeeding on read-only files and volumes**, which
-matters for a library that reads signed manifests, EFI signature databases and
-IMA measurement logs off media that is deliberately not writable.
-
-### ⚠ `dist/sigil.cyr` fails `cyrfmt --check`, but not for a formatting reason
-
-Worth recording so nobody reformats sigil chasing a cyrius cap. Measured here
-against 6.6.6:
-
-```
-dist/sigil.cyr        1,106,698 B   exit 1
-  cyrfmt: file too large to format-check (>1028KB) — raise _MAX_FILE
-dist/sigil-aes.cyr … dist/sigil-x509.cyr   (13 bundles)   exit 0
-```
-
-The bundle is over cycc's own `programs/cyrfmt.cyr:38` cap
-(`var _MAX_FILE: i64 = 1052672;`), so cyrfmt refuses to read it at all. **There
-is no formatting defect** — every per-algorithm bundle passes, and regenerating
-`dist/` will not clear this because the full bundle will still be ~1.1 MB. The
-fix is a cyrius change (raise `_MAX_FILE`, or teach cyrfmt to stream), and it
-belongs upstream in cyrius, not in a sigil reformat. Per CLAUDE.md's "fix the
-SOURCE repo" rule, the source here *is* cyrius.
-
-### Everything else in 6.6.6 is clear for sigil — checked, not assumed
-
-- **The new compile errors cannot fire.** 0 struct-typed `var` declarations
-  (`var x: SomeStruct`) across `src/`, `tests/` and `programs/`, so neither the
-  different-struct-copy error nor the by-value-deep-copy change has a site. 0
-  `async fn`, 0 `operator` fns, 0 `ret2`/`rethi`, 0 `: cstring` params.
-- **No SIMD.** The 37 `iv_*` hits are `iv_len` locals in `src/aes_gcm.cyr` and
-  the `IntegrityVerifier` accessors in `src/integrity.cyr:143-149` — not the
-  `iv_*` SIMD intrinsics. The SIMD-return rule has nothing to match.
-- **584 globals, none redeclared**, so 6.6.6's "last definition wins everywhere"
-  flip and the new different-type-co-linked-global error change nothing.
-- **No `var` in a top-level block.** The `src/argon2.cyr:275-278` candidates are
-  the body of `_argon2_h0`, whose `fn` signature wraps across two lines.
-- **No raw `SYS_STATFS`**, no own `vec_*` definitions (so the new
-  `assert.cyr → vec.cyr` include cannot collide), no `lib/` symlinks, and a
-  writable `cyrius.lock` — 6.6.6's fail-hard `cyrius deps`/`publish` is a no-op.
-
-### Verify after bumping
-
-1. **On `cass`, and only on `cass`:** write an audit log, `alog_save()`, add
-   events, save again, and confirm the file **grows** and retains the earlier
-   lines. That is the regression that was invisible for the whole PE era, and a
-   Linux run cannot show it.
-2. On `cass`, save a trust store, then save a **smaller** one over it and confirm
-   no trailing fragment of the larger file survives (`src/trust.cyr:361`).
-3. On `cass`, read a signed manifest off a read-only volume via `file_read_all`
-   and confirm it now succeeds.
-4. Regenerate `dist/` and re-run the 13 per-algorithm `cyrfmt --check`s; expect
-   the full-bundle "file too large" line to persist until cyrius raises
-   `_MAX_FILE`.
-5. The usual: `cyrius test`, then re-vendor into mabda and yukti so their Windows
-   builds pick up the fixed bodies.
+- [ ] **On `cass` only:** write an audit log, `alog_save()`, add events, save
+      again; the file must **grow** and keep the earlier lines. A Linux run
+      cannot show this regression.
+- [ ] **On `cass`:** save a trust store, then save a **smaller** one over it; no
+      trailing fragment of the larger file may survive (`sv_save_trust_store`).
+- [ ] **On `cass`:** read a signed manifest off a read-only volume via
+      `file_read_all` / `file_read_whole`; 6.6.6 stops PE requesting write access
+      for a read, so this should now succeed.
+- [ ] **Re-vendor into mabda and yukti** so their Windows builds pick up the fixed
+      bodies.
+- [ ] **`dist/sigil.cyr` fails `cyrfmt --check` for a size reason, not a
+      formatting one.** At ~1.1 MB it is over cyrfmt's `_MAX_FILE`
+      (`programs/cyrfmt.cyr:38`, 1,052,672 B) and cyrfmt refuses to read it; the
+      13 per-profile bundles pass. The fix is upstream (raise the cap or stream);
+      do not reformat sigil to chase it. Nothing in sigil's CI runs cyrfmt on the
+      monolith.

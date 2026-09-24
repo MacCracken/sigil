@@ -321,32 +321,22 @@ fn tdx_quote_parse(buf, buf_len, out): i64 {
 # SGX-style report-data offset inside the QE report.
 var TDX_QE_REPORT_OFF_REPORT_DATA = 320;
 
-var _tdxv_binding_input = 0;
-var _tdxv_binding_hash  = 0;
-var _tdxv_quote_body    = 0;
-var _tdxv_inited = 0;
-
-fn _tdxv_init(): i64 {
-    if (_tdxv_inited == 1) { return 0; }
-    # Binding input must hold AK (96 max — P-384 case) + qe_auth_data (≤ 65535).
-    _tdxv_binding_input = alloc(96 + 65536);
-    # Binding hash: 32 B for SHA-256 (att_key_type=2), 48 B for SHA-384
-    # (att_key_type=3). The full SHA-384 digest is computed; only the
-    # lower 32 B are compared against qe_report.report_data[0:32].
-    _tdxv_binding_hash  = alloc(48);
-    # Signed prefix: header (48) + TD body (584) = 632 bytes.
-    _tdxv_quote_body    = alloc(TDX_QUOTE_SIGNED_PREFIX_SIZE);
-    _tdxv_inited = 1;
-    return 0;
-}
+# Concurrency (audit H2): this path keeps NO module-level mutable state.
+# The binding hash is streamed (SHA-256 or SHA-384 over AK then
+# qe_auth_data) into per-call stack locals, and the AK signature is
+# checked directly over the contiguous 632-byte signed prefix in the
+# caller's quote buffer. The pre-fix shared `_tdxv_*` scratch let a
+# concurrent verify replace one call's binding hash between hashing and
+# compare, so a forged AK riding a replayed genuine QE report could be
+# accepted.
 
 # Verify a successfully parsed quote against a caller-trusted PCK key (`pck_pk`: 64-byte BE
 # P-256 Qx||Qy): PCK sig over the QE report, AK binding in QE report_data, AK sig over
 # header || TD body (632 B); the AK steps use SHA-384 / P-384 when att_key_type is 3.
-# Returns 1 iff all pass, else 0. Not thread-safe: uses unbanked module-global scratch.
+# Returns 1 iff all pass, else 0. Thread-safe: all scratch is per-call stack, provided the
+# SHA-256 / SHA-512 and ECDSA P-256 / P-384 tables are warmed on the main thread before
+# fan-out (e.g. one serial verify; ADR 0007).
 fn tdx_quote_verify_with_pck(quote, pck_pk): i64 {
-    _tdxv_init();
-
     var att_key_type = tdx_quote_att_key_type(quote);
 
     # Step 1 — PCK signs the QE report (384 B SGX enclave report shape).
@@ -367,55 +357,57 @@ fn tdx_quote_verify_with_pck(quote, pck_pk): i64 {
     var aux = tdx_quote_qe_auth_data_ptr(quote);
     var aux_len = tdx_quote_qe_auth_data_len(quote);
     if (aux_len < 0) { return 0; }
-    if (aux_len > 65536) { return 0; }
+    if (aux_len > 65536) { return 0; }   # u16 length field; sanity bound
 
-    var i = 0;
-    while (i < ak_w) {
-        store8(_tdxv_binding_input + i, load8(ak + i) & 0xFF);
-        i = i + 1;
-    }
-    i = 0;
-    while (i < aux_len) {
-        store8(_tdxv_binding_input + ak_w + i, load8(aux + i) & 0xFF);
-        i = i + 1;
-    }
+    # Streamed H(AK || qe_auth_data) — no concatenation buffer. The
+    # context is sized for SHA-384 (208 B), which also covers SHA-256's
+    # 144 B; the digest buffer holds the full 48-B SHA-384 output.
+    var hctx[208];
+    var hash[48];
     if (att_key_type == TDX_ATT_KEY_TYPE_ECDSA_P384) {
-        sha384(_tdxv_binding_input, ak_w + aux_len, _tdxv_binding_hash);
+        sha384_init_into(&hctx);
+        sha384_update(&hctx, ak, ak_w);
+        sha384_update(&hctx, aux, aux_len);
+        sha384_finalize(&hctx, &hash);
     } else {
-        sha256(_tdxv_binding_input, ak_w + aux_len, _tdxv_binding_hash);
+        sha256_init_into(&hctx);
+        sha256_update(&hctx, ak, ak_w);
+        sha256_update(&hctx, aux, aux_len);
+        sha256_finalize(&hctx, &hash);
     }
 
+    # report_data[0:32] must equal the (lower 32 B of the) hash and the
+    # upper 32 B must be zero — defence-in-depth against an attacker
+    # stuffing extra bytes that downstream consumers might parse out of
+    # the 64-byte slot. OR-accumulated, no early exit.
     var rd = qe_report + TDX_QE_REPORT_OFF_REPORT_DATA;
-    i = 0;
+    var diff = 0;
+    var i = 0;
     while (i < 32) {
-        if ((load8(rd + i) & 0xFF) != (load8(_tdxv_binding_hash + i) & 0xFF)) {
-            return 0;
-        }
+        diff = diff | ((load8(rd + i) ^ load8(&hash + i)) & 0xFF);
         i = i + 1;
     }
-    # Upper 32 B of report_data must be zero — defence-in-depth against
-    # an attacker stuffing extra bytes that downstream consumers might
-    # parse out of the 64-byte slot.
-    i = 32;
     while (i < 64) {
-        if ((load8(rd + i) & 0xFF) != 0) { return 0; }
+        diff = diff | (load8(rd + i) & 0xFF);
         i = i + 1;
     }
+    if (diff != 0) { return 0; }
 
     # Step 3 — AK signs the quote body (header || TD report body, 632 B).
-    # ecdsa_p256_verify for type=2, ecdsa_p384_verify for type=3.
+    # tdx_quote_parse fixes the header at +0 and the TD body at +48 of
+    # the caller's buffer, so the signed prefix is contiguous there;
+    # verify it in place (no shared copy). ecdsa_p256_verify for
+    # type=2, ecdsa_p384_verify for type=3.
     var buf = tdx_quote_buf(quote);
-    memcpy(_tdxv_quote_body, buf, TDX_QUOTE_SIGNED_PREFIX_SIZE);
-
     var ecdsa_sig = tdx_quote_ecdsa_sig_ptr(quote);
     if (att_key_type == TDX_ATT_KEY_TYPE_ECDSA_P384) {
-        if (ecdsa_p384_verify(ak, _tdxv_quote_body,
+        if (ecdsa_p384_verify(ak, buf,
             TDX_QUOTE_SIGNED_PREFIX_SIZE,
             ecdsa_sig) != 1) {
             return 0;
         }
     } else {
-        if (ecdsa_p256_verify(ak, _tdxv_quote_body,
+        if (ecdsa_p256_verify(ak, buf,
             TDX_QUOTE_SIGNED_PREFIX_SIZE,
             ecdsa_sig) != 1) {
             return 0;
@@ -454,14 +446,16 @@ fn _tdx_cert_is_self_issued(c): i64 {
     return _x509_dn_eq(buf, iss_off, iss_len, buf, sub_off, sub_len);
 }
 
-# tdx_quote_verify_full — one-shot wrapper (global bump scratch).
+# tdx_quote_verify_full — one-shot wrapper (global bump scratch). NOT thread-safe.
 fn tdx_quote_verify_full(quote, root_ca_der, root_ca_der_len, now_unix): i64 {
     return tdx_quote_verify_full_into(quote, root_ca_der, root_ca_der_len, now_unix, 0);
 }
 
 # tdx_quote_verify_full_into — drift-free variant: all per-call scratch
 # is drawn from the caller's `arena` (stdlib handle; `arena == 0` ⇒
-# global bump). Returns 1 on full success, 0 otherwise. 3.7.3.
+# global bump). Returns 1 on full success, 0 otherwise. 3.7.3. NOT thread-safe: the PCK
+# chain check (x509_verify_chain) hashes each TBS into the shared module-global
+# `_xvl_digest` in src/x509.cyr (audit H2 residual).
 fn tdx_quote_verify_full_into(quote, root_ca_der, root_ca_der_len, now_unix, arena): i64 {
     # Step 1 — cert_data_type must be PEM PCK chain.
     if (tdx_quote_cert_data_type(quote) != TDX_CERT_TYPE_PCK_PEM) { return 0; }

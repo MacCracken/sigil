@@ -309,32 +309,21 @@ fn sgx_quote_parse(buf, buf_len, out): i64 {
 # land in 3.2.3+).
 # ================================================================
 
-# Scratch globals (Cyrius quirk #1 — locals can clobber across
-# nested calls).
-var _sgxv_binding_input = 0;
-var _sgxv_binding_hash  = 0;
-var _sgxv_quote_body    = 0;
-var _sgxv_inited = 0;
-
-fn _sgxv_init(): i64 {
-    if (_sgxv_inited == 1) { return 0; }
-    # Max binding input: AK (64) + qe_auth_data (≤ 65535) = 65599 bytes.
-    # Allocate generously once. For typical quotes auth_data ≤ ~256.
-    _sgxv_binding_input = alloc(65600);
-    _sgxv_binding_hash  = alloc(32);
-    # Quote body for AK signature = header (48) + report body (384) = 432.
-    _sgxv_quote_body    = alloc(432);
-    _sgxv_inited = 1;
-    return 0;
-}
+# Concurrency (audit H2): this path keeps NO module-level mutable state.
+# The binding hash is streamed (SHA-256 over AK then qe_auth_data) into
+# per-call stack locals, and the AK signature is checked directly over
+# the contiguous header || report body in the caller's quote buffer.
+# The pre-fix shared `_sgxv_*` scratch let a concurrent verify replace
+# one call's binding hash between hashing and compare, so a forged AK
+# riding a replayed genuine QE report could be accepted.
 
 # Verify a successfully parsed quote against a caller-trusted PCK key (`pck_pk`: 64-byte BE
 # P-256 Qx||Qy): PCK sig over the QE report, QE report_data == SHA-256(AK || qe_auth_data)
 # followed by 32 zero bytes, then AK sig over header || enclave report (432 B). Returns 1
-# iff all three pass, else 0. Not thread-safe: uses unbanked module-global scratch.
+# iff all three pass, else 0. Thread-safe: all scratch is per-call stack, provided the
+# SHA-256 and ECDSA P-256 tables are warmed on the main thread before fan-out (e.g. one
+# serial verify; ADR 0007).
 fn sgx_quote_verify_with_pck(quote, pck_pk): i64 {
-    _sgxv_init();
-
     # ----------------------------------------------------------------
     # Step 1 — PCK signs the QE report.
     # ----------------------------------------------------------------
@@ -353,52 +342,42 @@ fn sgx_quote_verify_with_pck(quote, pck_pk): i64 {
     var aux = sgx_quote_qe_auth_data_ptr(quote);
     var aux_len = sgx_quote_qe_auth_data_len(quote);
     if (aux_len < 0) { return 0; }
-    if (aux_len > 65536) { return 0; }   # bounded by our scratch
+    if (aux_len > 65536) { return 0; }   # u16 length field; sanity bound
 
-    # Build SHA-256 input: AK || qe_auth_data
-    var i = 0;
-    while (i < SGX_AK_SIZE) {
-        store8(_sgxv_binding_input + i, load8(ak + i) & 0xFF);
-        i = i + 1;
-    }
-    i = 0;
-    while (i < aux_len) {
-        store8(_sgxv_binding_input + SGX_AK_SIZE + i, load8(aux + i) & 0xFF);
-        i = i + 1;
-    }
-    sha256(_sgxv_binding_input, SGX_AK_SIZE + aux_len, _sgxv_binding_hash);
+    # Streamed SHA-256(AK || qe_auth_data) — no concatenation buffer.
+    var hctx[144];                       # SHA-256 streaming context
+    var hash[32];
+    sha256_init_into(&hctx);
+    sha256_update(&hctx, ak, SGX_AK_SIZE);
+    sha256_update(&hctx, aux, aux_len);
+    sha256_finalize(&hctx, &hash);
 
-    # Compare against qe_report.report_data[0:32]
+    # report_data[0:32] must equal the hash and report_data[32:64] must
+    # be zero (defense in depth — guards against an attacker stuffing
+    # additional bytes that affect downstream consumers parsing the
+    # full 64-byte report_data). OR-accumulated, no early exit.
     var rd = qe_report + SGX_REPORT_OFF_REPORT_DATA;
-    i = 0;
+    var diff = 0;
+    var i = 0;
     while (i < 32) {
-        if ((load8(rd + i) & 0xFF) != (load8(_sgxv_binding_hash + i) & 0xFF)) {
-            return 0;
-        }
+        diff = diff | ((load8(rd + i) ^ load8(&hash + i)) & 0xFF);
         i = i + 1;
     }
-    # Upper 32 bytes must be zero (defense in depth — guards against
-    # an attacker stuffing additional bytes that affect downstream
-    # consumers parsing the full 64-byte report_data).
-    i = 32;
     while (i < 64) {
-        if ((load8(rd + i) & 0xFF) != 0) { return 0; }
+        diff = diff | (load8(rd + i) & 0xFF);
         i = i + 1;
     }
+    if (diff != 0) { return 0; }
 
     # ----------------------------------------------------------------
     # Step 3 — AK signs the quote body (header || enclave_report).
+    # sgx_quote_parse fixes the header at +0 and the report body at +48
+    # of the caller's buffer, so the signed 432 bytes are contiguous
+    # there; verify them in place (no shared copy).
     # ----------------------------------------------------------------
     var buf = sgx_quote_buf(quote);
-    # Assemble header || report_body into our scratch (they're
-    # contiguous in the quote, but copying is the same shape we'd use
-    # if the format ever inserted padding — defensive).
-    memcpy(_sgxv_quote_body, buf, SGX_QUOTE_HEADER_SIZE);
-    memcpy(_sgxv_quote_body + SGX_QUOTE_HEADER_SIZE,
-      buf + SGX_QUOTE_HEADER_SIZE, SGX_REPORT_BODY_SIZE);
-
     var ecdsa_sig = sgx_quote_ecdsa_sig_ptr(quote);
-    if (ecdsa_p256_verify(ak, _sgxv_quote_body,
+    if (ecdsa_p256_verify(ak, buf,
         SGX_QUOTE_HEADER_SIZE + SGX_REPORT_BODY_SIZE,
         ecdsa_sig) != 1) {
         return 0;
@@ -462,7 +441,7 @@ fn _sgx_cert_is_self_issued(c): i64 {
     return _x509_dn_eq(buf, iss_off, iss_len, buf, sub_off, sub_len);
 }
 
-# sgx_quote_verify_full — one-shot wrapper (global bump scratch).
+# sgx_quote_verify_full — one-shot wrapper (global bump scratch). NOT thread-safe.
 fn sgx_quote_verify_full(quote, root_ca_der, root_ca_der_len, now_unix): i64 {
     return sgx_quote_verify_full_into(quote, root_ca_der, root_ca_der_len, now_unix, 0);
 }
@@ -472,7 +451,8 @@ fn sgx_quote_verify_full(quote, root_ca_der, root_ca_der_len, now_unix): i64 {
 # blocks) is drawn from the caller's `arena` (stdlib arena_new handle;
 # `arena_reset` between verifications). `arena == 0` ⇒ global bump heap.
 # Returns 1 only if every step succeeds, 0 otherwise (incl. arena
-# exhaustion). 3.7.3.
+# exhaustion). 3.7.3. NOT thread-safe: the PCK chain check (x509_verify_chain) hashes
+# each TBS into the shared module-global `_xvl_digest` in src/x509.cyr (audit H2 residual).
 fn sgx_quote_verify_full_into(quote, root_ca_der, root_ca_der_len, now_unix, arena): i64 {
     # Step 1 — cert_data_type must be PEM PCK chain.
     if (sgx_quote_cert_data_type(quote) != SGX_CERT_TYPE_PCK_PEM) { return 0; }

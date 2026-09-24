@@ -1,0 +1,426 @@
+# ecdsa_sign_timing.tcyr — H1 regression: the ECDSA SIGNING scalar multiply
+# must not leak the bit length of the secret nonce k through timing
+# (Minerva class — CVE-2019-15809 / TPM-Fail).
+#
+# The signer computes R = k·G with a Montgomery ladder whose R0 starts at
+# the point at infinity, and pt_add / pt_double (and the P-384 twins) exit
+# early on an infinity operand. Run over k itself, every leading zero bit
+# of k skipped a full add + double, so signing time was a function of
+# bitlen(k) — enough timed signatures recover the private key by lattice
+# (HNP) reduction.
+#
+# The fix ladders over a FIXED-LENGTH scalar k_hat = k + n, or k + 2n when
+# k + n lacks bit 256 (P-384: bit 384), picked by a constant-time mask.
+# k_hat always has exactly that top bit set, so the ladder runs 257 / 385
+# iterations and R0/R1 meet infinity only in the identical first one.
+# n·G = O, so k_hat·G == k·G and every signature stays byte-identical.
+#
+# Groups:
+#   1. k_hat structure: top limb is exactly 1 and k_hat ∈ {k + n, k + 2n}
+#      (the one picked by the rule above), for edge and random k.
+#   2. k_hat·G == k·G: the signer's entry vs the 256/384-bit reference
+#      ladder, for edge k (0, 1, 2, 2^16, 2^255 / 2^383, n-2, n-1, n, and
+#      the values on either side of 2^bits - n) plus random k.
+#   3. RFC 6979 KATs through ecdsa_p{256,384}_sign (byte-identical output).
+#   4. Timing ratio on the exact scalar-multiply entry the signer uses:
+#      median over interleaved runs, small k (1, 2^16) vs full-length k
+#      (n-1). Pre-fix k=1 ran in well under 1% of the n-1 time.
+
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/string.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fmt.cyr"
+include "lib/bayan.cyr"
+include "lib/sakshi.cyr"
+include "lib/chrono.cyr"
+include "lib/ct.cyr"
+
+include "lib/thread_local.cyr"
+include "src/crypto_scratch.cyr"
+include "src/mul64.cyr"
+include "src/types.cyr"
+include "src/error.cyr"
+include "lib/random.cyr"
+include "src/random.cyr"
+include "src/sha256.cyr"
+include "src/hex.cyr"
+include "src/sha512.cyr"
+include "src/sha384.cyr"
+include "src/hmac.cyr"
+include "src/hmac_sha384.cyr"
+include "src/bigint_ext.cyr"
+include "src/ed25519.cyr"
+include "src/ecdsa_p256.cyr"
+include "src/ecdsa_p384.cyr"
+include "src/ecdsa_sign.cyr"
+
+# ----------------------------------------------------------------
+# Helpers
+# ----------------------------------------------------------------
+
+# In-place insertion sort of `n` i64 values; returns the median.
+fn _tm_median(arr, n): i64 {
+    var i = 1;
+    while (i < n) {
+        var v = load64(arr + i * 8);
+        var j = i - 1;
+        var moving = 1;
+        while (moving == 1) {
+            if (j < 0) { moving = 0; }
+            else {
+                if (load64(arr + j * 8) > v) {
+                    store64(arr + (j + 1) * 8, load64(arr + j * 8));
+                    j = j - 1;
+                } else { moving = 0; }
+            }
+        }
+        store64(arr + (j + 1) * 8, v);
+        i = i + 1;
+    }
+    return load64(arr + (n / 2) * 8);
+}
+
+# Limb-wise equality of two `limbs`-limb LE buffers (test-side; public data).
+fn _tm_limbs_eq(a, b, limbs): i64 {
+    var i = 0;
+    var d = 0;
+    while (i < limbs) {
+        d = d | (load64(a + i * 8) ^ load64(b + i * 8));
+        i = i + 1;
+    }
+    if (d == 0) { return 1; }
+    return 0;
+}
+
+# Reference k_hat, test-side and deliberately branchy/obvious:
+# out(limbs+1) = k + n if that sum carries into bit 256/384, else k + 2n.
+fn _tm_ref_khat(out, k, n, limbs): i64 {
+    var t = alloc((limbs + 1) * 8);
+    # t = k + n
+    var c = 0;
+    var i = 0;
+    while (i < limbs) {
+        var a = load64(k + i * 8);
+        var b = load64(n + i * 8);
+        var s = a + b;
+        var c1 = 0;
+        if ((s ^ (1 << 63)) < (a ^ (1 << 63))) { c1 = 1; }
+        var s2 = s + c;
+        var c2 = 0;
+        if ((s2 ^ (1 << 63)) < (s ^ (1 << 63))) { c2 = 1; }
+        store64(t + i * 8, s2);
+        c = c1 + c2;
+        i = i + 1;
+    }
+    store64(t + limbs * 8, c);
+    if (c == 0) {
+        # t = t + n  (= k + 2n)
+        var c3 = 0;
+        i = 0;
+        while (i < limbs) {
+            var a = load64(t + i * 8);
+            var b = load64(n + i * 8);
+            var s = a + b;
+            var c1 = 0;
+            if ((s ^ (1 << 63)) < (a ^ (1 << 63))) { c1 = 1; }
+            var s2 = s + c3;
+            var c2 = 0;
+            if ((s2 ^ (1 << 63)) < (s ^ (1 << 63))) { c2 = 1; }
+            store64(t + i * 8, s2);
+            c3 = c1 + c2;
+            i = i + 1;
+        }
+        store64(t + limbs * 8, load64(t + limbs * 8) + c3);
+    }
+    memcpy(out, t, (limbs + 1) * 8);
+    return 0;
+}
+
+# ---------------- P-256 ----------------
+
+var _tm256_G   = 0;
+var _tm256_ref = 0;
+var _tm256_got = 0;
+var _tm256_rx = 0; var _tm256_ry = 0;
+var _tm256_gx = 0; var _tm256_gy = 0;
+
+fn _tm256_setup(): i64 {
+    _p256_init();
+    _tm256_G = pt_alloc();
+    pt_from_affine(_tm256_G, _p256_gx, _p256_gy);
+    _tm256_ref = pt_alloc();
+    _tm256_got = pt_alloc();
+    _tm256_rx = alloc(32); _tm256_ry = alloc(32);
+    _tm256_gx = alloc(32); _tm256_gy = alloc(32);
+    return 0;
+}
+
+# k_hat structure + k_hat·G == k·G for one 256-bit scalar `k`.
+fn _tm256_check(k, label): i64 {
+    var kh = alloc(40);
+    memset(kh, 0, 40);
+    _p256_khat(kh, k);
+    var want = alloc(40);
+    _tm_ref_khat(want, k, _p256_n, 4);
+    assert_eq(load64(kh + 32), 1, label);                 # bit 256 set, nothing above
+    assert_eq(_tm_limbs_eq(kh, want, 5), 1, label);       # == k+n or k+2n per the rule
+
+    pt_scalarmul(_tm256_ref, k, _tm256_G);                # 256-bit reference ladder
+    pt_scalarmul_secret(_tm256_got, k, _tm256_G);         # the signer's entry
+    var ri = pt_is_infinity(_tm256_ref);
+    assert_eq(pt_is_infinity(_tm256_got), ri, label);
+    if (ri == 0) {
+        pt_to_affine(_tm256_rx, _tm256_ry, _tm256_ref);
+        pt_to_affine(_tm256_gx, _tm256_gy, _tm256_got);
+        assert_eq(u256_eq(_tm256_gx, _tm256_rx), 1, label);
+        assert_eq(u256_eq(_tm256_gy, _tm256_ry), 1, label);
+    }
+    return 0;
+}
+
+fn _tm256_time(k): i64 {
+    var t0 = clock_now_ns();
+    pt_scalarmul_secret(_tm256_got, k, _tm256_G);
+    return clock_now_ns() - t0;
+}
+
+# ---------------- P-384 ----------------
+
+var _tm384_G   = 0;
+var _tm384_ref = 0;
+var _tm384_got = 0;
+var _tm384_rx = 0; var _tm384_ry = 0;
+var _tm384_gx = 0; var _tm384_gy = 0;
+
+fn _tm384_setup(): i64 {
+    _p384_init();
+    _tm384_G = pt384_alloc();
+    pt384_from_affine(_tm384_G, _p384_gx, _p384_gy);
+    _tm384_ref = pt384_alloc();
+    _tm384_got = pt384_alloc();
+    _tm384_rx = alloc(48); _tm384_ry = alloc(48);
+    _tm384_gx = alloc(48); _tm384_gy = alloc(48);
+    return 0;
+}
+
+fn _tm384_check(k, label): i64 {
+    var kh = alloc(56);
+    memset(kh, 0, 56);
+    _p384_khat(kh, k);
+    var want = alloc(56);
+    _tm_ref_khat(want, k, _p384_n, 6);
+    assert_eq(load64(kh + 48), 1, label);                 # bit 384 set, nothing above
+    assert_eq(_tm_limbs_eq(kh, want, 7), 1, label);
+
+    pt384_scalarmul(_tm384_ref, k, _tm384_G);
+    pt384_scalarmul_secret(_tm384_got, k, _tm384_G);
+    var ri = pt384_is_infinity(_tm384_ref);
+    assert_eq(pt384_is_infinity(_tm384_got), ri, label);
+    if (ri == 0) {
+        pt384_to_affine(_tm384_rx, _tm384_ry, _tm384_ref);
+        pt384_to_affine(_tm384_gx, _tm384_gy, _tm384_got);
+        assert_eq(u384_eq(_tm384_gx, _tm384_rx), 1, label);
+        assert_eq(u384_eq(_tm384_gy, _tm384_ry), 1, label);
+    }
+    return 0;
+}
+
+fn _tm384_time(k): i64 {
+    var t0 = clock_now_ns();
+    pt384_scalarmul_secret(_tm384_got, k, _tm384_G);
+    return clock_now_ns() - t0;
+}
+
+fn _tm_print3(label, a, b, c): i64 {
+    sys_write(1, "    ", 4);
+    sys_write(1, label, strlen(label));
+    sys_write(1, " medians ns: k=1 ", 17);
+    fmt_int(a);
+    sys_write(1, "  k=2^16 ", 9);
+    fmt_int(b);
+    sys_write(1, "  k=n-1 ", 8);
+    fmt_int(c);
+    sys_write(1, "\n", 1);
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    _tm256_setup();
+    _tm384_setup();
+
+    # ============================================================
+    # Groups 1+2 — P-256 k_hat structure and k_hat·G == k·G
+    # ============================================================
+    test_group("P-256 fixed-length k_hat: structure + k_hat*G == k*G");
+
+    _tm256_check(u256_from(0), "p256 k=0");
+    _tm256_check(u256_from(1), "p256 k=1");
+    _tm256_check(u256_from(2), "p256 k=2");
+    _tm256_check(u256_from(0x10000), "p256 k=2^16");
+    _tm256_check(u256_from_hex(
+        "8000000000000000000000000000000000000000000000000000000000000000"),
+        "p256 k=2^255");
+    # 2^256 - n - 1: k + n = 2^256 - 1 LACKS bit 256 -> k + 2n.
+    _tm256_check(u256_from_hex(
+        "00000000ffffffff00000000000000004319055258e8617b0c46353d039cdaae"),
+        "p256 k=2^256-n-1 (k+n lacks bit 256)");
+    # 2^256 - n: k + n = 2^256 exactly HAS bit 256 -> k + n.
+    _tm256_check(u256_from_hex(
+        "00000000ffffffff00000000000000004319055258e8617b0c46353d039cdaaf"),
+        "p256 k=2^256-n (k+n == 2^256)");
+    _tm256_check(u256_from_hex(
+        "00000000ffffffff00000000000000004319055258e8617b0c46353d039cdab0"),
+        "p256 k=2^256-n+1");
+    _tm256_check(u256_from_hex(
+        "ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc63254f"),
+        "p256 k=n-2");
+    _tm256_check(u256_from_hex(
+        "ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632550"),
+        "p256 k=n-1");
+    _tm256_check(_p256_n, "p256 k=n (n*G == O)");
+
+    # Random k in [0, n): SHA-256 of a counter, reduced once (n > 2^255).
+    var seed[8];
+    var dg[32];
+    var rk = alloc(32);
+    var ri = 0;
+    while (ri < 6) {
+        store64(&seed, 0x5eed2560 + ri);
+        sha256(&seed, 8, &dg);
+        u256_load_be(rk, &dg);
+        if (u256_cmp(rk, _p256_n) >= 0) { u256_sub(rk, rk, _p256_n); }
+        _tm256_check(rk, "p256 random k");
+        ri = ri + 1;
+    }
+
+    # ============================================================
+    # Groups 1+2 — P-384
+    # ============================================================
+    test_group("P-384 fixed-length k_hat: structure + k_hat*G == k*G");
+
+    _tm384_check(u384_from(0), "p384 k=0");
+    _tm384_check(u384_from(1), "p384 k=1");
+    _tm384_check(u384_from(2), "p384 k=2");
+    _tm384_check(u384_from(0x10000), "p384 k=2^16");
+    _tm384_check(u384_from_hex(
+        "800000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"),
+        "p384 k=2^383");
+    _tm384_check(u384_from_hex(
+        "000000000000000000000000000000000000000000000000389cb27e0bc8d220a7e5f24db74f58851313e695333ad68c"),
+        "p384 k=2^384-n-1 (k+n lacks bit 384)");
+    _tm384_check(u384_from_hex(
+        "000000000000000000000000000000000000000000000000389cb27e0bc8d220a7e5f24db74f58851313e695333ad68d"),
+        "p384 k=2^384-n (k+n == 2^384)");
+    _tm384_check(u384_from_hex(
+        "000000000000000000000000000000000000000000000000389cb27e0bc8d220a7e5f24db74f58851313e695333ad68e"),
+        "p384 k=2^384-n+1");
+    _tm384_check(u384_from_hex(
+        "ffffffffffffffffffffffffffffffffffffffffffffffffc7634d81f4372ddf581a0db248b0a77aecec196accc52971"),
+        "p384 k=n-2");
+    _tm384_check(u384_from_hex(
+        "ffffffffffffffffffffffffffffffffffffffffffffffffc7634d81f4372ddf581a0db248b0a77aecec196accc52972"),
+        "p384 k=n-1");
+    _tm384_check(_p384_n, "p384 k=n (n*G == O)");
+
+    var dg384[48];
+    var rk384 = alloc(48);
+    ri = 0;
+    while (ri < 6) {
+        store64(&seed, 0x5eed3840 + ri);
+        sha384(&seed, 8, &dg384);
+        u384_load_be(rk384, &dg384);
+        if (u384_cmp(rk384, _p384_n) >= 0) { u384_sub(rk384, rk384, _p384_n); }
+        _tm384_check(rk384, "p384 random k");
+        ri = ri + 1;
+    }
+
+    # ============================================================
+    # Group 3 — the signer still emits the RFC 6979 vectors
+    # ============================================================
+    test_group("RFC 6979 KATs through the fixed-length signer");
+
+    var x256 = hex_decode("c9afa9d845ba75166b5c215767b1d6934e50c3db36e89b127b8a622b120f6721", 64);
+    var sig256[64];
+    assert_eq(ecdsa_p256_sign(x256, "sample", 6, &sig256), 0, "p256 sign rc=0");
+    assert_streq(hex_encode(&sig256, 64),
+        "efd48b2aacb6a8fd1140dd9cd45e81d69d2c877b56aaf991c34d0ea84eaf3716f7cb1c942d657c41d436c7a1b6e29f65f3e900dbb9aff4064dc4ab2f843acda8",
+        "p256 sample r||s == RFC 6979 A.2.5");
+    var x384 = hex_decode("6b9d3dad2e1b8c1c05b19875b6659f4de23c3b667bf297ba9aa47740787137d896d5724e4c70a825f872c9ea60d2edf5", 96);
+    var sig384[96];
+    assert_eq(ecdsa_p384_sign(x384, "sample", 6, &sig384), 0, "p384 sign rc=0");
+    assert_streq(hex_encode(&sig384, 96),
+        "94edbb92a5ecb8aad4736e56c691916b3f88140666ce9fa73d64c4ea95ad133c81a648152e44acf96e36dd1e80fabe4699ef4aeb15f178cea1fe40db2603138f130e740a19624526203b6351d0a3a94fa329c145786e679e7b82c71a38628ac8",
+        "p384 sample r||s == RFC 6979 A.2.6");
+
+    # ============================================================
+    # Group 4 — timing ratio on the signer's scalar-multiply entry
+    # ============================================================
+    # Rounds interleave the three scalars (rotating the order each
+    # round) so host noise lands on all of them alike; the median
+    # discards outliers. Tolerance is deliberately generous (small k
+    # >= 0.75x the n-1 time): pre-fix, k=1 took < 1% and k=2^16 ~7%.
+    test_group("scalar-mult timing independent of bitlen(k)");
+
+    var t = alloc(3 * 8 * 16);            # 3 rows x up to 16 samples
+    var k256_1   = u256_from(1);
+    var k256_16  = u256_from(0x10000);
+    var k256_nm1 = u256_from_hex(
+        "ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632550");
+    _tm256_time(k256_nm1);                # warm
+    var R = 11;
+    var r = 0;
+    while (r < R) {
+        var o = 0;
+        while (o < 3) {
+            var which = (r + o) % 3;
+            if (which == 0) { store64(t + (0 * 16 + r) * 8, _tm256_time(k256_1)); }
+            if (which == 1) { store64(t + (1 * 16 + r) * 8, _tm256_time(k256_16)); }
+            if (which == 2) { store64(t + (2 * 16 + r) * 8, _tm256_time(k256_nm1)); }
+            o = o + 1;
+        }
+        r = r + 1;
+    }
+    var m1   = _tm_median(t + 0 * 128, R);
+    var m16  = _tm_median(t + 1 * 128, R);
+    var mfull = _tm_median(t + 2 * 128, R);
+    _tm_print3("p256", m1, m16, mfull);
+    assert_gte(m1 * 4, mfull * 3, "p256 k=1 median >= 0.75x k=n-1 median");
+    assert_gte(m16 * 4, mfull * 3, "p256 k=2^16 median >= 0.75x k=n-1 median");
+
+    var k384_1   = u384_from(1);
+    var k384_16  = u384_from(0x10000);
+    var k384_nm1 = u384_from_hex(
+        "ffffffffffffffffffffffffffffffffffffffffffffffffc7634d81f4372ddf581a0db248b0a77aecec196accc52972");
+    _tm384_time(k384_nm1);                # warm
+    R = 7;
+    r = 0;
+    while (r < R) {
+        var o = 0;
+        while (o < 3) {
+            var which = (r + o) % 3;
+            if (which == 0) { store64(t + (0 * 16 + r) * 8, _tm384_time(k384_1)); }
+            if (which == 1) { store64(t + (1 * 16 + r) * 8, _tm384_time(k384_16)); }
+            if (which == 2) { store64(t + (2 * 16 + r) * 8, _tm384_time(k384_nm1)); }
+            o = o + 1;
+        }
+        r = r + 1;
+    }
+    m1    = _tm_median(t + 0 * 128, R);
+    m16   = _tm_median(t + 1 * 128, R);
+    mfull = _tm_median(t + 2 * 128, R);
+    _tm_print3("p384", m1, m16, mfull);
+    assert_gte(m1 * 4, mfull * 3, "p384 k=1 median >= 0.75x k=n-1 median");
+    assert_gte(m16 * 4, mfull * 3, "p384 k=2^16 median >= 0.75x k=n-1 median");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+sys_exit(exit_code);

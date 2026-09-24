@@ -1,0 +1,286 @@
+# audit_log.tcyr — AuditLog JSONL persistence: escaping, bounds, no truncation.
+#
+# H3: alog_save built each JSONL line in a fixed alloc(512) with a bare memcpy of path /
+# key_id / content_hash. (1) No JSON escaping: a '"', '\', newline or control byte in a
+# path injected forged JSONL events that alog_load then replayed as real audit events.
+# (2) No bounds: a field longer than ~340 bytes overflowed the 512-byte bump block into
+# the heap beyond it (and every event leaked 512 B).
+# H6: alog_load read through file_read_all(path, buf, 65536), silently dropping every
+# event past 64 KiB; a torn (partial) final line also loaded as a bogus event.
+
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/string.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fmt.cyr"
+include "lib/bayan.cyr"
+include "lib/sakshi.cyr"
+include "lib/chrono.cyr"
+
+include "lib/thread_local.cyr"
+include "src/crypto_scratch.cyr"
+include "src/mul64.cyr"
+include "src/types.cyr"
+include "src/error.cyr"
+include "lib/random.cyr"
+include "src/random.cyr"
+include "src/sha256.cyr"
+include "src/hex.cyr"
+include "lib/ct.cyr"
+include "src/hmac.cyr"
+include "src/sha512.cyr"
+include "src/bigint_ext.cyr"
+include "src/ed25519.cyr"
+include "src/trust.cyr"
+include "src/integrity.cyr"
+include "src/policy.cyr"
+include "src/audit.cyr"
+
+# Returns 1 if C-strings `a` and `b` are byte-identical (length and content), else 0.
+fn _t_same(a, b): i64 {
+    if (a == 0) { return 0; }
+    if (b == 0) { return 0; }
+    var la = strlen(a);
+    if (la != strlen(b)) { return 0; }
+    return memeq(a, b, la);
+}
+
+# Fresh NUL-terminated string of `n` bytes, byte i = 'a' + (i*7 + seed) % 26.
+fn _t_long_str(n, seed): i64 {
+    var s = alloc(n + 1);
+    var i = 0;
+    while (i < n) {
+        store8(s + i, 97 + ((i * 7 + seed) % 26));
+        i = i + 1;
+    }
+    store8(s + n, 0);
+    return s;
+}
+
+# Fresh NUL-terminated concatenation of C-strings `a` and `b`.
+fn _t_cat(a, b): i64 {
+    var la = strlen(a);
+    var lb = strlen(b);
+    var s = alloc(la + lb + 1);
+    memcpy(s, a, la);
+    memcpy(s + la, b, lb);
+    store8(s + la + lb, 0);
+    return s;
+}
+
+# Reads the whole file at `path` into a fresh buffer; returns it and its length via `lo`.
+fn _t_slurp(path, lo): i64 {
+    return file_read_whole(path, lo);
+}
+
+fn main() {
+    alloc_init();
+
+    # ============================================================
+    # (0) Ordinary inputs: output stays byte-identical to the pre-fix writer.
+    # ============================================================
+    test_group("audit ordinary bytes");
+    var p0 = test_scratch("sigil_audit_plain.jsonl");
+    xunlink(p0);
+    var lg0 = audit_log_new();
+    var e0 = audit_artifact_verified("/bin/ls", ARTIFACT_SYSTEM_BINARY, TRUST_VERIFIED, 1,
+        "hash_ls");
+    store64(e0 + 56, 1700000000);
+    alog_record(lg0, e0);
+    var e1 = audit_artifact_signed("/bin/cat", ARTIFACT_SYSTEM_BINARY, "key_root", "hash_cat");
+    store64(e1 + 56, 0);
+    alog_record(lg0, e1);
+    var e2 = audit_artifact_verified("/etc/x", ARTIFACT_CONFIG, TRUST_VERIFIED, 0, "h");
+    store64(e2 + 56, 42);
+    alog_record(lg0, e2);
+    assert_eq(alog_save(lg0, p0), SIGIL_ERR_NONE, "plain save ok");
+    var want0 = _t_cat(_t_cat(
+        "{\"type\":\"artifact_verified\",\"timestamp\":1700000000,\"path\":\"/bin/ls\",",
+        "\"content_hash\":\"hash_ls\",\"passed\":true}\n"), _t_cat(
+        "{\"type\":\"artifact_signed\",\"timestamp\":0,\"path\":\"/bin/cat\",",
+        "\"key_id\":\"key_root\",\"content_hash\":\"hash_cat\"}\n"));
+    want0 = _t_cat(want0, _t_cat(
+        "{\"type\":\"artifact_verified\",\"timestamp\":42,\"path\":\"/etc/x\",",
+        "\"content_hash\":\"h\",\"passed\":false}\n"));
+    var l0 = 0;
+    var b0 = _t_slurp(p0, &l0);
+    assert(b0 != 0, "plain file readable");
+    assert_eq(l0, strlen(want0), "plain file length unchanged");
+    assert_eq(_t_same(b0, want0), 1, "plain file bytes unchanged");
+    xunlink(p0);
+
+    # ============================================================
+    # (a) Injection: specials in path / key_id / content_hash round-trip as ONE event.
+    # ============================================================
+    test_group("audit injection");
+    var inj = "/a\"}\n{\"type\":\"key_rotated\",\"timestamp\":1,\"key_id\":\"evil\"}\n{\"x\":\"";
+    var special = alloc(64);
+    var sp = 0;
+    store8(special + sp, 47); sp = sp + 1;     # /
+    store8(special + sp, 92); sp = sp + 1;     # backslash
+    store8(special + sp, 34); sp = sp + 1;     # "
+    store8(special + sp, 10); sp = sp + 1;     # \n
+    store8(special + sp, 13); sp = sp + 1;     # \r
+    store8(special + sp, 9); sp = sp + 1;      # \t
+    store8(special + sp, 8); sp = sp + 1;      # \b
+    store8(special + sp, 12); sp = sp + 1;     # \f
+    store8(special + sp, 1); sp = sp + 1;      # 0x01
+    store8(special + sp, 31); sp = sp + 1;     # 0x1f
+    store8(special + sp, 127); sp = sp + 1;    # DEL
+    store8(special + sp, 0xC3); sp = sp + 1;   # UTF-8 e-acute
+    store8(special + sp, 0xA9); sp = sp + 1;
+    store8(special + sp, 0xFF); sp = sp + 1;
+    store8(special + sp, 125); sp = sp + 1;    # }
+    store8(special + sp, 92); sp = sp + 1;     # trailing backslash
+    store8(special + sp, 0);
+    var kinj = "k\\\",\"passed\":false,\"z\":\"";
+    var pa = test_scratch("sigil_audit_inject.jsonl");
+    xunlink(pa);
+    var lga = audit_log_new();
+    alog_record(lga, audit_artifact_verified(inj, ARTIFACT_CONFIG, TRUST_VERIFIED, 1, special));
+    alog_record(lga, audit_artifact_signed(special, ARTIFACT_CONFIG, kinj, inj));
+    assert_eq(alog_save(lga, pa), SIGIL_ERR_NONE, "inject save ok");
+    var ra = audit_log_new();
+    var na = alog_load(ra, pa);
+    assert_eq(na, 2, "inject: exactly 2 events loaded (no forged ones)");
+    assert_eq(alog_len(ra), 2, "inject: log holds 2 events");
+    if (alog_len(ra) >= 2) {
+        var a0 = vec_get(alog_events(ra), 0);
+        var a1 = vec_get(alog_events(ra), 1);
+        assert_eq(ae_type(a0), AUDIT_ARTIFACT_VERIFIED, "inject: event 0 type");
+        assert_eq(_t_same(ae_path(a0), inj), 1, "inject: event 0 path byte-identical");
+        assert_eq(_t_same(ae_content_hash(a0), special), 1, "inject: event 0 hash identical");
+        assert_eq(ae_passed(a0), 1, "inject: event 0 passed kept");
+        assert_eq(ae_type(a1), AUDIT_ARTIFACT_SIGNED, "inject: event 1 type");
+        assert_eq(_t_same(ae_path(a1), special), 1, "inject: event 1 path byte-identical");
+        assert_eq(_t_same(ae_key_id(a1), kinj), 1, "inject: event 1 key_id identical");
+        assert_eq(_t_same(ae_content_hash(a1), inj), 1, "inject: event 1 hash identical");
+        assert_eq(ae_passed(a1), 0 - 1, "inject: event 1 passed not forged");
+    }
+    # The file itself holds exactly two lines (no raw newline leaked from a field).
+    var la = 0;
+    var ba = _t_slurp(pa, &la);
+    var nl = 0;
+    var qi = 0;
+    while (qi < la) {
+        if ((load8(ba + qi) & 0xFF) == 10) { nl = nl + 1; }
+        qi = qi + 1;
+    }
+    assert_eq(nl, 2, "inject: file has exactly 2 lines");
+    xunlink(pa);
+
+    # ============================================================
+    # (b) Bounds: 4 KiB path + key_id round-trip; nothing written past the heap top.
+    # ============================================================
+    test_group("audit long fields");
+    var longp = _t_long_str(4096, 3);
+    var longk = _t_long_str(4096, 11);
+    var longh = _t_long_str(4096, 17);
+    var canary = alloc(4096);
+    memset(canary, 0xA5, 4096);
+    var pb = test_scratch("sigil_audit_long.jsonl");
+    xunlink(pb);
+    var lgb = audit_log_new();
+    alog_record(lgb, audit_artifact_signed(longp, ARTIFACT_CONFIG, longk, longh));
+    alog_record(lgb, audit_artifact_signed(longp, ARTIFACT_CONFIG, longk, longh));
+    assert_eq(alog_save(lgb, pb), SIGIL_ERR_NONE, "long save ok");
+    # A bump block handed out right after the save must still be untouched (zero) mmap
+    # memory: the old writer's 512-byte line buffer overflowed straight into it.
+    var probe = alloc(16384);
+    var dirty = 0;
+    var pi = 0;
+    while (pi < 16384) {
+        dirty = dirty | (load8(probe + pi) & 0xFF);
+        pi = pi + 1;
+    }
+    assert_eq(dirty, 0, "long: no write past the heap top during save");
+    var cbad = 0;
+    var ci = 0;
+    while (ci < 4096) {
+        if ((load8(canary + ci) & 0xFF) != 0xA5) { cbad = cbad + 1; }
+        ci = ci + 1;
+    }
+    assert_eq(cbad, 0, "long: canary allocation intact");
+    assert_eq(_t_same(longp, _t_long_str(4096, 3)), 1, "long: source path intact");
+    var rb = audit_log_new();
+    assert_eq(alog_load(rb, pb), 2, "long: 2 events loaded");
+    if (alog_len(rb) >= 2) {
+        var bb = vec_get(alog_events(rb), 1);
+        assert_eq(_t_same(ae_path(bb), longp), 1, "long: 4 KiB path intact");
+        assert_eq(_t_same(ae_key_id(bb), longk), 1, "long: 4 KiB key_id intact");
+        assert_eq(_t_same(ae_content_hash(bb), longh), 1, "long: 4 KiB hash intact");
+    }
+    xunlink(pb);
+
+    # ============================================================
+    # (c) No truncation: a log well over 64 KiB loads every event.
+    # ============================================================
+    test_group("audit large log");
+    var pc = test_scratch("sigil_audit_big.jsonl");
+    xunlink(pc);
+    var lgc = audit_log_new();
+    var nev = 3000;
+    var ei = 0;
+    while (ei < nev) {
+        var ev = audit_artifact_verified("/usr/lib/some/fairly/long/path/libexample.so",
+            ARTIFACT_SYSTEM_BINARY, TRUST_VERIFIED, 1,
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
+        store64(ev + 56, 1000 + ei);
+        alog_record(lgc, ev);
+        ei = ei + 1;
+    }
+    assert_eq(alog_save(lgc, pc), SIGIL_ERR_NONE, "big save ok");
+    var lc = 0;
+    var bc = _t_slurp(pc, &lc);
+    assert(bc != 0, "big file readable");
+    assert(lc > 65536 * 4, "big file is well over 64 KiB");
+    var rc = audit_log_new();
+    assert_eq(alog_load(rc, pc), nev, "big: every event loaded");
+    assert_eq(alog_len(rc), nev, "big: log holds every event");
+    if (alog_len(rc) == nev) {
+        var last = vec_get(alog_events(rc), nev - 1);
+        assert_eq(ae_timestamp(last), 1000 + nev - 1, "big: last event timestamp");
+    }
+    xunlink(pc);
+
+    # ============================================================
+    # (d) A torn final line (crash mid-append) must not load as an event.
+    # ============================================================
+    test_group("audit torn line");
+    var pd = test_scratch("sigil_audit_torn.jsonl");
+    var ok1 = "{\"type\":\"artifact_verified\",\"timestamp\":5,\"path\":\"/ok\",\"passed\":true}\n";
+    var torn = _t_cat(ok1, "{\"type\":\"artifact_verified\",\"timestamp\":6,\"path\":\"/tor");
+    file_write_all(pd, torn, strlen(torn));
+    var rd = audit_log_new();
+    assert_eq(alog_load(rd, pd), 1, "torn: only the complete line loads");
+    # Torn inside a string that itself contains a '}' still does not load.
+    var torn2 = _t_cat(ok1, "{\"type\":\"key_rotated\",\"timestamp\":6,\"key_id\":\"a}");
+    file_write_all(pd, torn2, strlen(torn2));
+    var rd2 = audit_log_new();
+    assert_eq(alog_load(rd2, pd), 1, "torn: unterminated string ending in } rejected");
+    # A complete final line without a trailing newline still loads.
+    var nonl = _t_cat(ok1, "{\"type\":\"key_rotated\",\"timestamp\":6,\"key_id\":\"a\"}");
+    file_write_all(pd, nonl, strlen(nonl));
+    var rd3 = audit_log_new();
+    assert_eq(alog_load(rd3, pd), 2, "torn: complete last line w/o newline loads");
+    # An empty file loads zero events (not an IO error).
+    file_write_all(pd, "", 0);
+    var rd4 = audit_log_new();
+    assert_eq(alog_load(rd4, pd), 0, "empty file loads 0 events");
+    xunlink(pd);
+
+    # Missing file stays -1.
+    var rm = audit_log_new();
+    assert_eq(alog_load(rm, "/tmp/sigil_audit_log_does_not_exist_xyz.jsonl"), 0 - 1,
+        "missing file returns -1");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+sys_exit(exit_code);

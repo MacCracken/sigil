@@ -350,9 +350,13 @@ fn rl_to_jsonl(rl): i64 {
 # quote). Writes a fresh C-string copy of the contents to *out_ptr.
 # Sets *out_ptr to 0 and returns pos unchanged if not a quoted str.
 var _rj_out_ptr = 0;
+# 1 when the most recent _rj_parse_string found its closing quote, else 0 (a line cut
+# mid-string must be rejected, not loaded with a truncated value).
+var _rj_str_closed = 0;
 
 fn _rj_parse_string(data, pos, end): i64 {
     _rj_out_ptr = 0;
+    _rj_str_closed = 0;
     if (pos >= end) { return pos; }
     if ((load8(data + pos) & 0xFF) != 34) { return pos; }
     pos = pos + 1;
@@ -420,17 +424,163 @@ fn _rj_parse_string(data, pos, end): i64 {
     }
     store8(out + w, 0);
     _rj_out_ptr = out;
-    if (pos < end) { pos = pos + 1; }   # skip closing quote
+    if (pos < end) { pos = pos + 1; _rj_str_closed = 1; }   # skip closing quote
     return pos;
 }
 
+# Internal: 1 if byte `c` is JSON whitespace (space, tab, LF, CR), else 0.
+fn _rj_is_ws(c): i64 {
+    if (c == 32) { return 1; }
+    if (c == 9) { return 1; }
+    if (c == 10) { return 1; }
+    if (c == 13) { return 1; }
+    return 0;
+}
+
+# Internal: returns the first offset >= `pos` in data[..end) that is not JSON whitespace.
+fn _rj_skip_ws(data, pos, end): i64 {
+    while (pos < end) {
+        if (_rj_is_ws(load8(data + pos) & 0xFF) == 0) { return pos; }
+        pos = pos + 1;
+    }
+    return pos;
+}
+
+# Internal: offset just past the JSON literal `lit` (a C-string) at data[pos], or -1 if the
+# bytes there differ or run past `end`.
+fn _rj_match_lit(data, pos, end, lit): i64 {
+    var n = strlen(lit);
+    if (pos + n > end) { return 0 - 1; }
+    var i = 0;
+    while (i < n) {
+        if ((load8(data + pos + i) & 0xFF) != (load8(lit + i) & 0xFF)) { return 0 - 1; }
+        i = i + 1;
+    }
+    return pos + n;
+}
+
+# Internal: offset of the next member key after the value ending at `pos` — skips JSON
+# whitespace, then either ',' (plus whitespace; the key's '"' is checked by the caller) or
+# the object's closing '}'. Returns -1 on anything else. On '}' sets _rj_obj_closed = 1 and
+# returns the offset just past it.
+var _rj_obj_closed = 0;
+fn _rj_member_end(data, pos, end): i64 {
+    _rj_obj_closed = 0;
+    pos = _rj_skip_ws(data, pos, end);
+    if (pos >= end) { return 0 - 1; }
+    var c = load8(data + pos) & 0xFF;
+    if (c == 125) { _rj_obj_closed = 1; return pos + 1; }
+    if (c != 44) { return 0 - 1; }
+    return _rj_skip_ws(data, pos + 1, end);
+}
+
+# Internal: offset of the first member key of the one-line JSON object at data[0..end) —
+# whitespace, '{', whitespace. Returns -1 if the line does not open an object; sets
+# _rj_obj_closed = 1 (offset just past '}') for the empty object "{}".
+fn _rj_object_open(data, end): i64 {
+    _rj_obj_closed = 0;
+    var pos = _rj_skip_ws(data, 0, end);
+    if (pos >= end) { return 0 - 1; }
+    if ((load8(data + pos) & 0xFF) != 123) { return 0 - 1; }
+    pos = _rj_skip_ws(data, pos + 1, end);
+    if (pos < end) {
+        if ((load8(data + pos) & 0xFF) == 125) { _rj_obj_closed = 1; return pos + 1; }
+    }
+    return pos;
+}
+
+# Internal: 1 if only JSON whitespace follows `pos` in data[..end) (the object was the
+# whole line), else 0.
+fn _rj_at_line_end(data, pos, end): i64 {
+    if (_rj_skip_ws(data, pos, end) == end) { return 1; }
+    return 0;
+}
+
+# Internal: after a key string ending at `pos`, skips JSON whitespace, requires ':', then
+# skips whitespace again. Returns the offset of the value's first byte, or -1 if there is
+# no ':' or no value.
+fn _rj_expect_colon(data, pos, end): i64 {
+    pos = _rj_skip_ws(data, pos, end);
+    if (pos >= end) { return 0 - 1; }
+    if ((load8(data + pos) & 0xFF) != 58) { return 0 - 1; }
+    pos = _rj_skip_ws(data, pos + 1, end);
+    if (pos >= end) { return 0 - 1; }
+    return pos;
+}
+
+# Internal: the value parsed by the most recent successful _rj_parse_int.
+var _rj_num_out = 0;
+
+# Internal: strict JSON integer starting at data[pos] (leading whitespace skipped). Grammar:
+# optional '-', then '0' or a nonzero digit followed by digits; no '+', no leading zeros, no
+# fraction or exponent. The number must fit an i64 (overflow is rejected, never wrapped) and
+# be followed, after optional whitespace, by ',' or '}'. On success stores the value in
+# _rj_num_out and returns the offset of that ',' / '}'; on any failure returns -1.
+fn _rj_parse_int(data, pos, end): i64 {
+    _rj_num_out = 0;
+    pos = _rj_skip_ws(data, pos, end);
+    if (pos >= end) { return 0 - 1; }
+    var neg = 0;
+    if ((load8(data + pos) & 0xFF) == 45) { neg = 1; pos = pos + 1; }
+    if (pos >= end) { return 0 - 1; }
+    # Accumulate as a non-positive value so i64 min is representable. `lim` is the most
+    # negative accumulator allowed; the check acc >= (lim + d) / 10 relies on division
+    # truncating toward zero (a ceiling for these negative operands).
+    var lim = 0 - 9223372036854775807;
+    if (neg == 1) { lim = lim - 1; }
+    var first = pos;
+    var acc = 0;
+    while (pos < end) {
+        var c = load8(data + pos) & 0xFF;
+        if (c < 48) { break; }
+        if (c > 57) { break; }
+        var d = c - 48;
+        if (acc < (lim + d) / 10) { return 0 - 1; }
+        acc = acc * 10 - d;
+        pos = pos + 1;
+    }
+    var ndig = pos - first;
+    if (ndig == 0) { return 0 - 1; }
+    if (ndig > 1) { if ((load8(data + first) & 0xFF) == 48) { return 0 - 1; } }
+    pos = _rj_skip_ws(data, pos, end);
+    if (pos >= end) { return 0 - 1; }
+    var t = load8(data + pos) & 0xFF;
+    if (t != 44) { if (t != 125) { return 0 - 1; } }
+    if (neg == 1) { _rj_num_out = acc; }
+    else { _rj_num_out = 0 - acc; }
+    return pos;
+}
+
+# Internal: skips one scalar JSON value at data[pos] — a closed string, null / true / false,
+# or a strict integer (_rj_parse_int) — for a field the caller does not read. Returns the
+# offset just past it (for an integer, of the ',' / '}' after it), or -1 if it is none of
+# those (nested objects / arrays are not accepted).
+fn _rj_skip_value(data, pos, end): i64 {
+    if (pos >= end) { return 0 - 1; }
+    if ((load8(data + pos) & 0xFF) == 34) {
+        pos = _rj_parse_string(data, pos, end);
+        if (_rj_str_closed == 0) { return 0 - 1; }
+        return pos;
+    }
+    var p = _rj_match_lit(data, pos, end, "null");
+    if (p >= 0) { return p; }
+    p = _rj_match_lit(data, pos, end, "true");
+    if (p >= 0) { return p; }
+    p = _rj_match_lit(data, pos, end, "false");
+    if (p >= 0) { return p; }
+    return _rj_parse_int(data, pos, end);
+}
+
 # Parse a single JSONL entry line into a fresh RevocationEntry.
-# Returns entry ptr, or 0 on malformed input.
+# Returns entry ptr, or 0 on malformed input. The line must be exactly one flat JSON object
+# ('{' "key": value, ... '}', JSON whitespace allowed between tokens, nothing after the
+# '}'), every string closed, and revoked_at / revoked_after strict i64 integers
+# (_rj_parse_int). A line cut short (a truncated file's last record) or carrying a junk,
+# fractional or overflowing number is therefore rejected, never loaded as an entry.
 fn _rev_entry_from_jsonl(line, llen): i64 {
-    # Six fields: key_id, content_hash, reason, revoked_at,
-    # revoked_by, revoked_after.  Walk the line in order, matching
-    # on the known key names. Tolerant to reordering that survives a
-    # round-trip from our own writer.
+    # Six fields: key_id, content_hash, reason, revoked_at, revoked_by, revoked_after, in
+    # any order. key_id / content_hash / reason / revoked_by take a string or null (null =
+    # 0 / ""); unknown fields take any scalar and are ignored.
     var key_id = 0;
     var chash = 0;
     var reason = 0;
@@ -438,69 +588,40 @@ fn _rev_entry_from_jsonl(line, llen): i64 {
     var revoked_at = 0;
     var revoked_after = 0;
 
-    var pos = 0;
-    while (pos < llen) {
-        var c = load8(line + pos) & 0xFF;
-        if (c != 34) { pos = pos + 1; }   # scan for opening quote
-        else {
+    var pos = _rj_object_open(line, llen);
+    if (pos < 0) { return 0; }
+    while (_rj_obj_closed == 0) {
+        if (pos >= llen) { return 0; }
+        if ((load8(line + pos) & 0xFF) != 34) { return 0; }
+        pos = _rj_parse_string(line, pos, llen);
+        var k = _rj_out_ptr;
+        if (_rj_str_closed == 0) { return 0; }
+        pos = _rj_expect_colon(line, pos, llen);
+        if (pos < 0) { return 0; }
+        if (streq(k, "revoked_at") == 1) {
+            pos = _rj_parse_int(line, pos, llen);
+            if (pos < 0) { return 0; }
+            revoked_at = _rj_num_out;
+        } elif (streq(k, "revoked_after") == 1) {
+            pos = _rj_parse_int(line, pos, llen);
+            if (pos < 0) { return 0; }
+            revoked_after = _rj_num_out;
+        } elif ((load8(line + pos) & 0xFF) == 34) {
             pos = _rj_parse_string(line, pos, llen);
-            var k = _rj_out_ptr;
-            if (k == 0) { return 0; }
-            # Skip to colon
-            while (pos < llen) {
-                if ((load8(line + pos) & 0xFF) == 58) { pos = pos + 1; break; }
-                pos = pos + 1;
-            }
-            # Skip whitespace after colon
-            while (pos < llen) {
-                var cc = load8(line + pos) & 0xFF;
-                if (cc == 32) { pos = pos + 1; }
-                elif (cc == 9) { pos = pos + 1; }
-                else { break; }
-            }
-            if (pos >= llen) { return 0; }
-            var vc = load8(line + pos) & 0xFF;
-            if (vc == 34) {
-                # Quoted string value
-                pos = _rj_parse_string(line, pos, llen);
-                var v = _rj_out_ptr;
-                if (streq(k, "key_id") == 1) { key_id = v; }
-                elif (streq(k, "content_hash") == 1) { chash = v; }
-                elif (streq(k, "reason") == 1) { reason = v; }
-                elif (streq(k, "revoked_by") == 1) { revoked_by = v; }
-            } else {
-                # Non-string value: null or integer.
-                var vs = pos;
-                while (pos < llen) {
-                    var vcc = load8(line + pos) & 0xFF;
-                    if (vcc == 44) { break; }  # ','
-                    if (vcc == 125) { break; } # '}'
-                    if (vcc == 32) { break; }
-                    if (vcc == 10) { break; }
-                    pos = pos + 1;
-                }
-                var vlen = pos - vs;
-                if (vlen > 0) {
-                    # Integer fields
-                    var intv = 0;
-                    # Reject "null" / "true" / "false" by checking first byte.
-                    var fb = load8(line + vs) & 0xFF;
-                    if (fb >= 48) {
-                        if (fb <= 57) {
-                            # digit — parse as int
-                            var ii = 0;
-                            while (ii < vlen) {
-                                intv = intv * 10 + ((load8(line + vs + ii) & 0xFF) - 48);
-                                ii = ii + 1;
-                            }
-                        }
-                    }
-                    if (streq(k, "revoked_at") == 1) { revoked_at = intv; }
-                    elif (streq(k, "revoked_after") == 1) { revoked_after = intv; }
-                }
-            }
+            if (_rj_str_closed == 0) { return 0; }
+            var v = _rj_out_ptr;
+            if (streq(k, "key_id") == 1) { key_id = v; }
+            elif (streq(k, "content_hash") == 1) { chash = v; }
+            elif (streq(k, "reason") == 1) { reason = v; }
+            elif (streq(k, "revoked_by") == 1) { revoked_by = v; }
+        } else {
+            pos = _rj_skip_value(line, pos, llen);
+            if (pos < 0) { return 0; }
         }
+        pos = _rj_member_end(line, pos, llen);
+        if (pos < 0) { return 0; }
     }
+    if (_rj_at_line_end(line, pos, llen) == 0) { return 0; }
 
     if (reason == 0) { reason = ""; }
     if (revoked_by == 0) { revoked_by = ""; }
@@ -557,12 +678,13 @@ fn rl_save(rl, path): i64 {
     return SIGIL_ERR_NONE;
 }
 
-# Reads the file at `path` (at most 64 KiB; any excess is silently dropped) and parses it
-# with rl_from_jsonl. Returns the new RevocationList, or 0 if the file cannot be read.
+# Reads the whole file at `path` (no size cap, nothing truncated) and parses it with
+# rl_from_jsonl, so a cut or malformed final line is counted in rl_load_bad_count, never
+# loaded. Returns the new RevocationList, or 0 if the file cannot be opened or read.
 fn rl_load(path): i64 {
-    var buf = alloc(65536);
-    var n = file_read_all(path, buf, 65536);
-    if (n < 0) { return 0; }
+    var n = 0;
+    var buf = file_read_whole(path, &n);
+    if (buf == 0) { return 0; }
     return rl_from_jsonl(buf, n);
 }
 
@@ -599,62 +721,49 @@ fn crl_to_jsonl(c): i64 {
 }
 
 # Parse the CRL header line. Returns new Crl struct with the entries
-# vec initialized empty. Returns 0 on failure.
+# vec initialized empty. Returns 0 on failure: the line must be one flat JSON object (as for
+# _rev_entry_from_jsonl), issuer a closed string, and version / issued_at / next_update
+# strict i64 integers (_rj_parse_int). Fails closed: a header whose next_update is junk,
+# fractional, overflowing, quoted or null yields no CRL at all rather than one that
+# crl_is_stale would report fresh. A missing field keeps its default (next_update 0 = none).
 fn _crl_parse_header(line, llen): i64 {
     var version = 0;
     var issuer = 0;
     var issued_at = 0;
     var next_update = 0;
 
-    var pos = 0;
-    while (pos < llen) {
-        var c = load8(line + pos) & 0xFF;
-        if (c != 34) { pos = pos + 1; }
-        else {
+    var pos = _rj_object_open(line, llen);
+    if (pos < 0) { return 0; }
+    while (_rj_obj_closed == 0) {
+        if (pos >= llen) { return 0; }
+        if ((load8(line + pos) & 0xFF) != 34) { return 0; }
+        pos = _rj_parse_string(line, pos, llen);
+        var k = _rj_out_ptr;
+        if (_rj_str_closed == 0) { return 0; }
+        pos = _rj_expect_colon(line, pos, llen);
+        if (pos < 0) { return 0; }
+        var nf = 0;
+        if (streq(k, "version") == 1) { nf = 1; }
+        elif (streq(k, "issued_at") == 1) { nf = 2; }
+        elif (streq(k, "next_update") == 1) { nf = 3; }
+        if (nf != 0) {
+            pos = _rj_parse_int(line, pos, llen);
+            if (pos < 0) { return 0; }
+            if (nf == 1) { version = _rj_num_out; }
+            elif (nf == 2) { issued_at = _rj_num_out; }
+            else { next_update = _rj_num_out; }
+        } elif ((load8(line + pos) & 0xFF) == 34) {
             pos = _rj_parse_string(line, pos, llen);
-            var k = _rj_out_ptr;
-            if (k == 0) { return 0; }
-            while (pos < llen) {
-                if ((load8(line + pos) & 0xFF) == 58) { pos = pos + 1; break; }
-                pos = pos + 1;
-            }
-            while (pos < llen) {
-                var cc = load8(line + pos) & 0xFF;
-                if (cc == 32) { pos = pos + 1; }
-                elif (cc == 9) { pos = pos + 1; }
-                else { break; }
-            }
-            if (pos >= llen) { return 0; }
-            var vc = load8(line + pos) & 0xFF;
-            if (vc == 34) {
-                pos = _rj_parse_string(line, pos, llen);
-                if (streq(k, "issuer") == 1) { issuer = _rj_out_ptr; }
-            } else {
-                var vs = pos;
-                while (pos < llen) {
-                    var vcc = load8(line + pos) & 0xFF;
-                    if (vcc == 44) { break; }
-                    if (vcc == 125) { break; }
-                    pos = pos + 1;
-                }
-                var vlen = pos - vs;
-                var intv = 0;
-                if (vlen > 0) {
-                    var fb = load8(line + vs) & 0xFF;
-                    if (fb >= 48) { if (fb <= 57) {
-                            var ii = 0;
-                            while (ii < vlen) {
-                                intv = intv * 10 + ((load8(line + vs + ii) & 0xFF) - 48);
-                                ii = ii + 1;
-                            }
-                        } }
-                }
-                if (streq(k, "version") == 1) { version = intv; }
-                elif (streq(k, "issued_at") == 1) { issued_at = intv; }
-                elif (streq(k, "next_update") == 1) { next_update = intv; }
-            }
+            if (_rj_str_closed == 0) { return 0; }
+            if (streq(k, "issuer") == 1) { issuer = _rj_out_ptr; }
+        } else {
+            pos = _rj_skip_value(line, pos, llen);
+            if (pos < 0) { return 0; }
         }
+        pos = _rj_member_end(line, pos, llen);
+        if (pos < 0) { return 0; }
     }
+    if (_rj_at_line_end(line, pos, llen) == 0) { return 0; }
     if (issuer == 0) { return 0; }
     var c = crl_new(version, issuer);
     store64(c + 16, issued_at);
@@ -701,12 +810,13 @@ fn crl_save(c, path): i64 {
     return SIGIL_ERR_NONE;
 }
 
-# Reads the file at `path` (at most 64 KiB; any excess is silently dropped) and parses it
-# with crl_from_jsonl. Returns the new Crl, or 0 if the file cannot be read or its header
-# line is missing, malformed or lacks an issuer. Malformed entry lines are skipped uncounted.
+# Reads the whole file at `path` (no size cap, nothing truncated) and parses it with
+# crl_from_jsonl. Returns the new Crl, or 0 if the file cannot be opened or read or its
+# header line is missing, malformed (including an unparseable number) or lacks an issuer.
+# Malformed entry lines are skipped uncounted.
 fn crl_load(path): i64 {
-    var buf = alloc(65536);
-    var n = file_read_all(path, buf, 65536);
-    if (n < 0) { return 0; }
+    var n = 0;
+    var buf = file_read_whole(path, &n);
+    if (buf == 0) { return 0; }
     return crl_from_jsonl(buf, n);
 }

@@ -8,10 +8,16 @@
 #
 # Reference: pq-crystals/dilithium `ref/rounding.c`. We keep the
 # same call shapes; the only Cyrius-specific adaptation is the
-# multi-return idiom — C uses an out-pointer for a0, we expose
-# globals the caller can read after a call. That matches the
-# sha256 / ed25519 pattern already in sigil and avoids the
-# address-of-local dance for scalars.
+# multi-return idiom — C uses an out-pointer for a0, the
+# single-coefficient `mldsa_power2round` / `mldsa_decompose` expose
+# module globals the caller can read after a call.
+#
+# ⚠ Those globals make the two single-coefficient calls NOT
+# thread-safe, so nothing on the keygen / sign / verify path uses
+# them. The poly / polyveck wrappers, HighBits, LowBits and UseHint
+# compute through the pure helpers `_mldsa_p2r_hi`, `_mldsa_dec_hi`
+# and `_mldsa_dec_lo` (locals only, no globals written), which is
+# what makes concurrent ML-DSA callers safe (finding M11).
 #
 # All functions operate on i64 values holding the signed-i32
 # range of Z_Q coefficients. Assume inputs are standard
@@ -31,13 +37,20 @@
 var _mldsa_p2r_a1 = 0;      # output high part
 var _mldsa_p2r_a0 = 0;      # output low part (balanced)
 
+# Power2Round high part of a ∈ [0, Q). Pure: writes no globals.
+# Standard trick: add 2^{D-1}-1 before the right-shift so the
+# shift rounds to nearest instead of toward zero. Input is
+# non-negative so the logical >> matches arithmetic >>. The low
+# part is a − (a1 << D).
+fn _mldsa_p2r_hi(a): i64 {
+    return (a + (1 << (MLDSA_D - 1)) - 1) >> MLDSA_D;
+}
+
 # Power2Round (D = 13) of a ∈ [0, Q): returns a1 ∈ [0, 1023] and also leaves a1 / a0 in
 # `_mldsa_p2r_a1` / `_mldsa_p2r_a0`, where a = a1 · 2^13 + a0 and a0 ∈ [-4095, 4096].
+# Those globals make this single-coefficient form not thread-safe (the poly wrappers avoid it).
 fn mldsa_power2round(a): i64 {
-    # Standard trick: add 2^{D-1}-1 before the right-shift so
-    # the shift rounds to nearest instead of toward zero. Input
-    # is non-negative so the logical >> matches arithmetic >>.
-    var a1 = (a + (1 << (MLDSA_D - 1)) - 1) >> MLDSA_D;
+    var a1 = _mldsa_p2r_hi(a);
     _mldsa_p2r_a1 = a1;
     _mldsa_p2r_a0 = a - (a1 << MLDSA_D);
     return a1;
@@ -63,33 +76,42 @@ fn mldsa_power2round(a): i64 {
 var _mldsa_dec_a1 = 0;      # high bits (w1 in the spec)
 var _mldsa_dec_a0 = 0;      # low bits (balanced, w0)
 
-# Decompose (γ2 = (Q−1)/32) of a ∈ [0, Q): returns a1 = HighBits ∈ [0, 15] and also leaves
-# a1 / a0 in `_mldsa_dec_a1` / `_mldsa_dec_a0`, a0 ∈ [−γ2, γ2] (−γ2 only when a1 wraps to 0).
-fn mldsa_decompose(a): i64 {
+# Decompose high part a1 ∈ [0, 15] of a ∈ [0, Q). Pure: writes no globals.
+fn _mldsa_dec_hi(a): i64 {
     var a1 = (a + 127) >> 7;
     a1 = (a1 * 1025 + (1 << 21)) >> 22;
-    a1 = a1 & 15;
+    return a1 & 15;
+}
+
+# Decompose low part a0 of a ∈ [0, Q) given its high part a1 = _mldsa_dec_hi(a). Pure.
+fn _mldsa_dec_lo(a, a1): i64 {
     var a0 = a - a1 * 2 * MLDSA65_GAMMA2;
     # Conditional subtract Q: if a0 > (Q−1)/2, bring it into the
     # balanced negative range.
     var diff = (MLDSA_Q - 1) / 2 - a0;
     var sign = (diff >> 63) & 1;        # 1 iff diff < 0 iff a0 > (Q−1)/2
-    a0 = a0 - sign * MLDSA_Q;
+    return a0 - sign * MLDSA_Q;
+}
+
+# Decompose (γ2 = (Q−1)/32) of a ∈ [0, Q): returns a1 = HighBits ∈ [0, 15] and also leaves
+# a1 / a0 in `_mldsa_dec_a1` / `_mldsa_dec_a0`, a0 ∈ [−γ2, γ2] (−γ2 only when a1 wraps to 0).
+# Those globals make this single-coefficient form not thread-safe (the poly wrappers avoid it).
+fn mldsa_decompose(a): i64 {
+    var a1 = _mldsa_dec_hi(a);
     _mldsa_dec_a1 = a1;
-    _mldsa_dec_a0 = a0;
+    _mldsa_dec_a0 = _mldsa_dec_lo(a, a1);
     return a1;
 }
 
 # Convenience accessors — HighBits / LowBits in FIPS 204 notation.
+# Pure (no globals written), so thread-safe.
 fn mldsa_high_bits(a): i64 {
-    mldsa_decompose(a);
-    return _mldsa_dec_a1;
+    return _mldsa_dec_hi(a);
 }
 
-# LowBits: the balanced a0 of mldsa_decompose(a); also overwrites the `_mldsa_dec_*` globals.
+# LowBits: the balanced a0 of Decompose(a). Pure (leaves `_mldsa_dec_*` alone), thread-safe.
 fn mldsa_low_bits(a): i64 {
-    mldsa_decompose(a);
-    return _mldsa_dec_a0;
+    return _mldsa_dec_lo(a, _mldsa_dec_hi(a));
 }
 
 # ================================================================
@@ -126,11 +148,10 @@ fn mldsa_make_hint(a0, a1): i64 {
 # the decompose step so a1 stays in [0, 15].
 
 # UseHint of a ∈ [0, Q): a1 = HighBits(a) if hint == 0, else a1 ± 1 mod 16 (+1 when a0 > 0).
-# Returns a value in [0, 15]; overwrites the `_mldsa_dec_*` globals.
+# Returns a value in [0, 15]. Pure (leaves `_mldsa_dec_*` alone), so thread-safe.
 fn mldsa_use_hint(a, hint): i64 {
-    mldsa_decompose(a);
-    var a1 = _mldsa_dec_a1;
-    var a0 = _mldsa_dec_a0;
+    var a1 = _mldsa_dec_hi(a);
+    var a0 = _mldsa_dec_lo(a, a1);
     if (hint == 0) { return a1; }
     if (a0 > 0) { return (a1 + 1) & 15; }
     return (a1 - 1) & 15;
@@ -140,25 +161,29 @@ fn mldsa_use_hint(a, hint): i64 {
 # Per-poly wrappers (iterate the per-coefficient primitive)
 # ================================================================
 
-# a1[i], a0[i] = power2round(a[i])
+# a1[i], a0[i] = power2round(a[i]). Pure helpers only (no globals), so thread-safe;
+# `a1` may alias `a` (each a[i] is read before a1[i] / a0[i] are written).
 fn mldsa_poly_power2round(a1, a0, a): i64 {
     var i = 0;
     while (i < 256) {
-        mldsa_power2round(load64(a + i * 8));
-        store64(a1 + i * 8, _mldsa_p2r_a1);
-        store64(a0 + i * 8, _mldsa_p2r_a0);
+        var c = load64(a + i * 8);
+        var hi = _mldsa_p2r_hi(c);
+        store64(a1 + i * 8, hi);
+        store64(a0 + i * 8, c - (hi << MLDSA_D));
         i = i + 1;
     }
     return 0;
 }
 
-# a1[i], a0[i] = decompose(a[i])
+# a1[i], a0[i] = decompose(a[i]). Pure helpers only (no globals), so thread-safe;
+# `a1` may alias `a` (each a[i] is read before a1[i] / a0[i] are written).
 fn mldsa_poly_decompose(a1, a0, a): i64 {
     var i = 0;
     while (i < 256) {
-        mldsa_decompose(load64(a + i * 8));
-        store64(a1 + i * 8, _mldsa_dec_a1);
-        store64(a0 + i * 8, _mldsa_dec_a0);
+        var c = load64(a + i * 8);
+        var hi = _mldsa_dec_hi(c);
+        store64(a1 + i * 8, hi);
+        store64(a0 + i * 8, _mldsa_dec_lo(c, hi));
         i = i + 1;
     }
     return 0;

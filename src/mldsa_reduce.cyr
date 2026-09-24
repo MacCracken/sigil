@@ -24,7 +24,7 @@
 # ML-DSA variant since they derive only from (Q, N).
 
 var MLDSA_MONT = 0 - 4186625;           # R = 2^32 mod Q, signed form
-var MLDSA_QINV = 58728449;              # Q * QINV ≡ -1 (mod 2^32)
+var MLDSA_QINV = 58728449;              # Q * QINV ≡ +1 (mod 2^32)
 
 # ================================================================
 # mldsa_montgomery_reduce — montgomery_reduce in FIPS 204 notation

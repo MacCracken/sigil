@@ -1035,7 +1035,13 @@ fn pt384_add(out, p, q): i64 {
     return 0;
 }
 
-# Montgomery-ladder scalar multiplication.
+# Montgomery-ladder scalar multiplication — P-384 mirror of the P-256
+# ladder (see src/ecdsa_p256.cyr for the full rationale). pt384_add /
+# pt384_double exit early on an infinity operand and R0 is infinity for
+# every leading zero bit, so laddering over k itself (pt384_scalarmul)
+# leaks bitlen(k) — Minerva / CVE-2019-15809. A SECRET scalar goes through
+# pt384_scalarmul_secret: the ladder over the fixed-length k_hat = k + n or
+# k + 2n (bit 384 always set; n·P = O), 385 iterations for every k.
 var _ptm384_r0 = 0;
 var _ptm384_r1 = 0;
 var _ptm384_sum = 0;
@@ -1052,10 +1058,10 @@ fn _ptm384_init(): i64 {
     return 0;
 }
 
-# out = k * P via a Montgomery ladder over all 384 bits of k (six LE limbs; P, out 144-byte
-# Jacobian) with branch-free pt384_cswap; the sign path's k * G. Not fully constant-time:
-# pt384_add / pt384_double exit early on infinity, which R0 is for each leading zero bit of k.
-fn pt384_scalarmul(out, k, P): i64 {
+# Ladder core: out = k * P over scalar bits top..0 (k is LE limbs covering bit `top`; P, out
+# 144-byte Jacobian), branch-free pt384_cswap. Shared by pt384_scalarmul (top 383) and
+# pt384_scalarmul_secret (top 384, fixed length).
+fn _pt384_ladder(out, k, top, P): i64 {
     _p384_init();
     _ptm384_init();
     var bk = cbank();
@@ -1068,7 +1074,7 @@ fn pt384_scalarmul(out, k, P): i64 {
     pt384_copy(_ptm384_r1b, P);
     var scalar = k;
     var prev = 0;
-    var i = 383;
+    var i = top;
     while (i >= 0) {
         var limb_idx = i / 64;
         var bit_idx  = i & 63;
@@ -1087,12 +1093,77 @@ fn pt384_scalarmul(out, k, P): i64 {
     return 0;
 }
 
+# out = k * P via the ladder over all 384 bits of k (six LE limbs; P, out 144-byte Jacobian).
+# PUBLIC scalars only: pt384_add / pt384_double exit early on infinity, which R0 is for each
+# leading zero bit of k, so the time leaks bitlen(k) — use pt384_scalarmul_secret for a secret k.
+fn pt384_scalarmul(out, k, P): i64 {
+    return _pt384_ladder(out, k, 383, P);
+}
+
+# kh (7 LE limbs, 56 B) = the fixed-length ladder scalar for a 384-bit k: k + n when that sum
+# reaches 2^384, else k + 2n. For every k < 2^384 the result has limb 6 == 1 exactly (bit 384
+# set, n > 2^383), and kh == k mod n. Both candidates are always computed and one is picked by
+# an all-ones/zero mask: no branch, no early exit, no secret-indexed access. The carry is the
+# branch-free majority form MSB((a & b) | ((a | b) & ~s)).
+fn _p384_khat(kh, k): i64 {
+    _p384_init();
+    var t2[56];                     # k + 2n candidate — stack local, wiped before return
+    var ones = 0 - 1;
+    var c = 0;
+    var i = 0;
+    while (i < 6) {                 # kh = k + n, carry into limb 6
+        var a = load64(k + i * 8);
+        var b = load64(_p384_n + i * 8);
+        var s = a + b + c;
+        c = (((a & b) | ((a | b) & (s ^ ones))) >> 63) & 1;
+        store64(kh + i * 8, s);
+        i = i + 1;
+    }
+    store64(kh + 48, c);
+    c = 0;
+    i = 0;
+    while (i < 6) {                 # t2 = kh + n = k + 2n
+        var a = load64(kh + i * 8);
+        var b = load64(_p384_n + i * 8);
+        var s = a + b + c;
+        c = (((a & b) | ((a | b) & (s ^ ones))) >> 63) & 1;
+        store64(&t2 + i * 8, s);
+        i = i + 1;
+    }
+    store64(&t2 + 48, load64(kh + 48) + c);
+    # mask = all ones iff k + n already reached bit 384 (keep it), else take k + 2n.
+    var mask = 0 - (load64(kh + 48) & 1);
+    i = 0;
+    while (i < 7) {
+        var x = load64(kh + i * 8);
+        var y = load64(&t2 + i * 8);
+        store64(kh + i * 8, y ^ (mask & (x ^ y)));
+        i = i + 1;
+    }
+    memset(&t2, 0, 56);
+    return 0;
+}
+
+# out = k * P for a SECRET 384-bit scalar k (six LE limbs; P a point of order n, out 144-byte
+# Jacobian) — the ECDSA sign k·G entry. Ladders over the fixed-length k_hat from _p384_khat
+# (385 iterations for every k), so the point-op sequence no longer depends on bitlen(k): the
+# Minerva / CVE-2019-15809 fix. Result equals pt384_scalarmul(out, k, P) since n·P = O. The
+# field arithmetic underneath still has data-dependent reduction branches; k_hat is wiped.
+fn pt384_scalarmul_secret(out, k, P): i64 {
+    var kh[56];                     # stack local (per-call, per-thread), wiped before return
+    _p384_khat(&kh, k);
+    _pt384_ladder(out, &kh, 384, P);
+    memset(&kh, 0, 56);
+    return 0;
+}
+
 # ================================================================
 # Fixed-base comb (G) + windowed variable mul (Q) — verify-only, NON-CT.
 # Direct mirror of the P-256 comb/window (see src/ecdsa_p256.cyr for the
 # full rationale). Both verify inputs are public, so the non-CT table
-# index is acceptable; the secret-nonce signing path stays on
-# `pt384_scalarmul`. P-384: 144 B points, 96 four-bit windows (384/4).
+# index is acceptable; the secret-nonce signing path stays on the
+# fixed-length ladder `pt384_scalarmul_secret`. P-384: 144 B points,
+# 96 four-bit windows (384/4).
 # G table: 96 × 16 × 144 B = 221184 B, built once on the main thread
 # (P-384 verify is not on the parallel batch path).
 # ================================================================

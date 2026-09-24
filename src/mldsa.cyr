@@ -7,74 +7,144 @@
 # `ref/sign.c`, crypto_sign_keypair / crypto_sign_signature_internal
 # / crypto_sign_verify_internal. No randomized-sign mode — sigil
 # pins rnd = 0^32 (the FIPS 204 deterministic profile); the
-# context prefix is fixed to the empty `(0, 0)` prefix.
+# context prefix is fixed to the empty `(0, 0)` prefix, so this is
+# pure ML-DSA with ctx = "" (M' = 0x00 ‖ 0x00 ‖ M). Signatures are
+# byte-identical to OpenSSL 3.6's `deterministic:1` output
+# (tests/tcyr/mldsa_kat.tcyr).
 #
-# Memory: every polyvec / matrix buffer is allocated once at first
-# use into module-level globals. Total workspace is ~200 KB; the
-# trust boundary is not on the memory-footprint hot path. Globals
-# are reused across calls, so callers must complete one operation
-# before starting the next (single-threaded). No operation leaves
-# secret material in the workspace longer than its own lifetime —
-# subsequent calls overwrite the relevant regions.
+# Memory / threading: every keygen / sign / verify call takes
+# exclusive ownership of one 154 KB workspace for its whole duration
+# and keeps all loop state in locals, and every exit path hands the
+# workspace back. The three entry points are therefore reentrant and
+# safe to call from concurrent threads. Keygen and sign wipe every
+# secret-bearing region — s1, s2, t0, K, ρ' / ρ'', y, z, w0, w1, the
+# hints, c, the seed buffer and the SHAKE state — with `_mldsa_wipe`
+# before handing it back; only the public matrix Â is left unwiped.
+# Verify touches public data only and hands back without a wipe.
+#
+# Workspaces are recycled through a small lock-free pool
+# (`_mldsa_ws_acquire` / `_mldsa_ws_release`, below) rather than
+# mmap'd and munmap'd on every call: a fresh `fl_alloc` of this size is
+# a private mmap, and the pool (a) removes that ~80 µs per call, (b)
+# keeps Windows flat — cyrius routes no PE syscall 11 to VirtualFree,
+# so `fl_free`'s large-block munmap fails and every freed workspace
+# would leak there — and (c) spares agnos a 2 MB-granular map and
+# unmap per call (its arena reclaims only LIFO frees, so concurrent
+# callers would strand address space). The pool only ever holds as
+# many workspaces as were in flight at once (capped at
+# _MLDSA_WS_POOL_SLOTS); a serial caller reuses one, as the pre-M11
+# single global workspace did.
+#
+# Before the M11 fix the workspace and the rejection-loop state were module
+# globals, allocated once and never cleared: the last keypair's
+# s1/s2/t0/K and the last signature's y stayed in memory until the
+# next call overwrote them, and two concurrent signers corrupted
+# each other (six threads livelocked in the rejection loop).
 
 # ================================================================
-# Workspace
+# Workspace layout (byte offsets into one pooled fl_alloc'd block)
 # ================================================================
+#   SV       0       208   Keccak state (200) + absorb/squeeze position (8)
+#   SEED     208     256   keygen ξ‖K‖L in, ρ‖ρ'‖K out; sign/verify ctx prefix, rnd
+#   RHO      464     32    ρ
+#   TR       496     64    tr
+#   MU       560     64    μ
+#   RHOP     624     64    ρ' (keygen) / ρ'' (sign)
+#   KEY      688     32    K
+#   CTILDE   720     48    c̃
+#   CTILDE2  768     48    verify's recomputed c̃'
+#   W1B      816     768   packed w1 (K · POLYW1_PACKEDBYTES)
+#   CP       1584    2048  challenge poly c
+#   S1       4096    L polys   s1
+#   S2       14336   K polys   s2
+#   T0       26624   K polys   t0 (verify: t1)
+#   Y        38912   L polys   y (keygen: NTT(s1))
+#   W1       49152   K polys   w, w1 (keygen: t, then t1)
+#   Z        61440   L polys   z              ← keygen uses and wipes [0, 61440)
+#   W0       71680   K polys   w0
+#   H        83968   K polys   c·s2, c·t0, hints
+#   MAT      96256   K·L polys public Â      ← sign wipes [0, 96256)
+#   BYTES    157696
+# Ordered so each operation's secrets are one prefix of the block:
+# the wipe touches only pages the operation already faulted in.
+enum MldsaWorkspace {
+    _MLDSA_WS_SV = 0;
+    _MLDSA_WS_SEED = 208;
+    _MLDSA_WS_RHO = 464;
+    _MLDSA_WS_TR = 496;
+    _MLDSA_WS_MU = 560;
+    _MLDSA_WS_RHOP = 624;
+    _MLDSA_WS_KEY = 688;
+    _MLDSA_WS_CTILDE = 720;
+    _MLDSA_WS_CTILDE2 = 768;
+    _MLDSA_WS_W1B = 816;
+    _MLDSA_WS_CP = 1584;
+    _MLDSA_WS_S1 = 4096;
+    _MLDSA_WS_S2 = 14336;
+    _MLDSA_WS_T0 = 26624;
+    _MLDSA_WS_Y = 38912;
+    _MLDSA_WS_W1 = 49152;
+    _MLDSA_WS_Z = 61440;
+    _MLDSA_WS_W0 = 71680;
+    _MLDSA_WS_H = 83968;
+    _MLDSA_WS_MAT = 96256;
+    _MLDSA_WS_BYTES = 157696;
+}
 
-var _mldsa_ws_inited = 0;
-var _mldsa_ws_mat = 0;          # K * L * 2048
-var _mldsa_ws_s1 = 0;           # L * 2048
-var _mldsa_ws_s1hat = 0;        # L * 2048
-var _mldsa_ws_s2 = 0;           # K * 2048
-var _mldsa_ws_t0 = 0;           # K * 2048
-var _mldsa_ws_t1 = 0;           # K * 2048
-var _mldsa_ws_y = 0;            # L * 2048
-var _mldsa_ws_z = 0;            # L * 2048
-var _mldsa_ws_w0 = 0;           # K * 2048
-var _mldsa_ws_w1 = 0;           # K * 2048
-var _mldsa_ws_h = 0;            # K * 2048
-var _mldsa_ws_cp = 0;           # 1 poly
-var _mldsa_ws_seedbuf = 0;      # 256 bytes (covers 2·SEED + TR + 2·CRH)
-var _mldsa_ws_w1_bytes = 0;     # K · POLYW1_PACKEDBYTES = 768 bytes
-var _mldsa_ws_rho = 0;          # 32 bytes
-var _mldsa_ws_tr = 0;           # 64 bytes
-var _mldsa_ws_mu = 0;           # 64 bytes
-var _mldsa_ws_rhoprime = 0;     # 64 bytes
-var _mldsa_ws_key = 0;          # 32 bytes
-var _mldsa_ws_ctilde = 0;       # CTILDEBYTES = 48
-var _mldsa_ws_ctilde2 = 0;      # CTILDEBYTES (verify's recomputed c̃)
+# ================================================================
+# Workspace pool
+# ================================================================
+# Each slot is 0 (empty) or a pointer to an IDLE workspace whose
+# secret prefix is already wiped. A slot's value is the ownership
+# token itself: whoever CASes a slot from p to 0 owns p exclusively,
+# and a release CASes an empty slot from 0 to p. There is no linked
+# structure, so the ABA problem of a Treiber stack cannot arise — a
+# slot that holds p holds an idle p, however often p came and went.
+# atomic_cas is a full barrier on x86 (`lock cmpxchg`) and
+# acquire/release on aarch64 (ldaxr/stlxr), so the wipe stores made
+# before a release are visible to the next owner. A fresh workspace
+# is taken only when every pooled one is in use, so the pool never
+# holds more than the peak number of concurrent calls. If all slots
+# are full on release (more than _MLDSA_WS_POOL_SLOTS calls were in
+# flight at once) the surplus workspace is freed with `fl_free`.
 
-# Standalone SHAKE-256 state for the multi-absorb hashes (mu,
-# rhoprime, challenge seed). Distinct from the sampling module's
-# state so rejection-sampling and hash-absorb don't race.
-var _mldsa_sv_state = 0;        # 200 bytes
-var _mldsa_sv_pos = 0;
+enum MldsaWsPool {
+    _MLDSA_WS_POOL_SLOTS = 64;
+}
+var _mldsa_ws_pool: i64[64];       # _MLDSA_WS_POOL_SLOTS slots (512 B)
 
-fn _mldsa_ws_init(): i64 {
-    if (_mldsa_ws_inited == 1) { return 0; }
-    _mldsa_ws_mat = alloc(MLDSA65_K * MLDSA65_L * 256 * 8);
-    _mldsa_ws_s1 = alloc(MLDSA65_L * 256 * 8);
-    _mldsa_ws_s1hat = alloc(MLDSA65_L * 256 * 8);
-    _mldsa_ws_s2 = alloc(MLDSA65_K * 256 * 8);
-    _mldsa_ws_t0 = alloc(MLDSA65_K * 256 * 8);
-    _mldsa_ws_t1 = alloc(MLDSA65_K * 256 * 8);
-    _mldsa_ws_y = alloc(MLDSA65_L * 256 * 8);
-    _mldsa_ws_z = alloc(MLDSA65_L * 256 * 8);
-    _mldsa_ws_w0 = alloc(MLDSA65_K * 256 * 8);
-    _mldsa_ws_w1 = alloc(MLDSA65_K * 256 * 8);
-    _mldsa_ws_h = alloc(MLDSA65_K * 256 * 8);
-    _mldsa_ws_cp = alloc(256 * 8);
-    _mldsa_ws_seedbuf = alloc(256);
-    _mldsa_ws_w1_bytes = alloc(MLDSA65_K * MLDSA65_POLYW1_PACKEDBYTES);
-    _mldsa_ws_rho = alloc(MLDSA_SEEDBYTES);
-    _mldsa_ws_tr = alloc(MLDSA_TRBYTES);
-    _mldsa_ws_mu = alloc(MLDSA_CRHBYTES);
-    _mldsa_ws_rhoprime = alloc(MLDSA_CRHBYTES);
-    _mldsa_ws_key = alloc(MLDSA_SEEDBYTES);
-    _mldsa_ws_ctilde = alloc(MLDSA65_CTILDEBYTES);
-    _mldsa_ws_ctilde2 = alloc(MLDSA65_CTILDEBYTES);
-    _mldsa_sv_state = alloc(200);
-    _mldsa_ws_inited = 1;
+# Take an idle workspace from the pool, or a fresh `fl_alloc` one (0 if that fails).
+fn _mldsa_ws_acquire(): i64 {
+    var i = 0;
+    while (i < _MLDSA_WS_POOL_SLOTS) {
+        var slot = &_mldsa_ws_pool + i * 8;
+        var p = atomic_load(slot);
+        if (p != 0) {
+            if (atomic_cas(slot, p, 0) == 1) { return p; }
+        }
+        i = i + 1;
+    }
+    return fl_alloc(_MLDSA_WS_BYTES);
+}
+
+# Hand workspace `ws` back to the pool (the caller has already wiped its secrets).
+fn _mldsa_ws_release(ws): i64 {
+    var i = 0;
+    while (i < _MLDSA_WS_POOL_SLOTS) {
+        var slot = &_mldsa_ws_pool + i * 8;
+        if (atomic_load(slot) == 0) {
+            if (atomic_cas(slot, 0, ws) == 1) { return 0; }
+        }
+        i = i + 1;
+    }
+    fl_free(ws);
+    return 0;
+}
+
+# Wipe the first `nbytes` of workspace `ws` (the calling operation's secret prefix), release it.
+fn _mldsa_ws_release_secret(ws, nbytes): i64 {
+    _mldsa_wipe(ws, nbytes);
+    _mldsa_ws_release(ws);
     return 0;
 }
 
@@ -86,60 +156,63 @@ fn _mldsa_ws_init(): i64 {
 # SHAKE256(tr ‖ pre ‖ msg)` takes three chunks, `rhoprime` takes
 # three, the challenge seed takes two. We keep these tight by
 # exposing an init/absorb/finalize/squeeze chain on the
-# stdlib-internal `_keccak_f1600` primitive.
+# stdlib-internal `_keccak_f1600` primitive. The sponge `sv` is the
+# caller's per-call SV region: 200 state bytes, then the position
+# as an i64 at sv + 200. Keygen also routes its seed expansion
+# through it (not the stdlib one-shot) so that the state that
+# squeezed ρ' and K is wiped with the workspace instead of being
+# left in a dead stack frame.
 
-fn _mldsa_sv_init(): i64 {
-    memset(_mldsa_sv_state, 0, 200);
-    _mldsa_sv_pos = 0;
+fn _mldsa_sv_init(sv): i64 {
+    memset(sv, 0, 208);
     return 0;
 }
 
-fn _mldsa_sv_absorb(data, datalen): i64 {
+fn _mldsa_sv_absorb(sv, data, datalen): i64 {
+    var pos = load64(sv + 200);
     var i = 0;
     while (i < datalen) {
-        store8(
-          _mldsa_sv_state + _mldsa_sv_pos,
-          load8(_mldsa_sv_state + _mldsa_sv_pos) ^ load8(data + i)
-          );
-        _mldsa_sv_pos = _mldsa_sv_pos + 1;
+        store8(sv + pos, load8(sv + pos) ^ load8(data + i));
+        pos = pos + 1;
         i = i + 1;
-        if (_mldsa_sv_pos == 136) {
-            _keccak_f1600(_mldsa_sv_state);
-            _mldsa_sv_pos = 0;
+        if (pos == 136) {
+            _keccak_f1600(sv);
+            pos = 0;
         }
     }
+    store64(sv + 200, pos);
     return 0;
 }
 
-fn _mldsa_sv_finalize(): i64 {
-    store8(
-      _mldsa_sv_state + _mldsa_sv_pos,
-      load8(_mldsa_sv_state + _mldsa_sv_pos) ^ 0x1F
-      );
-    store8(_mldsa_sv_state + 135, load8(_mldsa_sv_state + 135) ^ 0x80);
-    _keccak_f1600(_mldsa_sv_state);
-    _mldsa_sv_pos = 0;
+fn _mldsa_sv_finalize(sv): i64 {
+    var pos = load64(sv + 200);
+    store8(sv + pos, load8(sv + pos) ^ 0x1F);
+    store8(sv + 135, load8(sv + 135) ^ 0x80);
+    _keccak_f1600(sv);
+    store64(sv + 200, 0);
     return 0;
 }
 
-fn _mldsa_sv_squeeze(out, outlen): i64 {
+fn _mldsa_sv_squeeze(sv, out, outlen): i64 {
+    var pos = load64(sv + 200);
     var out_pos = 0;
     while (out_pos < outlen) {
-        if (_mldsa_sv_pos == 136) {
-            _keccak_f1600(_mldsa_sv_state);
-            _mldsa_sv_pos = 0;
+        if (pos == 136) {
+            _keccak_f1600(sv);
+            pos = 0;
         }
-        var remain = 136 - _mldsa_sv_pos;
+        var remain = 136 - pos;
         var take = outlen - out_pos;
         if (take > remain) { take = remain; }
         var j = 0;
         while (j < take) {
-            store8(out + out_pos + j, load8(_mldsa_sv_state + _mldsa_sv_pos + j));
+            store8(out + out_pos + j, load8(sv + pos + j));
             j = j + 1;
         }
-        _mldsa_sv_pos = _mldsa_sv_pos + take;
+        pos = pos + take;
         out_pos = out_pos + take;
     }
+    store64(sv + 200, pos);
     return 0;
 }
 
@@ -150,7 +223,7 @@ fn _mldsa_sv_squeeze(out, outlen): i64 {
 # CSPRNG-driven convenience wrapper below). Output: pk
 # (1952 B), sk (4032 B) buffers pre-allocated by caller.
 #
-# Steps (FIPS 204 Algorithm 1):
+# Steps (FIPS 204 Algorithm 6, ML-DSA.KeyGen_internal):
 #   1. Expand seed into (rho, rhoprime, key) via SHAKE-256 over
 #      seed ‖ K ‖ L (34 bytes in, 128 bytes out).
 #   2. Sample matrix A from rho via ExpandA.
@@ -162,66 +235,88 @@ fn _mldsa_sv_squeeze(out, outlen): i64 {
 #   7. Pack pk = rho ‖ t1, sk = rho ‖ key ‖ tr ‖ s1 ‖ s2 ‖ t0.
 
 # ML-DSA-65 KeyGen_internal: derive a keypair deterministically from the 32-byte seed ξ into
-# caller-allocated pk (1952 B) and sk (4032 B). Returns 0. Runs in the shared module
-# workspace, so it is single-threaded.
+# caller-allocated pk (1952 B) and sk (4032 B). Returns 0, or 1 (pk/sk untouched) if the
+# workspace cannot be allocated. Own pooled workspace, secrets wiped: thread-safe.
 fn mldsa65_keypair_from_seed(seed, pk, sk): i64 {
-    _mldsa_ws_init();
+    var ws = _mldsa_ws_acquire();
+    if (ws == 0) { return 1; }
+    var sv = ws + _MLDSA_WS_SV;
+    var seedbuf = ws + _MLDSA_WS_SEED;
+    var rho = ws + _MLDSA_WS_RHO;
+    var tr = ws + _MLDSA_WS_TR;
+    var rhoprime = ws + _MLDSA_WS_RHOP;
+    var key = ws + _MLDSA_WS_KEY;
+    var s1 = ws + _MLDSA_WS_S1;
+    var s1hat = ws + _MLDSA_WS_Y;       # NTT(s1) staging
+    var s2 = ws + _MLDSA_WS_S2;
+    var t0 = ws + _MLDSA_WS_T0;
+    var t1 = ws + _MLDSA_WS_W1;         # t, then t1
+    var mat = ws + _MLDSA_WS_MAT;
 
     # Expand seed into (rho, rhoprime, key). Input = seed ‖ K ‖ L.
-    memcpy(_mldsa_ws_seedbuf, seed, MLDSA_SEEDBYTES);
-    store8(_mldsa_ws_seedbuf + MLDSA_SEEDBYTES + 0, MLDSA65_K);
-    store8(_mldsa_ws_seedbuf + MLDSA_SEEDBYTES + 1, MLDSA65_L);
-    # Output: 2·SEEDBYTES + CRHBYTES = 128 bytes, in-place back
-    # into seedbuf. Layout: rho (32) ‖ rhoprime (64) ‖ key (32).
-    shake256(_mldsa_ws_seedbuf, MLDSA_SEEDBYTES + 2, _mldsa_ws_seedbuf, 2 * MLDSA_SEEDBYTES + MLDSA_CRHBYTES);
-    memcpy(_mldsa_ws_rho, _mldsa_ws_seedbuf, MLDSA_SEEDBYTES);
-    memcpy(_mldsa_ws_rhoprime, _mldsa_ws_seedbuf + MLDSA_SEEDBYTES, MLDSA_CRHBYTES);
-    memcpy(_mldsa_ws_key, _mldsa_ws_seedbuf + MLDSA_SEEDBYTES + MLDSA_CRHBYTES, MLDSA_SEEDBYTES);
+    memcpy(seedbuf, seed, MLDSA_SEEDBYTES);
+    store8(seedbuf + MLDSA_SEEDBYTES + 0, MLDSA65_K);
+    store8(seedbuf + MLDSA_SEEDBYTES + 1, MLDSA65_L);
+    # Output: 2·SEEDBYTES + CRHBYTES = 128 bytes, back into seedbuf.
+    # Layout: rho (32) ‖ rhoprime (64) ‖ key (32).
+    _mldsa_sv_init(sv);
+    _mldsa_sv_absorb(sv, seedbuf, MLDSA_SEEDBYTES + 2);
+    _mldsa_sv_finalize(sv);
+    _mldsa_sv_squeeze(sv, seedbuf, 2 * MLDSA_SEEDBYTES + MLDSA_CRHBYTES);
+    memcpy(rho, seedbuf, MLDSA_SEEDBYTES);
+    memcpy(rhoprime, seedbuf + MLDSA_SEEDBYTES, MLDSA_CRHBYTES);
+    memcpy(key, seedbuf + MLDSA_SEEDBYTES + MLDSA_CRHBYTES, MLDSA_SEEDBYTES);
 
     # ExpandA, ExpandS.
-    mldsa_polyvec_matrix_expand(_mldsa_ws_mat, _mldsa_ws_rho);
-    mldsa_polyvecl_uniform_eta(_mldsa_ws_s1, _mldsa_ws_rhoprime, 0);
-    mldsa_polyveck_uniform_eta(_mldsa_ws_s2, _mldsa_ws_rhoprime, MLDSA65_L);
+    mldsa_polyvec_matrix_expand(mat, rho);
+    mldsa_polyvecl_uniform_eta(s1, rhoprime, 0);
+    mldsa_polyveck_uniform_eta(s2, rhoprime, MLDSA65_L);
 
     # t1 = NTT^{-1}(A · NTT(s1)) + s2. We stage NTT(s1) in s1hat
     # so the original s1 (needed for sk packing) is preserved.
     var i = 0;
     while (i < MLDSA65_L * 256) {
-        store64(_mldsa_ws_s1hat + i * 8, load64(_mldsa_ws_s1 + i * 8));
+        store64(s1hat + i * 8, load64(s1 + i * 8));
         i = i + 1;
     }
-    mldsa_polyvecl_ntt(_mldsa_ws_s1hat);
-    mldsa_polyvec_matrix_pointwise_montgomery(_mldsa_ws_t1, _mldsa_ws_mat, _mldsa_ws_s1hat);
-    mldsa_polyveck_reduce(_mldsa_ws_t1);
-    mldsa_polyveck_invntt_tomont(_mldsa_ws_t1);
-    mldsa_polyveck_add(_mldsa_ws_t1, _mldsa_ws_t1, _mldsa_ws_s2);
+    mldsa_polyvecl_ntt(s1hat);
+    mldsa_polyvec_matrix_pointwise_montgomery(t1, mat, s1hat);
+    mldsa_polyveck_reduce(t1);
+    mldsa_polyveck_invntt_tomont(t1);
+    mldsa_polyveck_add(t1, t1, s2);
 
     # Split t1 into (t1_high, t0) via Power2Round.
-    mldsa_polyveck_caddq(_mldsa_ws_t1);
-    mldsa_polyveck_power2round(_mldsa_ws_t1, _mldsa_ws_t0, _mldsa_ws_t1);
+    mldsa_polyveck_caddq(t1);
+    mldsa_polyveck_power2round(t1, t0, t1);
 
     # Assemble pk, then tr = SHAKE-256(pk, 64).
-    mldsa_pack_pk(pk, _mldsa_ws_rho, _mldsa_ws_t1);
-    shake256(pk, MLDSA65_PK_BYTES, _mldsa_ws_tr, MLDSA_TRBYTES);
+    mldsa_pack_pk(pk, rho, t1);
+    shake256(pk, MLDSA65_PK_BYTES, tr, MLDSA_TRBYTES);
 
     # Assemble sk.
-    mldsa_pack_sk(sk, _mldsa_ws_rho, _mldsa_ws_key, _mldsa_ws_tr,
-      _mldsa_ws_t0, _mldsa_ws_s1, _mldsa_ws_s2);
+    mldsa_pack_sk(sk, rho, key, tr, t0, s1, s2);
+    # Keygen's secrets (and everything it touched but Â) sit below Z.
+    _mldsa_ws_release_secret(ws, _MLDSA_WS_Z);
     return 0;
 }
 
 # Convenience: generate a keypair from the kernel CSPRNG via sigil's
 # single fail-closed entropy boundary (src/random.cyr → stdlib
 # random_bytes; per-target getrandom/getentropy/ProcessPrng). Returns 1
-# on success, 0 if entropy gather fails — `_sigil_random_fill` fills all
-# MLDSA_SEEDBYTES or returns non-zero (no partial seed). `secret var`
-# zeroizes `seed` on every return path. Matches ed25519's keygen ABI.
+# on success, 0 if entropy gather (or the keygen workspace) fails —
+# `_sigil_random_fill` fills all MLDSA_SEEDBYTES or returns non-zero (no
+# partial seed). `seed` is a plain per-call stack array wiped on every
+# path (never a `secret var` array: CLAUDE.md quirk #9). Matches
+# ed25519's keygen ABI.
 fn mldsa65_keypair(pk, sk): i64 {
-    secret var seed[32];
+    var seed[32];
     memset(&seed, 0, MLDSA_SEEDBYTES);
-    if (_sigil_random_fill(&seed, MLDSA_SEEDBYTES) != 0) { return 0; }
-    mldsa65_keypair_from_seed(&seed, pk, sk);
-    return 1;
+    var ok = 0;
+    if (_sigil_random_fill(&seed, MLDSA_SEEDBYTES) == 0) {
+        if (mldsa65_keypair_from_seed(&seed, pk, sk) == 0) { ok = 1; }
+    }
+    _mldsa_wipe(&seed, MLDSA_SEEDBYTES);
+    return ok;
 }
 
 # ================================================================
@@ -231,122 +326,144 @@ fn mldsa65_keypair(pk, sk): i64 {
 # The rejection loop iterates until every norm and hint-weight
 # check passes; average 4–5 iterations per signature.
 #
-# Steps:
+# Steps (FIPS 204 Algorithm 7, ML-DSA.Sign_internal):
 #   1. unpack_sk.
 #   2. mu = SHAKE256(tr ‖ pre ‖ msg), where pre = (0, 0).
 #   3. rhoprime = SHAKE256(key ‖ rnd ‖ mu) with rnd = 0^32.
 #   4. Expand A; NTT(s1), NTT(s2), NTT(t0).
-#   5. Loop: sample y, compute w = A·y; w1 = HighBits(w);
-#      c̃ = SHAKE256(mu ‖ pack_w1(w1)); c = SampleInBall(c̃).
-#      z = y + c·s1; chknorm(z, γ1 − β); compute w0 − c·s2,
-#      chknorm, compute c·t0, chknorm; make hints,
-#      chknorm(h, ω); if all checks pass, pack_sig.
-
-# Loop state promoted to globals. Nested calls descend multiple
-# layers into montgomery_reduce / SHAKE; locals get clobbered.
-var _mldsa_sign_nonce = 0;
-var _mldsa_sign_sig = 0;
-var _mldsa_sign_sk = 0;
+#   5. Loop, κ = 0, L, 2L, …: y = ExpandMask(rhoprime, κ), then
+#      κ ← κ + L — each attempt's L mask polys use fresh nonces
+#      κ..κ+L-1 (Algorithm 7: κ ← κ + ℓ). Compute w = A·y;
+#      w1 = HighBits(w); c̃ = SHAKE256(mu ‖ pack_w1(w1));
+#      c = SampleInBall(c̃). z = y + c·s1; chknorm(z, γ1 − β);
+#      compute w0 − c·s2, chknorm, compute c·t0, chknorm; make
+#      hints, chknorm(h, ω); if all checks pass, pack_sig.
+#
+# Before the H4 fix, κ advanced by 1 per attempt, so consecutive attempts
+# shared 4 of their 5 mask polys: any signature that needed more
+# than one attempt differed from FIPS 204 (and from every other
+# implementation), and the rejected attempt's mask was reused.
 
 # Deterministic ML-DSA-65 sign (rnd = 0^32, empty context): write the 3309-byte signature of
-# msg[msglen] under the 4032-byte `sk` into caller-allocated `sig`. Loops until a candidate
-# passes every check; returns 0. Runs in the shared module workspace, so single-threaded.
+# msg[msglen] under the 4032-byte `sk` into caller-allocated `sig`. Returns 0, or 1 (sig zeroed)
+# if the workspace cannot be allocated. Own pooled workspace, secrets wiped: thread-safe.
 fn mldsa65_sign(sig, msg, msglen, sk): i64 {
-    _mldsa_ws_init();
-    _mldsa_sign_sig = sig;
-    _mldsa_sign_sk = sk;
+    var ws = _mldsa_ws_acquire();
+    if (ws == 0) {
+        memset(sig, 0, MLDSA65_SIG_BYTES);
+        return 1;
+    }
+    var sv = ws + _MLDSA_WS_SV;
+    var seedbuf = ws + _MLDSA_WS_SEED;
+    var rho = ws + _MLDSA_WS_RHO;
+    var tr = ws + _MLDSA_WS_TR;
+    var mu = ws + _MLDSA_WS_MU;
+    var rhoprime = ws + _MLDSA_WS_RHOP;
+    var key = ws + _MLDSA_WS_KEY;
+    var ctilde = ws + _MLDSA_WS_CTILDE;
+    var w1b = ws + _MLDSA_WS_W1B;
+    var cp = ws + _MLDSA_WS_CP;
+    var s1 = ws + _MLDSA_WS_S1;
+    var s2 = ws + _MLDSA_WS_S2;
+    var t0 = ws + _MLDSA_WS_T0;
+    var y = ws + _MLDSA_WS_Y;
+    var z = ws + _MLDSA_WS_Z;
+    var w0 = ws + _MLDSA_WS_W0;
+    var w1 = ws + _MLDSA_WS_W1;
+    var h = ws + _MLDSA_WS_H;
+    var mat = ws + _MLDSA_WS_MAT;
 
     # 1. Unpack sk.
-    mldsa_unpack_sk(_mldsa_ws_rho, _mldsa_ws_key, _mldsa_ws_tr,
-      _mldsa_ws_t0, _mldsa_ws_s1, _mldsa_ws_s2, _mldsa_sign_sk);
+    mldsa_unpack_sk(rho, key, tr, t0, s1, s2, sk);
 
     # 2. mu = SHAKE256(tr ‖ 0x00 0x00 ‖ msg).
-    _mldsa_sv_init();
-    _mldsa_sv_absorb(_mldsa_ws_tr, MLDSA_TRBYTES);
+    _mldsa_sv_init(sv);
+    _mldsa_sv_absorb(sv, tr, MLDSA_TRBYTES);
     # pre = (0x00, 0x00) — empty context prefix.
-    store8(_mldsa_ws_seedbuf + 0, 0);
-    store8(_mldsa_ws_seedbuf + 1, 0);
-    _mldsa_sv_absorb(_mldsa_ws_seedbuf, 2);
-    _mldsa_sv_absorb(msg, msglen);
-    _mldsa_sv_finalize();
-    _mldsa_sv_squeeze(_mldsa_ws_mu, MLDSA_CRHBYTES);
+    store8(seedbuf + 0, 0);
+    store8(seedbuf + 1, 0);
+    _mldsa_sv_absorb(sv, seedbuf, 2);
+    _mldsa_sv_absorb(sv, msg, msglen);
+    _mldsa_sv_finalize(sv);
+    _mldsa_sv_squeeze(sv, mu, MLDSA_CRHBYTES);
 
     # 3. rhoprime = SHAKE256(key ‖ rnd=0^32 ‖ mu).
-    _mldsa_sv_init();
-    _mldsa_sv_absorb(_mldsa_ws_key, MLDSA_SEEDBYTES);
+    _mldsa_sv_init(sv);
+    _mldsa_sv_absorb(sv, key, MLDSA_SEEDBYTES);
     # rnd bytes pinned to zero (deterministic profile).
-    memset(_mldsa_ws_seedbuf, 0, MLDSA_RNDBYTES);
-    _mldsa_sv_absorb(_mldsa_ws_seedbuf, MLDSA_RNDBYTES);
-    _mldsa_sv_absorb(_mldsa_ws_mu, MLDSA_CRHBYTES);
-    _mldsa_sv_finalize();
-    _mldsa_sv_squeeze(_mldsa_ws_rhoprime, MLDSA_CRHBYTES);
+    memset(seedbuf, 0, MLDSA_RNDBYTES);
+    _mldsa_sv_absorb(sv, seedbuf, MLDSA_RNDBYTES);
+    _mldsa_sv_absorb(sv, mu, MLDSA_CRHBYTES);
+    _mldsa_sv_finalize(sv);
+    _mldsa_sv_squeeze(sv, rhoprime, MLDSA_CRHBYTES);
 
     # 4. Expand matrix and NTT-transform secret vectors.
-    mldsa_polyvec_matrix_expand(_mldsa_ws_mat, _mldsa_ws_rho);
-    mldsa_polyvecl_ntt(_mldsa_ws_s1);
-    mldsa_polyveck_ntt(_mldsa_ws_s2);
-    mldsa_polyveck_ntt(_mldsa_ws_t0);
+    mldsa_polyvec_matrix_expand(mat, rho);
+    mldsa_polyvecl_ntt(s1);
+    mldsa_polyveck_ntt(s2);
+    mldsa_polyveck_ntt(t0);
 
     # 5. Rejection loop.
-    _mldsa_sign_nonce = 0;
+    var kappa = 0;
     var done = 0;
     while (done == 0) {
-        # Sample y.
-        mldsa_polyvecl_uniform_gamma1(_mldsa_ws_y, _mldsa_ws_rhoprime, _mldsa_sign_nonce);
-        _mldsa_sign_nonce = _mldsa_sign_nonce + 1;
+        # Sample y = ExpandMask(rhoprime, κ), nonces κ..κ+L-1, then
+        # advance κ past all L of them (FIPS 204 Alg. 7: κ ← κ + ℓ).
+        mldsa_polyvecl_uniform_gamma1(y, rhoprime, kappa);
+        kappa = kappa + MLDSA65_L;
 
         # w = A · NTT(y); z buffer used as staging for NTT(y).
         var i = 0;
         while (i < MLDSA65_L * 256) {
-            store64(_mldsa_ws_z + i * 8, load64(_mldsa_ws_y + i * 8));
+            store64(z + i * 8, load64(y + i * 8));
             i = i + 1;
         }
-        mldsa_polyvecl_ntt(_mldsa_ws_z);
-        mldsa_polyvec_matrix_pointwise_montgomery(_mldsa_ws_w1, _mldsa_ws_mat, _mldsa_ws_z);
-        mldsa_polyveck_reduce(_mldsa_ws_w1);
-        mldsa_polyveck_invntt_tomont(_mldsa_ws_w1);
+        mldsa_polyvecl_ntt(z);
+        mldsa_polyvec_matrix_pointwise_montgomery(w1, mat, z);
+        mldsa_polyveck_reduce(w1);
+        mldsa_polyveck_invntt_tomont(w1);
 
         # Decompose w into (w1, w0).
-        mldsa_polyveck_caddq(_mldsa_ws_w1);
-        mldsa_polyveck_decompose(_mldsa_ws_w1, _mldsa_ws_w0, _mldsa_ws_w1);
-        mldsa_polyveck_pack_w1(_mldsa_ws_w1_bytes, _mldsa_ws_w1);
+        mldsa_polyveck_caddq(w1);
+        mldsa_polyveck_decompose(w1, w0, w1);
+        mldsa_polyveck_pack_w1(w1b, w1);
 
         # c̃ = SHAKE256(mu ‖ w1_bytes), then c = SampleInBall(c̃).
-        _mldsa_sv_init();
-        _mldsa_sv_absorb(_mldsa_ws_mu, MLDSA_CRHBYTES);
-        _mldsa_sv_absorb(_mldsa_ws_w1_bytes, MLDSA65_K * MLDSA65_POLYW1_PACKEDBYTES);
-        _mldsa_sv_finalize();
-        _mldsa_sv_squeeze(_mldsa_ws_ctilde, MLDSA65_CTILDEBYTES);
-        mldsa_poly_challenge(_mldsa_ws_cp, _mldsa_ws_ctilde);
-        mldsa_ntt(_mldsa_ws_cp);
+        _mldsa_sv_init(sv);
+        _mldsa_sv_absorb(sv, mu, MLDSA_CRHBYTES);
+        _mldsa_sv_absorb(sv, w1b, MLDSA65_K * MLDSA65_POLYW1_PACKEDBYTES);
+        _mldsa_sv_finalize(sv);
+        _mldsa_sv_squeeze(sv, ctilde, MLDSA65_CTILDEBYTES);
+        mldsa_poly_challenge(cp, ctilde);
+        mldsa_ntt(cp);
 
         # z = c · s1 (in NTT domain, then inverse) + y.
-        mldsa_polyvecl_pointwise_poly_montgomery(_mldsa_ws_z, _mldsa_ws_cp, _mldsa_ws_s1);
-        mldsa_polyvecl_invntt_tomont(_mldsa_ws_z);
-        mldsa_polyvecl_add(_mldsa_ws_z, _mldsa_ws_z, _mldsa_ws_y);
-        mldsa_polyvecl_reduce(_mldsa_ws_z);
-        if (mldsa_polyvecl_chknorm(_mldsa_ws_z, MLDSA65_GAMMA1 - MLDSA65_BETA) == 1) {
+        mldsa_polyvecl_pointwise_poly_montgomery(z, cp, s1);
+        mldsa_polyvecl_invntt_tomont(z);
+        mldsa_polyvecl_add(z, z, y);
+        mldsa_polyvecl_reduce(z);
+        if (mldsa_polyvecl_chknorm(z, MLDSA65_GAMMA1 - MLDSA65_BETA) == 1) {
             # Rejected: z norm too large. Loop.
         } else {
             # h = c · s2, then w0 = w0 − h; reject if |w0| ≥ γ2 − β.
-            mldsa_polyveck_pointwise_poly_montgomery(_mldsa_ws_h, _mldsa_ws_cp, _mldsa_ws_s2);
-            mldsa_polyveck_invntt_tomont(_mldsa_ws_h);
-            mldsa_polyveck_sub(_mldsa_ws_w0, _mldsa_ws_w0, _mldsa_ws_h);
-            mldsa_polyveck_reduce(_mldsa_ws_w0);
-            if (mldsa_polyveck_chknorm(_mldsa_ws_w0, MLDSA65_GAMMA2 - MLDSA65_BETA) == 1) {
+            mldsa_polyveck_pointwise_poly_montgomery(h, cp, s2);
+            mldsa_polyveck_invntt_tomont(h);
+            mldsa_polyveck_sub(w0, w0, h);
+            mldsa_polyveck_reduce(w0);
+            if (mldsa_polyveck_chknorm(w0, MLDSA65_GAMMA2 - MLDSA65_BETA) == 1) {
                 # Rejected. Loop.
             } else {
                 # h = c · t0; reject if |h| ≥ γ2.
-                mldsa_polyveck_pointwise_poly_montgomery(_mldsa_ws_h, _mldsa_ws_cp, _mldsa_ws_t0);
-                mldsa_polyveck_invntt_tomont(_mldsa_ws_h);
-                mldsa_polyveck_reduce(_mldsa_ws_h);
-                if (mldsa_polyveck_chknorm(_mldsa_ws_h, MLDSA65_GAMMA2) == 1) {
+                mldsa_polyveck_pointwise_poly_montgomery(h, cp, t0);
+                mldsa_polyveck_invntt_tomont(h);
+                mldsa_polyveck_reduce(h);
+                if (mldsa_polyveck_chknorm(h, MLDSA65_GAMMA2) == 1) {
                     # Rejected. Loop.
                 } else {
                     # Compute hint = make_hint(w0 + c·t0, w1); reject
                     # if weight > ω.
-                    mldsa_polyveck_add(_mldsa_ws_w0, _mldsa_ws_w0, _mldsa_ws_h);
-                    var weight = mldsa_polyveck_make_hint(_mldsa_ws_h, _mldsa_ws_w0, _mldsa_ws_w1);
+                    mldsa_polyveck_add(w0, w0, h);
+                    var weight = mldsa_polyveck_make_hint(h, w0, w1);
                     if (weight > MLDSA65_OMEGA) {
                         # Rejected. Loop.
                     } else {
@@ -358,7 +475,8 @@ fn mldsa65_sign(sig, msg, msglen, sk): i64 {
     }
 
     # Pack signature: c̃ ‖ z ‖ h.
-    mldsa_pack_sig(_mldsa_sign_sig, _mldsa_ws_ctilde, _mldsa_ws_z, _mldsa_ws_h);
+    mldsa_pack_sig(sig, ctilde, z, h);
+    _mldsa_ws_release_secret(ws, _MLDSA_WS_MAT);
     return 0;
 }
 
@@ -368,70 +486,93 @@ fn mldsa65_sign(sig, msg, msglen, sk): i64 {
 # The sign/verify break points line up with pq-crystals'
 # `crypto_sign_verify_internal` (int returning 0/−1 from the C
 # ref; we flip to 0/1 to match sigil's other boolean returns).
+# `_mldsa_verify_ws` holds the body so its early rejects can simply
+# return; the public wrapper owns the workspace and releases it on
+# every path. All inputs are public, so nothing is wiped.
 
-# Verify the 3309-byte ML-DSA-65 `sig` over msg[msglen] (empty context) against the 1952-byte
-# `pk`. Returns 0 if VALID, 1 otherwise — the reverse of ed25519_verify's 1 = valid. Runs in
-# the shared module workspace, so single-threaded.
-fn mldsa65_verify(sig, msg, msglen, pk): i64 {
-    _mldsa_ws_init();
+fn _mldsa_verify_ws(ws, sig, msg, msglen, pk): i64 {
+    var sv = ws + _MLDSA_WS_SV;
+    var seedbuf = ws + _MLDSA_WS_SEED;
+    var rho = ws + _MLDSA_WS_RHO;
+    var mu = ws + _MLDSA_WS_MU;
+    var ctilde = ws + _MLDSA_WS_CTILDE;
+    var ctilde2 = ws + _MLDSA_WS_CTILDE2;
+    var w1b = ws + _MLDSA_WS_W1B;
+    var cp = ws + _MLDSA_WS_CP;
+    var t1 = ws + _MLDSA_WS_T0;         # verify has no t0
+    var z = ws + _MLDSA_WS_Z;
+    var w1 = ws + _MLDSA_WS_W1;
+    var h = ws + _MLDSA_WS_H;
+    var mat = ws + _MLDSA_WS_MAT;
 
     # Unpack pk and sig. A malformed sig fails early.
-    mldsa_unpack_pk(_mldsa_ws_rho, _mldsa_ws_t1, pk);
-    if (mldsa_unpack_sig(_mldsa_ws_ctilde, _mldsa_ws_z, _mldsa_ws_h, sig) == 1) { return 1; }
+    mldsa_unpack_pk(rho, t1, pk);
+    if (mldsa_unpack_sig(ctilde, z, h, sig) == 1) { return 1; }
     # z-norm check: must be strictly < γ1 − β.
-    if (mldsa_polyvecl_chknorm(_mldsa_ws_z, MLDSA65_GAMMA1 - MLDSA65_BETA) == 1) { return 1; }
+    if (mldsa_polyvecl_chknorm(z, MLDSA65_GAMMA1 - MLDSA65_BETA) == 1) { return 1; }
 
     # Compute mu = SHAKE256( SHAKE256(pk, 64) ‖ pre ‖ msg ).
-    shake256(pk, MLDSA65_PK_BYTES, _mldsa_ws_mu, MLDSA_TRBYTES);
-    _mldsa_sv_init();
-    _mldsa_sv_absorb(_mldsa_ws_mu, MLDSA_TRBYTES);
-    store8(_mldsa_ws_seedbuf + 0, 0);
-    store8(_mldsa_ws_seedbuf + 1, 0);
-    _mldsa_sv_absorb(_mldsa_ws_seedbuf, 2);
-    _mldsa_sv_absorb(msg, msglen);
-    _mldsa_sv_finalize();
-    _mldsa_sv_squeeze(_mldsa_ws_mu, MLDSA_CRHBYTES);
+    shake256(pk, MLDSA65_PK_BYTES, mu, MLDSA_TRBYTES);
+    _mldsa_sv_init(sv);
+    _mldsa_sv_absorb(sv, mu, MLDSA_TRBYTES);
+    store8(seedbuf + 0, 0);
+    store8(seedbuf + 1, 0);
+    _mldsa_sv_absorb(sv, seedbuf, 2);
+    _mldsa_sv_absorb(sv, msg, msglen);
+    _mldsa_sv_finalize(sv);
+    _mldsa_sv_squeeze(sv, mu, MLDSA_CRHBYTES);
 
     # c_ntt = NTT(SampleInBall(c̃)).
-    mldsa_poly_challenge(_mldsa_ws_cp, _mldsa_ws_ctilde);
+    mldsa_poly_challenge(cp, ctilde);
 
     # A · z (in NTT domain).
-    mldsa_polyvec_matrix_expand(_mldsa_ws_mat, _mldsa_ws_rho);
-    mldsa_polyvecl_ntt(_mldsa_ws_z);
-    mldsa_polyvec_matrix_pointwise_montgomery(_mldsa_ws_w1, _mldsa_ws_mat, _mldsa_ws_z);
+    mldsa_polyvec_matrix_expand(mat, rho);
+    mldsa_polyvecl_ntt(z);
+    mldsa_polyvec_matrix_pointwise_montgomery(w1, mat, z);
 
     # c · 2^D · t1: shift t1 left by D, NTT, then pointwise with c_ntt.
-    mldsa_ntt(_mldsa_ws_cp);
-    mldsa_polyveck_shiftl(_mldsa_ws_t1);
-    mldsa_polyveck_ntt(_mldsa_ws_t1);
-    mldsa_polyveck_pointwise_poly_montgomery(_mldsa_ws_t1, _mldsa_ws_cp, _mldsa_ws_t1);
+    mldsa_ntt(cp);
+    mldsa_polyveck_shiftl(t1);
+    mldsa_polyveck_ntt(t1);
+    mldsa_polyveck_pointwise_poly_montgomery(t1, cp, t1);
 
     # w = (A·z) − c·2^D·t1, inverse-NTT.
-    mldsa_polyveck_sub(_mldsa_ws_w1, _mldsa_ws_w1, _mldsa_ws_t1);
-    mldsa_polyveck_reduce(_mldsa_ws_w1);
-    mldsa_polyveck_invntt_tomont(_mldsa_ws_w1);
+    mldsa_polyveck_sub(w1, w1, t1);
+    mldsa_polyveck_reduce(w1);
+    mldsa_polyveck_invntt_tomont(w1);
 
     # Reconstruct w1 using the hint.
-    mldsa_polyveck_caddq(_mldsa_ws_w1);
-    mldsa_polyveck_use_hint(_mldsa_ws_w1, _mldsa_ws_w1, _mldsa_ws_h);
-    mldsa_polyveck_pack_w1(_mldsa_ws_w1_bytes, _mldsa_ws_w1);
+    mldsa_polyveck_caddq(w1);
+    mldsa_polyveck_use_hint(w1, w1, h);
+    mldsa_polyveck_pack_w1(w1b, w1);
 
     # Recompute challenge seed c̃' and compare.
-    _mldsa_sv_init();
-    _mldsa_sv_absorb(_mldsa_ws_mu, MLDSA_CRHBYTES);
-    _mldsa_sv_absorb(_mldsa_ws_w1_bytes, MLDSA65_K * MLDSA65_POLYW1_PACKEDBYTES);
-    _mldsa_sv_finalize();
-    _mldsa_sv_squeeze(_mldsa_ws_ctilde2, MLDSA65_CTILDEBYTES);
+    _mldsa_sv_init(sv);
+    _mldsa_sv_absorb(sv, mu, MLDSA_CRHBYTES);
+    _mldsa_sv_absorb(sv, w1b, MLDSA65_K * MLDSA65_POLYW1_PACKEDBYTES);
+    _mldsa_sv_finalize(sv);
+    _mldsa_sv_squeeze(sv, ctilde2, MLDSA65_CTILDEBYTES);
 
     # Constant-time equality: if any byte differs, reject.
     var diff = 0;
     var i = 0;
     while (i < MLDSA65_CTILDEBYTES) {
-        diff = diff | ((load8(_mldsa_ws_ctilde + i) & 0xFF) ^ (load8(_mldsa_ws_ctilde2 + i) & 0xFF));
+        diff = diff | ((load8(ctilde + i) & 0xFF) ^ (load8(ctilde2 + i) & 0xFF));
         i = i + 1;
     }
     if (diff != 0) { return 1; }
     return 0;
+}
+
+# Verify the 3309-byte ML-DSA-65 `sig` over msg[msglen] (empty context) against the 1952-byte
+# `pk`. Returns 0 if VALID, 1 otherwise (including a failed workspace allocation) — the reverse
+# of ed25519_verify's 1 = valid. Own pooled workspace, released on every path: thread-safe.
+fn mldsa65_verify(sig, msg, msglen, pk): i64 {
+    var ws = _mldsa_ws_acquire();
+    if (ws == 0) { return 1; }
+    var rc = _mldsa_verify_ws(ws, sig, msg, msglen, pk);
+    _mldsa_ws_release(ws);
+    return rc;
 }
 
 # ================================================================

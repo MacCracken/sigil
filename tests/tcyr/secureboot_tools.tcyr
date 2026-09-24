@@ -1,0 +1,204 @@
+# secureboot_tools.tcyr — Secure Boot helpers never exec a tool out of the cwd.
+#
+# Audit M5 (MEDIUM). src/secureboot_core.cyr passed BARE tool names ("mokutil",
+# "kmodsign", "modinfo", "ls") as argv[0] to `agnosys_capture_n`, which forks
+# and calls execve(2) directly. execve does no PATH search: a name without a
+# '/' is opened relative to the CURRENT WORKING DIRECTORY. So a process whose
+# cwd was attacker-writable ran the attacker's ./mokutil, and sigil reported
+# whatever it printed — "SecureBoot enabled", a forged module signer, a
+# successful kmodsign, a spoofed efivars listing.
+#
+# This test plants an executable fake of every one of those tools in a scratch
+# dir, chdirs into it, drives each code path that execs a tool, and asserts NO
+# fake ever ran (each fake creates a marker file before printing its spoofed
+# output). The cwd is restored and the scratch dir removed at the end.
+
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/string.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fs.cyr"
+include "lib/fmt.cyr"
+include "lib/bayan.cyr"
+include "lib/sakshi.cyr"
+include "lib/chrono.cyr"
+include "lib/tagged.cyr"
+include "lib/process.cyr"
+include "lib/slice.cyr"
+include "lib/sys.cyr"
+
+include "lib/thread_local.cyr"
+include "src/crypto_scratch.cyr"
+include "src/mul64.cyr"
+include "src/types.cyr"
+include "src/error.cyr"
+include "src/sys_error.cyr"
+include "src/sys_util.cyr"
+include "src/sysinfo.cyr"
+include "src/secureboot_core.cyr"
+
+var _sbt_pid = 0;
+var _sbt_dir = 0;
+
+fn cat2(a, b): i64 {
+    var al = strlen(a);
+    var bl = strlen(b);
+    var out = alloc(al + bl + 1);
+    memcpy(out, a, al);
+    memcpy(out + al, b, bl);
+    store8(out + al + bl, 0);
+    return out;
+}
+
+fn pid_str(): i64 {
+    var buf = alloc(24);
+    memset(buf, 0, 24);
+    fmt_int_buf(_sbt_pid, buf);
+    return buf;
+}
+
+# <dir>/ran_<tool> — the file a fake creates when (if) it is executed.
+fn marker_path(tool): i64 {
+    return cat2(cat2(_sbt_dir, "/ran_"), tool);
+}
+
+# Plant an executable /bin/sh fake named `tool` in the scratch dir. It touches
+# its marker, then prints `out` (spoofed "trusted" output) and exits 0.
+fn plant_fake(tool, out): i64 {
+    var path = cat2(cat2(_sbt_dir, "/"), tool);
+    var body = cat2(cat2(cat2("#!/bin/sh\n: > ", marker_path(tool)), "\nprintf '"), out);
+    body = cat2(body, "'\nexit 0\n");
+    xunlink(path);
+    var w = file_write_all(path, body, strlen(body));
+    if (w < 0) { return w; }
+    return sys_chmod(path, 493);   # 0755
+}
+
+fn fake_ran(tool): i64 {
+    return file_exists(marker_path(tool));
+}
+
+fn main() {
+    alloc_init();
+    _sbt_pid = sys_getpid();
+    _sbt_dir = cat2("/tmp/sigil_sbt_", pid_str());
+
+    # Save the cwd so it can be restored afterwards.
+    var oldcwd = alloc(4096);
+    memset(oldcwd, 0, 4096);
+    var cl = sys_readlink("/proc/self/cwd", oldcwd, 4095);
+    assert(cl > 0, "current cwd recorded");
+
+    test_group("setup: fakes planted in the cwd");
+    assert_eq(xmkdir(_sbt_dir, 448), 0, "scratch dir created");   # 0700
+    assert_eq(plant_fake("mokutil",
+        "SecureBoot enabled\\n[key 1]\\nSHA1 Fingerprint: aa:bb\\nSubject: CN=evil\\n"),
+        0, "fake mokutil planted");
+    assert_eq(plant_fake("kmodsign", ""), 0, "fake kmodsign planted");
+    assert_eq(plant_fake("modinfo", "sig_id: PKCS#7\\nsigner: Evil Corp\\nsig_hashalgo: sha256\\n"),
+        0, "fake modinfo planted");
+    assert_eq(plant_fake("ls", "SecureBoot-fake\\nPK-fake\\n"), 0, "fake ls planted");
+    var kmod = cat2(_sbt_dir, "/fake.ko");
+    var key = cat2(_sbt_dir, "/fake.key");
+    var crt = cat2(_sbt_dir, "/fake.der");
+    file_write_all(kmod, "not-a-module", 12);
+    file_write_all(key, "not-a-key", 9);
+    file_write_all(crt, "not-a-cert", 10);
+    assert_eq(sys_chdir(_sbt_dir), 0, "chdir into the planted dir");
+
+    # ============================================================
+    # Every tool-exec path. None may pick the fake up from the cwd.
+    # ============================================================
+    test_group("secureboot_detect_state");
+    var dt, dv = secureboot_detect_state();
+    assert_eq(fake_ran("mokutil"), 0, "detect_state never runs ./mokutil");
+
+    # The mokutil fallback itself — reached by detect_state only when the
+    # SecureBoot EFI variable is unreadable, so it is driven directly here.
+    test_group("mokutil --sb-state fallback");
+    xunlink(marker_path("mokutil"));
+    var mstate = _secureboot_state_from_mokutil();
+    assert_eq(fake_ran("mokutil"), 0, "the mokutil fallback never runs ./mokutil");
+    if (_sb_tool_path("mokutil") == 0) {
+        assert_eq(mstate, SB_NOT_SUPPORTED,
+            "no trusted mokutil: fails closed to not_supported, not 'enabled'");
+    }
+
+    test_group("secureboot_list_enrolled_keys");
+    xunlink(marker_path("mokutil"));
+    var lt, lv = secureboot_list_enrolled_keys();
+    assert_eq(fake_ran("mokutil"), 0, "list_enrolled_keys never runs ./mokutil");
+    if (is_ok(lt) == 1) {
+        assert_eq(vec_len(lv), 0, "no key parsed from a spoofed mokutil listing");
+    }
+
+    test_group("secureboot_enroll_key");
+    xunlink(marker_path("mokutil"));
+    var et, ev = secureboot_enroll_key(crt);
+    assert_eq(fake_ran("mokutil"), 0, "enroll_key never runs ./mokutil");
+
+    test_group("secureboot_sign_module");
+    var st, sv = secureboot_sign_module(kmod, key, crt);
+    assert_eq(fake_ran("kmodsign"), 0, "sign_module never runs ./kmodsign");
+    assert_eq(is_err_result(st), 1, "signing a junk module with a junk key is not Ok");
+
+    test_group("secureboot_verify_module");
+    var vt, vv = secureboot_verify_module(kmod);
+    assert_eq(fake_ran("modinfo"), 0, "verify_module never runs ./modinfo");
+    if (is_ok(vt) == 1) {
+        assert_eq(secureboot_sig_has_sig(vv), 0, "a junk module reports no signature");
+    }
+
+    test_group("secureboot_list_efi_variables");
+    var ft, fv = secureboot_list_efi_variables();
+    assert_eq(fake_ran("ls"), 0, "list_efi_variables never runs ./ls");
+
+    # ============================================================
+    # The resolver: absolute paths from the trusted dirs only.
+    # ============================================================
+    test_group("_sb_tool_path");
+    var lsp = _sb_tool_path("ls");
+    assert(lsp != 0, "ls resolves from a trusted dir");
+    if (lsp != 0) { assert_eq(load8(lsp), 47, "the resolved path is absolute"); }
+    var only_cwd = cat2("sigil_sbt_only_in_cwd_", pid_str());
+    assert_eq(plant_fake(only_cwd, "x"), 0, "a tool that exists only in the cwd planted");
+    assert_eq(_sb_tool_path(only_cwd), 0, "a tool only in the cwd does not resolve");
+    xunlink(cat2(cat2(_sbt_dir, "/"), only_cwd));
+    assert_eq(_sb_tool_path("./mokutil"), 0, "a name with '/' is rejected");
+    assert_eq(_sb_tool_path("../bin/ls"), 0, "a relative path is rejected");
+    assert_eq(_sb_tool_path("/usr/bin/ls"), 0, "an absolute path is rejected (names only)");
+    assert_eq(_sb_tool_path(""), 0, "an empty name is rejected");
+    assert_eq(_sb_tool_path(0), 0, "a null name is rejected");
+
+    # ============================================================
+    # Cleanup: restore the cwd, remove the fakes, markers and dir.
+    # ============================================================
+    test_group("cleanup");
+    assert_eq(sys_chdir(oldcwd), 0, "cwd restored");
+    var tools = vec_new();
+    vec_push(tools, "mokutil");
+    vec_push(tools, "kmodsign");
+    vec_push(tools, "modinfo");
+    vec_push(tools, "ls");
+    var i = 0;
+    while (i < vec_len(tools)) {
+        var t = vec_get(tools, i);
+        xunlink(cat2(cat2(_sbt_dir, "/"), t));
+        xunlink(marker_path(t));
+        i = i + 1;
+    }
+    xunlink(kmod);
+    xunlink(key);
+    xunlink(crt);
+    assert_eq(xrmdir(_sbt_dir), 0, "scratch dir removed");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+sys_exit(exit_code);
