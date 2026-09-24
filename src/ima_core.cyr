@@ -322,7 +322,29 @@ fn ima_measurement_new(pcr, template_hash, template_name, filedata_hash, filenam
 # Returns Ok(ima_status_ptr) or Err.
 # ================================================================
 
-# Probe the running IMA subsystem and return its status. Returns Result.
+# Internal: the number of '\n' bytes read from `fd` to end-of-file, or -1 if a read fails (a
+# read error is not end-of-file). Does not close `fd` (the caller owns it).
+fn _ima_count_lines_fd(fd): i64 {
+    var rbuf[4096];
+    var s: [u8] = 0;
+    var count = 0;
+    while (1 == 1) {
+        var n = file_read(fd, &rbuf, 4096);
+        if (n < 0) { return 0 - 1; }
+        if (n == 0) { break; }
+        # Count newlines (bounds-checked via slice)
+        slice_set(&s, &rbuf, n);
+        var ri = 0;
+        while (ri < s.len) {
+            if (s[ri] == 10) { count = count + 1; }
+            ri = ri + 1;
+        }
+    }
+    return count;
+}
+
+# Probe the running IMA subsystem and return its status. Returns Result; Err if the
+# measurement log cannot be read to the end.
 fn ima_get_status(): i64 {
     var ima_dir = "/sys/kernel/security/ima";
     var acc = sys_access(ima_dir, 0);
@@ -337,26 +359,11 @@ fn ima_get_status(): i64 {
     var mcount = 0;
     var mfd = file_open(mpath, O_RDONLY, 0);
     if (mfd >= 0) {
-        var rbuf[4096];
-        var s: [u8] = 0;
-        var rgo = 1;
-        while (rgo == 1) {
-            var n = file_read(mfd, &rbuf, 4096);
-            if (n <= 0) {
-                rgo = 0;
-            } else {
-                # Count newlines (bounds-checked via slice)
-                slice_set(&s, &rbuf, n);
-                var ri = 0;
-                while (ri < s.len) {
-                    if (s[ri] == 10) {
-                        mcount = mcount + 1;
-                    }
-                    ri = ri + 1;
-                }
-            }
-        }
+        mcount = _ima_count_lines_fd(mfd);
         file_close(mfd);
+        # 3.13.1: a read error used to end the count early and report a too-low
+        # measurement_count as Ok.
+        if (mcount < 0) { return sigil_err_io(0, "Failed to read IMA measurements"); }
     }
 
     # Check if policy file exists

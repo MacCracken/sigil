@@ -1,6 +1,6 @@
 # `x509_verify_chain` hashes every TBS into one shared buffer — a forged link verifies under concurrency
 
-**Filed:** 2026-09-23 (3.13.0) · **Severity:** HIGH · **Status:** open
+**Filed:** 2026-09-23 (3.13.0) · **Severity:** HIGH · **Status:** resolved (3.13.1)
 
 **Where:** `src/x509.cyr` `_xvl_digest` / `_xvl_init` (~1160), used by `_x509_verify_link`. Reached
 from `x509_verify_chain` in `src/sgx.cyr` (~512), `src/tdx.cyr` (~512) and `src/sev_snp.cyr` (~378) —
@@ -21,3 +21,12 @@ thread (stated in CHANGELOG 3.13.0 and in `tests/tcyr/tee_verify_concurrent.tcyr
 inside the frame budget); delete `_xvl_digest` / `_xvl_init`; add a race-detector group to
 `tests/tcyr/tee_verify_concurrent.tcyr` — even threads verify the genuine PCK leaf link, odd threads
 a leaf with one TBS byte flipped and the genuine signature.
+
+## Resolution (3.13.1)
+
+`_x509_verify_link` hashes into a per-call stack `var digest[48]`; `_xvl_digest` / `_xvl_init`
+are gone. New race-detector group "x509 — concurrent chain-link verify" in
+`tests/tcyr/tee_verify_concurrent.tcyr` — 8 workers × 300 pairs of a genuine PCK leaf link and
+a leaf with one serial byte flipped. It was red on the old code (5 forged accepts, 2 genuine
+false-rejects) and is green now. The `*_verify_full_into` docs now say they are safe from
+several threads, each with its own arena, after one warm-up call on the main thread.

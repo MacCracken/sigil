@@ -5,7 +5,6 @@ freelist
 string
 bayan
 process
-ct
 thread
 thread_local
 syscalls

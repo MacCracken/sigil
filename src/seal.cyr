@@ -76,22 +76,13 @@ var SGX_SEAL_MAX_KEY_ID       = 256;
 var SGX_SEAL_SALT             = "sigil-sgx-seal-v1";
 var SGX_SEAL_SALT_LEN         = 17;
 
-# Long-lived scratch (init-time alloc, reused per call).
-# Info layout (35 + key_id_len bytes):
+# HKDF info layout (35 + key_id_len bytes), built per call in a stack buffer (3.13.1: it was
+# one module-level buffer with a non-atomic init flag, so concurrent key derivations
+# overwrote each other's info and could derive a key for the wrong policy / measurement):
 #   info[0]      policy (u8)
 #   info[1..3]   isvsvn (big-endian u16)
 #   info[3..35]  measurement (32 bytes)
 #   info[35..]   key_id
-var _seal_info     = 0;
-var _seal_inited   = 0;
-
-fn _seal_init(): i64 {
-    if (_seal_inited == 1) { return 0; }
-    # Max info size: 35 + SGX_SEAL_MAX_KEY_ID = 291 bytes.
-    _seal_info = alloc(35 + SGX_SEAL_MAX_KEY_ID);
-    _seal_inited = 1;
-    return 0;
-}
 
 # ================================================================
 # sgx_derive_seal_key — core KDF
@@ -121,7 +112,7 @@ fn _seal_init(): i64 {
 # sgx_derive_seal_key_n — KDF with a caller-chosen key width (3.6.7).
 fn sgx_derive_seal_key_n(sealing_root, policy, measurement, isvsvn,
   key_id, key_id_len, out_key, out_key_len): i64 {
-    _seal_init();
+    var info[296];   # 35 + SGX_SEAL_MAX_KEY_ID (256) = 291 bytes max; per call, per thread
 
     # Validate inputs.
     if (policy != SGX_SEAL_POLICY_MRSIGNER) {
@@ -137,22 +128,22 @@ fn sgx_derive_seal_key_n(sealing_root, policy, measurement, isvsvn,
     }
 
     # Build info buffer.
-    store8(_seal_info + 0, policy & 0xFF);
+    store8(&info + 0, policy & 0xFF);
     # ISVSVN big-endian (matches the on-wire convention used by SGX
     # reports / quotes — keeps any future cross-checks against
     # quote.report_body.isv_svn straightforward).
-    store8(_seal_info + 1, (isvsvn >> 8) & 0xFF);
-    store8(_seal_info + 2, isvsvn & 0xFF);
+    store8(&info + 1, (isvsvn >> 8) & 0xFF);
+    store8(&info + 2, isvsvn & 0xFF);
     # Measurement (32 bytes).
     var i = 0;
     while (i < 32) {
-        store8(_seal_info + 3 + i, load8(measurement + i) & 0xFF);
+        store8(&info + 3 + i, load8(measurement + i) & 0xFF);
         i = i + 1;
     }
     # Caller-supplied key_id.
     i = 0;
     while (i < key_id_len) {
-        store8(_seal_info + 35 + i, load8(key_id + i) & 0xFF);
+        store8(&info + 35 + i, load8(key_id + i) & 0xFF);
         i = i + 1;
     }
 
@@ -160,7 +151,7 @@ fn sgx_derive_seal_key_n(sealing_root, policy, measurement, isvsvn,
     # success, non-zero on error; normalise to sigil's 1/0 convention.
     var rc = hkdf(SGX_SEAL_SALT, SGX_SEAL_SALT_LEN,
       sealing_root, 32,
-      _seal_info, 35 + key_id_len,
+      &info, 35 + key_id_len,
       out_key, out_key_len);
     if (rc != 0) { return 0; }
     return 1;

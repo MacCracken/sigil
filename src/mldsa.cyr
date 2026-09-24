@@ -485,7 +485,8 @@ fn mldsa65_sign(sig, msg, msglen, sk): i64 {
 # ================================================================
 # The sign/verify break points line up with pq-crystals'
 # `crypto_sign_verify_internal` (int returning 0/−1 from the C
-# ref; we flip to 0/1 to match sigil's other boolean returns).
+# ref; we map it to 0 = valid / 1 = invalid — the REVERSE of
+# ed25519_verify and ecdsa_*_verify, which return 1 = valid).
 # `_mldsa_verify_ws` holds the body so its early rejects can simply
 # return; the public wrapper owns the workspace and releases it on
 # every path. All inputs are public, so nothing is wiped.

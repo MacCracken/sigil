@@ -265,6 +265,36 @@ fn main() {
         assert_eq(vec_len(crl_entries(c1)), 1, "crl junk-number entry dropped");
     }
 
+    # ============================================================
+    # 3.13.1 — the issues filed 2026-09-23
+    # ============================================================
+    test_group("3.13.1 crl_load_bad_count counts rejected entry lines");
+    var crl_txt = "{\"version\":1,\"issuer\":\"ca\",\"issued_at\":1,\"next_update\":0}\n{\"key_id\":\"k1\",\"revoked_at\":5}\n{\"key_id\":\"k2\",\"revoked_at\":x}\n{\"key_id\":\"k3\"\n";
+    var cb = crl_from_jsonl(crl_txt, strlen(crl_txt));
+    assert(cb != 0, "CRL with bad entries still parses");
+    if (cb != 0) { assert_eq(vec_len(crl_entries(cb)), 1, "one good entry kept"); }
+    assert_eq(crl_load_bad_count(), 2, "two entry lines counted as rejected");
+
+    test_group("3.13.1 rl_merge keeps a different revoked_after");
+    var ma = revocation_list_new();
+    var e_cond = revocation_entry_new("kx", 0, "r", "by");
+    store64(e_cond + 40, 1000);
+    rl_add(ma, e_cond);
+    var mb = revocation_list_new();
+    rl_add(mb, revocation_entry_new("kx", 0, "r", "by"));   # unconditional (revoked_after 0)
+    assert_eq(rl_merge(ma, mb), 1, "unconditional entry merged next to the conditional one");
+    assert_eq(rl_merge(ma, mb), 0, "an identical entry is still a duplicate");
+    assert_eq(rl_is_key_revoked_at(ma, "kx", 500), 1, "revoked before the conditional cutoff");
+
+    test_group("3.13.1 _rj_parse_string never reads past end");
+    var rjt[32];
+    memset(&rjt, 0, 32);
+    var src = "\"abc\\\"";   # bytes: " a b c \ " — end = 5 stops before the last quote
+    var pe = _rj_parse_string(&rjt, src, 0, 5);
+    assert_eq(load64(&rjt + 8), 0, "a backslash as the last byte leaves the string unclosed");
+    assert(pe <= 5, "the scan stops at end");
+    assert_streq(load64(&rjt), "abc", "no byte past end is copied");
+
     return assert_summary();
 }
 

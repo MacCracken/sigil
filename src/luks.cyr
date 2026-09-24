@@ -380,6 +380,9 @@ fn luks_write_keyfile(key_ptr, key_len): i64 {
     # refusal was silently lost there; O_EXCL still caught the final component).
     # 3.13.0: io.cyr's `file_open`, not a raw `sys_open` — on agnos `sys_open` is
     # (name, namelen, flags), so the Linux-shaped call passed the flags as the name length.
+    # On Windows (PE), O_CREAT|O_EXCL|O_NOFOLLOW resolves a final reparse point instead of
+    # refusing it (cyrius 6.6.6 documents this), so the symlink refusal is weaker there. LUKS has
+    # no Windows path at all (no cryptsetup, no fork+exec), so it is unreachable in practice.
     var open_flags = O_WRONLY | O_CREAT | O_TRUNC | O_EXCL | O_NOFOLLOW;
     var fd = file_open(keyfile, open_flags, 384);  # 0600
     if (fd < 0) {
@@ -445,6 +448,18 @@ fn luks_run_capture(args, buf, buflen): i64 {
 # Helper: build argv vec and run, return Ok(exit_code) or Err
 fn luks_run_checked(args): i64 {
     return agnosys_run_checked(args, "command failed with non-zero exit");
+}
+
+# Internal: best-effort `losetup -d <loop_dev>` on an error path. BOUNDED — an unbounded wait
+# on a detach that cannot complete would hang the error path of a function that is already
+# failing (3.12.13). Returns 0.
+fn _luks_detach_loop(loop_dev): i64 {
+    var det_args = vec_new();
+    vec_push(det_args, "/usr/sbin/losetup");
+    vec_push(det_args, "-d");
+    vec_push(det_args, loop_dev);
+    agnosys_run_checked_timeout(det_args, 0, "losetup -d failed");
+    return 0;
 }
 
 # Format a LUKS2 encrypted volume.
@@ -525,14 +540,7 @@ fn luks_format(config, key_ptr, key_len): i64 {
     if (is_err_result(cs_res_tag) == 1) {
         # Detach loop on failure — including a keyfile that could not be written,
         # which returned before detaching until 3.13.0.
-        var det_args = vec_new();
-        vec_push(det_args, "/usr/sbin/losetup");
-        vec_push(det_args, "-d");
-        vec_push(det_args, loop_dev);
-        # Best-effort cleanup, but BOUNDED — an unbounded wait on a detach that
-        # cannot complete would hang the error path of a function that is already
-        # failing. 3.12.13.
-        agnosys_run_checked_timeout(det_args, 0, "losetup -d failed");
+        _luks_detach_loop(loop_dev);
         return Err(cs_res);
     }
 
@@ -583,7 +591,12 @@ fn luks_open(config, key_ptr, key_len): i64 {
     vec_push(cs_post, name);
 
     var cs_res_tag, cs_res = _luks_run_with_keyfile(cs_pre, cs_post, key_ptr, key_len);
-    if (is_err_result(cs_res_tag) == 1) { return Err(cs_res); }
+    if (is_err_result(cs_res_tag) == 1) {
+        # 3.13.1: detach the loop device this call attached (it stayed attached, as
+        # luks_format's did before 3.13.0).
+        _luks_detach_loop(loop_dev);
+        return Err(cs_res);
+    }
 
     # Build /dev/mapper/<name>
     var prefix = "/dev/mapper/";

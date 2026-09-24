@@ -254,14 +254,29 @@ fn u256_mul_full(out, a, b): i64 {
 # Read-only-after-init: curve modulus p = 2^255 - 19 and the
 # Solinas constant 38 (= 2 · 19) used in 2^256 ≡ 38 (mod p).
 var _ed_p = 0;
-var _ed_p_inited = 0;
+var _ed_p_inited = 0;   # 0 = not built, 1 = being built, 2 = published (atomics only)
 var _mod_38 = 0;
 
 fn _init_ed_p(): i64 {
-    if (_ed_p_inited == 1) { return 0; }
-    _ed_p = u256_from_hex("7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffed");
-    _mod_38 = u256_from(38);
-    _ed_p_inited = 1;
+    if (atomic_load(&_ed_p_inited) == 2) {
+        # Acquire: the table reads that follow must not pass this flag read. x86 (TSO) never
+        # reorders loads with loads, so the fence is needed on aarch64 only — this fast path
+        # runs on every field op (fp_add / fp_sub / fp_neg call _init_ed_p each time).
+        #ifdef CYRIUS_ARCH_AARCH64
+        atomic_fence();
+        #endif
+        return 0;
+    }
+    if (atomic_cas(&_ed_p_inited, 0, 1) == 1) {
+        _ed_p = u256_from_hex("7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffed");
+        _mod_38 = u256_from(38);
+        atomic_fence();
+        atomic_store(&_ed_p_inited, 2);
+        return 0;
+    }
+    # Another thread is building the tables: wait for it to publish them.
+    while (atomic_load(&_ed_p_inited) != 2) { }
+    atomic_fence();
     return 0;
 }
 

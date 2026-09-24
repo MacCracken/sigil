@@ -1,6 +1,6 @@
 # ECDSA signing: one-bit ladder timing residual, and unbanked `k_hat` scratch
 
-**Filed:** 2026-09-23 (3.13.0) · **Severity:** MEDIUM · **Status:** open
+**Filed:** 2026-09-23 (3.13.0) · **Severity:** MEDIUM · **Status:** resolved (3.13.1)
 
 **Where:** `src/ecdsa_p256.cyr` (~1246, `t2` ~1295, `kh` ~1338), `src/ecdsa_p384.cyr` (`t2` ~1110,
 `kh` ~1153). Left after the 3.13.0 fixed-length-ladder fix.
@@ -17,3 +17,13 @@
    `CYRIUS_STACK_ARRAYS=0` makes them shared `.bss`, and with RFC 6979 a race-corrupted R plus a
    correct signature on the same message recovers d. Direction: bank them like the rest of the sign
    path, or record the choice.
+
+## Resolution (3.13.1)
+
+1. `pt_scalarmul_secret` / `pt384_scalarmul_secret` rescale P's Jacobian coordinates by a
+   secret per-call λ = SHA-256 / SHA-384(tag ‖ k̂) mod p before the ladder
+   (`_p256_blind_point` / `_p384_blind_point`), so no iteration runs on a fixed Z = 1 operand.
+   Signatures are byte-identical (RFC 6979 KATs); test group in
+   `tests/tcyr/ecdsa_sign_timing.tcyr` (same point, non-unit Z, Z differs per k̂).
+2. `kh` / `t2` stay stack locals; the choice is recorded at each declaration (quirk #1; a
+   `CYRIUS_STACK_ARRAYS=0` build is unsupported; 3.14.0 retires `cbank()`).

@@ -195,17 +195,98 @@ fn certpin_verify_pin(host, actual_pin, pin_set, current_time): i64 {
 }
 
 # ================================================================
-# Pin computation via openssl subprocess
+# Pin computation (in-process)
 # ================================================================
 
-# Compute the SPKI SHA-256 pin for a PEM certificate file on disk.
+# Internal: one DER TLV at buf[pos..end) — any tag, definite length of up to 4 octets. Stores
+# the content offset in *cpos and returns the content length, or -1 if the header or the
+# content runs past `end`.
+fn _cp_der_tlv(buf, pos, end, cpos): i64 {
+    if (pos + 2 > end) { return 0 - 1; }
+    var l0 = load8(buf + pos + 1) & 0xFF;
+    var p = pos + 2;
+    var len = l0;
+    if (l0 >= 0x80) {
+        var nb = l0 & 0x7F;
+        if (nb == 0) { return 0 - 1; }
+        if (nb > 4) { return 0 - 1; }
+        if (p + nb > end) { return 0 - 1; }
+        len = 0;
+        var i = 0;
+        while (i < nb) {
+            len = (len << 8) | (load8(buf + p + i) & 0xFF);
+            i = i + 1;
+        }
+        p = p + nb;
+    }
+    if (p + len > end) { return 0 - 1; }
+    store64(cpos, p);
+    return len;
+}
+
+# Internal: the offset just past the DER TLV at buf[pos] if its tag is `tag`, else -1.
+fn _cp_der_skip(buf, pos, end, tag): i64 {
+    if (pos < 0) { return 0 - 1; }
+    if (pos >= end) { return 0 - 1; }
+    if ((load8(buf + pos) & 0xFF) != tag) { return 0 - 1; }
+    var c = 0;
+    var n = _cp_der_tlv(buf, pos, end, &c);
+    if (n < 0) { return 0 - 1; }
+    return c + n;
+}
+
+# Internal: the first "-----BEGIN CERTIFICATE-----" block of the `n`-byte PEM text at `pem`,
+# base64-decoded. Stores the DER length in *der_len and returns the buffer, or 0 if there is
+# no complete block or its body is not base64.
+fn _cp_pem_first_cert(pem, n, der_len): i64 {
+    var begin = "-----BEGIN CERTIFICATE-----";
+    var endm = "-----END CERTIFICATE-----";
+    var bl = strlen(begin);
+    var el = strlen(endm);
+    var s = 0 - 1;
+    var i = 0;
+    while (i + bl <= n) {
+        if (memeq(pem + i, begin, bl) == 1) { s = i + bl; break; }
+        i = i + 1;
+    }
+    if (s < 0) { return 0; }
+    var e = 0 - 1;
+    i = s;
+    while (i + el <= n) {
+        if (memeq(pem + i, endm, el) == 1) { e = i; break; }
+        i = i + 1;
+    }
+    if (e < 0) { return 0; }
+    # The body without its line breaks, then decoded.
+    var body = alloc(e - s + 1);
+    var bn = 0;
+    i = s;
+    while (i < e) {
+        var c = load8(pem + i) & 0xFF;
+        var ws = 0;
+        if (c == 10) { ws = 1; }
+        if (c == 13) { ws = 1; }
+        if (c == 32) { ws = 1; }
+        if (c == 9) { ws = 1; }
+        if (ws == 0) { store8(body + bn, c); bn = bn + 1; }
+        i = i + 1;
+    }
+    if (bn == 0) { return 0; }
+    var dec = bayan_base64_decode(body, bn);   # {ptr, len}, or 0 if not base64
+    if (dec == 0) { return 0; }
+    store64(der_len, load64(dec + 8));
+    return load64(dec);
+}
+
+# Compute the SPKI SHA-256 pin (RFC 7469: base64 of SHA-256 over the DER
+# SubjectPublicKeyInfo) of the first certificate in a PEM file on disk.
 # cert_path: path to a PEM-encoded certificate file.
-# Returns Result: Ok(pin_string_ptr) or Err.
+# Returns Result: Ok(pin C-string, 44 chars) or Err.
 #
-# Pipeline: openssl x509 -in <path> -pubkey -noout |
-#           openssl pkey -pubin -outform DER |
-#           openssl dgst -sha256 -binary |
-#           openssl enc -base64
+# 3.13.1: computed in-process. It used to run `sh -c "openssl x509 | openssl pkey |
+# openssl dgst | openssl enc"` through run_capture, which discards the exit status, and
+# without pipefail a missing or unparseable cert hashed EMPTY input — returning Ok with
+# 47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU= (SHA-256 of nothing) as the pin.
 fn certpin_compute_spki_pin(cert_path): i64 {
     if (cert_path == 0) {
         return sigil_err_invalid_argument("cert_path is null");
@@ -213,91 +294,41 @@ fn certpin_compute_spki_pin(cert_path): i64 {
     if (strlen(cert_path) == 0) {
         return sigil_err_invalid_argument("cert_path is empty");
     }
+    var n = 0;
+    var pem = file_read_whole(cert_path, &n);
+    if (pem == 0) { return sigil_err_unknown("certificate file cannot be read"); }
+    var dl = 0;
+    var der = _cp_pem_first_cert(pem, n, &dl);
+    if (der == 0) { return sigil_err_invalid_argument("no PEM certificate in the file"); }
 
-    # Validate cert_path does not contain shell-injection characters
-    var vlen = strlen(cert_path);
-    if (vlen == 0) {
-        return sigil_err_invalid_argument("cert_path is empty");
+    # Certificate ::= SEQUENCE { tbsCertificate, signatureAlgorithm, signatureValue }
+    # TBSCertificate ::= SEQUENCE { [0] version OPTIONAL, serialNumber, signature, issuer,
+    #                               validity, subject, subjectPublicKeyInfo, ... }
+    if (dl < 2) { return sigil_err_invalid_argument("certificate DER is truncated"); }
+    if ((load8(der) & 0xFF) != 0x30) { return sigil_err_invalid_argument("certificate is not a SEQUENCE"); }
+    var cc = 0;
+    var cl = _cp_der_tlv(der, 0, dl, &cc);
+    if (cl < 0) { return sigil_err_invalid_argument("certificate DER is truncated"); }
+    if ((load8(der + cc) & 0xFF) != 0x30) { return sigil_err_invalid_argument("TBSCertificate missing"); }
+    var tc = 0;
+    var tl = _cp_der_tlv(der, cc, cc + cl, &tc);
+    if (tl < 0) { return sigil_err_invalid_argument("TBSCertificate is truncated"); }
+    var tend = tc + tl;
+    var p = tc;
+    if (p < tend) {
+        if ((load8(der + p) & 0xFF) == 0xA0) { p = _cp_der_skip(der, p, tend, 0xA0); }   # version
     }
-    if (vlen > 896) {
-        return sigil_err_invalid_argument("cert_path too long");
-    }
-    var vi = 0;
-    while (vi < vlen) {
-        var vc = load8(cert_path + vi);
-        if (vc == 39) {  # single quote
-            return sigil_err_invalid_argument("cert_path contains single quote");
-        }
-        if (vc == 10) {  # newline
-            return sigil_err_invalid_argument("cert_path contains newline");
-        }
-        if (vc == 0) {  # null byte (shouldn't reach here, but defensive)
-            return sigil_err_invalid_argument("cert_path contains null byte");
-        }
-        vi = vi + 1;
-    }
-
-    # Build the pipeline command as a single shell invocation
-    # We use sh -c to pipe the commands together
-    var cmd = "sh";
-    # Construct the pipeline string
-    # openssl x509 -in <path> -pubkey -noout | openssl pkey -pubin -outform DER
-    # | openssl dgst -sha256 -binary | openssl enc -base64 -A
-    # We'll build this as a static command with the path inserted
-
-    # For safety, use a fixed buffer for the shell command
-    var buf = alloc(1024);
-    var pos = 0;
-
-    var prefix = "openssl x509 -in '";
-    var prefixlen = strlen(prefix);
-    memcpy(buf + pos, prefix, prefixlen);
-    pos = pos + prefixlen;
-
-    var pathlen = strlen(cert_path);
-    memcpy(buf + pos, cert_path, pathlen);
-    pos = pos + pathlen;
-
-    var s1 = "' -pubkey -noout | openssl pkey -pubin -outform DER";
-    var s2 = " | openssl dgst -sha256 -binary | openssl enc -base64 -A";
-    # Build suffix by concatenating s1 + s2 into buf directly
-    var s1len = strlen(s1);
-    memcpy(buf + pos, s1, s1len);
-    pos = pos + s1len;
-    var suffix = s2;
-    var suffixlen = strlen(suffix);
-    memcpy(buf + pos, suffix, suffixlen);
-    pos = pos + suffixlen;
-
-    store8(buf + pos, 0);  # null terminate
-
-    # Run `sh -c "<pipeline>"` and capture the base64 pin from stdout.
-    # v3.9.3: this previously called an obsolete argv-array API
-    # `run_capture(cmd, argv)` — it mis-bound the args (only 2 of 5) and
-    # treated the Ok(bytes_read) Result as an output pointer, so the openssl
-    # pin computation never worked against the current 5-arg run_capture.
-    # The current contract is `run_capture(cmd, arg1, arg2, buf, buflen)`:
-    # execs `cmd arg1 arg2` (here `sh -c <pipeline>`), writes stdout into
-    # `buf` (raw, NOT NUL-terminated), and returns Ok(bytes_read). Fixes
-    # cyrius issue 2026-06-24-sigil-certpin-run-capture-signature-mismatch.
-    var dashc = "-c";
-    var outcap = 1024;
-    var outbuf = alloc(outcap);
-    var res_tag, res = run_capture(cmd, dashc, buf, outbuf, outcap - 1);
-    if (is_err_result(res_tag) == 1) { return Err(res); }
-
-    var total = res;
-    if (total <= 0) {
-        return sigil_err_unknown("openssl pipeline returned empty output");
-    }
-    store8(outbuf + total, 0);  # NUL-terminate (run_capture writes raw bytes)
-
-    # Strip trailing newline if present
-    if (load8(outbuf + total - 1) == 10) {
-        store8(outbuf + total - 1, 0);
-    }
-
-    return Ok(outbuf);
+    p = _cp_der_skip(der, p, tend, 0x02);   # serialNumber
+    p = _cp_der_skip(der, p, tend, 0x30);   # signature
+    p = _cp_der_skip(der, p, tend, 0x30);   # issuer
+    p = _cp_der_skip(der, p, tend, 0x30);   # validity
+    p = _cp_der_skip(der, p, tend, 0x30);   # subject
+    if (p < 0) { return sigil_err_invalid_argument("TBSCertificate is malformed"); }
+    var spki_end = _cp_der_skip(der, p, tend, 0x30);   # subjectPublicKeyInfo
+    if (spki_end < 0) { return sigil_err_invalid_argument("SubjectPublicKeyInfo missing"); }
+    var digest[32];
+    sha256(der + p, spki_end - p, &digest);
+    return Ok(bayan_base64_encode(&digest, 32));
 }
 
 # ================================================================

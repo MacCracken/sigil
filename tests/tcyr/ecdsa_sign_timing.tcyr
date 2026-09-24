@@ -419,6 +419,42 @@ fn main() {
     assert_gte(m1 * 4, mfull * 3, "p384 k=1 median >= 0.75x k=n-1 median");
     assert_gte(m16 * 4, mfull * 3, "p384 k=2^16 median >= 0.75x k=n-1 median");
 
+    test_group("3.13.1 ladder input blinded: same point, secret non-unit Z");
+    var bk1[56];
+    var bk2[56];
+    memset(&bk1, 0, 56);
+    memset(&bk2, 0, 56);
+    store64(&bk1, 12345);
+    store64(&bk2, 67890);
+    var bp1 = alloc(96);
+    var bp2 = alloc(96);
+    _p256_blind_point(bp1, _tm256_G, &bk1);
+    _p256_blind_point(bp2, _tm256_G, &bk2);
+    var gx = alloc(32);
+    var gy = alloc(32);
+    var ax = alloc(32);
+    var ay = alloc(32);
+    pt_to_affine(gx, gy, _tm256_G);
+    pt_to_affine(ax, ay, bp1);
+    assert_eq(u256_eq(ax, gx), 1, "P-256 blinded G: same x");
+    assert_eq(u256_eq(ay, gy), 1, "P-256 blinded G: same y");
+    assert_eq(u256_eq(_pt_z(bp1), _pt_z(_tm256_G)), 0, "P-256 blinded G: Z is not 1");
+    assert_eq(u256_eq(_pt_z(bp1), _pt_z(bp2)), 0, "P-256: another k_hat gives another Z");
+    var cp1 = alloc(144);
+    var cp2 = alloc(144);
+    _p384_blind_point(cp1, _tm384_G, &bk1);
+    _p384_blind_point(cp2, _tm384_G, &bk2);
+    var hx = alloc(48);
+    var hy = alloc(48);
+    var bx = alloc(48);
+    var by = alloc(48);
+    pt384_to_affine(hx, hy, _tm384_G);
+    pt384_to_affine(bx, by, cp1);
+    assert_eq(memeq(bx, hx, 48), 1, "P-384 blinded G: same x");
+    assert_eq(memeq(by, hy, 48), 1, "P-384 blinded G: same y");
+    assert_eq(memeq(_pt384_z(cp1), _pt384_z(_tm384_G), 48), 0, "P-384 blinded G: Z is not 1");
+    assert_eq(memeq(_pt384_z(cp1), _pt384_z(cp2), 48), 0, "P-384: another k_hat gives another Z");
+
     return assert_summary();
 }
 

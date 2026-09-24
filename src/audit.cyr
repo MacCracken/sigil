@@ -48,12 +48,13 @@ fn audit_event_type_from_name(name): i64 {
 #   +40  content_hash  (C-string ptr, 0 = n/a)
 #   +48  key_id        (C-string ptr, 0 = n/a)
 #   +56  timestamp     (epoch seconds)
+#   +64  reason        (C-string ptr, 0 = n/a; 3.13.1 — the revocation reason)
 
-# Allocates a 64-byte AuditEvent (fl_alloc) of `event_type` with every optional field unset
+# Allocates a 72-byte AuditEvent (fl_alloc) of `event_type` with every optional field unset
 # (pointers 0; artifact_type, trust_level and passed -1) and the timestamp set to the current
 # epoch seconds. Returns the pointer.
 fn audit_event_new(event_type): i64 {
-    var e = fl_alloc(64);
+    var e = fl_alloc(72);
     store64(e, event_type);
     store64(e + 8, 0);
     store64(e + 16, 0 - 1);
@@ -62,6 +63,7 @@ fn audit_event_new(event_type): i64 {
     store64(e + 40, 0);
     store64(e + 48, 0);
     store64(e + 56, clock_epoch_secs());
+    store64(e + 64, 0);
     return e;
 }
 
@@ -94,6 +96,10 @@ fn ae_set_passed(e, v): i64 { store64(e + 32, v); return e; }
 fn ae_set_content_hash(e, v): i64 { store64(e + 40, v); return e; }
 # Sets the key-id C-string of event `e` to `v`; returns `e`.
 fn ae_set_key_id(e, v): i64 { store64(e + 48, v); return e; }
+# Returns the reason C-string of event `e` (the revocation reason), or 0 if none.
+fn ae_reason(e): i64 { return load64(e + 64); }
+# Sets the reason C-string of event `e` to `v` (stored by pointer, 0 = none); returns `e`.
+fn ae_set_reason(e, v): i64 { store64(e + 64, v); return e; }
 
 # ================================================================
 # Convenience constructors
@@ -124,12 +130,13 @@ fn audit_artifact_signed(path, atype, key_id, chash): i64 {
 }
 
 # Builds an AUDIT_REVOCATION_ADDED event for the revoked `key_id` and/or content hash
-# `chash` (either may be 0). `reason` is ignored: AuditEvent has no field for it. Returns
-# the event (fl_alloc, via audit_event_new).
+# `chash` (either may be 0), recording `reason` (a C-string, 0 = none; stored by pointer).
+# Returns the event (fl_alloc, via audit_event_new).
 fn audit_revocation_added(key_id, chash, reason): i64 {
     var e = audit_event_new(AUDIT_REVOCATION_ADDED);
     ae_set_key_id(e, key_id);
     ae_set_content_hash(e, chash);
+    ae_set_reason(e, reason);
     return e;
 }
 
@@ -207,6 +214,7 @@ fn alog_save(log, path): i64 {
         if (ae_path(e) != 0) { cap = cap + _alog_esc_len(ae_path(e)); }
         if (ae_key_id(e) != 0) { cap = cap + _alog_esc_len(ae_key_id(e)); }
         if (ae_content_hash(e) != 0) { cap = cap + _alog_esc_len(ae_content_hash(e)); }
+        if (ae_reason(e) != 0) { cap = cap + 16 + _alog_esc_len(ae_reason(e)); }
         var line = fl_alloc(cap);
         if (line == 0) { file_close(fd); return SIGIL_ERR_IO; }
         # Simple JSON line: {"type":"...","timestamp":...}
@@ -230,14 +238,21 @@ fn alog_save(log, path): i64 {
             pos = pos + _alog_write_esc(line + pos, ae_content_hash(e));
             pos = pos + _alog_write_str(line + pos, "\"");
         }
+        if (ae_reason(e) != 0) {
+            pos = pos + _alog_write_str(line + pos, ",\"reason\":\"");
+            pos = pos + _alog_write_esc(line + pos, ae_reason(e));
+            pos = pos + _alog_write_str(line + pos, "\"");
+        }
         if (ae_passed(e) != (0 - 1)) {
             pos = pos + _alog_write_str(line + pos, ",\"passed\":");
             if (ae_passed(e) == 1) { pos = pos + _alog_write_str(line + pos, "true"); }
             else { pos = pos + _alog_write_str(line + pos, "false"); }
         }
         pos = pos + _alog_write_str(line + pos, "}\n");
-        file_write(fd, line, pos);
+        # 3.13.1: a failed or short write is an error (was ignored, and success returned).
+        var w = file_write(fd, line, pos);
         fl_free(line);
+        if (w != pos) { file_close(fd); return SIGIL_ERR_IO; }
         i = i + 1;
     }
     file_close(fd);
@@ -321,14 +336,18 @@ fn _alog_write_esc(dst, s): i64 {
 # with an unknown `type` are skipped — forensic replay must not
 # abort on an unknown event that a newer writer produced.
 #
-# Reuses `_rj_parse_string` from policy.cyr (same compilation unit)
-# for escape-aware string decoding, matching what
-# `json_write_escaped` emitted on the writer side.
+# Reuses `_rj_parse_string` / `_rj_parse_int` from policy.cyr (same
+# compilation unit) for escape-aware string decoding, matching the
+# escapes alog_save's _alog_write_esc emits.
 #
 # Returns the number of events loaded, or -1 on IO failure.
 # ================================================================
 
 fn _alog_parse_one_line(log, line, llen): i64 {
+    var rjb[32];
+    memset(&rjb, 0, 32);
+    var rj = &rjb;
+    var reason = 0;
     var etype = 0 - 1;
     var apath = 0;
     var kid = 0;
@@ -341,8 +360,8 @@ fn _alog_parse_one_line(log, line, llen): i64 {
         var c = load8(line + pos) & 0xFF;
         if (c != 34) { pos = pos + 1; }
         else {
-            pos = _rj_parse_string(line, pos, llen);
-            var k = _rj_out_ptr;
+            pos = _rj_parse_string(rj, line, pos, llen);
+            var k = load64(rj);
             if (k == 0) { break; }
             # Skip to colon
             while (pos < llen) {
@@ -359,12 +378,20 @@ fn _alog_parse_one_line(log, line, llen): i64 {
             if (pos >= llen) { break; }
             var vc = load8(line + pos) & 0xFF;
             if (vc == 34) {
-                pos = _rj_parse_string(line, pos, llen);
-                var v = _rj_out_ptr;
+                pos = _rj_parse_string(rj, line, pos, llen);
+                var v = load64(rj);
                 if (streq(k, "type") == 1) { etype = audit_event_type_from_name(v); }
                 elif (streq(k, "path") == 1) { apath = v; }
                 elif (streq(k, "key_id") == 1) { kid = v; }
                 elif (streq(k, "content_hash") == 1) { chash = v; }
+                elif (streq(k, "reason") == 1) { reason = v; }
+            } elif (streq(k, "timestamp") == 1) {
+                # Strict signed integer (3.13.1: a negative timestamp used to be written as
+                # an empty value and read back as 0).
+                var tp = _rj_parse_int(rj, line, pos, llen);
+                if (tp < 0) { return 0; }
+                ts = load64(rj + 24);
+                pos = tp;
             } else {
                 # Literal: true / false / number
                 var vs = pos;
@@ -385,17 +412,6 @@ fn _alog_parse_one_line(log, line, llen): i64 {
                     } elif (fb == 102) {
                         # "false"
                         if (streq(k, "passed") == 1) { passed = 0; }
-                    } elif (fb >= 48) {
-                        if (fb <= 57) {
-                            var intv = 0;
-                            var ii = 0;
-                            while (ii < vlen) {
-                                var ch = load8(line + vs + ii) & 0xFF;
-                                if (ch >= 48) { if (ch <= 57) { intv = intv * 10 + (ch - 48); } }
-                                ii = ii + 1;
-                            }
-                            if (streq(k, "timestamp") == 1) { ts = intv; }
-                        }
                     }
                 }
             }
@@ -408,6 +424,7 @@ fn _alog_parse_one_line(log, line, llen): i64 {
     if (apath != 0) { ae_set_path(e, apath); }
     if (kid != 0) { ae_set_key_id(e, kid); }
     if (chash != 0) { ae_set_content_hash(e, chash); }
+    if (reason != 0) { ae_set_reason(e, reason); }
     if (passed != (0 - 1)) { ae_set_passed(e, passed); }
     store64(e + 56, ts);    # timestamp
     alog_record(log, e);
@@ -417,7 +434,10 @@ fn _alog_parse_one_line(log, line, llen): i64 {
 # 1 if bytes 0 through `llen`-1 of `line` hold one complete JSON object: after optional
 # leading space / tab / CR the first byte is '{', every string literal is closed (a
 # backslash escapes the next byte), and the last byte outside a string, ignoring trailing
-# space / tab / CR, is '}'. 0 otherwise, e.g. a line torn by a crash mid-append.
+# space / tab / CR, is '}'; and exactly one '{' and one '}' occur outside strings (events
+# are flat objects). 0 otherwise, e.g. a line torn by a crash mid-append — including a torn
+# fragment that a later append completed into one merged line (3.13.1: such a line passed,
+# and loaded as one made-up event while the real event was lost).
 fn _alog_line_complete(line, llen): i64 {
     var i = 0;
     while (i < llen) {
@@ -431,6 +451,8 @@ fn _alog_line_complete(line, llen): i64 {
     if ((load8(line + i) & 0xFF) != 123) { return 0; }   # {
     var in_str = 0;
     var last = 0;
+    var opens = 0;
+    var closes = 0;
     while (i < llen) {
         var c = load8(line + i) & 0xFF;
         if (in_str == 1) {
@@ -443,23 +465,29 @@ fn _alog_line_complete(line, llen): i64 {
             }
         } else {
             if (c == 34) { in_str = 1; }
+            if (c == 123) { opens = opens + 1; }
+            if (c == 125) { closes = closes + 1; }
             if (c != 32) { if (c != 9) { if (c != 13) { last = c; } } }
             i = i + 1;
         }
     }
     if (in_str == 1) { return 0; }
     if (last != 125) { return 0; }   # }
+    if (opens != 1) { return 0; }
+    if (closes != 1) { return 0; }
     return 1;
 }
 
 # Appends the events in the JSONL journal at `path` to `log` (format notes in the alog_load
-# block above). Reads the WHOLE file (3.13.0, H6: was silently capped at the first 64 KiB).
+# block above). Reads the WHOLE file (3.13.0, H6: was silently capped at the first 64 KiB)
+# up to RJ_MAX_FILE_BYTES — a larger file is an error, not truncated — into a buffer freed
+# once parsed (3.13.1).
 # A line that is not one complete JSON object (a torn final append, an unterminated string)
 # is skipped rather than loaded as a partial event. Returns the number of events appended,
 # or -1 if the file cannot be opened or read.
 fn alog_load(log, path): i64 {
     var n = 0;
-    var buf = file_read_whole(path, &n);
+    var buf = _rj_read_file(path, &n);
     if (buf == 0) { return (0 - 1); }
     var loaded = 0;
     var pos = 0;
@@ -477,31 +505,37 @@ fn alog_load(log, path): i64 {
         }
         if (pos < n) { pos = pos + 1; }   # skip '\n'
     }
+    fl_free(buf);
     return loaded;
 }
 
-# Global to survive nested calls
-var _alog_int_buf = 0;
-
+# Writes `val` in decimal (with a leading '-' when negative; i64 min included) to `dst`;
+# returns the byte count. 3.13.1: the digits are built in a per-call stack buffer (was one
+# module-global buffer, racing concurrent alog_save calls), and a negative value is written
+# (it used to come out empty, leaving `"timestamp":,` in the line).
 fn _alog_write_int(dst, val): i64 {
-    if (_alog_int_buf == 0) { _alog_int_buf = alloc(24); }
-    # Manual int-to-string into global buffer
+    var ib[24];
     var v = val;
     var pos = 23;
-    store8(_alog_int_buf + pos, 0);
-    pos = pos - 1;
     if (v == 0) {
-        store8(_alog_int_buf + pos, 48);
+        store8(&ib + pos, 48);
         pos = pos - 1;
-    } else {
-        while (v > 0) {
-            store8(_alog_int_buf + pos, 48 + (v % 10));
-            v = v / 10;
-            pos = pos - 1;
-        }
+    }
+    # Digits of a negative value come from the negative remainder, so i64 min needs no
+    # negation (division truncates toward zero).
+    while (v != 0) {
+        var d = v % 10;
+        if (d < 0) { d = 0 - d; }
+        store8(&ib + pos, 48 + d);
+        v = v / 10;
+        pos = pos - 1;
+    }
+    if (val < 0) {
+        store8(&ib + pos, 45);   # -
+        pos = pos - 1;
     }
     pos = pos + 1;
-    var len = 23 - pos;
-    memcpy(dst, _alog_int_buf + pos, len);
+    var len = 24 - pos;
+    memcpy(dst, &ib + pos, len);
     return len;
 }

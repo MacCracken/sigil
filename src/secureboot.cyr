@@ -1,5 +1,6 @@
 # secureboot.cyr — UEFI Secure Boot state for sigil trust policy.
-# Thin wrapper over agnosys secureboot_* functions.
+# Thin wrapper over src/secureboot_core.cyr's secureboot_* functions (the agnosys Secure
+# Boot layer, folded into sigil at 3.8.1).
 #
 # Sigil-facing surface:
 #   - `sigil_sb_state()`       — returns the SB state enum (agnosys value)

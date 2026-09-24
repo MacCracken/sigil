@@ -1,6 +1,6 @@
 # LOW findings recorded during the 3.13.0 work (not fixed)
 
-**Filed:** 2026-09-23 (3.13.0) · **Severity:** LOW · **Status:** open
+**Filed:** 2026-09-23 (3.13.0) · **Severity:** LOW · **Status:** resolved (3.13.1)
 
 Line numbers are approximate; re-locate by content.
 
@@ -39,3 +39,16 @@ Line numbers are approximate; re-locate by content.
 - L26 On Windows (PE) a CREATE_NEW with O_EXCL|O_NOFOLLOW resolves a final reparse point rather than refusing it (cyrius 6.6.6 notes), so luks_write_keyfile's symlink refusal is weaker there; LUKS itself is unreachable on Windows (no cryptsetup / fork+exec).
 - L27 src/sysinfo.cyr's `uname_release` duplicates lib/sys.cyr's (6.6.6 warns "duplicate fn ... last definition wins"); same semantics. Tracked by the existing "Retire the interim src/sysinfo.cyr" backlog item.
 - L28 The stdlib's full-write loop `_io_write_full` is module-private, so sigil carries its own `agnosys_write_all`; a public fd-level write-all in lib/io.cyr would let it go.
+
+## Resolution (3.13.1)
+
+- **Fixed:** L4, L5, L6, L7 (TEE parse / verify / alloc / accessors), L8, L9 (`alog_save`,
+  `sv_save_trust_store`, `keyring_save`), L10, L11 (group- / world-writable store refused),
+  L12, L13, L14, L15 (parser state moved to a per-call context), L16, L17, L18, L19, L20,
+  L21, L22, L24, L25, L27.
+- **Documented as intended:** L1 (the type-3 AK binding layout, as the code applies it),
+  L2 (report versions other than 2 fail closed until checked against AMD's ABI), L3 (compare
+  TCB components per byte, unsigned), L26 (Windows reparse-point semantics; LUKS has no
+  Windows path).
+- **Not a defect:** L28 — `agnosys_write_all` stays; the stdlib's `_io_write_full` is private.
+- **Still open:** L23 → `docs/development/issues/2026-09-23-ima-policy-loaded-needs-ima-host.md`.

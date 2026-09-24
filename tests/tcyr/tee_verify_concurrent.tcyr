@@ -34,9 +34,10 @@
 #
 # Scope: the *_verify_full_into groups re-cover the with_pck / verify
 # race end to end only. Genuine and forged inputs carry the SAME PCK /
-# VCEK chain, so these groups do NOT detect a chain-level race in
-# x509_verify_chain (its shared `_xvl_digest` in src/x509.cyr is an open
-# audit H2 residual; *_verify_full_into is not thread-safe until fixed).
+# VCEK chain, so they do not exercise a chain-level race; the separate
+# "x509 — concurrent chain-link verify" group does (3.13.1: the module-global
+# `_xvl_digest` in src/x509.cyr let a TBS-mutated leaf carrying the genuine CA
+# signature verify under concurrency).
 
 include "lib/assert.cyr"
 include "lib/alloc.cyr"
@@ -115,6 +116,7 @@ var _tv_pk     = 0;   # PCK / VCEK public key (with_pck kinds)
 var _tv_root   = 0;   # root CA DER (full kinds)
 var _tv_chain  = 0;   # SNP VCEK chain PEM (full kinds)
 var _tv_arenas = 0;   # TV_NA x 8 per-worker arenas (full kinds)
+var _tv_issuer = 0;   # issuer cert for the chain-link kind (7)
 # Per-worker result slots (each worker writes only its own slot).
 var _tv_gbad = 0;     # TV_NA x 8 genuine false-rejects
 var _tv_facc = 0;     # TV_NA x 8 forged accepts
@@ -124,6 +126,7 @@ fn _tv_verify(q, idx): i64 {
     if (k == 1) { return sgx_quote_verify_with_pck(q, _tv_pk); }
     if (k == 2) { return tdx_quote_verify_with_pck(q, _tv_pk); }
     if (k == 3) { return snp_report_verify(q, _tv_pk); }
+    if (k == 7) { return _x509_verify_link(q, _tv_issuer); }
     var arena = load64(_tv_arenas + idx * 8);
     arena_reset(arena);
     if (k == 4) {
@@ -194,6 +197,26 @@ fn _tv_run(kind, good, forged, iters): i64 {
     return 0;
 }
 
+# Copy of a cert's DER with the last byte of its serial number flipped: the TBS
+# changes, the signature does not. 0 if the TBS does not have the expected shape.
+fn _tv_flip_serial(der, der_len, cert): i64 {
+    var out = alloc(der_len);
+    memcpy(out, der, der_len);
+    var p = load64(cert + 16);                    # tbs_off
+    if (load8(out + p) != 0x30) { return 0; }
+    var l = load8(out + p + 1);
+    p = p + 2;
+    if ((l & 0x80) != 0) { p = p + (l & 0x7F); }  # long-form length octets
+    if (load8(out + p) == 0xA0) { p = p + 2 + load8(out + p + 1); }   # [0] version
+    if (load8(out + p) != 0x02) { return 0; }     # serialNumber INTEGER
+    var sl = load8(out + p + 1);
+    if ((sl & 0x80) != 0) { return 0; }
+    if (sl < 2) { return 0; }
+    var last = out + p + 2 + sl - 1;
+    store8(last, (load8(last) & 0xFF) ^ 0x5A);
+    return out;
+}
+
 # Leaf public key of a PEM chain (parsed on the main thread).
 fn _tv_leaf_pk(pem, pem_len): i64 {
     var chain[64];
@@ -262,6 +285,30 @@ fn main() {
     _tv_run(4, sgx_q, sgx_fq, 5);
     assert_eq(_tv_tot_gbad, 0, "8 workers x 5: zero genuine SGX verify_full false-rejects");
     assert_eq(_tv_tot_facc, 0, "8 workers x 5: zero forged SGX verify_full accepts");
+
+    test_group("x509 — concurrent chain-link verify (_x509_verify_link)");
+    var xl_chain[64];
+    memset(&xl_chain, 0, 64);
+    var xl_n = pem_decode_certs(sgx_quote_cert_data_ptr(sgx_q), sgx_quote_cert_data_len(sgx_q),
+      &xl_chain, 4);
+    assert(xl_n >= 2, "SGX PCK chain has a leaf and its issuer");
+    var xl_der = load64(&xl_chain + 0);
+    var xl_len = load64(&xl_chain + 8);
+    var xl_leaf = x509_cert_alloc();
+    var xl_iss = x509_cert_alloc();
+    assert_eq(x509_parse(xl_der, xl_len, xl_leaf), 1, "PCK leaf parses");
+    assert_eq(x509_parse(load64(&xl_chain + 16), load64(&xl_chain + 24), xl_iss), 1,
+      "PCK issuer parses");
+    var xl_fder = _tv_flip_serial(xl_der, xl_len, xl_leaf);
+    assert(xl_fder != 0, "forged leaf built (serial byte flipped)");
+    var xl_forged = x509_cert_alloc();
+    assert_eq(x509_parse(xl_fder, xl_len, xl_forged), 1, "forged leaf parses");
+    _tv_issuer = xl_iss;
+    assert_eq(_x509_verify_link(xl_leaf, xl_iss), 1, "genuine leaf link verifies (serial)");
+    assert_eq(_x509_verify_link(xl_forged, xl_iss), 0, "TBS-mutated leaf rejected (serial)");
+    _tv_run(7, xl_leaf, xl_forged, 300);
+    assert_eq(_tv_tot_gbad, 0, "8 workers x 300: zero genuine link false-rejects");
+    assert_eq(_tv_tot_facc, 0, "8 workers x 300: zero forged link accepts");
 
     # ============================================================
     # TDX v4 — att_key_type 2 (P-256) and 3 (P-384)
@@ -344,6 +391,24 @@ fn main() {
     _tv_run(6, snp_r, snp_fr, 3);
     assert_eq(_tv_tot_gbad, 0, "8 workers x 3: zero genuine SNP verify_full false-rejects");
     assert_eq(_tv_tot_facc, 0, "8 workers x 3: zero forged SNP verify_full accepts");
+
+    test_group("3.13.1 exact-length parse; an unparsed struct is refused");
+    var sgx_tail = alloc(SGX_QUOTE_LEN + 1);
+    memcpy(sgx_tail, sgx_buf, SGX_QUOTE_LEN);
+    store8(sgx_tail + SGX_QUOTE_LEN, 0);
+    assert_eq(sgx_quote_parse(sgx_tail, SGX_QUOTE_LEN + 1, sgx_quote_alloc()), 0,
+      "SGX: a byte after the signature section is refused");
+    var t2_tail = alloc(TDX_P256_QUOTE_LEN + 1);
+    memcpy(t2_tail, t2_buf, TDX_P256_QUOTE_LEN);
+    store8(t2_tail + TDX_P256_QUOTE_LEN, 0);
+    assert_eq(tdx_quote_parse(t2_tail, TDX_P256_QUOTE_LEN + 1, tdx_quote_alloc()), 0,
+      "TDX: a byte after the signature section is refused");
+    assert_eq(sgx_quote_verify_with_pck(sgx_quote_alloc(), pck_pk), 0, "SGX: unparsed struct refused");
+    assert_eq(tdx_quote_verify_with_pck(tdx_quote_alloc(), tdx_pck), 0, "TDX: unparsed struct refused");
+    var t2_body = tdx_quote_td_body_ptr(t2_q);
+    assert_eq(tdx_quote_tee_tcb_svn_ptr(t2_q) - t2_body, 0, "TEE_TCB_SVN at TD body +0");
+    assert_eq(tdx_quote_seam_attributes_ptr(t2_q) - t2_body, 112, "SEAMATTRIBUTES at TD body +112");
+    assert_eq(tdx_quote_mrownerconfig_ptr(t2_q) - t2_body, 280, "MROWNERCONFIG at TD body +280");
 
     return assert_summary();
 }

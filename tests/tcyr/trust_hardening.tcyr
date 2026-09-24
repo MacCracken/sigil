@@ -290,6 +290,60 @@ fn main(): i64 {
     assert(hash_file_with(fpath, HASH_ALG_SHA512) != 0, "hash_file_with sha512 regular ok");
     xunlink(fpath);
 
+    # ------------------------------------------------------------
+    # 3.13.1 — the issues filed 2026-09-23
+    # ------------------------------------------------------------
+    test_group("3.13.1 sign_data / keyring_sign_issuance refuse a mismatched key");
+    var bad_sk = alloc(64);
+    memcpy(bad_sk, g_sk_r, 64);
+    store8(bad_sk + 40, (load8(bad_sk + 40) & 0xFF) ^ 1);   # public half no longer the seed's
+    assert_eq(sign_data("msg", 3, bad_sk), 0, "sign_data returns 0 for a mismatched key");
+    assert(sign_data("msg", 3, g_sk_r) != 0, "sign_data signs with a consistent key");
+    var kv_m = mk_kv(g_kid_x, g_hex_x, KEY_ROLE_PUBLISHER, g_kid_r);
+    assert_eq(keyring_sign_issuance(bad_sk, kv_m), 0, "issuance refused for a mismatched parent key");
+    assert_eq(kv_issuer_sig(kv_m), 0, "nothing attached");
+    assert_eq(keyring_sign_issuance(g_sk_r, kv_m), 1, "issuance signs with the real key");
+    var first_sig = kv_issuer_sig(kv_m);
+    assert_eq(keyring_sign_issuance(g_sk_r, kv_m), 1, "re-sign ok");
+    assert_eq(kv_issuer_sig(kv_m), first_sig, "re-sign reuses the 64-byte buffer");
+
+    test_group("3.13.1 keyring_rotate_key keeps the key's restrictions");
+    var rkr = keyring_new(0);
+    var rkv = mk_kv(g_kid_x, g_hex_x, KEY_ROLE_INTERMEDIATE, g_kid_r);
+    kv_add_allowed_type(rkv, ARTIFACT_CONFIG);
+    kv_set_pub_contact(rkv, "sec@example.org");
+    keyring_add_key(rkr, rkv);
+    var rnew = keyring_rotate_key(rkr, g_kid_x, g_hex_p, clock_epoch_secs() + 60);
+    assert_eq(kv_role(rnew), KEY_ROLE_INTERMEDIATE, "role carried");
+    assert_streq(kv_issued_by(rnew), g_kid_r, "issued_by carried");
+    assert_streq(kv_pub_contact(rnew), "sec@example.org", "publisher contact carried");
+    assert_eq(kv_is_type_allowed(rnew, ARTIFACT_CONFIG), 1, "allowed type carried");
+    assert_eq(kv_is_type_allowed(rnew, ARTIFACT_PACKAGE), 0, "type limit kept");
+    assert(kv_allowed_types(rnew) != kv_allowed_types(rkv), "allowed-type list copied, not shared");
+    assert_eq(kv_issuer_sig(rnew), 0, "new version must be re-issued");
+
+    test_group("3.13.1 keyring_save writes each key file whole");
+    var kdir = "/tmp/sigil_th_keysave";
+    xmkdir(kdir, 448);
+    var skr = keyring_new(kdir);
+    keyring_add_key(skr, mk_kv(g_kid_x, g_hex_x, KEY_ROLE_PUBLISHER, 0));
+    assert_eq(keyring_save(skr), 1, "one version saved");
+    var kf = alloc(256);
+    memset(kf, 0, 256);
+    memcpy(kf, kdir, strlen(kdir));
+    store8(kf + strlen(kdir), 47);
+    memcpy(kf + strlen(kdir) + 1, g_kid_x, strlen(g_kid_x));
+    memcpy(kf + strlen(kf), ".json", 5);
+    var kn = 0;
+    var kbuf = file_read_whole(kf, &kn);
+    assert(kbuf != 0, "key file written");
+    if (kbuf != 0) {
+        assert_eq(load8(kbuf) & 0xFF, 91, "starts with [");
+        assert_eq(load8(kbuf + kn - 1) & 0xFF, 93, "ends with ]");
+    }
+    xunlink(kf);
+    xrmdir(kdir);
+
     return assert_summary();
 }
 

@@ -310,6 +310,26 @@ fn main() {
     assert_eq(agnosys_capture_n(gone_args, nbuf, 255, 5000), 0 - 1,
       "capture_n returns -1 for a missing binary");
 
+    test_group("certpin_compute_spki_pin: in-process, fails closed (3.13.1)");
+    var cp_pem = "-----BEGIN CERTIFICATE-----\nMIIBhjCCAS2gAwIBAgIUDc0DQrrF2adgbQalAiR8FtUqWYwwCgYIKoZIzj0EAwIw\nGTEXMBUGA1UEAwwOc2lnaWwtcGluLXRlc3QwHhcNMjYwOTI0MDI1MTQyWhcNMzYw\nOTIxMDI1MTQyWjAZMRcwFQYDVQQDDA5zaWdpbC1waW4tdGVzdDBZMBMGByqGSM49\nAgEGCCqGSM49AwEHA0IABNHGpbGrTRyR88qEDJh1+pDkaevoHgDwMuW/0nay0xWF\nJqoj2aPUaqzYhuUFBCmxTtMdXUiYybFW7V4o49RDKTOjUzBRMB0GA1UdDgQWBBSz\n1cArvUuWOjpnxsCldlpQVPoDBzAfBgNVHSMEGDAWgBSz1cArvUuWOjpnxsCldlpQ\nVPoDBzAPBgNVHRMBAf8EBTADAQH/MAoGCCqGSM49BAMCA0cAMEQCIHTo8UDsLCzY\n4mcZ7szmZAZBkCg7EWXwOlMkuK+TGIYpAiABSi+APB8oofEqS4nYk2eQig6jizTu\nSaZ09ZE32oXXkw==\n-----END CERTIFICATE-----\n";
+    var cp_path = "/tmp/sigil_certpin_pin_test.pem";
+    file_write_all(cp_path, cp_pem, strlen(cp_pem));
+    var cp_t, cp_v = certpin_compute_spki_pin(cp_path);
+    assert_eq(is_ok(cp_t), 1, "pin computed");
+    if (is_ok(cp_t) == 1) {
+        # Expected value: openssl x509 -pubkey | openssl pkey -pubin -outform DER |
+        # openssl dgst -sha256 -binary | openssl enc -base64 -A on the same certificate.
+        assert_streq(cp_v, "Demx3DoItksQYIZQ082snDUYi3AooETnsmmMdoPrvyY=", "pin matches openssl's");
+    }
+    var cm_t, cm_v = certpin_compute_spki_pin("/tmp/sigil_certpin_no_such_file.pem");
+    assert_eq(is_err_result(cm_t), 1, "a missing file is Err, not the SHA-256-of-empty pin");
+    var cd_t, cd_v = certpin_compute_spki_pin("/tmp");
+    assert_eq(is_err_result(cd_t), 1, "a directory is Err");
+    file_write_all(cp_path, "not a certificate\n", 18);
+    var cj_t, cj_v = certpin_compute_spki_pin(cp_path);
+    assert_eq(is_err_result(cj_t), 1, "non-PEM content is Err");
+    xunlink(cp_path);
+
     return assert_summary();
 }
 

@@ -27,10 +27,13 @@
 # In both cases the PCK chain itself is P-256 (Intel's PCK is
 # always P-256 across SGX and TDX); only the AK (which signs the
 # quote body) shifts curves. The AK→QE binding hash in
-# qe_report.report_data[0:32] uses SHA-256 for type=2 and the
-# lower 32 bytes of SHA-384 for type=3 (the upper 16 bytes are
-# unused — the 64-byte report_data slot is too small to carry the
-# full 48-byte SHA-384 digest, so the spec truncates).
+# qe_report.report_data[0:32] is SHA-256(AK || qe_auth_data) for
+# type=2 (Intel's DCAP layout, bytes 32..63 zero). For type=3 sigil
+# binds the FIRST 32 bytes of SHA-384 over the same input, again with
+# bytes 32..63 zero — the P-256 layout carried over. The 64-byte slot
+# could hold the full 48-byte digest; no real type-3 quote has been
+# available to check Intel's layout against (only a synthesized
+# fixture), so revisit this if one differs.
 #
 # Surface:
 #   fn tdx_quote_parse(buf, buf_len, out): i64
@@ -104,8 +107,8 @@ var TDX_BODY_OFF_REPORT_DATA     = 520;
 #   40  header_off (always 0)
 #   48  td_body_off (always 48)
 #   56  signature_data_len
-#   64  ecdsa_sig_off            — 64 B raw r||s
-#   72  ak_off                   — 64 B Qx||Qy
+#   64  ecdsa_sig_off            — raw r||s: 64 B (att_key_type 2) or 96 B (3)
+#   72  ak_off                   — Qx||Qy: 64 B (att_key_type 2) or 96 B (3)
 #   80  qe_report_off            — 384 B (SGX enclave report shape)
 #   88  qe_report_sig_off        — 64 B raw r||s
 #   96  qe_auth_data_off
@@ -120,6 +123,7 @@ var TDX_BODY_OFF_REPORT_DATA     = 520;
 # Bump-allocated via `alloc`; never `free()` it.
 fn tdx_quote_alloc(): i64 {
     var q = alloc(256);
+    if (q == 0) { return 0; }   # out of memory (3.13.1: memset used to write through 0)
     memset(q, 0, 256);
     return q;
 }
@@ -167,6 +171,13 @@ fn tdx_quote_mrtd_ptr(q): i64           { return tdx_quote_td_body_ptr(q) + TDX_
 fn tdx_quote_mrconfigid_ptr(q): i64     { return tdx_quote_td_body_ptr(q) + TDX_BODY_OFF_MRCONFIGID; }
 # Accessor: pointer to the 48-byte MROWNER (software-defined TD owner ID) at TD body +232.
 fn tdx_quote_mrowner_ptr(q): i64        { return tdx_quote_td_body_ptr(q) + TDX_BODY_OFF_MROWNER; }
+# Accessor: pointer to the 48-byte MROWNERCONFIG (software-defined owner config) at TD body +280.
+fn tdx_quote_mrownerconfig_ptr(q): i64  { return tdx_quote_td_body_ptr(q) + TDX_BODY_OFF_MROWNERCONFIG; }
+# Accessor: pointer to the 16-byte TEE_TCB_SVN (the TDX module's TCB SVN array — what a TCB
+# policy compares) at TD body +0.
+fn tdx_quote_tee_tcb_svn_ptr(q): i64    { return tdx_quote_td_body_ptr(q) + TDX_BODY_OFF_TEE_TCB_SVN; }
+# Accessor: pointer to the 8-byte SEAMATTRIBUTES field at TD body +112.
+fn tdx_quote_seam_attributes_ptr(q): i64 { return tdx_quote_td_body_ptr(q) + TDX_BODY_OFF_SEAM_ATTRIBUTES; }
 # Accessor: pointer to the 48-byte RTMR0 runtime measurement register at TD body +328.
 fn tdx_quote_rtmr0_ptr(q): i64          { return tdx_quote_td_body_ptr(q) + TDX_BODY_OFF_RTMR0; }
 # Accessor: pointer to the 48-byte RTMR1 runtime measurement register at TD body +376.
@@ -263,7 +274,9 @@ fn tdx_quote_parse(buf, buf_len, out): i64 {
     var sig_data_len = _tdx_load_u32(buf, sig_len_off);
     var sig_data_off = sig_len_off + 4;
     if (sig_data_len < 0) { return 0; }
-    if (sig_data_off + sig_data_len > buf_len) { return 0; }
+    # The signature section must end exactly at the end of the quote (3.13.1: trailing bytes
+    # after it were accepted).
+    if (sig_data_off + sig_data_len != buf_len) { return 0; }
     # Fixed-part minimum depends on att_key_type. The QE report's
     # own signature (qe_report_sig) is always 64 B (Intel PCK is
     # P-256 across all variants); only ecdsa_sig + ak widen.
@@ -337,6 +350,9 @@ var TDX_QE_REPORT_OFF_REPORT_DATA = 320;
 # SHA-256 / SHA-512 and ECDSA P-256 / P-384 tables are warmed on the main thread before
 # fan-out (e.g. one serial verify; ADR 0007).
 fn tdx_quote_verify_with_pck(quote, pck_pk): i64 {
+    # A struct that tdx_quote_parse never filled has no buffer: every accessor below would
+    # dereference an address near 0 (3.13.1).
+    if (tdx_quote_buf(quote) == 0) { return 0; }
     var att_key_type = tdx_quote_att_key_type(quote);
 
     # Step 1 — PCK signs the QE report (384 B SGX enclave report shape).
@@ -451,11 +467,11 @@ fn tdx_quote_verify_full(quote, root_ca_der, root_ca_der_len, now_unix): i64 {
     return tdx_quote_verify_full_into(quote, root_ca_der, root_ca_der_len, now_unix, 0);
 }
 
-# tdx_quote_verify_full_into — drift-free variant: all per-call scratch
-# is drawn from the caller's `arena` (stdlib handle; `arena == 0` ⇒
-# global bump). Returns 1 on full success, 0 otherwise. 3.7.3. NOT thread-safe: the PCK
-# chain check (x509_verify_chain) hashes each TBS into the shared module-global
-# `_xvl_digest` in src/x509.cyr (audit H2 residual).
+# tdx_quote_verify_full_into — drift-free variant: all per-call scratch is drawn from the caller's
+# `arena` (stdlib handle; `arena == 0` ⇒ global bump). Returns 1 on full success, 0 otherwise.
+# 3.7.3. Safe to call from several threads, each with its own arena, once one call has run on the
+# main thread (the lazy PEM / SHA / ECDSA tables); the chain check's digest is per-call since
+# 3.13.1.
 fn tdx_quote_verify_full_into(quote, root_ca_der, root_ca_der_len, now_unix, arena): i64 {
     # Step 1 — cert_data_type must be PEM PCK chain.
     if (tdx_quote_cert_data_type(quote) != TDX_CERT_TYPE_PCK_PEM) { return 0; }

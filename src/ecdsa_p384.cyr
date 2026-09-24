@@ -22,9 +22,8 @@
 #   • SEC 1 v2.0 §4.1.4 — verifying operation
 #   • FIPS 186-4 D.1.2.4 / SP 800-186 — P-384 curve params
 #
-# All u384 helpers are private to this module. If 3.2.5 (TDX) or a
-# future consumer needs P-384 arithmetic outside ECDSA, lift them
-# into `lib/bigint.cyr` as `u384_*` analogues at that point.
+# The u384_* helpers are used by ecdsa_sign.cyr and the tests as well
+# as by this module; they are not a stable public API.
 
 # ================================================================
 # Curve constants — initialised on first call via `_p384_init`.
@@ -1107,7 +1106,10 @@ fn pt384_scalarmul(out, k, P): i64 {
 # branch-free majority form MSB((a & b) | ((a | b) & ~s)).
 fn _p384_khat(kh, k): i64 {
     _p384_init();
-    var t2[56];                     # k + 2n candidate — stack local, wiped before return
+    # k + 2n candidate — a stack local (per-call, per-thread), deliberately not cbank-banked:
+    # array locals are per-thread under the pinned toolchain (CLAUDE.md quirk #1); a
+    # CYRIUS_STACK_ARRAYS=0 build is unsupported. Wiped before return.
+    var t2[56];
     var ones = 0 - 1;
     var c = 0;
     var i = 0;
@@ -1144,16 +1146,63 @@ fn _p384_khat(kh, k): i64 {
     return 0;
 }
 
+# bp (144-byte Jacobian) = P with its coordinates rescaled by a secret per-call λ — (X·λ², Y·λ³,
+# Z·λ), the same point. λ = SHA-384("sigil-p384-ladder-blind" || kh) reduced mod p and never 0:
+# secret (derived from the secret k_hat) and different for every nonce, so no ladder iteration
+# runs on a fixed Z = 1 operand (the one-bit LadderLeak-class residual, fixed 3.13.1). Every
+# intermediate is wiped.
+fn _p384_blind_point(bp, P, kh): i64 {
+    _p384_init();
+    var hin[80];
+    var tag = "sigil-p384-ladder-blind";
+    var tl = strlen(tag);
+    memcpy(&hin, tag, tl);
+    memcpy(&hin + tl, kh, 56);
+    var dig[48];
+    sha384(&hin, tl + 56, &dig);
+    var one[48];
+    memset(&one, 0, 48);
+    store64(&one, 1);
+    var lam[48];
+    fp_p384_mul(&lam, &dig, &one);                 # reduce mod p
+    # λ == 0 (probability ~2^-384) would zero Z; map it to 1 without a branch.
+    var o = load64(&lam) | load64(&lam + 8) | load64(&lam + 16) | load64(&lam + 24)
+    | load64(&lam + 32) | load64(&lam + 40);
+    var isz = 1 ^ (((o | (0 - o)) >> 63) & 1);
+    store64(&lam, load64(&lam) | isz);
+    var l2[48];
+    var l3[48];
+    fp_p384_sq(&l2, &lam);
+    fp_p384_mul(&l3, &l2, &lam);
+    fp_p384_mul(_pt384_x(bp), _pt384_x(P), &l2);
+    fp_p384_mul(_pt384_y(bp), _pt384_y(P), &l3);
+    fp_p384_mul(_pt384_z(bp), _pt384_z(P), &lam);
+    memset(&hin, 0, 80);
+    memset(&dig, 0, 48);
+    memset(&lam, 0, 48);
+    memset(&l2, 0, 48);
+    memset(&l3, 0, 48);
+    return 0;
+}
+
 # out = k * P for a SECRET 384-bit scalar k (six LE limbs; P a point of order n, out 144-byte
 # Jacobian) — the ECDSA sign k·G entry. Ladders over the fixed-length k_hat from _p384_khat
 # (385 iterations for every k), so the point-op sequence no longer depends on bitlen(k): the
-# Minerva / CVE-2019-15809 fix. Result equals pt384_scalarmul(out, k, P) since n·P = O. The
-# field arithmetic underneath still has data-dependent reduction branches; k_hat is wiped.
+# Minerva / CVE-2019-15809 fix. P enters with secret-randomised projective coordinates
+# (_p384_blind_point, 3.13.1). Result equals pt384_scalarmul(out, k, P) as a point (affine
+# coordinates identical) since n·P = O. The field arithmetic underneath still has
+# data-dependent reduction branches; k_hat and the blinded copy are wiped.
 fn pt384_scalarmul_secret(out, k, P): i64 {
-    var kh[56];                     # stack local (per-call, per-thread), wiped before return
+    # A stack local (per-call, per-thread), deliberately not cbank-banked: array locals are
+    # per-thread under the pinned toolchain (CLAUDE.md quirk #1); a CYRIUS_STACK_ARRAYS=0
+    # build is unsupported. Wiped before return.
+    var kh[56];
+    var bp[144];                    # P, blinded — same stack-local rule, wiped before return
     _p384_khat(&kh, k);
-    _pt384_ladder(out, &kh, 384, P);
+    _p384_blind_point(&bp, P, &kh);
+    _pt384_ladder(out, &kh, 384, &bp);
     memset(&kh, 0, 56);
+    memset(&bp, 0, 144);
     return 0;
 }
 

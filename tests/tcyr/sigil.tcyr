@@ -34,6 +34,10 @@ include "src/integrity.cyr"
 include "src/policy.cyr"
 include "src/audit.cyr"
 
+
+var _iv_cb_n = 0;
+fn _iv_cb_count(m): i64 { _iv_cb_n = _iv_cb_n + 1; return 0; }
+
 fn main() {
     alloc_init();
     ed25519_init();
@@ -207,6 +211,21 @@ fn main() {
     assert_eq(vec_len(ireport_errors(rep3)), 1, "1 missing file");
     var missing_m = vec_get(ireport_errors(rep3), 0);
     assert_eq(meas_status(missing_m), MSTATUS_FILE_NOT_FOUND, "status = FILE_NOT_FOUND");
+
+    test_group("3.13.1 verify_all writes statuses back and calls the callback");
+    var ipol4 = integrity_policy_new();
+    ipolicy_add(ipol4, tmppath, "0000000000000000000000000000000000000000000000000000000000000000");
+    ipolicy_add(ipol4, "/tmp/nonexistent_sigil_test_xyz", "dead");
+    var iv4 = integrity_verifier_new(ipol4);
+    iv_set_callback(iv4, &_iv_cb_count);
+    _iv_cb_n = 0;
+    iv_verify_all(iv4);
+    assert_eq(_iv_cb_n, 2, "callback called once per violation");
+    var pm4 = load64(ipol4);
+    assert_eq(meas_status(vec_get(pm4, 0)), MSTATUS_MISMATCH, "policy entry reads Mismatch");
+    assert_eq(meas_status(vec_get(pm4, 1)), MSTATUS_FILE_NOT_FOUND, "policy entry reads FileNotFound");
+    assert_eq(ipolicy_remove(ipol4, tmppath), 1, "removed");
+    assert_eq(vec_len(pm4), 1, "one measurement left");
 
     # ============================================================
     # Policy: revocation list

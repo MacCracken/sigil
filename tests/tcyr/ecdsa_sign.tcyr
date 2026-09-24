@@ -46,6 +46,38 @@ include "src/ecdsa_p256.cyr"
 include "src/ecdsa_p384.cyr"
 include "src/ecdsa_sign.cyr"
 
+# Appends the DER INTEGER for the 32-byte big-endian value `v` to out+pos and returns the new
+# pos. mode 0 = canonical; 1 = one redundant leading 0x00 (only when v's top bit is clear);
+# 2 = the high-bit value WITHOUT its sign byte (a negative encoding).
+fn _dsig_int(out, pos, v, mode): i64 {
+    var z = 0;
+    while (z < 31) {
+        if ((load8(v + z) & 0xFF) != 0) { break; }
+        z = z + 1;
+    }
+    var n = 32 - z;
+    var hi = (load8(v + z) & 0x80) != 0;
+    var lead = 0;
+    if (hi == 1) { lead = 1; }
+    if (mode == 1) { lead = 1; }
+    if (mode == 2) { lead = 0; }
+    store8(out + pos, 0x02);
+    store8(out + pos + 1, n + lead);
+    var q = pos + 2;
+    if (lead == 1) { store8(out + q, 0); q = q + 1; }
+    memcpy(out + q, v + z, n);
+    return q + n;
+}
+
+# DER SEQUENCE { r, s } from raw r || s (64 bytes) with r encoded per `rmode`; returns the length.
+fn _dsig(out, rs, rmode): i64 {
+    var p = _dsig_int(out, 2, rs, rmode);
+    p = _dsig_int(out, p, rs + 32, 0);
+    store8(out, 0x30);
+    store8(out + 1, p - 2);
+    return p;
+}
+
 fn main() {
     alloc_init();
 
@@ -119,6 +151,38 @@ fn main() {
     assert_gt(dl384, 0, "p384 sign_der length > 0");
     assert_eq(load8(&der384) & 0xFF, 0x30, "p384 DER SEQUENCE tag");
     assert_eq(load8(&der384 + 1) & 0xFF, dl384 - 2, "p384 DER length byte consistent");
+
+    test_group("3.13.1 ecdsa_p256_verify_der accepts canonical DER only");
+    var dm = alloc(16);
+    var draw = alloc(64);
+    var dder = alloc(96);
+    var seen_redundant = 0;
+    var seen_negative = 0;
+    var mi = 0;
+    while (mi < 12) {
+        memset(dm, 0, 16);
+        store64(dm, 0x5349474c00000000 + mi);
+        assert_eq(ecdsa_p256_sign(x256, dm, 16, draw), 0, "signed");
+        var dl = _dsig(dder, draw, 0);
+        assert_eq(ecdsa_p256_verify_der(pub256, dm, 16, dder, dl), 1, "canonical DER verifies");
+        assert_eq(ecdsa_p256_verify_der(pub256, dm, 16, dder, dl + 1), 0, "a trailing byte is rejected");
+        if ((load8(draw) & 0x80) == 0) {
+            var rl = _dsig(dder, draw, 1);
+            assert_eq(ecdsa_p256_verify_der(pub256, dm, 16, dder, rl), 0, "a redundant leading zero is rejected");
+            seen_redundant = 1;
+        } else {
+            var nl = _dsig(dder, draw, 2);
+            assert_eq(ecdsa_p256_verify_der(pub256, dm, 16, dder, nl), 0, "a negative INTEGER is rejected");
+            seen_negative = 1;
+        }
+        # r's INTEGER claims the whole buffer: bounded by the SEQUENCE, not the buffer.
+        dl = _dsig(dder, draw, 0);
+        store8(dder + 1, load8(dder + 1) - 1);
+        assert_eq(ecdsa_p256_verify_der(pub256, dm, 16, dder, dl), 0, "an INTEGER past the SEQUENCE is rejected");
+        mi = mi + 1;
+    }
+    assert_eq(seen_redundant, 1, "the redundant-zero case was exercised");
+    assert_eq(seen_negative, 1, "the negative-encoding case was exercised");
 
     return assert_summary();
 }

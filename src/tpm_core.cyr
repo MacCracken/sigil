@@ -378,6 +378,30 @@ fn tpm_extend_pcr(bank, index, hash): i64 {
 # Returns Ok(sealed_secret_ptr) or Err.
 # ================================================================
 
+# Internal: overwrite the first `len` bytes of the staged plaintext at `path` with zeros,
+# flush, then unlink it. Best effort: an unlinked file's blocks keep their contents until
+# reused, so on a disk-backed output_dir the sealed secret used to survive the unlink
+# (3.13.1). On a copy-on-write filesystem (btrfs, ZFS) the old blocks can survive even an
+# in-place overwrite — use a tmpfs output_dir. O_NOFOLLOW: never writes through a symlink.
+fn _tpm_shred_unlink(path, len): i64 {
+    var fd = file_open(path, O_WRONLY | O_NOFOLLOW, 0);
+    if (fd >= 0) {
+        var z[4096];
+        memset(&z, 0, 4096);
+        var off = 0;
+        while (off < len) {
+            var n = len - off;
+            if (n > 4096) { n = 4096; }
+            if (agnosys_write_all(fd, &z, n) < 0) { break; }
+            off = off + n;
+        }
+        xfsync(fd);
+        file_close(fd);
+    }
+    xunlink(path);
+    return 0;
+}
+
 # Seal data to the current PCR state; writes the sealed object. Returns Result.
 fn tpm_seal(bank, pcr_indices, data_ptr, data_len, output_dir): i64 {
     if (data_len == 0) {
@@ -420,11 +444,11 @@ fn tpm_seal(bank, pcr_indices, data_ptr, data_len, output_dir): i64 {
     var wret = agnosys_write_all(ifd, data_ptr, data_len);
     var cret = file_close(ifd);
     if (wret < 0) {
-        xunlink(input_file);
+        _tpm_shred_unlink(input_file, data_len);
         return sigil_err_syscall_failed(0 - wret, "write failed");
     }
     if (cret < 0) {
-        xunlink(input_file);
+        _tpm_shred_unlink(input_file, data_len);
         return sigil_err_syscall_failed(0 - cret, "close of seal input failed");
     }
 
@@ -460,7 +484,7 @@ fn tpm_seal(bank, pcr_indices, data_ptr, data_len, output_dir): i64 {
 
     var cr_res_tag, cr_res = tpm_run_checked(cr_args);
     if (is_err_result(cr_res_tag) == 1) {
-        xunlink(input_file);
+        _tpm_shred_unlink(input_file, data_len);
         return Err(cr_res);
     }
 
@@ -477,7 +501,7 @@ fn tpm_seal(bank, pcr_indices, data_ptr, data_len, output_dir): i64 {
     vec_push(ld_args, ctx_file);
 
     var ld_res_tag, ld_res = tpm_run_checked(ld_args);
-    xunlink(input_file);
+    _tpm_shred_unlink(input_file, data_len);
 
     if (is_err_result(ld_res_tag) == 1) { return Err(ld_res); }
 

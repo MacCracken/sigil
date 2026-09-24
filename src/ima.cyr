@@ -1,5 +1,6 @@
 # ima.cyr — Linux IMA (Integrity Measurement Architecture) integration.
-# Thin wrapper over agnosys ima_* functions.
+# Thin wrapper over src/ima_core.cyr's ima_* functions (the agnosys IMA layer, folded into
+# sigil at 3.8.1).
 #
 # Sigil-facing surface:
 #   - `sigil_ima_available()`          — IMA active on this host?

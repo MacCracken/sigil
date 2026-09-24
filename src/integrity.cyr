@@ -71,9 +71,11 @@ fn integrity_policy_new(): i64 {
     return p;
 }
 
-# Returns the check interval (seconds) of policy `p`.
+# Returns the check interval (seconds) of policy `p`. Policy data for the caller: sigil does
+# not schedule re-checks — a caller that re-verifies periodically reads this.
 fn ipolicy_check_interval(p): i64 { return load64(p + 8); }
-# Returns the enforce flag (0 or 1) of policy `p`.
+# Returns the enforce flag (0 or 1) of policy `p`. Policy data for the caller: the iv_* checks
+# report the same statuses either way; a caller that blocks on a violation reads this.
 fn ipolicy_enforce(p): i64 { return load64(p + 16); }
 
 # Sets the enforce flag of policy `p` to `v`; returns `p`.
@@ -89,8 +91,9 @@ fn ipolicy_add(p, path, expected_hash): i64 {
     return p;
 }
 
-# Removes the first measurement whose path equals `path` from policy `p`. Returns 1 if one was
-# removed, 0 if none matched.
+# Removes the first measurement whose path equals `path` from policy `p` and frees it (its
+# path / hash strings stay the caller's; 3.13.1 — the 24-byte measurement used to leak).
+# Returns 1 if one was removed, 0 if none matched.
 fn ipolicy_remove(p, path): i64 {
     var measurements = load64(p);
     var mlen = vec_len(measurements);
@@ -99,6 +102,7 @@ fn ipolicy_remove(p, path): i64 {
         var m = vec_get(measurements, i);
         if (streq(load64(m), path) == 1) {
             vec_remove(measurements, i);
+            fl_free(m);
             return 1;
         }
         i = i + 1;
@@ -173,8 +177,10 @@ fn iv_policy(v): i64 { return load64(v); }
 # iv_set_policy and the iv_*_baseline calls reset it to 0.
 fn iv_last_report(v): i64 { return load64(v + 8); }
 
-# Stores fn pointer `cb` as the callback of verifier `v`; returns `v`. Stored only: no sigil
-# code path reads or invokes it.
+# Stores fn pointer `cb` (e.g. `&on_violation`) as the callback of verifier `v`; returns `v`.
+# iv_verify_all calls `cb(measurement)` once per violation, with the report's copy of each
+# MSTATUS_MISMATCH / MSTATUS_FILE_NOT_FOUND measurement; its return value is ignored. 3.13.1:
+# the callback was stored and never invoked.
 fn iv_set_callback(v, cb): i64 { store64(v + 16, cb); return v; }
 # Clears the callback of verifier `v` to 0; returns `v`.
 fn iv_clear_callback(v): i64 { store64(v + 16, 0); return v; }
@@ -208,7 +214,17 @@ fn iv_verify_file(v, path): i64 {
     return MSTATUS_ERROR;
 }
 
-# Verify all files in policy
+# Internal: calls verifier `v`'s callback, if any, with measurement `m`.
+fn _iv_notify(v, m): i64 {
+    var cb = load64(v + 16);
+    if (cb != 0) { callptr(cb, m); }
+    return 0;
+}
+
+# Verifies every measurement of the verifier's policy and returns a fresh IntegrityReport (also
+# kept as its last report). Each policy measurement's status is updated — Verified, Mismatch
+# or FileNotFound (3.13.1: only Verified was written back, so a file tampered after a clean
+# run still read Verified in meas_status) — and the callback is called once per violation.
 fn iv_verify_all(v): i64 {
     var policy = load64(v);
     var measurements = load64(policy);
@@ -225,18 +241,22 @@ fn iv_verify_all(v): i64 {
 
         if (h == 0) {
             # File not found or error.
+            store64(m + 16, MSTATUS_FILE_NOT_FOUND);
             var rm = measurement_new(path, load64(m + 8));
             store64(rm + 16, MSTATUS_FILE_NOT_FOUND);
             vec_push(load64(report + 24), rm);
+            _iv_notify(v, rm);
         } else {
             var expected = load64(m + 8);
             if (ct_eq_bytes_lens(h, strlen(h), expected, strlen(expected)) == 1) {
                 verified = verified + 1;
                 store64(m + 16, MSTATUS_VERIFIED);
             } else {
+                store64(m + 16, MSTATUS_MISMATCH);
                 var rm = measurement_new(path, expected);
                 store64(rm + 16, MSTATUS_MISMATCH);
                 vec_push(load64(report + 16), rm);
+                _iv_notify(v, rm);
             }
         }
         i = i + 1;

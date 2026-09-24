@@ -239,7 +239,7 @@ fn _oid_eq(buf, off, len, ref, ref_len): i64 {
 }
 
 # ================================================================
-# X509Cert struct — 256 bytes (parsed cert metadata + extracted key)
+# X509Cert struct — 272 bytes (parsed cert metadata + extracted key)
 #
 # Offsets (in bytes, all little-endian i64 unless noted):
 #    0  der_ptr           — pointer to the original DER buffer
@@ -262,11 +262,15 @@ fn _oid_eq(buf, off, len, ref, ref_len): i64 {
 #                            on-curve-validated at parse time
 #                            (pt_is_on_curve for P-256,
 #                            pt_p384_is_on_curve for P-384).
-#  192  sig_algo          — X509_SIG_ECDSA_SHA256 only (== 1)
-#  200  sig_off           — offset of signature value (P-256 raw
-#                            r || s, after BIT STRING + DER int
-#                            unwrapping)
-#  208  sig_len           — must equal 64
+#  192  sig_algo          — X509_SIG_* (ECDSA SHA-256 / SHA-384,
+#                            RSA SHA-256 / SHA-384, Ed25519)
+#  200  sig_off           — absolute POINTER to the signature bytes
+#                            (ECDSA: raw r || s in a side block, after
+#                            BIT STRING + DER INTEGER unwrapping; RSA /
+#                            Ed25519: the BIT STRING value)
+#  208  sig_len           — signature length (ECDSA 2 x field width:
+#                            64 or 96; RSA the modulus length;
+#                            Ed25519 64)
 #  216  is_ca             — 1 if basicConstraints CA bit set
 #  224  path_len          — -1 if absent, else value
 #  232  curve             — X509_CURVE_P256 / _P384 / _RSA (key-type tag)
@@ -275,6 +279,8 @@ fn _oid_eq(buf, off, len, ref, ref_len): i64 {
 #                            (EC). Block: n[512] || e[16] || n_len@528 ||
 #                            e_len@536. RSA keys don't fit the 96-byte
 #                            affine slot, so they live in a side alloc.
+#  256  key_usage         — keyUsage (x509_cert_key_usage; CVE-17)
+#  264  eku               — extendedKeyUsage (x509_cert_eku; CVE-17)
 # ================================================================
 
 # ================================================================
@@ -298,7 +304,7 @@ fn _x509_scratch(arena, n): i64 {
     return arena_alloc(arena, n);
 }
 
-# x509_cert_alloc_into — allocate a zeroed 256-byte X509Cert from the
+# x509_cert_alloc_into — allocate a zeroed 272-byte X509Cert from the
 # caller's arena (or the global bump heap when arena == 0). Returns the
 # cert pointer, or 0 if the arena is exhausted.
 fn x509_cert_alloc_into(arena): i64 {
@@ -629,11 +635,12 @@ fn _xp_parse_sig_algid(buf, buf_len, pos, out_algo): i64 {
     return next_pos;
 }
 
-# Parse SubjectPublicKeyInfo at `pos`. Must be id-ecPublicKey with
-# either prime256v1 (P-256, 64-byte pubkey) or secp384r1 (P-384,
-# 96-byte pubkey) parameters. Extracts the raw uncompressed point
-# into cert.pubkey, on-curve-validates via the appropriate curve
-# primitive, and sets cert.curve + cert.pubkey_len accordingly.
+# Parse SubjectPublicKeyInfo at `pos`: id-ecPublicKey with prime256v1
+# (P-256, 64-byte pubkey) or secp384r1 (P-384, 96-byte pubkey) — the
+# raw uncompressed point goes into cert.pubkey, on-curve-validated by
+# the curve's primitive — or rsaEncryption (the (n, e) side block,
+# X509_CURVE_RSA) or id-Ed25519 (the 32-byte key, X509_CURVE_ED25519).
+# Sets cert.curve + cert.pubkey_len accordingly.
 # Returns next position on success, -1 on failure.
 fn _xp_parse_spki(buf, buf_len, pos, cert, arena): i64 {
     _x509_oids_init();
@@ -1152,17 +1159,11 @@ fn _x509_dn_eq(buf_a, off_a, len_a, buf_b, off_b, len_b): i64 {
 #     the issuer's RSA (n, e) (issuer must be X509_CURVE_RSA). Real AMD
 #     ARK/ASK links are RSA-4096 + SHA-384.
 # The ECDSA path hashes the TBS here and feeds the digest; the RSA path
-# hashes the raw TBS bytes internally.
-# Scratch digest for chain-link verify — the hash named by the child's
-# signature-algorithm OID (up to SHA-384 = 48 bytes). Init-once, on the
-# single-threaded verify path (not the parallel batch), so a plain
-# init-once alloc matches the endorsed `alloc()`-for-init-once pattern.
-var _xvl_digest = 0;
-fn _xvl_init(): i64 {
-    if (_xvl_digest == 0) { _xvl_digest = alloc(48); }
-    return 0;
-}
-
+# hashes the raw TBS bytes internally. The digest buffer is a per-call stack
+# local: through 3.13.0 it was one module-global shared by every caller, so two
+# concurrent chain verifies could check a signature against each other's
+# digest and accept a forged link (issue 2026-09-23-x509-verify-chain-shared-
+# digest-races, fixed 3.13.1).
 fn _x509_verify_link(child, issuer_cert): i64 {
     var algo = x509_cert_sig_algo(child);
     var der_ptr = load64(child + 0);
@@ -1189,15 +1190,15 @@ fn _x509_verify_link(child, issuer_cert): i64 {
         if (sig_len != want_len) { return 0; }
 
         # Digest the TBS with the hash named by the signature algorithm.
-        _xvl_init();
+        var digest[48];
         var dlen = 0;
-        if (algo == X509_SIG_ECDSA_SHA256) { sha256(der_ptr + tbs_off, tbs_len, _xvl_digest); dlen = 32; }
-        if (algo == X509_SIG_ECDSA_SHA384) { sha384(der_ptr + tbs_off, tbs_len, _xvl_digest); dlen = 48; }
+        if (algo == X509_SIG_ECDSA_SHA256) { sha256(der_ptr + tbs_off, tbs_len, &digest); dlen = 32; }
+        if (algo == X509_SIG_ECDSA_SHA384) { sha384(der_ptr + tbs_off, tbs_len, &digest); dlen = 48; }
 
         # Dispatch the verify primitive by issuer curve, feeding the digest.
         var pk = x509_cert_pubkey(issuer_cert);
-        if (icurve == X509_CURVE_P256) { return _ecdsa_p256_verify_digest(pk, _xvl_digest, dlen, sig_addr); }
-        return _ecdsa_p384_verify_digest(pk, _xvl_digest, dlen, sig_addr);
+        if (icurve == X509_CURVE_P256) { return _ecdsa_p256_verify_digest(pk, &digest, dlen, sig_addr); }
+        return _ecdsa_p384_verify_digest(pk, &digest, dlen, sig_addr);
     }
 
     if (algo == X509_SIG_RSA_SHA256) {

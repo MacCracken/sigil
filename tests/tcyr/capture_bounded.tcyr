@@ -170,6 +170,25 @@ fn main() {
     assert_eq(is_err_result(pm_tag), 0, "and it parses");
     assert_eq(vec_len(pm_v), 1, "into one measurement");
 
+    # ima_get_status's count and agnosys_read_fd_to_str: a read error is not EOF (3.13.1).
+    test_group("read errors are not EOF (ima_get_status, agnosys_read_fd_to_str)");
+    var cdf = file_open("/tmp", O_RDONLY, 0);
+    assert_eq(_ima_count_lines_fd(cdf), 0 - 1, "line count over -EISDIR is -1, not 0");
+    assert_eq(agnosys_read_fd_to_str(cdf, 64), 0, "agnosys_read_fd_to_str over -EISDIR is 0");
+    file_close(cdf);
+    var three = "a\nb\nc\n";
+    xunlink(lp);
+    file_write_all(lp, three, 6);
+    var cfd = file_open(lp, O_RDONLY, 0);
+    assert_eq(_ima_count_lines_fd(cfd), 3, "a readable log counts its lines");
+    file_close(cfd);
+    var sfd = file_open(lp, O_RDONLY, 0);
+    var rs = agnosys_read_fd_to_str(sfd, 64);
+    file_close(sfd);
+    assert(rs != 0, "a readable fd reads");
+    if (rs != 0) { assert_eq(str_len(rs), 6, "all 6 bytes"); }
+    xunlink(lp);
+
     # On a host without IMA the public reader fails closed (open error).
     if (sys_access("/sys/kernel/security/ima/ascii_runtime_measurements", 0) < 0) {
         var ra_tag, ra_v = ima_read_measurements();

@@ -1,6 +1,6 @@
 # Minor residuals left open by the 3.13.0 fixes
 
-**Filed:** 2026-09-23 (3.13.0) · **Severity:** LOW · **Status:** open
+**Filed:** 2026-09-23 (3.13.0) · **Severity:** LOW · **Status:** resolved (3.13.1)
 
 - **`sign_data` ignores `ed25519_sign`'s -1** (`src/trust.cyr` ~834). On a seed / public-half mismatch
   it returns an all-zero 64-byte "signature" with no error, and `sv_sign_artifact`
@@ -27,3 +27,17 @@
   so the dead stack can hold AES state.
 - **`keyring_sign_issuance`** keeps each signature in bump `alloc()`; re-signing a child leaks the old
   64-byte buffer (no secret in it).
+
+## Resolution (3.13.1)
+
+All fixed:
+- `sign_data` returns 0 when `ed25519_sign` refuses, and `sv_sign_artifact` registers nothing.
+- `crl_from_jsonl` counts rejected entry lines: new `crl_load_bad_count()`.
+- `ed25519_verify` refuses small-order public keys ([8]A = identity), as libsodium does.
+- AuditLog: a torn line merged into the next append is rejected (exactly one `{` / `}` outside
+  strings); `_alog_write_int` uses a per-call buffer and writes negative values (i64 min
+  included) and they parse back; `alog_load` reads into a freed buffer.
+- The JSONL / JSON loaders read through `_rj_read_file`: capped at `RJ_MAX_FILE_BYTES`
+  (64 MiB, an error — never a truncation), into a buffer freed after parsing.
+- `_aes_shift_rows` wipes its `tmp` lane.
+- `keyring_sign_issuance` reuses the child's 64-byte buffer on re-sign.

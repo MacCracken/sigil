@@ -5,6 +5,119 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.13.1] - 2026-09-23
+
+Cleanup of the eight issues filed at 3.13.0 (`docs/development/issues/archive/2026-09-23-*`).
+One item stays open, since it needs a host with IMA enabled:
+`docs/development/issues/2026-09-23-ima-policy-loaded-needs-ima-host.md`.
+
+### Security
+
+- **A forged X.509 link could verify under concurrency.** `_x509_verify_link` hashed every
+  TBS into one module-global buffer, so two concurrent chain verifies could check a signature
+  against each other's digest. The probe accepted 5 forged links and rejected 2 genuine ones
+  in 8 × 300. The digest is a per-call stack local now, so `*_verify_full_into` is safe from
+  several threads, each with its own arena, after one warm-up call.
+- **A stored `TRUST_REVOKED` entry was lifted to Verified by a valid signature.** It now
+  fails ("Revoked in trust store"). `sv_trust_level_for`, `sv_stats` and
+  `sv_compliance_report` also reflect the revocation list now; before, they read only stored
+  levels.
+- **`certpin_compute_spki_pin` returned the SHA-256-of-empty pin as `Ok` for a missing or
+  bad cert.** It is computed in-process now (PEM → DER → SubjectPublicKeyInfo → SHA-256 →
+  base64), with no shell pipeline, and a bad input is `Err`.
+- **ECDSA signing:** a one-bit ladder timing residual (G entered with Z = 1). P's
+  coordinates are now rescaled by a secret per-signature λ before the ladder. Signatures are
+  byte-identical. The sign path also wipes the field-inverse and reduction scratch (L16).
+- **Ed25519:** `ed25519_verify` refuses small-order public keys, as libsodium does; under
+  one, `R = B, S = 1` verified any message. `sc_muladd` now carries into limbs 5–7 (L18).
+  The one-shot `sha512()` and `sha512_transform` wipe their context and message schedule
+  (L19).
+- **Read errors taken as EOF:** `agnosys_read_fd_to_str` returns 0 and `ima_get_status`
+  returns `Err`.
+- **Strict parsing:**
+  - `ecdsa_p256_verify_der` and the Authenticode digest variant accept only canonical DER:
+    exact length, minimal non-negative INTEGERs (L17).
+  - `sgx_quote_parse` / `tdx_quote_parse` refuse bytes after the signature section (L5), and
+    verify refuses a struct that was never parsed (L4).
+  - `_rj_parse_string` no longer reads past `end` (L13).
+- **Trust store and keyring:**
+  - `sv_load_trust_store` refuses a group- or world-writable store file (L11).
+  - `sv_save_trust_store` and `keyring_save` write atomically and report a failed write;
+    `alog_save` reports one too (L9).
+  - `sign_data` returns 0 when `ed25519_sign` refuses, and `sv_sign_artifact` registers
+    nothing in that case.
+  - `keyring_rotate_key` carries the key's restrictions into the new version (L12), and
+    verify accepts the previous version inside the overlap window.
+  - `keyring_sign_issuance` reuses the child's signature buffer.
+- **Concurrency:**
+  - The JSON parser state is per-call, where it was module globals (L15).
+  - The AES, BLAKE2b, SHA-512 and Ed25519 lazy table inits are CAS-guarded (L21).
+  - Seal info is per call (L20), and `_alog_write_int`'s buffer is per call.
+- **Audit log:**
+  - A torn line completed by a later append is rejected.
+  - Negative timestamps round-trip.
+  - The revocation reason is recorded (L10: new `ae_reason` / `ae_set_reason`).
+- **Other fixes:**
+  - The CRL reader counts rejected entry lines (new `crl_load_bad_count`), and `rl_merge`
+    compares `revoked_after` (L14).
+  - The JSONL loaders are capped at 64 MiB (an error, never a truncation) and free their
+    read buffer.
+  - `tpm_seal` overwrites its staged plaintext before unlinking it (L24).
+  - `luks_open` detaches its loop device when `cryptsetup open` fails (L25).
+  - `iv_verify_all` writes every status back and calls the verifier callback on each
+    violation (L22).
+  - `ipolicy_remove` frees the removed measurement.
+  - The software AES wipes its `ShiftRows` copy.
+  - The TEE `*_alloc` functions check for allocation failure (L6).
+
+### Breaking
+
+- `ed25519_verify` returns 0 for a small-order public key. No honestly generated key is
+  small-order.
+- `ecdsa_p256_verify_der`: `sig_der_len` must be the exact DER length, and each INTEGER must
+  be canonical.
+- `sgx_quote_parse` / `tdx_quote_parse`: `buf_len` must be the exact quote length.
+- `sv_load_trust_store` loads nothing from a group- or world-writable file; use mode 0644 or
+  stricter.
+- `sign_data` / `sv_sign_artifact` return 0 for a key whose public half is not its seed's.
+- The JSONL / JSON loaders return their failure value for a file larger than 64 MiB.
+
+### Added
+
+- `crl_load_bad_count`, `ae_reason`, `ae_set_reason`, `tdx_quote_tee_tcb_svn_ptr`,
+  `tdx_quote_seam_attributes_ptr`, `tdx_quote_mrownerconfig_ptr` (L7).
+
+### Changed
+
+- Documented as intended (no behaviour change):
+  - L1: the TDX type-3 AK binding layout.
+  - L2: SEV-SNP report versions other than 2 fail closed.
+  - L3: compare TCB components per byte, unsigned.
+  - L26: Windows reparse points; LUKS has no Windows path.
+- The duplicate `uname_release` in `src/sysinfo.cyr` is removed (L27; `lib/sys.cyr`'s is
+  used).
+- The stale-comment list is corrected throughout.
+
+### Performance
+
+- **Not measured cleanly.** Other builds loaded the host throughout (load average 10–14), so
+  nothing was added to `benches/history.csv`.
+- An interleaved A/B against 3.13.0, taking the pair with a fair load factor, shows:
+  - `sha512_4kb` is **+10–15%**, from wiping the message schedule every block (L19).
+  - Everything else is within that run's ±5% noise.
+- Expected costs, by construction:
+  - `ed25519_verify` does +3 point doublings (the small-order check).
+  - ECDSA sign does +1 hash and 5 field multiplies (the blinding).
+- The lazy-init fast path stays a plain load on x86; it fences on aarch64 only.
+- Re-run `CYRIUS_DCE=1 cyrius bench tests/bcyr/sigil.bcyr` on a quiet host before tagging.
+
+### Tests
+
+- New groups in `tee_verify_concurrent`, `verify_hardening`, `trust_hardening`, `audit_log`,
+  `policy_hardening`, `ecdsa_sign`, `ecdsa_sign_timing`, `ed25519_strict`, `capture_bounded`,
+  `agnosys` and `sigil`.
+- Suite **78 files, 2610 assertions, 0 failures**; fuzz 24 / 0.
+
 ## [3.13.0] - 2026-09-23
 
 ### Security

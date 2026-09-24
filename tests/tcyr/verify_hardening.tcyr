@@ -376,6 +376,88 @@ fn main() {
     assert_eq(vec_len(load64(iv_policy(iv))), n_before, "caller baseline kept");
 
     xunlink(ts_path);
+    # ============================================================
+    # 3.13.1 — the issues filed 2026-09-23
+    # ============================================================
+    test_group("3.13.1 stored Revoked is never lifted by a valid signature");
+    var sv_rv = sigil_verifier_new(kr, trust_policy_new());
+    var rv_art = sv_sign_artifact(sv_rv, f_b, &sk, kid, ARTIFACT_SYSTEM_BINARY);
+    assert(rv_art != 0, "signed artifact registered");
+    assert_eq(vresult_passed(sv_verify_artifact(sv_rv, f_b, ARTIFACT_SYSTEM_BINARY)), 1,
+      "validly signed artifact verifies");
+    if (rv_art != 0) { artifact_set_trust_level(rv_art, TRUST_REVOKED); }
+    var vr_rv = sv_verify_artifact(sv_rv, f_b, ARTIFACT_SYSTEM_BINARY);
+    assert_eq(vresult_passed(vr_rv), 0, "stored Revoked + valid signature is rejected");
+    assert_eq(artifact_trust_level(vresult_artifact(vr_rv)), TRUST_REVOKED, "and reported Revoked");
+
+    test_group("3.13.1 sv_sign_artifact refuses a mismatched secret key");
+    var bad_sk[64];
+    memcpy(&bad_sk, &sk, 64);
+    store8(&bad_sk + 40, (load8(&bad_sk + 40) & 0xFF) ^ 1);   # public half no longer the seed's
+    var sv_ms = sigil_verifier_new(kr, trust_policy_new());
+    assert_eq(sv_sign_artifact(sv_ms, f_c, &bad_sk, kid, ARTIFACT_SYSTEM_BINARY), 0,
+      "mismatched key: nothing signed");
+    assert_eq(map_get(sv_trust_store(sv_ms), hash_file(f_c)), 0, "and nothing registered");
+
+    test_group("3.13.1 trust-level reporting reflects the revocation list");
+    var sv_rl = sigil_verifier_new(kr, trust_policy_new());
+    var rl_art = sv_sign_artifact(sv_rl, f_d, &sk, kid, ARTIFACT_SYSTEM_BINARY);
+    var rl_h = artifact_content_hash(rl_art);
+    assert_eq(sv_trust_level_for(sv_rl, rl_h), TRUST_VERIFIED, "Verified before the revocation");
+    sv_add_revocation(sv_rl, revocation_entry_new(0, rl_h, "compromised build", "ops"));
+    assert_eq(sv_trust_level_for(sv_rl, rl_h), TRUST_REVOKED, "hash on the list reads Revoked");
+    var st_rl = sv_stats(sv_rl);
+    assert_eq(load64(st_rl + 16), 1, "sv_stats counts it revoked");
+    assert_eq(load64(st_rl + 8), 0, "and not verified");
+    var rl_log = alog_events(load64(sv_rl + 48));
+    var rl_ev = vec_get(rl_log, vec_len(rl_log) - 1);
+    assert_eq(ae_type(rl_ev), AUDIT_REVOCATION_ADDED, "revocation audited");
+    assert_streq(ae_reason(rl_ev), "compromised build", "with its reason");
+
+    test_group("3.13.1 rotation overlap: the previous version still verifies");
+    var r_sk[64];
+    var r_pk[32];
+    var r_kid = generate_keypair(&r_sk, &r_pk);
+    var r_kr = keyring_new("/tmp/sigil_vh_rot_keys");
+    var r_kv = key_version_new(r_kid, hex_encode(&r_pk, 32));
+    kv_set_valid_from(r_kv, clock_epoch_secs() - 100);
+    kv_add_allowed_type(r_kv, ARTIFACT_SYSTEM_BINARY);
+    kv_set_pub_name(r_kv, "Rot Publisher");
+    keyring_add_key(r_kr, r_kv);
+    var sv_rot = sigil_verifier_new(r_kr, trust_policy_new());
+    assert(sv_sign_artifact(sv_rot, f_e, &r_sk, r_kid, ARTIFACT_SYSTEM_BINARY) != 0, "signed by v1");
+    var n_sk[64];
+    var n_pk[32];
+    generate_keypair(&n_sk, &n_pk);
+    var r_new = keyring_rotate_key(r_kr, r_kid, hex_encode(&n_pk, 32), clock_epoch_secs() + 3600);
+    assert_eq(vresult_passed(sv_verify_artifact(sv_rot, f_e, ARTIFACT_SYSTEM_BINARY)), 1,
+      "v1-signed artifact verifies inside the overlap window");
+    assert_eq(kv_is_type_allowed(r_new, ARTIFACT_SYSTEM_BINARY), 1, "allowed type carried over");
+    assert_eq(kv_is_type_allowed(r_new, ARTIFACT_PACKAGE), 0, "type limit kept");
+    assert_streq(kv_pub_name(r_new), "Rot Publisher", "publisher carried over");
+    assert_eq(kv_issuer_sig(r_new), 0, "new version has no issuer signature");
+    kv_set_valid_until(r_kv, clock_epoch_secs() - 50);   # overlap over
+    assert_eq(vresult_passed(sv_verify_artifact(sv_rot, f_e, ARTIFACT_SYSTEM_BINARY)), 0,
+      "after the window the v1 signature no longer verifies");
+
+    test_group("3.13.1 a group- or world-writable trust store is refused");
+    var sv_pm = sigil_verifier_new(kr, trust_policy_new());
+    sv_sign_artifact(sv_pm, f_a, &sk, kid, ARTIFACT_SYSTEM_BINARY);
+    xunlink(ts_path);
+    assert_eq(sv_save_trust_store(sv_pm, ts_path), SIGIL_ERR_NONE, "store saved");
+    var sv_pm2 = sigil_verifier_new(kr, trust_policy_new());
+    assert_eq(sv_load_trust_store(sv_pm2, ts_path), 1, "0644 store loads");
+    sys_chmod(ts_path, 438);   # 0666
+    var sv_pm3 = sigil_verifier_new(kr, trust_policy_new());
+    assert_eq(sv_load_trust_store(sv_pm3, ts_path), 0, "world-writable store refused");
+    sys_chmod(ts_path, 436);   # 0664
+    assert_eq(sv_load_trust_store(sv_pm3, ts_path), 0, "group-writable store refused");
+    sys_chmod(ts_path, 420);   # 0644
+    assert_eq(sv_load_trust_store(sv_pm3, ts_path), 1, "0644 again loads");
+    assert_eq(sv_save_trust_store(sv_pm, "/tmp/sigil_vh_no_such_dir/store.json"), SIGIL_ERR_IO,
+      "a save that cannot be written is SIGIL_ERR_IO");
+    xunlink(ts_path);
+
     xunlink(f_a);
     xunlink(f_b);
     xunlink(f_c);

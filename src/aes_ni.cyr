@@ -150,9 +150,8 @@ fn _aes_ni_cpuid_probe(out): i64 {
 #   in_block   — rsi — 16-byte plaintext
 #   out_block  — rdx — 16-byte ciphertext (caller-allocated)
 #
-# Status: reaches the CPU's AESENC machinery correctly when called
-# directly inside a single-compilation-unit build. Not wired into
-# aes_gcm_encrypt in 2.9.0 (see module header).
+# Called by aes_gcm.cyr's block encrypt when aes_ni_available() — the
+# runtime AES-NI dispatch (the 2.9.0 "not wired in" status is history).
 fn aes256_encrypt_block_ni(round_keys, in_block, out_block): i64 {
     #ifdef CYRIUS_ARCH_X86
     asm {

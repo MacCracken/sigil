@@ -1,6 +1,6 @@
 # `certpin_compute_spki_pin` returns the SHA-256-of-empty pin as `Ok` for a missing or bad cert
 
-**Filed:** 2026-09-23 (3.13.0) · **Severity:** MEDIUM · **Status:** open
+**Filed:** 2026-09-23 (3.13.0) · **Severity:** MEDIUM · **Status:** resolved (3.13.1)
 
 **Where:** `src/certpin_core.cyr` (~286), `certpin_compute_spki_pin`.
 
@@ -15,3 +15,10 @@ guard passes, and the function returns `Ok("47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZ
 **Fix direction (not applied):** compute the SPKI pin in-process (sigil parses X.509 and has
 SHA-256), or run each stage through `agnosys_run_capture_timeout` with the status checked and
 reject the empty-input digest.
+
+## Resolution (3.13.1)
+
+`certpin_compute_spki_pin` is computed in-process — first PEM certificate → DER →
+SubjectPublicKeyInfo TLV → SHA-256 → base64 — with no shell and no openssl. A missing file, a
+directory or non-PEM content is `Err`. `tests/tcyr/agnosys.tcyr` checks the pin against
+openssl's for a fixture certificate.

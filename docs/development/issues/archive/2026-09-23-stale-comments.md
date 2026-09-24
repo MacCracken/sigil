@@ -1,6 +1,6 @@
 # Stale or wrong comments found during the 3.13.0 work (comment-only)
 
-**Filed:** 2026-09-23 (3.13.0) · **Severity:** LOW · **Status:** open
+**Filed:** 2026-09-23 (3.13.0) · **Severity:** LOW · **Status:** resolved (3.13.1)
 
 Line numbers are approximate (pre-3.13.0); re-locate by content, and re-check each against the current code first.
 
@@ -43,3 +43,10 @@ Line numbers are approximate (pre-3.13.0); re-locate by content, and re-check ea
 - mldsa.cyr ~370: says mldsa65_verify's 0 = valid convention matches sigil's other checks; ed25519_verify returns 1 = valid.
 - mldsa.cyr ~16-18 and mldsa_sample.cyr ~19: secret-lifetime / "public scratch" claims — make them match the post-M11 code.
 - tpm.cyr:1, ima.cyr:2, secureboot.cyr:2: headers say they wrap "agnosys" (folded into sigil at 3.8.1).
+
+## Resolution (3.13.1)
+
+Every listed comment is corrected against the current code: the TEE, verify / audit,
+trust / policy, ECDSA, SHA-2, x509, AES-NI, seal, ML-DSA and tpm / ima / secureboot header
+items. `_seal_info` itself is gone (per-call buffer, L20). The CLAUDE.md quirk #7 item was
+done in 3.13.0.

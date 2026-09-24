@@ -366,14 +366,17 @@ fn agnosys_run_checked(args, errmsg): i64 {
 # buffer is `cap + 1` bytes so the terminator never writes past the end
 # even at a full read (the per-module copies alloc'd exactly `cap`, a
 # latent 1-byte overflow when the file filled the buffer). Shared by the
-# pam config / passwd readers.
+# pam config / passwd readers. Returns 0 if a read fails: only a 0-byte read is end-of-file
+# (3.13.1 — a read error used to end the loop too, returning the prefix read so far as if it
+# were the whole file).
 fn agnosys_read_fd_to_str(fd, cap): i64 {
     var buf = alloc(cap + 1);
     var total = 0;
     var rgo = 1;
     while (rgo == 1) {
         var n = sys_read(fd, buf + total, cap - total);
-        if (n <= 0) {
+        if (n < 0) { return 0; }
+        if (n == 0) {
             rgo = 0;
         } else {
             total = total + n;

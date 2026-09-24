@@ -261,11 +261,13 @@ fn _ecs256_init(): i64 {
 # scrubs ONLY the calling thread's lane (`cbank()`), preserving per-call
 # secret zeroization on the sign path. Called on every return of
 # ecdsa_p256_sign. Each buffer is guarded against the not-yet-allocated
-# (lazy `_init`) case. NOTE: only the secret-carrying buffers (nonce k,
-# k·G, private scalar d, and their intermediates) are scrubbed; the
-# verify-only buffers (_ecv_*, _ecq_*, _onc_*, _p256fi_*, _p256_inv_*,
-# _p256_R, _p256_sol_t, _p256_ninv_*) hold public data and are left
-# alone (they are banked for race-freedom but need no wipe).
+# (lazy `_init`) case. The field-inverse chain (_p256fi_*, which k·G's
+# affine conversion runs through), the generic inverse (_p256_inv_*) and
+# the reduction scratch (_p256_R, _p256_sol_t, which every field multiply
+# on the sign path runs through) are scrubbed too — 3.13.1: they were
+# listed as verify-only and left holding secret-derived residue. The
+# genuinely verify-only buffers (_ecv_*, _ecq_*, _onc_*, _p256_ninv_*)
+# hold public data and are left alone.
 fn _p256_scrub_secret_lanes(): i64 {
     var bk = cbank();
     # Montgomery-ladder point set (k·G with secret k) — 96 B each.
@@ -316,6 +318,23 @@ fn _p256_scrub_secret_lanes(): i64 {
     if (_p256_tmp2 != 0) { memset(_p256_tmp2 + bk * 32, 0, 32); }
     # per-sign k·G output point (ecdsa_sign.cyr) — 96 B.
     if (_ecs256_R != 0) { memset(_ecs256_R + bk * 96, 0, 96); }
+    # field inverse chain (k·G to affine) — 9 × 32 B.
+    if (_p256fi_t1  != 0) { memset(_p256fi_t1  + bk * 32, 0, 32); }
+    if (_p256fi_t2  != 0) { memset(_p256fi_t2  + bk * 32, 0, 32); }
+    if (_p256fi_t3  != 0) { memset(_p256fi_t3  + bk * 32, 0, 32); }
+    if (_p256fi_t6  != 0) { memset(_p256fi_t6  + bk * 32, 0, 32); }
+    if (_p256fi_t12 != 0) { memset(_p256fi_t12 + bk * 32, 0, 32); }
+    if (_p256fi_t15 != 0) { memset(_p256fi_t15 + bk * 32, 0, 32); }
+    if (_p256fi_t30 != 0) { memset(_p256fi_t30 + bk * 32, 0, 32); }
+    if (_p256fi_t32 != 0) { memset(_p256fi_t32 + bk * 32, 0, 32); }
+    if (_p256fi_acc != 0) { memset(_p256fi_acc + bk * 32, 0, 32); }
+    # generic field inverse — 3 × 32 B.
+    if (_p256_inv_tmp  != 0) { memset(_p256_inv_tmp  + bk * 32, 0, 32); }
+    if (_p256_inv_res  != 0) { memset(_p256_inv_res  + bk * 32, 0, 32); }
+    if (_p256_inv_base != 0) { memset(_p256_inv_base + bk * 32, 0, 32); }
+    # reduction scratch (every field multiply) — 2 × 32 B.
+    if (_p256_R     != 0) { memset(_p256_R     + bk * 32, 0, 32); }
+    if (_p256_sol_t != 0) { memset(_p256_sol_t + bk * 32, 0, 32); }
     return 0;
 }
 
@@ -341,11 +360,12 @@ fn _ecs384_init(): i64 {
 # scrubs ONLY the calling thread's lane (`cbank()`), preserving per-call
 # secret zeroization on the sign path. Called on every return of
 # ecdsa_p384_sign. Each buffer is guarded against the not-yet-allocated
-# (lazy `_init`) case. Only secret-carrying buffers (nonce k, k·G,
-# private scalar d, and their intermediates) are scrubbed; the verify-only
-# buffers (_ecv384_*, _ecq384_*, _onc384_*, _p384_inv_*, _p384_ninv_*,
-# _p384_R, _p384_sol_t) hold public data and are left alone (banked for
-# race-freedom, no wipe needed).
+# (lazy `_init`) case. The field inverse (_p384_inv_*, which k·G's affine
+# conversion runs through) and the reduction scratch (_p384_R,
+# _p384_sol_t, which every field multiply on the sign path runs through)
+# are scrubbed too — 3.13.1: they were listed as verify-only and left
+# holding secret-derived residue. The genuinely verify-only buffers
+# (_ecv384_*, _ecq384_*, _onc384_*) hold public data and are left alone.
 fn _p384_scrub_secret_lanes(): i64 {
     var bk = cbank();
     # Montgomery-ladder point set (k·G with secret k) — 144 B each.
@@ -399,6 +419,13 @@ fn _p384_scrub_secret_lanes(): i64 {
     if (_p384_m64 != 0) { memset(_p384_m64 + bk * 16, 0, 16); }
     # per-sign k·G output point (ecdsa_sign.cyr) — 144 B.
     if (_ecs384_R != 0) { memset(_ecs384_R + bk * 144, 0, 144); }
+    # field inverse (k·G to affine) — 3 × 48 B.
+    if (_p384_inv_tmp  != 0) { memset(_p384_inv_tmp  + bk * 48, 0, 48); }
+    if (_p384_inv_res  != 0) { memset(_p384_inv_res  + bk * 48, 0, 48); }
+    if (_p384_inv_base != 0) { memset(_p384_inv_base + bk * 48, 0, 48); }
+    # reduction scratch (every field multiply) — 2 × 48 B.
+    if (_p384_R     != 0) { memset(_p384_R     + bk * 48, 0, 48); }
+    if (_p384_sol_t != 0) { memset(_p384_sol_t + bk * 48, 0, 48); }
     return 0;
 }
 

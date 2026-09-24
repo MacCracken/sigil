@@ -13,8 +13,10 @@
 # Surface:
 #   fn snp_report_parse(buf, buf_len, out): i64
 #       — parse the fixed layout into an SnpReport struct (1 = ok,
-#         0 = malformed/unsupported). version must be 2 (current
-#         GenoaPilatos+ firmware); signature_algo must be 1
+#         0 = malformed/unsupported). version must be 2 — the layout
+#         this parser implements; a report of any other version is
+#         refused (fail closed) until its layout has been checked
+#         against AMD's SEV-SNP firmware ABI. signature_algo must be 1
 #         (ECDSA P-384 / SHA-384).
 #   fn snp_report_verify(report, vcek_pk): i64
 #       — given a parsed report + an externally-validated VCEK
@@ -103,6 +105,7 @@ var SNP_OFF_SIG_S             = 0x2E8;
 # Bump-allocated via `alloc`; never `free()` it.
 fn snp_report_alloc(): i64 {
     var r = alloc(256);
+    if (r == 0) { return 0; }   # out of memory (3.13.1: memset used to write through 0)
     memset(r, 0, 256);
     return r;
 }
@@ -142,12 +145,15 @@ fn snp_report_vmpl(r): i64               { return load64(r + 40); }
 # Accessor: SIGNATURE_ALGO (u32 at 0x034); parse only accepts 1 (ECDSA P-384 / SHA-384).
 fn snp_report_signature_algo(r): i64     { return load64(r + 48); }
 # Accessor: CURRENT_TCB, the platform's current TCB_VERSION (u64 at 0x038), as a raw bit
-# pattern (negative as an i64 when bit 63 is set).
+# pattern (negative as an i64 when bit 63 is set). Compare TCB components byte by byte as
+# unsigned values, e.g. (tcb >> 56) & 0xFF — never the whole value as a signed i64, which
+# orders wrongly once any component byte is >= 0x80.
 fn snp_report_current_tcb(r): i64        { return load64(r + 56); }
 # Accessor: PLATFORM_INFO flags (u64 at 0x040).
 fn snp_report_platform_info(r): i64      { return load64(r + 64); }
 # Accessor: REPORTED_TCB, the TCB_VERSION the signing VCEK was derived from (u64 at 0x180),
-# as a raw bit pattern (negative as an i64 when bit 63 is set).
+# as a raw bit pattern (negative as an i64 when bit 63 is set). Compare per component byte,
+# unsigned, as for snp_report_current_tcb.
 fn snp_report_reported_tcb(r): i64       { return load64(r + 72); }
 
 # Accessor: pointer to the 16-byte FAMILY_ID (provided at launch) at 0x010.
@@ -314,12 +320,11 @@ fn snp_report_verify_full(report, vcek_chain_pem, vcek_chain_pem_len,
       ark_root_der, ark_root_der_len, now_unix, 0);
 }
 
-# snp_report_verify_full_into — drift-free variant: all per-call scratch
-# (VCEK chain DER pool + parsed cert structs + their P-384 sig blocks)
-# is drawn from the caller's `arena` (stdlib handle; `arena == 0` ⇒
-# global bump). Returns 1 on full success, 0 otherwise. 3.7.3. NOT thread-safe: the VCEK
-# chain check (x509_verify_chain) hashes each TBS into the shared module-global
-# `_xvl_digest` in src/x509.cyr (audit H2 residual).
+# snp_report_verify_full_into — drift-free variant: all per-call scratch (VCEK chain DER pool +
+# parsed cert structs + their P-384 sig blocks) is drawn from the caller's `arena` (stdlib handle;
+# `arena == 0` ⇒ global bump). Returns 1 on full success, 0 otherwise. 3.7.3. Safe to call from
+# several threads, each with its own arena, once one call has run on the main thread (the lazy PEM
+# / SHA / ECDSA tables); the chain check's digest is per-call since 3.13.1.
 fn snp_report_verify_full_into(report, vcek_chain_pem, vcek_chain_pem_len,
   ark_root_der, ark_root_der_len, now_unix, arena): i64 {
     # Cert chain must be non-empty.

@@ -94,7 +94,7 @@ fn _vresult_add_check_scratch(s, name, passed, detail): i64 {
     var slot = _trust_check_slot(s, name, passed, detail);
     if (slot != 0) {
         # vec_push into the pre-allocated cap-16 vec — guaranteed
-        # not to grow (we cap usage at _VSC_MAX_CHECKS=6 < 16), so
+        # not to grow (we cap usage at _VSC_MAX_CHECKS = 8 < 16), so
         # this never touches the allocator.
         vec_push(s + _VSC_VEC_HDR, slot);
     }
@@ -300,13 +300,15 @@ fn sv_register_system_core(sv, artifact): i64 {
 # Hashes the file at `path` (SHA-256 hex), Ed25519-signs that 64-char hex string with the
 # 64-byte `secret_key` (seed || pk), registers the artifact at Verified with `key_id` as its
 # signer, and records an AUDIT_ARTIFACT_SIGNED event. Returns the new TrustedArtifact, or 0
-# if the file cannot be opened. `key_id` is recorded as given — it is not checked against
-# the keyring or `secret_key`.
+# if the file cannot be read or `secret_key`'s public half is not its seed's (sign_data
+# refuses; nothing is registered — 3.13.1, it used to register a zero "signature").
+# `key_id` is recorded as given — it is not checked against the keyring or `secret_key`.
 fn sv_sign_artifact(sv, path, secret_key, key_id, artifact_type): i64 {
     var chash = hash_file(path);
     if (chash == 0) { return 0; }
 
     var sig = sign_data(chash, strlen(chash), secret_key);
+    if (sig == 0) { return 0; }
     var artifact = trusted_artifact_new(path, artifact_type, chash);
     artifact_set_signature(artifact, sig);
     artifact_set_signer(artifact, key_id);
@@ -324,6 +326,49 @@ fn sv_sign_artifact(sv, path, secret_key, key_id, artifact_type): i64 {
 # ================================================================
 # Verify an artifact
 # ================================================================
+
+# Internal: a version of `signer` other than `current` that is valid now and whose public key
+# verifies `sig` over the content hash `chash` — a rotation's overlap window, in which
+# keyring_rotate_key keeps the previous version valid until overlap_until. Each candidate
+# key is decoded into `pk_buf` (32 bytes). Returns that KeyVersion, or 0. Allocates nothing
+# (safe on the sv_verify_batch worker path). 3.13.1: only keyring_get_current was tried, so
+# every artifact signed before a rotation failed inside the window meant to accept it.
+fn _sv_other_version_verifies(kr, signer, current, chash, sig, pk_buf): i64 {
+    var versions = keyring_get_all_versions(kr, signer);
+    if (versions == 0) { return 0; }
+    var now = clock_epoch_secs();
+    var i = vec_len(versions) - 1;
+    while (i >= 0) {
+        var kv = vec_get(versions, i);
+        if (kv != current) {
+            if (kv_is_valid_at(kv, now) == 1) {
+                var pk = kv_public_key_hex(kv);
+                if (pk != 0) {
+                    if (strlen(pk) == 64) {
+                        if (hex_decode_into(pk, 64, pk_buf) != 0) {
+                            if (verify_data(chash, strlen(chash), sig, pk_buf) == 1) { return kv; }
+                        }
+                    }
+                }
+            }
+        }
+        i = i - 1;
+    }
+    return 0;
+}
+
+# Internal: 1 if trust-store artifact `artifact` is revoked — stored as Revoked, or its content
+# hash or its signer's key is on the verifier's revocation list (any revoked_after cutoff
+# ignored, as on the verify path) — else 0.
+fn _sv_artifact_revoked(sv, artifact): i64 {
+    if (artifact_trust_level(artifact) == TRUST_REVOKED) { return 1; }
+    var rl = load64(sv + 16);
+    var chash = artifact_content_hash(artifact);
+    if (chash != 0) { if (rl_is_artifact_revoked(rl, chash) == 1) { return 1; } }
+    var signer = artifact_signer_key_id(artifact);
+    if (signer != 0) { if (rl_is_key_revoked(rl, signer) == 1) { return 1; } }
+    return 0;
+}
 
 # Public API (3.2.0): thin wrapper that allocates a fresh
 # VerifyScratch and delegates to `sv_verify_artifact_into`. Same
@@ -446,6 +491,7 @@ fn sv_verify_artifact_into(sv, path, artifact_type, scratch): i64 {
     # Check: signature verification. sig_state: 0 = no signature, 1 = valid, 2 = a
     # signature is present but could not be verified (any failure branch below).
     var sig_state = 0;
+    var sig_kv = 0;   # the KeyVersion whose key verified the signature
     if (stored != 0) {
         var sig = artifact_signature(stored);
         var signer = artifact_signer_key_id(stored);
@@ -468,10 +514,21 @@ fn sv_verify_artifact_into(sv, path, artifact_type, scratch): i64 {
                                 _vresult_add_check_scratch(scratch, "signature", 0, "Public key hex invalid");
                             } else {
                                 var valid = verify_data(chash, strlen(chash), sig, scratch + _VSC_PK);
+                                var vkv = kv;
+                                if (valid != 1) {
+                                    vkv = _sv_other_version_verifies(kr, signer, kv, chash, sig,
+                                      scratch + _VSC_PK);
+                                    if (vkv != 0) { valid = 1; }
+                                }
                                 if (valid == 1) {
                                     sig_state = 1;
-                                    if (trust_level_rank(trust_level) < trust_level_rank(TRUST_VERIFIED)) {
-                                        trust_level = TRUST_VERIFIED;
+                                    sig_kv = vkv;
+                                    # Never lifts a stored Revoked entry (3.13.1: a valid signature
+                                    # raised Revoked, rank 0, to Verified).
+                                    if (trust_level != TRUST_REVOKED) {
+                                        if (trust_level_rank(trust_level) < trust_level_rank(TRUST_VERIFIED)) {
+                                            trust_level = TRUST_VERIFIED;
+                                        }
                                     }
                                     _vresult_add_check_scratch(scratch, "signature", 1, "Signature valid");
                                 } else {
@@ -512,8 +569,12 @@ fn sv_verify_artifact_into(sv, path, artifact_type, scratch): i64 {
         }
     }
 
-    # Check: revocation
+    # Check: revocation — the revocation list, then the stored level itself
     var rl = load64(sv + 16);
+    var stored_revoked = 0;
+    if (stored != 0) {
+        if (artifact_trust_level(stored) == TRUST_REVOKED) { stored_revoked = 1; }
+    }
     var key_revoked = 0;
     var hash_revoked = rl_is_artifact_revoked(rl, chash);
     if (stored != 0) {
@@ -528,6 +589,9 @@ fn sv_verify_artifact_into(sv, path, artifact_type, scratch): i64 {
     } elif (hash_revoked == 1) {
         trust_level = TRUST_REVOKED;
         _vresult_add_check_scratch(scratch, "revocation", 0, "Content hash revoked");
+    } elif (stored_revoked == 1) {
+        trust_level = TRUST_REVOKED;
+        _vresult_add_check_scratch(scratch, "revocation", 0, "Revoked in trust store");
     } else {
         _vresult_add_check_scratch(scratch, "revocation", 1, "Not revoked");
     }
@@ -540,7 +604,7 @@ fn sv_verify_artifact_into(sv, path, artifact_type, scratch): i64 {
             _vresult_add_check_scratch(scratch, "key_pin", 1, "Key authorized");
         } else {
             _vresult_add_check_scratch(scratch, "key_pin", 0, "Key not authorized for path");
-            trust_level = TRUST_UNVERIFIED;
+            if (trust_level != TRUST_REVOKED) { trust_level = TRUST_UNVERIFIED; }
         }
     }
 
@@ -549,13 +613,16 @@ fn sv_verify_artifact_into(sv, path, artifact_type, scratch): i64 {
         var signer_atype = artifact_signer_key_id(stored);
         if (signer_atype != 0) {
             var kra = load64(sv);
-            var kva = keyring_get_current(kra, signer_atype);
+            # The version that verified the signature (an older one inside a rotation's
+            # overlap window), else the current one.
+            var kva = sig_kv;
+            if (kva == 0) { kva = keyring_get_current(kra, signer_atype); }
             if (kva != 0) {
                 if (kv_is_type_allowed(kva, artifact_type) == 1) {
                     _vresult_add_check_scratch(scratch, "allowed_type", 1, "Key authorized for artifact type");
                 } else {
                     _vresult_add_check_scratch(scratch, "allowed_type", 0, "Key not authorized for artifact type");
-                    trust_level = TRUST_UNVERIFIED;
+                    if (trust_level != TRUST_REVOKED) { trust_level = TRUST_UNVERIFIED; }
                 }
             }
         }
@@ -722,18 +789,23 @@ fn sv_revocation_count(sv): i64 {
 # Trust store queries
 # ================================================================
 
-# Returns the stored TrustLevel of the trust-store artifact with `content_hash`, or
-# TRUST_UNVERIFIED if there is none. The revocation list is not consulted.
+# Returns TRUST_REVOKED if `content_hash` — or the trust-store artifact with it, or that
+# artifact's signer key — is revoked (stored Revoked or on the revocation list; any
+# revoked_after cutoff ignored, as on the verify path); else the artifact's stored TrustLevel,
+# or TRUST_UNVERIFIED if there is none. 3.13.1: the revocation list was not consulted.
 fn sv_trust_level_for(sv, content_hash): i64 {
+    if (rl_is_artifact_revoked(load64(sv + 16), content_hash) == 1) { return TRUST_REVOKED; }
     var store = load64(sv + 32);
     var artifact = map_get(store, content_hash);
     if (artifact == 0) { return TRUST_UNVERIFIED; }
+    if (_sv_artifact_revoked(sv, artifact) == 1) { return TRUST_REVOKED; }
     return artifact_trust_level(artifact);
 }
 
 # Tallies the trust store into a new SigilStats block (sigil_stats_new): total artifacts,
-# those stored at Verified or above, and those stored as Revoked. Counts use stored trust
-# levels only (the revocation list is not consulted). Returns the pointer.
+# those revoked (stored Revoked, or hash / signer key on the revocation list), and those at
+# Verified or above that are not revoked. 3.13.1: the revocation list was not consulted.
+# Returns the pointer.
 fn sv_stats(sv): i64 {
     var store = load64(sv + 32);
     var s = sigil_stats_new();
@@ -747,8 +819,8 @@ fn sv_stats(sv): i64 {
         var chash = vec_get(keys, i);
         var artifact = map_get(store, chash);
         var tl = artifact_trust_level(artifact);
-        if (trust_level_ge(tl, TRUST_VERIFIED) == 1) { verified = verified + 1; }
-        if (tl == TRUST_REVOKED) { revoked = revoked + 1; }
+        if (_sv_artifact_revoked(sv, artifact) == 1) { revoked = revoked + 1; }
+        elif (trust_level_ge(tl, TRUST_VERIFIED) == 1) { verified = verified + 1; }
         i = i + 1;
     }
     store64(s + 8, verified);
@@ -757,17 +829,14 @@ fn sv_stats(sv): i64 {
 }
 
 # ================================================================
-# Boot chain verification
-# ================================================================
-
-# ================================================================
 # Compliance report
 # ================================================================
 
 # Classifies every trust-store artifact against the policy into a new ComplianceReport:
-# revoked (stored level Revoked), below_minimum, pin_violations (signer not authorized by a
-# matching KeyPin), unsigned (no signature while the policy disallows it), else compliant.
-# Uses stored trust levels only: no signature re-check and no revocation-list lookup.
+# revoked (stored Revoked, or hash / signer key on the revocation list), below_minimum,
+# pin_violations (signer not authorized by a matching KeyPin), unsigned (no signature while
+# the policy disallows it), else compliant. Uses stored trust levels (no signature re-check);
+# 3.13.1: revocation-list entries now count as revoked.
 # Returns the report; its vecs hold the live TrustedArtifact pointers.
 fn sv_compliance_report(sv): i64 {
     var cr = compliance_report_new();
@@ -786,7 +855,7 @@ fn sv_compliance_report(sv): i64 {
         var tl = artifact_trust_level(artifact);
         var path = artifact_path(artifact);
 
-        if (tl == TRUST_REVOKED) {
+        if (_sv_artifact_revoked(sv, artifact) == 1) {
             vec_push(load64(cr + 40), artifact);
         } elif (trust_level_ge(tl, min_trust) == 0) {
             vec_push(load64(cr + 24), artifact);
@@ -1016,10 +1085,14 @@ fn sv_diff_trust_store(sv, old_snap): i64 {
 # malformed records are skipped. Returns the number of artifacts loaded (0 on IO failure
 # or an empty file).
 fn sv_load_trust_store(sv, path): i64 {
+    if (_sv_store_file_safe(path) == 0) { return 0; }
+    var rjb[32];
+    memset(&rjb, 0, 32);
+    var rj = &rjb;
     var n = 0;
-    var buf = file_read_whole(path, &n);
+    var buf = _rj_read_file(path, &n);
     if (buf == 0) { return 0; }
-    if (n <= 0) { return 0; }
+    if (n <= 0) { fl_free(buf); return 0; }
     var store = load64(sv + 32);
 
     var pos = 0;
@@ -1047,8 +1120,8 @@ fn sv_load_trust_store(sv, path): i64 {
             if (c == 125) { pos = pos + 1; closed = 1; break; }
             if (c != 34) { pos = pos + 1; }
             else {
-                pos = _rj_parse_string(buf, pos, n);
-                var k = _rj_out_ptr;
+                pos = _rj_parse_string(rj, buf, pos, n);
+                var k = load64(rj);
                 if (k == 0) { break; }
                 # Skip to colon
                 while (pos < n) {
@@ -1065,8 +1138,8 @@ fn sv_load_trust_store(sv, path): i64 {
                 if (pos >= n) { break; }
                 var vc = load8(buf + pos) & 0xFF;
                 if (vc == 34) {
-                    pos = _rj_parse_string(buf, pos, n);
-                    var v = _rj_out_ptr;
+                    pos = _rj_parse_string(rj, buf, pos, n);
+                    var v = load64(rj);
                     if (streq(k, "hash") == 1) { hash = v; }
                     elif (streq(k, "path") == 1) { apath = v; }
                     elif (streq(k, "sig") == 1) { sighex = v; }
@@ -1131,44 +1204,52 @@ fn sv_load_trust_store(sv, path): i64 {
             if ((load8(buf + pos) & 0xFF) == 93) { break; }
         }
     }
+    fl_free(buf);
     return loaded;
+}
+
+# Internal: 0 if the trust-store file at `path` is writable by group or others, else 1. The
+# store is not signed, so whoever can write it sets every artifact's stored trust level
+# (SystemCore included); sv_load_trust_store refuses such a file (3.13.1), as ssh refuses a
+# group- or world-writable key. A path that cannot be stat'd is left to the read that
+# follows. Windows and agnos have no POSIX mode here, so the check is skipped there.
+fn _sv_store_file_safe(path): i64 {
+    #ifndef CYRIUS_TARGET_WIN
+    #ifndef CYRIUS_TARGET_AGNOS
+    var st[144];
+    if (xstat(path, &st) != 0) { return 1; }
+    if ((load32(&st + STAT_MODE) & 0x12) != 0) { return 0; }   # S_IWGRP | S_IWOTH
+    #endif
+    #endif
+    return 1;
 }
 
 # Writes the trust store to `path` as a JSON array of {hash, path, type, trust} objects,
 # plus "sig" (the 64-byte signature as 128 lowercase hex chars) and "signer" for a signed
-# artifact, creating or truncating the file (mode 0644). A NULL path is written as "".
-# Returns SIGIL_ERR_NONE, or SIGIL_ERR_IO if the file cannot be opened (the individual
-# write results are not checked).
+# artifact. A NULL path is written as "". The file is built in memory and replaced atomically
+# (file_write_atomic: an existing file keeps its mode; a failed write leaves it intact).
+# Returns SIGIL_ERR_NONE, or SIGIL_ERR_IO if the write fails (3.13.1: individual write
+# results were ignored and success returned).
 fn sv_save_trust_store(sv, path): i64 {
     var store = load64(sv + 32);
     var keys = map_keys(store);
     var klen = vec_len(keys);
-    # 3.13.0: named flags — the literal 577 lost O_TRUNC on Darwin, so a store that shrank
-    # (a revoked artifact removed) kept a fragment of the larger previous store.
-    var fd = file_open(path, O_WRONLY | O_CREAT | O_TRUNC, 420);  # 0644
-    if (fd < 0) { return SIGIL_ERR_IO; }
-    file_write(fd, "[", 1);
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "[");
     var i = 0;
-    var nbuf[24];
-    var hx[128];
+    var hx[136];
     while (i < klen) {
         var chash = vec_get(keys, i);
         var art = map_get(store, chash);
-        if (i > 0) { file_write(fd, ",", 1); }
-        file_write(fd, "{\"hash\":\"", 9);
-        json_write_escaped(fd, chash, strlen(chash));
-        file_write(fd, "\",\"path\":\"", 10);
-        var ap = artifact_path(art);
-        if (ap != 0) { json_write_escaped(fd, ap, strlen(ap)); }
-        file_write(fd, "\",\"type\":", 9);
-        # fmt_int prints to stdout — use fmt_int_buf for file output.
-        memset(&nbuf, 0, 24);
-        var nlen = fmt_int_buf(artifact_type(art), &nbuf);
-        file_write(fd, &nbuf, nlen);
-        file_write(fd, ",\"trust\":", 9);
-        memset(&nbuf, 0, 24);
-        nlen = fmt_int_buf(artifact_trust_level(art), &nbuf);
-        file_write(fd, &nbuf, nlen);
+        if (i > 0) { str_builder_add_cstr(sb, ","); }
+        str_builder_add_cstr(sb, "{\"hash\":\"");
+        _json_escape_cstr(sb, chash);
+        str_builder_add_cstr(sb, "\",\"path\":\"");
+        _json_escape_cstr(sb, artifact_path(art));
+        str_builder_add_cstr(sb, "\",\"type\":");
+        str_builder_add_int(sb, artifact_type(art));
+        str_builder_add_cstr(sb, ",\"trust\":");
+        str_builder_add_int(sb, artifact_trust_level(art));
         # 3.13.0 (M8): persist the signature and signer so a reloaded store re-verifies.
         var sig = artifact_signature(art);
         if (sig != 0) {
@@ -1179,21 +1260,22 @@ fn sv_save_trust_store(sv, path): i64 {
                 store8(&hx + hi * 2 + 1, load8("0123456789abcdef" + (b & 15)));
                 hi = hi + 1;
             }
-            file_write(fd, ",\"sig\":\"", 8);
-            file_write(fd, &hx, 128);
-            file_write(fd, "\"", 1);
+            store8(&hx + 128, 0);
+            str_builder_add_cstr(sb, ",\"sig\":\"");
+            str_builder_add_cstr(sb, &hx);
+            str_builder_add_cstr(sb, "\"");
         }
         var signer = artifact_signer_key_id(art);
         if (signer != 0) {
-            file_write(fd, ",\"signer\":\"", 11);
-            json_write_escaped(fd, signer, strlen(signer));
-            file_write(fd, "\"", 1);
+            str_builder_add_cstr(sb, ",\"signer\":\"");
+            _json_escape_cstr(sb, signer);
+            str_builder_add_cstr(sb, "\"");
         }
-        file_write(fd, "}", 1);
+        str_builder_add_cstr(sb, "}");
         i = i + 1;
     }
-    file_write(fd, "]", 1);
-    file_close(fd);
+    str_builder_add_cstr(sb, "]");
+    if (file_write_atomic(path, load64(sb), load64(sb + 8)) != 0) { return SIGIL_ERR_IO; }
     return SIGIL_ERR_NONE;
 }
 
@@ -1228,7 +1310,10 @@ fn sv_save_trust_store(sv, path): i64 {
 #   #1) — so the crypto primitives' transient working arrays are
 #   shared across threads. That was the sole remaining reason for
 #   the mutex, which remained in place until there was a way to give
-#   each worker its own working state.
+#   each worker its own working state. (Superseded: since cyrius
+#   6.3.15 an array local inside the 122,880-byte frame budget IS a
+#   per-call stack local — CLAUDE.md quirk #1 as revised at 3.12.3.
+#   The banking below stays until cbank() is retired in 3.14.0.)
 # - 3.6 drops the mutex. cyrius 6.0.52 shipped thread-local storage
 #   (lib/thread_local.cyr); src/crypto_scratch.cyr uses it to give
 #   each worker a private *bank* (lane) of every racing crypto
@@ -1251,13 +1336,14 @@ fn sv_save_trust_store(sv, path): i64 {
 var _SIGIL_BATCH_PARALLEL_THRESHOLD = 4;
 var _SIGIL_BATCH_WORKERS = 4;
 
-# Worker entry (3.2.0 alloc-free). arg is a 48-byte packed record:
+# Worker entry (3.2.0 alloc-free). arg is a 56-byte packed record:
 #   +0   sv
 #   +8   artifacts (packed path/type buffer base)
 #   +16  start_idx
 #   +24  end_idx
 #   +32  result_slots (base of `count * 8` pointer array)
 #   +40  scratch_base (base of `count * _VSC_SIZE` scratch pool)
+#   +48  crypto bank (lane) for this worker
 fn _batch_worker(arg): i64 {
     var sv = load64(arg);
     var artifacts = load64(arg + 8);
@@ -1322,7 +1408,7 @@ fn sv_verify_batch(sv, artifacts, count): i64 {
         # Each worker needs a distinct crypto bank (1..workers); bank 0
         # is reserved for the main/serial path. Clamp so the bank index
         # can never exceed the scratch width (defence in depth — the
-        # default 4 workers sit well inside SIGIL_CRYPTO_BANKS = 8).
+        # default 4 workers sit well inside SIGIL_CRYPTO_BANKS = 64).
         if (workers > SIGIL_CRYPTO_BANKS - 1) { workers = SIGIL_CRYPTO_BANKS - 1; }
 
         # Pre-allocate everything on main thread before spawn —
@@ -1452,8 +1538,8 @@ fn _sv_boot_component(sv, path, s, expected_out): i64 {
     }
     var shash = artifact_content_hash(stored);
     store64(expected_out, shash);
-    # A stored Revoked entry fails outright: sv_verify_artifact_into lets a valid signature
-    # lift the working level to Verified, so its result alone would not catch this.
+    # A stored Revoked entry fails outright (sv_verify_artifact_into also refuses it since
+    # 3.13.1; this early exit keeps the boot report's status explicit).
     if (artifact_trust_level(stored) == TRUST_REVOKED) { return MSTATUS_ERROR; }
 
     # Same check chain as sv_verify_artifact, with the stored entry's artifact type.

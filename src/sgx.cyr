@@ -123,6 +123,7 @@ var SGX_REPORT_OFF_REPORT_DATA  = 320;
 # Bump-allocated via `alloc`; never `free()` it.
 fn sgx_quote_alloc(): i64 {
     var q = alloc(256);
+    if (q == 0) { return 0; }   # out of memory (3.13.1: memset used to write through 0)
     memset(q, 0, 256);
     return q;
 }
@@ -143,7 +144,7 @@ fn _sgx_load_u32(buf, off): i64 {
 # ================================================================
 # Field accessors (post-parse). The integer-valued ones return the
 # value directly; the byte-region ones return absolute pointers
-# into the original DER buffer.
+# into the caller's quote buffer (Intel's binary quote layout — not DER).
 # ================================================================
 
 # Accessor: header `version` (u16 at quote +0); 3 after a successful parse.
@@ -247,8 +248,10 @@ fn sgx_quote_parse(buf, buf_len, out): i64 {
     # Reject sig_data_len that would push past buf_len OR is
     # patently too small to contain the fixed part of the
     # signature section.
-    if (sig_data_len < 0) { return 0; }     # u32 read can produce ≥ 2^31 as negative i64; guard anyway
-    if (sig_data_off + sig_data_len > buf_len) { return 0; }
+    if (sig_data_len < 0) { return 0; }     # a u32 read is never negative on 64-bit; kept as a guard
+    # The signature section must end exactly at the end of the quote (3.13.1: trailing bytes
+    # after it were accepted).
+    if (sig_data_off + sig_data_len != buf_len) { return 0; }
     var sig_min_fixed = SGX_ECDSA_SIG_SIZE + SGX_AK_SIZE
     + SGX_REPORT_BODY_SIZE + SGX_ECDSA_SIG_SIZE
     + 2 + 2 + 4;
@@ -324,6 +327,9 @@ fn sgx_quote_parse(buf, buf_len, out): i64 {
 # SHA-256 and ECDSA P-256 tables are warmed on the main thread before fan-out (e.g. one
 # serial verify; ADR 0007).
 fn sgx_quote_verify_with_pck(quote, pck_pk): i64 {
+    # A struct that sgx_quote_parse never filled has no buffer: every accessor below would
+    # dereference an address near 0 (3.13.1).
+    if (sgx_quote_buf(quote) == 0) { return 0; }
     # ----------------------------------------------------------------
     # Step 1 — PCK signs the QE report.
     # ----------------------------------------------------------------
@@ -451,8 +457,9 @@ fn sgx_quote_verify_full(quote, root_ca_der, root_ca_der_len, now_unix): i64 {
 # blocks) is drawn from the caller's `arena` (stdlib arena_new handle;
 # `arena_reset` between verifications). `arena == 0` ⇒ global bump heap.
 # Returns 1 only if every step succeeds, 0 otherwise (incl. arena
-# exhaustion). 3.7.3. NOT thread-safe: the PCK chain check (x509_verify_chain) hashes
-# each TBS into the shared module-global `_xvl_digest` in src/x509.cyr (audit H2 residual).
+# exhaustion). 3.7.3. Safe to call from several threads, each with its own arena, once one
+# call has run on the main thread (the lazy PEM / SHA / ECDSA tables); the chain
+# check's digest is per-call since 3.13.1.
 fn sgx_quote_verify_full_into(quote, root_ca_der, root_ca_der_len, now_unix, arena): i64 {
     # Step 1 — cert_data_type must be PEM PCK chain.
     if (sgx_quote_cert_data_type(quote) != SGX_CERT_TYPE_PCK_PEM) { return 0; }

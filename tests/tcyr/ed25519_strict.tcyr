@@ -312,6 +312,51 @@ fn main() {
     assert_eq(ed25519_sign(sk1, "", 0, sig1b), 0, "TEST 1 re-sign rc = 0");
     _check_sig(sig1b, sig1_r, sig1_s, "TEST 1 re-sign matches RFC");
 
+    # ============================================================
+    # 3.13.1 — small-order public keys refused; sc_muladd carry
+    # ============================================================
+    test_group("3.13.1 verify refuses small-order public keys");
+    var so_sig = _sig_from(enc_b, s_one);   # R = enc(B), S = 1
+    var so_keys = vec_new();
+    vec_push(so_keys, enc_id);    # identity (order 1)
+    vec_push(so_keys, enc_pm1);   # (0, -1)  (order 2)
+    vec_push(so_keys, enc_y0);    # y = 0    (order 4)
+    vec_push(so_keys, enc_y0_s1);
+    vec_push(so_keys, "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05");   # order 8
+    vec_push(so_keys, "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a");   # order 8
+    var so_pt = alloc(128);
+    var ki = 0;
+    while (ki < vec_len(so_keys)) {
+        var kpk = hex_decode(vec_get(so_keys, ki), 64);
+        assert_eq(ge_from_bytes(so_pt, kpk), 0, "small-order encoding decodes");
+        assert_eq(ed25519_verify(kpk, "any message", 11, so_sig), 0, "but verify refuses the key");
+        ki = ki + 1;
+    }
+    var ok_pk = hex_decode(pk1_hex, 64);
+    assert_eq(ed25519_verify(ok_pk, "", 0, _sig_from(sig1_r, sig1_s)), 1, "an ordinary key still verifies");
+
+    test_group("3.13.1 sc_muladd carries into limbs 5..7");
+    # a = b = 2^160 - 1: a*b = 2^320 - 2^161 + 1 has limb 4 all ones; c = 2^161 - 1 makes
+    # a*b + c = 2^320 exactly, so the low-half carry must ripple through limb 4 into limb 5.
+    var sa = alloc(32);
+    memset(sa, 0, 32);
+    store64(sa, 0 - 1);
+    store64(sa + 8, 0 - 1);
+    store64(sa + 16, 0xFFFFFFFF);
+    var sc = alloc(32);
+    memset(sc, 0, 32);
+    store64(sc, 0 - 1);
+    store64(sc + 8, 0 - 1);
+    store64(sc + 16, 0x1FFFFFFFF);
+    var sgot = alloc(32);
+    sc_muladd(sgot, sa, sa, sc);
+    var s512 = alloc(64);
+    memset(s512, 0, 64);
+    store64(s512 + 40, 1);        # 2^320
+    var swant = alloc(32);
+    sc_reduce(swant, s512);
+    assert_eq(memeq(sgot, swant, 32), 1, "sc_muladd == (2^320 mod L)");
+
     return assert_summary();
 }
 

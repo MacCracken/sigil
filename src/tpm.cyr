@@ -1,6 +1,7 @@
-# tpm.cyr — TPM 2.0 integration (thin wrapper over agnosys 0.98.0)
+# tpm.cyr — TPM 2.0 integration (thin wrapper over src/tpm_core.cyr,
+# the agnosys TPM layer folded into sigil at 3.8.1)
 #
-# Sigil owns the trust-decision policy; agnosys owns the tpm2-tools
+# Sigil owns the trust-decision policy; tpm_core.cyr owns the tpm2-tools
 # shell-out. This module exposes a narrow, Result-free surface to the
 # rest of sigil:
 #   - `tpm_available()`    — detect /dev/tpm{rm,}0

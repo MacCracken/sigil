@@ -36,7 +36,8 @@ fn key_role_name(role): i64 {
 #   +56  issuer_sig_len  (i64; must be 64 for the link to validate)
 #   +64  pub_name        (C-string ptr, 0 = none)
 #   +72  pub_contact     (C-string ptr, 0 = none)
-#   +80  secret_key      (ptr to 32 raw bytes, 0 = none, for HMAC signing)
+#   +80  secret_key      (ptr to the caller's secret-key buffer, 0 = none — e.g. the 64-byte
+#                        Ed25519 seed || pk; stored for the caller, never read by sigil)
 #   +88  allowed_types   (vec of ARTIFACT_* i64s, 0 = all types allowed)
 
 # Allocates a 96-byte KeyVersion (fl_alloc) for `key_id` and its public-key hex C-string,
@@ -303,10 +304,14 @@ fn keyring_find_by_publisher(kr, name): i64 {
     return result;
 }
 
-# Rotate key: create new version with overlap period
+# Rotates `key_id` to the public key `new_pk_hex`. The last-added existing version stays
+# valid until `overlap_until` — sv_verify_artifact accepts a signature by either version
+# inside that window — and the new version, valid from now, inherits its role, allowed
+# artifact types (copied), publisher info and issued_by. The new version carries NO issuer
+# signature: re-issue it with keyring_sign_issuance before keyring_validate_chain accepts it.
+# Returns the new KeyVersion.
 fn keyring_rotate_key(kr, key_id, new_pk_hex, overlap_until): i64 {
     var new_kv = key_version_new(key_id, new_pk_hex);
-    # Set the old key's valid_until to overlap_until
     var m = load64(kr);
     var versions = map_get(m, key_id);
     if (versions != 0) {
@@ -314,6 +319,21 @@ fn keyring_rotate_key(kr, key_id, new_pk_hex, overlap_until): i64 {
         if (vlen > 0) {
             var old_kv = vec_get(versions, vlen - 1);
             kv_set_valid_until(old_kv, overlap_until);
+            # 3.13.1: the new version used to start from defaults — role Publisher, every
+            # artifact type, no publisher or issuer — so rotating a type-restricted key made
+            # it unrestricted.
+            kv_set_role(new_kv, kv_role(old_kv));
+            kv_set_issued_by(new_kv, kv_issued_by(old_kv));
+            kv_set_pub_name(new_kv, kv_pub_name(old_kv));
+            kv_set_pub_contact(new_kv, kv_pub_contact(old_kv));
+            var types = kv_allowed_types(old_kv);
+            if (types != 0) {
+                var ti = 0;
+                while (ti < vec_len(types)) {
+                    kv_add_allowed_type(new_kv, vec_get(types, ti));
+                    ti = ti + 1;
+                }
+            }
         }
     }
     keyring_add_key(kr, new_kv);
@@ -457,8 +477,10 @@ fn kv_issuance_message_into(kv, out): i64 {
 # attaches the fresh 64-byte signature with kv_set_issuer_sig. Set every child field —
 # issued_by (the parent key_id), role, validity, allowed types, publisher info — BEFORE
 # calling: a later change invalidates the signature. Returns 1, or 0 (nothing attached) if
-# `parent_secret_key` is null, the child has no issued_by, or it has no issuance message.
-# The parent key is not checked against issued_by here; keyring_validate_chain does that.
+# `parent_secret_key` is null, the child has no issued_by, it has no issuance message, or the
+# key's public half is not its seed's (ed25519_sign refuses). Re-signing overwrites the
+# child's existing 64-byte issuer_sig buffer in place. The parent key is not checked against
+# issued_by here; keyring_validate_chain does that.
 fn keyring_sign_issuance(parent_secret_key, child_kv): i64 {
     if (parent_secret_key == 0) { return 0; }
     if (child_kv == 0) { return 0; }
@@ -467,9 +489,16 @@ fn keyring_sign_issuance(parent_secret_key, child_kv): i64 {
     if (mlen < 0) { return 0; }
     var msg = fl_alloc(mlen);
     kv_issuance_message_into(child_kv, msg);
-    var sig = alloc(64);
-    ed25519_sign(parent_secret_key, msg, mlen, sig);
+    var tmp[64];
+    var rc = ed25519_sign(parent_secret_key, msg, mlen, &tmp);
     fl_free(msg);
+    if (rc != 0) { return 0; }
+    # 3.13.1: reuse the child's 64-byte buffer (each re-sign alloc'd a new one and leaked
+    # the old), and attach nothing when ed25519_sign refused (it used to attach zeros).
+    var sig = kv_issuer_sig(child_kv);
+    if (kv_issuer_sig_len(child_kv) != 64) { sig = 0; }
+    if (sig == 0) { sig = alloc(64); }
+    memcpy(sig, &tmp, 64);
     kv_set_issuer_sig(child_kv, sig, 64);
     return 1;
 }
@@ -578,9 +607,10 @@ fn _is_safe_key_id(kid): i64 {
     return 1;
 }
 
-# Save keyring to JSON files in keys_dir.
-# Returns count of key versions written. Skips any key_id that
-# fails _is_safe_key_id or whose full path exceeds 255 bytes.
+# Save keyring to JSON files in keys_dir, one per key_id, each replaced atomically
+# (file_write_atomic: a failed write leaves the previous file intact). Returns the count of
+# key versions written — a file whose write fails is not counted (3.13.1; write results were
+# ignored). Skips any key_id that fails _is_safe_key_id or whose full path exceeds 255 bytes.
 fn keyring_save(kr): i64 {
     var keys_dir = load64(kr + 8);
     if (keys_dir == 0) { return 0; }
@@ -615,27 +645,23 @@ fn keyring_save(kr): i64 {
                 pos = pos + 5;
                 store8(path + pos, 0);
 
-                # 3.13.0: named flags — the literal 577 lost O_TRUNC on Darwin (0x241 there is
-                # O_WRONLY|O_ASYNC|O_CREAT), so a shrinking key file kept a stale tail.
-                var fd = file_open(path, O_WRONLY | O_CREAT | O_TRUNC, 420);  # 0644
-                if (fd >= 0) {
-                    file_write(fd, "[", 1);
-                    var j = 0;
-                    while (j < vlen) {
-                        var kv = vec_get(versions, j);
-                        if (j > 0) { file_write(fd, ",", 1); }
-                        file_write(fd, "{\"key_id\":\"", 11);
-                        json_write_escaped(fd, kv_key_id(kv), strlen(kv_key_id(kv)));
-                        file_write(fd, "\",\"public_key_hex\":\"", 20);
-                        json_write_escaped(fd, kv_public_key_hex(kv), strlen(kv_public_key_hex(kv)));
-                        file_write(fd, "\",\"role\":\"", 10);
-                        var rn = key_role_name(kv_role(kv));
-                        json_write_escaped(fd, rn, strlen(rn));
-                        file_write(fd, "\"}", 2);
-                        j = j + 1;
-                    }
-                    file_write(fd, "]", 1);
-                    file_close(fd);
+                var sb = str_builder_new();
+                str_builder_add_cstr(sb, "[");
+                var j = 0;
+                while (j < vlen) {
+                    var kv = vec_get(versions, j);
+                    if (j > 0) { str_builder_add_cstr(sb, ","); }
+                    str_builder_add_cstr(sb, "{\"key_id\":\"");
+                    _json_escape_cstr(sb, kv_key_id(kv));
+                    str_builder_add_cstr(sb, "\",\"public_key_hex\":\"");
+                    _json_escape_cstr(sb, kv_public_key_hex(kv));
+                    str_builder_add_cstr(sb, "\",\"role\":\"");
+                    _json_escape_cstr(sb, key_role_name(kv_role(kv)));
+                    str_builder_add_cstr(sb, "\"}");
+                    j = j + 1;
+                }
+                str_builder_add_cstr(sb, "]");
+                if (file_write_atomic(path, load64(sb), load64(sb + 8)) == 0) {
                     count = count + vlen;
                 }
                 i = i + 1;
@@ -648,6 +674,42 @@ fn keyring_save(kr): i64 {
 # ================================================================
 # JSON string escaping
 # ================================================================
+
+# Internal: append JSON-escaped version of a C-string to a
+# str_builder. Escapes `"`, `\`, and control chars 0x00-0x1F
+# per RFC 8259. Without this, a reason like `key "foo" compromised`
+# would produce invalid JSON that the parser choked on. A null `s`
+# appends nothing. (Lives here, ahead of policy.cyr, since keyring_save uses it.)
+fn _json_escape_cstr(sb, s): i64 {
+    if (s == 0) { return 0; }
+    var n = strlen(s);
+    var i = 0;
+    while (i < n) {
+        var c = load8(s + i) & 0xFF;
+        if (c == 34) { str_builder_add_cstr(sb, "\\\""); }
+        elif (c == 92) { str_builder_add_cstr(sb, "\\\\"); }
+        elif (c == 10) { str_builder_add_cstr(sb, "\\n"); }
+        elif (c == 13) { str_builder_add_cstr(sb, "\\r"); }
+        elif (c == 9)  { str_builder_add_cstr(sb, "\\t"); }
+        elif (c == 8)  { str_builder_add_cstr(sb, "\\b"); }
+        elif (c == 12) { str_builder_add_cstr(sb, "\\f"); }
+        elif (c < 32) {
+            # \u00XX for any remaining control char
+            str_builder_add_cstr(sb, "\\u00");
+            var hi = (c >> 4) & 0xF;
+            var lo = c & 0xF;
+            if (hi < 10) { str_builder_add_byte(sb, 48 + hi); }
+            else         { str_builder_add_byte(sb, 87 + hi); }
+            if (lo < 10) { str_builder_add_byte(sb, 48 + lo); }
+            else         { str_builder_add_byte(sb, 87 + lo); }
+        } else {
+            str_builder_add_byte(sb, c);
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
 # Write `s` (length `slen`) to `fd`, escaping the minimal RFC 8259 set:
 # `"`, `\`, and control bytes < 0x20. Non-ASCII bytes pass through
 # verbatim (sigil stores UTF-8 path/hex content). Used by persistence
@@ -827,11 +889,14 @@ fn hash_file_with(path, algorithm): i64 {
 # ================================================================
 
 # Ed25519-signs `len` bytes at `data` with the 64-byte `secret_key` (seed || pk, as written
-# by generate_keypair). Returns a freshly alloc'd 64-byte signature.
+# by generate_keypair). Returns a freshly alloc'd 64-byte signature, or 0 if the key's public
+# half is not its seed's public key (ed25519_sign refuses; 3.13.1 — this used to return the
+# zeroed buffer as if it were a signature).
 fn sign_data(data, len, secret_key): i64 {
-    # secret_key is 64 bytes (seed || pk) from ed25519_keypair
+    var tmp[64];
+    if (ed25519_sign(secret_key, data, len, &tmp) != 0) { return 0; }
     var sig = alloc(64);
-    ed25519_sign(secret_key, data, len, sig);
+    memcpy(sig, &tmp, 64);
     return sig;
 }
 

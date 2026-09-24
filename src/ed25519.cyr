@@ -20,7 +20,7 @@ var _ed_B = 0;       # base point (128 bytes: X,Y,Z,T)
 var _ed_B_table = 0; # fixed-base table: 64 rows × 16 pts × 128B = 128KB
 var _ed_L = 0;       # group order (32 bytes)
 var _ed_sqrtm1 = 0;
-var _ed25519_inited = 0;
+var _ed25519_inited = 0;   # 0 = not built, 1 = being built, 2 = published (atomics only)
 
 # ================================================================
 # Point layout: 128 bytes = 4 x u256
@@ -465,61 +465,75 @@ fn ge_from_bytes(p, s): i64 {
 # Ed25519 initialization
 # ================================================================
 
-# Lazily build the read-only Ed25519 constants with bump `alloc`: d, 2d,
-# sqrt(-1), the group order L, the base point B, the 128 KB fixed-base comb
-# table, the (p-5)/8 exponent and 2^256 mod L. Idempotent, but the init flag is
-# not atomic — make the first call before spawning threads (sv_verify_batch
-# pre-warms it). Returns 0.
+# Lazily build the read-only Ed25519 constants with bump `alloc`: d, 2d, sqrt(-1), the group order
+# L, the base point B, the 128 KB fixed-base comb table, the (p-5)/8 exponent and 2^256 mod L.
+# Idempotent. Thread-safe (3.13.1): the first caller builds the tables under an atomic 0 -> 1 CAS
+# and publishes them (state 2); racing first callers wait for that. The flag used to be a plain
+# int, so a concurrent first call could read a half-filled table. Returns 0.
 fn ed25519_init(): i64 {
-    if (_ed25519_inited == 1) { return 0; }
-    _init_ed_p();
+    if (atomic_load(&_ed25519_inited) == 2) {
+        # Acquire: the table reads that follow must not pass this flag read. x86 (TSO) never
+        # reorders loads with loads, so the fence is needed on aarch64 only — this fast path
+        # runs on every field op (fp_add / fp_sub / fp_neg call _init_ed_p each time).
+        #ifdef CYRIUS_ARCH_AARCH64
+        atomic_fence();
+        #endif
+        return 0;
+    }
+    if (atomic_cas(&_ed25519_inited, 0, 1) == 1) {
+        _init_ed_p();
 
-    # Pre-computed constants (avoids expensive fp_pow at init)
+        # Pre-computed constants (avoids expensive fp_pow at init)
 
-    # d = -121665/121666 mod p
-    # = 0x52036cee2b6ffe738cc740797779e89800700a4d4141d8ab75eb4dca135978a3
-    _ed_d = u256_from_hex("52036cee2b6ffe738cc740797779e89800700a4d4141d8ab75eb4dca135978a3");
+        # d = -121665/121666 mod p
+        # = 0x52036cee2b6ffe738cc740797779e89800700a4d4141d8ab75eb4dca135978a3
+        _ed_d = u256_from_hex("52036cee2b6ffe738cc740797779e89800700a4d4141d8ab75eb4dca135978a3");
 
-    # 2*d
-    _ed_2d = alloc(32);
-    fp_add(_ed_2d, _ed_d, _ed_d);
+        # 2*d
+        _ed_2d = alloc(32);
+        fp_add(_ed_2d, _ed_d, _ed_d);
 
-    # sqrt(-1) mod p
-    # = 0x2b8324804fc1df0b2b4d00993dfbd7a72f431806ad2fe478c4ee1b274a0ea0b0
-    _ed_sqrtm1 = u256_from_hex("2b8324804fc1df0b2b4d00993dfbd7a72f431806ad2fe478c4ee1b274a0ea0b0");
+        # sqrt(-1) mod p
+        # = 0x2b8324804fc1df0b2b4d00993dfbd7a72f431806ad2fe478c4ee1b274a0ea0b0
+        _ed_sqrtm1 = u256_from_hex("2b8324804fc1df0b2b4d00993dfbd7a72f431806ad2fe478c4ee1b274a0ea0b0");
 
-    # L (group order)
-    _ed_L = u256_from_hex("1000000000000000000000000000000014def9dea2f79cd65812631a5cf5d3ed");
+        # L (group order)
+        _ed_L = u256_from_hex("1000000000000000000000000000000014def9dea2f79cd65812631a5cf5d3ed");
 
-    # Base point B: pre-computed extended coordinates
-    # B.y = 4/5 mod p = 0x6666...6658
-    # B.x = recovered from curve equation
-    # Encoded point (compressed): 5866666666666666666666666666666666666666666666666666666666666666
-    # X = 0x216936d3cd6e53fec0a4e231fdd6dc5c692cc7609525a7b2c9562d608f25d51a
-    # Y = 0x6666666666666666666666666666666666666666666666666666666666666658
-    _ed_B = alloc(128);
-    var Bx = u256_from_hex("216936d3cd6e53fec0a4e231fdd6dc5c692cc7609525a7b2c9562d608f25d51a");
-    var By = u256_from_hex("6666666666666666666666666666666666666666666666666666666666666658");
-    var Bz = u256_from(1);
-    var Bt = alloc(32);
-    fp_mul(Bt, Bx, By);
-    u256_copy(ge_x(_ed_B), Bx);
-    u256_copy(ge_y(_ed_B), By);
-    u256_copy(ge_z(_ed_B), Bz);
-    u256_copy(ge_t(_ed_B), Bt);
+        # Base point B: pre-computed extended coordinates
+        # B.y = 4/5 mod p = 0x6666...6658
+        # B.x = recovered from curve equation
+        # Encoded point (compressed): 5866666666666666666666666666666666666666666666666666666666666666
+        # X = 0x216936d3cd6e53fec0a4e231fdd6dc5c692cc7609525a7b2c9562d608f25d51a
+        # Y = 0x6666666666666666666666666666666666666666666666666666666666666658
+        _ed_B = alloc(128);
+        var Bx = u256_from_hex("216936d3cd6e53fec0a4e231fdd6dc5c692cc7609525a7b2c9562d608f25d51a");
+        var By = u256_from_hex("6666666666666666666666666666666666666666666666666666666666666658");
+        var Bz = u256_from(1);
+        var Bt = alloc(32);
+        fp_mul(Bt, Bx, By);
+        u256_copy(ge_x(_ed_B), Bx);
+        u256_copy(ge_y(_ed_B), By);
+        u256_copy(ge_z(_ed_B), Bz);
+        u256_copy(ge_t(_ed_B), Bt);
 
-    # Precomputed fixed-base table for signing/keypair/verify (2.3.0).
-    _build_ed_B_table();
+        # Precomputed fixed-base table for signing/keypair/verify (2.3.0).
+        _build_ed_B_table();
 
-    # (p-5)/8 exponent for ge_from_bytes square-root recovery.
-    _ed_decomp_exp = u256_from_hex("0ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffd");
+        # (p-5)/8 exponent for ge_from_bytes square-root recovery.
+        _ed_decomp_exp = u256_from_hex("0ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffd");
 
-    # R = 2^256 mod L for sc_reduce. Initialised here so the
-    # parallel-batch main-thread pre-warm in sv_verify_batch
-    # covers it (sc_reduce is called from ed25519_verify).
-    _scr_r256 = u256_from_hex("0ffffffffffffffffffffffffffffffec6ef5bf4737dcf70d6ec31748d98951d");
-
-    _ed25519_inited = 1;
+        # R = 2^256 mod L for sc_reduce. Initialised here so the
+        # parallel-batch main-thread pre-warm in sv_verify_batch
+        # covers it (sc_reduce is called from ed25519_verify).
+        _scr_r256 = u256_from_hex("0ffffffffffffffffffffffffffffffec6ef5bf4737dcf70d6ec31748d98951d");
+        atomic_fence();
+        atomic_store(&_ed25519_inited, 2);
+        return 0;
+    }
+    # Another thread is building the tables: wait for it to publish them.
+    while (atomic_load(&_ed25519_inited) != 2) { }
+    atomic_fence();
     return 0;
 }
 
@@ -606,10 +620,19 @@ fn sc_muladd(out, a, b, c): i64 {
     var prod[4096]; var prodb = &prod + bk * 64;   # 64 * SIGIL_CRYPTO_BANKS
     u256_mul_full(prodb, a, b);
 
-    # Add c to the 512-bit product (low 256 bits, propagate carry to high)
+    # Add c to the 512-bit product: low 256 bits, then the carry through limbs 4..7 — branch-free
+    # (the operands are secret). 3.13.1: the carry went into limb 4 only, so when limb 4 was all
+    # ones (~2^-67 per signature) it was lost and S came out wrong by 2^320 — an invalid
+    # signature, which verify rejects.
     var carry = u256_add(prodb, prodb, c);
-    if (carry > 0) {
-        store64(prodb + 32, load64(prodb + 32) + carry);
+    var li = 4;
+    while (li < 8) {
+        var v = load64(prodb + li * 8);
+        store64(prodb + li * 8, v + carry);
+        # the add wraps (carry out) only when carry is 1 and v was all ones, i.e. v + 1 == 0
+        var t = v + 1;
+        carry = carry & ((((t | (0 - t)) >> 63) & 1) ^ 1);
+        li = li + 1;
     }
 
     sc_reduce(out, prodb);
@@ -796,6 +819,20 @@ fn ed25519_verify(pk, msg, msg_len, sig): i64 {
 
     # RFC 8032 §5.1.7: if A fails to decode the signature is invalid.
     if (ge_from_bytes(Ab, pk) != 0) { return 0; }
+
+    # 3.13.1: refuse a small-order public key — one of the 8 torsion points, [8]A = identity —
+    # as libsodium does. RFC 8032's cofactorless check accepts it, and under such a key
+    # R = enc(B), S = 1 verifies ANY message. No honestly generated key is small-order
+    # (A = [a]B lies in the prime-order subgroup). The coordinates are canonical (< p), so
+    # the identity test is X == 0 and Y == Z. A is public, so branching here leaks nothing.
+    var T1[8192];      var T1b = &T1 + bk * 128;
+    var T2[8192];      var T2b = &T2 + bk * 128;
+    ge_double(T1b, Ab);
+    ge_double(T2b, T1b);
+    ge_double(T1b, T2b);
+    if (u256_is_zero(ge_x(T1b)) == 1) {
+        if (u256_cmp(ge_y(T1b), ge_z(T1b)) == 0) { return 0; }
+    }
 
     # h = SHA-512(R || pk || msg) mod L. Stack-allocated (banked)
     # SHA-512 context — sha512_init() would fl_alloc, which is not

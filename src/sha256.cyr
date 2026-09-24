@@ -400,7 +400,7 @@ fn sha256_finalize(ctx, out): i64 {
 # ================================================================
 
 # One-shot SHA-256: hashes `len` bytes at `data` and writes the 32-byte
-# digest to `out`. Allocates, drives, and frees a context internally.
+# digest to `out`. Runs on a banked per-cbank()-lane context — no allocator call.
 # Returns 0.
 fn sha256(data, len, out): i64 {
     # Banked one-shot (3.9.6): the ctx was `fl_alloc`'d, but `fl_alloc`

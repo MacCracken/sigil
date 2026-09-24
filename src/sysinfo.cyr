@@ -43,5 +43,5 @@ fn agnosys_uname(out): i64 {
     return Ok(out);
 }
 
-# Pointer to the release field within a uts buffer.
-fn uname_release(uts): i64 { return uts + UTS_RELEASE; }
+# uname_release(uts) comes from lib/sys.cyr, which sys_uname already requires (3.13.1: this
+# file carried an identical copy — cyrius 6.6.6 warns "duplicate fn ... last definition wins").
