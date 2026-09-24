@@ -11,5 +11,4 @@ process
 ct
 thread
 thread_local
-fmt
 str

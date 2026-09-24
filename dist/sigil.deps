@@ -6,13 +6,13 @@ alloc
 vec
 tagged
 syscalls
+io
 process
 slice
 assert
 freelist
 str
 hashmap
-io
 fs
 random
 result

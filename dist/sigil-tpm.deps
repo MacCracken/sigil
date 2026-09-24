@@ -5,10 +5,10 @@ fmt
 alloc
 vec
 syscalls
+io
 process
 freelist
 str
-io
 random
 result
 chrono

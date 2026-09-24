@@ -5,6 +5,132 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.13.0] - 2026-09-23
+
+### Security
+
+- **The LUKS key was left in `/tmp` after every `luks_format` / `luks_open`.** Its unlink sat
+  in a `defer`, and cyrius 6.6.0–6.6.6 skip a `defer` with no diagnostic when the fn returns a
+  value-form Result. `_luks_run_with_keyfile` now removes the keyfile on every exit and returns
+  `Err` if that unlink fails (other than ENOENT); `luks_write_keyfile` writes the whole key or
+  unlinks and fails. Issue:
+  `docs/development/issues/archive/2026-09-22-luks-keyfile-left-in-tmp-defer-skipped.md`.
+- **None of sigil's 8 `defer`s ever ran** — all sat in Result-returning fns, so
+  `luks_write_keyfile`, `tpm_seal`, `secureboot_read_efi_variable` and three IMA
+  readers/writers each leaked an fd per call. Every `defer` is removed; each exit path releases
+  explicitly. New `tests/tcyr/fd_hygiene.tcyr` (37 assertions, red 7/17 on the old code).
+- **Short writes.** New `agnosys_write_all(fd, buf, len)` loops until done (a 0-byte write is
+  -5); the LUKS keyfile and `tpm_seal` staging writes use it.
+- **`tpm_seal` staging file** is created fresh — stale path removed, then
+  `O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW`, mode 0600 — written in full, unlinked on failure.
+- **ECDSA signing leaked the nonce's bit length through timing** (Minerva / TPM-Fail class): the
+  ladder started at infinity and skipped work for every leading zero bit of `k`. It now ladders a
+  fixed 257 / 385 bits over `k + n` or `k + 2n`, picked by a constant-time mask
+  (`pt_scalarmul_secret`, `pt384_scalarmul_secret`). Signatures are byte-identical. Test:
+  `ecdsa_sign_timing.tcyr`.
+- **SGX / TDX quote and SEV-SNP report verify shared module-global scratch across threads**, so
+  a concurrent call could let a forged quote pass the AK-binding check.
+  `sgx_quote_verify_with_pck`, `tdx_quote_verify_with_pck` and `snp_report_verify` now use
+  per-call scratch. Not covered: `x509_verify_chain`'s `_xvl_digest` is still shared, so
+  `*_verify_full_into` is not yet safe to call concurrently. Test: `tee_verify_concurrent.tcyr`.
+- **`alog_save` wrote unescaped, unbounded JSONL**: a `"`, `\` or newline in a path injected
+  events that `alog_load` replayed as real, and a field over ~340 bytes overflowed its 512-byte
+  heap block. Lines are escaped and sized to fit; a torn final line is rejected. Test:
+  `audit_log.tcyr`.
+- **Loaders stopped at 64 KiB without saying so** — `alog_load`, `sv_load_trust_store`,
+  `rl_load` and `crl_load` read through a fixed 65,536-byte buffer. They read the whole file.
+- **`sv_verify_boot_chain` failed open** on unknown, revoked and unsigned components (and
+  mismatched duplicate paths, and overwrote the verifier's integrity policy). `allow_unsigned`
+  is now enforced on the verify path, signatures survive a trust-store save / load, and
+  `sv_verify_agent` / `sv_verify_package` audit the final outcome. Test: `verify_hardening.tcyr`.
+- **`keyring_validate_chain` never checked a signature** — any key claiming
+  `issued_by = <root>` validated. Every non-root link now needs its parent's Ed25519 signature
+  over a domain-separated issuance message; see **Breaking**. Test: `trust_hardening.tcyr`.
+- **Read errors were taken as EOF**: `hash_file` / `hash_file_into` / `hash_file_with` returned
+  the digest of the prefix on EISDIR / EIO (for a directory, SHA-256 of ""), and
+  `ima_read_measurements` parsed a partial log as complete. Both fail now.
+- **Ed25519.** `ge_from_bytes` enforces RFC 8032 §5.1.3 (non-canonical y, non-square x²,
+  x = 0 with the sign bit set); the old decoder let `R = B, S = 1` forgeries verify against
+  small-order and non-canonical keys. `ed25519_sign` re-derives `A = [a]B` and refuses if it is
+  not `sk[32..64]`, closing the double-public-key oracle that recovers the secret scalar. Test:
+  `ed25519_strict.tcyr`. Cost: see **Performance**.
+- **Secure Boot helpers exec'd tools out of the cwd.** `mokutil`, `kmodsign`, `modinfo` and `ls`
+  reached execve as bare names, and execve does no PATH search. They are now resolved to an
+  absolute path from a fixed trusted-directory list. Test: `secureboot_tools.tcyr`.
+- **`agnosys_run_capture` was unbounded and ignored the exit status**, so a missing or failing
+  `losetup` / `veritysetup` came back `Ok`. It now uses `agnosys_run_capture_timeout` and checks
+  the status. Test: `capture_bounded.tcyr`.
+- **The revocation / CRL JSONL readers parsed integers loosely**; header and entry numbers are
+  strict now. Test: `policy_hardening.tcyr`.
+- **ML-DSA-65 signing advanced ExpandMask's κ by 1 per attempt instead of ℓ = 5** (FIPS 204
+  Alg. 7), so a retry reused 4 of its 5 mask polynomials and any signature that needed a retry
+  differed from FIPS 204. Output is now byte-identical to OpenSSL 3.6.4 (`mldsa_kat.tcyr`).
+  Verify never sees the mask, so earlier signatures still verify. Also: the lazy NTT zetas init
+  is CAS-guarded, workspaces come from a 64-slot pool (the per-call mmap leaked on Windows), and
+  secret workspace state is wiped.
+- **GHASH and software AES branched on secret data** (`_ghash_mul`,
+  `_ghash_shift_right_and_reduce`, `_aes_xtime`), and with no CLMUL path every host ran it. Now a
+  branch-free 64-bit-word masked form. Test: `ghash_ct.tcyr`.
+- **IMA policy injection through `obj_type`.** `ima_rule_validate` never checked it: a newline
+  injected extra kernel policy rules (e.g. `dont_measure func=BPRM_CHECK`) and a long value
+  overflowed the 512-byte line. `obj_type` must be 1–255 bytes of `[A-Za-z0-9_.-]`, and the line
+  and policy buffers are sized to what they hold. Test: `ima_policy_rules.tcyr`.
+
+### Breaking
+
+- **`keyring_validate_chain` rejects a non-root key without a valid issuer signature.** Set every
+  child field (issued_by, role, validity, allowed types, publisher info), then call
+  `keyring_sign_issuance(parent_secret_key, child_kv)` (returns 1 when attached); changing a
+  signed field afterwards invalidates it. New: `kv_issuer_sig`, `kv_issuer_sig_len`,
+  `kv_set_issuer_sig`, `kv_issuance_message_len`, `kv_issuance_message_into`.
+- **`sv_verify_boot_chain` fails closed** on unknown / revoked / unsigned components, and an
+  unsigned artifact is refused unless the policy's `allow_unsigned` is set.
+- **`ed25519_sign` returns -1 with `sig_out` zeroed** when `sk[32..64]` is not the seed's public
+  key (0 on success).
+- **`hash_file` / `hash_file_into` / `hash_file_with` return 0 on a read error.**
+
+### Changed
+
+- **Toolchain `6.6.4` → `6.6.6`**; `cyrius.lock` refreshed (40 deps). The snapshot carries
+  sakshi 2.5.2 and bayan 1.5.6 (README corrected).
+- **No raw syscalls.** Every `syscall(N, …)` in `src/`, `tests/`, `fuzz/`, benches and
+  `programs/` now goes through the stdlib helpers (`sys_exit`, `sys_write`, `xunlink`,
+  `file_open`, `sys_uname`, …), and every numeric open flag is its per-target `O_*` name — `577`
+  / `1089` are x86_64-Linux values and drop `O_TRUNC` / `O_APPEND` on Darwin. One tracked
+  exception: `syscall(SYS_FCNTL, …)` in `src/sys_util.cyr` until cyrius ships `sys_fcntl`
+  (cyrius issue `2026-09-23-sigil-sys-fcntl-wrapper.md`).
+- **429 undocumented public fns documented** across 34 modules, which cyrius 6.6.6's
+  `cyrius doc --check` requires.
+- **CLAUDE.md:** two new hard rules — no raw syscalls; no `defer` in a Result-returning fn.
+  Quirk #1 citations and the 6.6.5+ warning text updated; quirk #7 rewritten (`alloc`
+  thread-safe since 6.0.64, `fl_alloc` since 6.5.19; `vec` / `hashmap` still not).
+- **Roadmap:** the `cbank()` retirement moves from 3.13.0 to 3.14.0.
+
+### Performance
+
+Same host, pin 6.6.6 on both sides — 3.12.18 rebuilt as the baseline (`benches/history.csv`
+blocks `v3.13.0-closeout` / `v3.13.0-baseline-3.12.18`):
+
+| Benchmark | 3.12.18 | 3.13.0 | |
+|---|---|---|---|
+| `aes_gcm_encrypt_1kb` | 719.503 µs | 65.577 µs | **11.0× faster** (word-wide GHASH) |
+| `aes_gcm_decrypt_1kb_valid` | 712.972 µs | 66.488 µs | 10.7× faster |
+| `aes_128_gcm_encrypt_1kb` | 710.729 µs | 64.653 µs | 11.0× faster |
+| `ed25519_sign` | 926.816 µs | 1.704 ms | **1.84× slower** — the `A = [a]B` re-derivation is one extra base-point multiply |
+| `mldsa65_sign` | 4.826 ms | 3.280 ms | 1.47× faster on the bench's one message; sign time is message-dependent and the κ fix changes which retries run, so not a general claim |
+| `ecdsa_p256_sign` | 13.097 ms | 13.185 ms | +0.7% (fixed-length ladder) |
+| `ecdsa_p384_sign` | 29.872 ms | 30.004 ms | +0.4% |
+
+Everything else, including RSA-2048 verify / sign and ECDSA P-256 / P-384 verify, is within ±3%
+(this host's noise).
+
+### Tests
+
+- 13 new files: `fd_hygiene`, `ima_policy_rules`, `ecdsa_sign_timing`, `tee_verify_concurrent`,
+  `audit_log`, `verify_hardening`, `trust_hardening`, `policy_hardening`, `ed25519_strict`,
+  `secureboot_tools`, `capture_bounded`, `mldsa_kat`, `ghash_ct`.
+- Suite **78 files, 2434 assertions, 0 failures**; fuzz 24 / 0.
+
 ## [3.12.18] - 2026-09-13
 
 ### Fixed
