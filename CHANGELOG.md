@@ -129,7 +129,7 @@ Everything else, including RSA-2048 verify / sign and ECDSA P-256 / P-384 verify
 - 13 new files: `fd_hygiene`, `ima_policy_rules`, `ecdsa_sign_timing`, `tee_verify_concurrent`,
   `audit_log`, `verify_hardening`, `trust_hardening`, `policy_hardening`, `ed25519_strict`,
   `secureboot_tools`, `capture_bounded`, `mldsa_kat`, `ghash_ct`.
-- Suite **78 files, 2434 assertions, 0 failures**; fuzz 24 / 0.
+- Suite **78 files, 2433 assertions, 0 failures**; fuzz 24 / 0.
 
 ## [3.12.18] - 2026-09-13
 
