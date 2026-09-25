@@ -26,6 +26,18 @@ check() {
 echo "=== Sigil Audit ==="
 echo ""
 
+# ── 0. Lock ──
+# The vendored lib/ must match cyrius.lock; a local edit to lib/ would otherwise run the
+# whole suite against code the lock does not describe. (`cyrius deps` re-vendors lib/ from
+# the pinned snapshot and refuses a lock that disagrees with it, cyrius >= 6.6.4.)
+echo "── Lock ──"
+if (cd "$ROOT" && cyrius deps --verify); then
+    check "cyrius.lock" 0
+else
+    check "cyrius.lock" 1
+fi
+echo ""
+
 # ── 1. Test Suite ──
 echo "── Test Suite ──"
 for tfile in "$ROOT"/tests/tcyr/*.tcyr; do

@@ -5,6 +5,149 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [3.13.2] - 2026-09-25
+
+The closeout pass that CLAUDE.md requires before the 3.14.0 minor (the `cbank()` retirement),
+the benchmark 3.13.1 shipped without, a release hook for `docs/development/state.md`, and a
+`cyrius.lock` gate. No behaviour change: the only source edit besides comments removes one
+private function nothing called.
+
+### Performance
+
+- **The benchmark 3.13.1 shipped without.** Measured as an interleaved A/B on one host at
+  pin 6.6.6, with 3.13.0 rebuilt from its tag as the baseline, two rounds
+  (`benches/history.csv` blocks `v3.13.1-issue-cleanup` / `v3.13.1-baseline-3.13.0`, from
+  round 1):
+
+  | Benchmark | 3.13.0 | 3.13.1 | Round 1 | Round 2 |
+  |---|---|---|---|---|
+  | `sha512_4kb` | 189.389 µs | 220.300 µs | +16.3% | +18.8% |
+  | `aes256_encrypt_block` | 21 ns | 11 ns | −47.6% | −45.0% |
+  | `aes128_key_expansion` | 719 ns | 745 ns | +3.6% | +4.1% |
+  | `ed25519_sign` | 1.824 ms | 1.875 ms | +2.8% | +3.8% |
+  | `ed25519_verify` | 5.414 ms | 5.486 ms | +1.3% | +3.8% |
+  | `ecdsa_p256_sign` | 13.856 ms | 14.007 ms | +1.1% | +1.4% |
+  | `ecdsa_p256_verify` | 10.350 ms | 10.557 ms | +2.0% | +2.9% |
+
+  - `sha512_4kb` is the message-schedule wipe on every block (L19). 3.13.1's entry estimated
+    +10–15%; it is +16–19%.
+  - `aes256_encrypt_block` halved in both rounds, but it is below the timer's resolution
+    (the harness marks it UNRESOLVED), so no cause is claimed.
+  - 3.13.1 predicted small costs for `ed25519_verify` (three extra doublings, the
+    small-order check) and `ecdsa_p256_sign` (one hash and five field multiplies, the
+    blinding). Both measured larger than that, at +1–4%, which is close to this host's
+    noise. No cause is claimed for `ed25519_sign`, `aes128_key_expansion` or
+    `ecdsa_p256_verify` either.
+  - `aes_gcm_encrypt_1kb` / `aes_gcm_decrypt_1kb_valid` moved +1.6% to +7.4%. Everything
+    else is within ±3% in round 1. Round 2's 3.13.0 run was faster than round 1's across the
+    board, so round 2's deltas lean positive.
+- **Against the `v3.13.0-closeout` rows, everything reads 4–7% slower**, including code
+  3.13.1 never touched (`sha256_64b_ni` 522 → 548 ns, `hex_encode_32b` 156 → 166 ns). 3.13.0
+  rebuilt the same day reads the same way (`sha256_4kb` 13.014 µs against its own closeout's
+  12.192 µs), so that gap is the host, not the code.
+- 3.13.2 changes no code a benchmark runs, so these numbers stand for it too.
+
+### Changed
+
+- **Closeout pass** (CLAUDE.md § "Closeout Pass"), ahead of 3.14.0:
+  - Full suite: 78 files, 2610 assertions, 0 failures; fuzz 24 / 0.
+  - Clean build from an empty `build/`: `cyrius deps`, `cyrius deps --verify` (40 verified,
+    0 failed), and the smoke binary builds and runs. It is 623,976 B with `CYRIUS_DCE=1` and
+    1,553,768 B without, the same as 3.13.1 built the same way.
+  - All 14 bundles regenerated after the version bump; `cyrius distlib --check` reports
+    every one current, and `cyrius doc --check dist/sigil.cyr` reports 0 undocumented.
+  - Dead code: removed `_ecdsa_der_int` (`src/ecdsa_p256.cyr`), the P-256 wrapper around
+    `_ecdsa_der_int_w` that lost its last caller when 3.13.1 moved the DER signature
+    wrappers to `_ecdsa_der_int_strict`. It was the only private function with no caller in
+    `src/`, `tests/`, `programs/` or `fuzz/`. The 90 public functions with no in-repo caller
+    are exported API and stay.
+  - Stale comments: `src/sysinfo.cyr`'s header said aarch64 was out of scope; since 3.12.18
+    it goes through `sys_uname`, which covers Linux on both architectures, macOS and agnos.
+    `src/dmverity.cyr`'s hand-written serializer now points at the roadmap item that tracks
+    it.
+  - Security re-scan (grep): no `sys_system` / `exec_cmd`, no `defer`, no raw syscall but
+    the tracked `SYS_FCNTL` pair, no numeric open flags, and no non-constant-time compare
+    on secret data. All 50 hand-written byte counts passed next to a string literal
+    (`sys_write`, `file_write`, `memcpy`, `memeq`) match the literal's length.
+  - `secret var` arrays: three, all in key generation (`ed25519_keypair`,
+    `ed25519_generate_keypair`, `generate_keypair`). Re-probed under 6.6.6 they are per-call:
+    four non-tail recursion depths got four stack addresses 112 B apart, and two threads got
+    addresses ~2 MiB apart. CLAUDE.md's 3.9.7 caveat that they are shared statics was
+    measured under 6.3.5, before cyrius 6.3.15 moved array locals to the stack.
+  - One pre-existing note, not changed: the public `json_write_escaped` ignores
+    `file_write` failures. Nothing in `src/` calls it (the save paths escape into a string
+    builder).
+  - Downstream: the eight consumers in state.md, each built and tested from a
+    `git archive` copy in a scratch directory (the consumer repos were not touched). None
+    is on sigil 3.13.x yet, and none takes `lib/sigil.cyr` from a sigil release directly:
+    cyrius's stdlib snapshot copy wins over a same-named `[deps.sigil]` (the 6.6.6
+    snapshot carries 3.12.18, 6.6.2's carries 3.12.16). So 3.13.2 was put into a scratch
+    `CYRIUS_HOME`, and each consumer was compared on one toolchain.
+    - daimon, kavach, ark, aegis, mela and stiva: the same build and test results on
+      3.12.18 and 3.13.2 at pin 6.6.6 (daimon 17 / 17, stiva 6 / 6, the others 1 / 1).
+      kavach fails one assertion on both; it checks that the working copy is not under
+      `/tmp`, and the scratch copy was.
+    - The five consumers pinned to cyrius 6.6.2 (ark, aegis, phylax, mela, stiva) cannot
+      take sigil 3.12.18 or later without moving to 6.6.6. At 6.6.2 `O_NOFOLLOW` (a stdlib
+      symbol since 6.6.4) and `file_read_whole` (used since 3.13.1) are missing: ark and
+      mela fail to build, and aegis and stiva build with those calls compiled as traps.
+    - phylax and argonaut also take sigil pieces through libro, which pins its own sigil
+      (libro 2.10.0: 3.12.9; 2.10.3: 3.12.18). A 3.13.x `lib/sigil.cyr` next to libro's
+      3.12.9 `sigil-mldsa.cyr` does not compile — the `_mldsa_sv_*` arities changed at
+      3.13.0 — so phylax (18 / 18 on 3.12.18) needs a libro release on sigil 3.13.x
+      first. argonaut uses only libro's pieces and is unaffected until then (33 / 33).
+    - The same on both versions: all five 6.6.2-pinned consumers compile `sys_uname` as
+      undefined, because the opt-in `sys` module the README requires since 3.12.18 is not
+      in their stdlib lists. On 3.13.2, aegis and stiva also lack `uname_release`, which
+      3.13.1 left to `lib/sys.cyr`. Both calls trap if reached (the Secure Boot
+      kernel-version read).
+- **`docs/development/state.md` has a release hook.** CLAUDE.md says one keeps state.md
+  current, but none existed: nothing in `scripts/` or `.github/` touched the file, and its
+  fields drifted three times (3.9.0–3.9.5, 3.9.6–3.11.0, 3.12.0–3.12.1). New
+  `scripts/state-sync.sh`:
+  - `--check` (the default, run by CI's lint job) exits 1 naming each stale field.
+  - `--write` rewrites what the repo owns: version, pin, release date (from the CHANGELOG
+    heading), the sakshi / bayan versions (from `lib/`), and the `.tcyr` / fuzz file counts.
+  - `--write --count` also runs every `.tcyr` file and fuzz harness and writes the
+    assertion totals. It writes nothing if any of them fails.
+  - Prose is not generated. `--check` fails until the Phase row and the top "Recently
+    shipped" row name the current version, so they have to be written before a release.
+  - Tested under dash and mawk, which Ubuntu CI uses, including a failing-suite run that
+    leaves state.md untouched.
+- **`cyrius.lock` gate.** CI's build job and `scripts/check.sh` run `cyrius deps --verify`.
+  The roadmap item this closes, "`cyrius.lock` no longer self-refreshes", was already fixed
+  upstream in cyrius 6.6.4. Checked on sigil's manifest in a scratch copy:
+  - A pin change re-locked by itself (17 hashes moved).
+  - A one-digit edit to the lock made `cyrius deps` exit 1 naming both hashes, without
+    re-locking.
+  - A one-byte edit to a `lib/` file failed `--verify`.
+- **Roadmap:**
+  - The `cyrius.lock` item is closed.
+  - The closeout prerequisite for 3.14.0 is marked done.
+  - The 4.0 removal of `verification_result_new` / `trusted_artifact_new` /
+    `trust_check_new` (decided at 3.2.0) is tracked again under "Towards v4.0". The section
+    `src/verify.cyr` points to had dropped out of the roadmap.
+  - The `#derive(Serialize)` item names both hand-written serializers.
+  - The CLMUL-GHASH item's AES-GCM figure is corrected: ~690 µs until 3.13.0, ~66 µs since.
+  - "Open audit findings" lists the one open LOW (L23, the IMA issue) instead of none.
+- **state.md:**
+  - The in-flight table's `cbank()` row said 3.13.0 and linked a roadmap anchor that no
+    longer exists; it says 3.14.0 now.
+  - The drift note is replaced with a description of the hook.
+  - The carried-forward backlog list matches the roadmap again. It still named the
+    TDX/SGX in-quote PCK chain walk (found shipped at 3.8.0) and retire-bank-indexing
+    (folded into 3.14.0), and it was missing the items opened since 3.12.8.
+  - The audit floor lists the open LOW (L23) instead of zero.
+- **CHANGELOG:** the empty `[Unreleased]` heading left between 3.12.15 and 3.12.14 is back
+  at the top.
+
+### Tests
+
+- No new `.tcyr` files. Suite **78 files, 2610 assertions, 0 failures**; fuzz
+  24 / 0.
+
 ## [3.13.1] - 2026-09-23
 
 Cleanup of the eight issues filed at 3.13.0 (`docs/development/issues/archive/2026-09-23-*`).
@@ -112,7 +255,8 @@ One item stays open, since it needs a host with IMA enabled:
 - **Pending follow-up (for the next agent):** 3.13.1 shipped without a clean benchmark. When
   the host is idle, run `CYRIUS_DCE=1 cyrius bench tests/bcyr/sigil.bcyr`, plus
   `tests/bcyr/{rsa,ecdsa_p256,ecdsa_p384}.bcyr`. Compare against the `v3.13.0-closeout` rows,
-  then append a `v3.13.1-issue-cleanup` block to `benches/history.csv`.
+  then append a `v3.13.1-issue-cleanup` block to `benches/history.csv`. **Done in 3.13.2** —
+  see its Performance section.
 
 ### Tests
 
@@ -381,8 +525,6 @@ Everything else, including RSA-2048 verify / sign and ECDSA P-256 / P-384 verify
   the ~30 transitively-present files outside it had drifted and had to be refreshed explicitly.
 - All **14** bundles regenerated (monolith + 13 profiles), each with its own `cyrius distlib`
   call — passing several names to one invocation does not regenerate them all.
-
-## [Unreleased]
 
 ## [3.12.14] — 2026-08-28 — the subprocess guard covers Windows too, not only agnos
 

@@ -49,6 +49,11 @@ jobs:
           echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
       - name: Resolve deps
         run: cyrius deps
+      - name: Verify cyrius.lock
+        # `cyrius deps` above already refuses a lock that disagrees with the pinned stdlib
+        # snapshot, and re-locks by itself on a pin change (cyrius >= 6.6.4). This step
+        # also proves the vendored lib/ matches the lock byte for byte.
+        run: cyrius deps --verify
       - name: Build smoke
         run: |
           mkdir -p build
@@ -148,6 +153,12 @@ jobs:
             esac
           done
           [ $fail -eq 0 ] || { echo "lint: warnings present"; exit 1; }
+      - name: state.md in sync
+        # The docs/development/state.md release hook (3.13.2). Fails when a field that
+        # VERSION, cyrius.cyml, CHANGELOG.md, lib/ or the test tree owns has drifted, or
+        # when the Phase / "Recently shipped" prose does not name the current version.
+        # Fix with `sh scripts/state-sync.sh --write --count` and hand-write the prose.
+        run: sh scripts/state-sync.sh --check
       - name: Doc coverage (bundle API)
         # The single-file `dist/sigil.cyr` bundle is what downstream
         # consumers — and the main Cyrius language, once sigil is

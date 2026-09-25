@@ -1807,11 +1807,6 @@ fn _ecdsa_der_int_w(src, off, src_len, dst, fw): i64 {
     return off + 2 + raw_len;   # consume the original encoded length
 }
 
-# P-256 (32-byte field) wrapper — preserves the original contract.
-fn _ecdsa_der_int(src, off, src_len, dst): i64 {
-    return _ecdsa_der_int_w(src, off, src_len, dst, 32);
-}
-
 # Decode one DER INTEGER at src[off] into the `fw`-byte big-endian `dst`, accepting only the
 # canonical DER encoding (X.690 §8.3): short-form length, content inside [off, end),
 # non-negative (the first content byte's high bit clear) and minimal (a leading 0x00 only when

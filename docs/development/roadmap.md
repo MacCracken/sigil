@@ -79,7 +79,7 @@ the job on the **symmetric and EC** scratch and then deletes the mechanism.
 **Prerequisite:** CLAUDE.md's closeout pass runs before any minor bump and ships
 as the **last 3.13.x patch** — full suite, benchmark baseline vs
 `benches/history.csv`, dead-code audit, stale-comment sweep, security re-scan,
-downstream check, docs sync, clean build.
+downstream check, docs sync, clean build. **Ran at 3.13.2** — see CHANGELOG `[3.13.2]`.
 
 **Not a vulnerability.** Exposure is materially lower than RSA's was: a lane
 collision in symmetric/EC scratch yields a corrupted digest or a failed
@@ -128,9 +128,10 @@ footprint and API-surface work, and it is scheduled rather than urgent.
 
 - [ ] **Switch hand-rolled JSON serializers to `#derive(Serialize)`** once
       cyrius's `#derive(Serialize)` supports cstring-pointer fields.
-      `certpin_info_to_json` (`src/certpin_core.cyr`) is hand-rolled *only*
-      because the derive macro cannot yet emit cstring-pointer fields; drop the
-      hand-rolled path and re-`#derive` the type when the toolchain gains it.
+      `certpin_info_to_json` (`src/certpin_core.cyr`) and `dmverity_status_to_json`
+      (`src/dmverity.cyr`) are hand-rolled *only* because the derive macro cannot yet
+      emit cstring-pointer fields; drop the hand-rolled paths and re-`#derive` the
+      types when the toolchain gains it. (Until 3.13.2 this item named only the first.)
       Gated on cyrius. Re-check on each toolchain bump.
 
 - [x] ~~**Retire the per-thread bank-indexing workaround** if cyrius gains a
@@ -160,9 +161,11 @@ footprint and API-surface work, and it is scheduled rather than urgent.
       3.12.2's `src/mul64.cyr` showed a leaf `asm{}` block needs no such pseudo, so
       the question is now whether *GHASH specifically* needs global-symbol access
       (it may, for a precomputed H-table — unlike a leaf multiply, which needs
-      none). Not yet investigated. AES-GCM 1 KB still sits ~690 µs after AES-NI,
-      with GHASH (bit-by-bit GF(2^128) multiply) dominating; PCLMULQDQ/VPCLMULQDQ
-      closes the gap, same byte-encoding pattern as the SHA-NI/AES-NI dispatchers.
+      none). Not yet investigated. This item was written when AES-GCM 1 KB sat at
+      ~690 µs with a bit-by-bit GF(2^128) GHASH; 3.13.0's branch-free word-wide GHASH
+      took it to ~66 µs (`v3.13.0-closeout`: 65.577 µs), so the win left for
+      PCLMULQDQ/VPCLMULQDQ is much smaller than it was. Same byte-encoding pattern as
+      the SHA-NI/AES-NI dispatchers.
       **Unlike the multiply, PCLMULQDQ IS an optional ISA extension**, so it needs
       the full CPUID probe + self-test + dispatch machinery that `mul64.cyr` was
       able to skip.
@@ -210,15 +213,18 @@ see **[Planned — 3.14.0](#planned--3140--retire-cbank)** above.
       ([`2026-08-14-3.12.8-err-namespace-toolchain-audit.md`](../audit/2026-08-14-3.12.8-err-namespace-toolchain-audit.md))
       re-established the practice but **explicitly does not cover that range**.
       Whether to run a retroactive pass is not decided here.
-- [ ] **`cyrius.lock` no longer self-refreshes — sigil has zero git deps.**
-      `cmd_deps_lock()` (cyrius `cbt/deps.cyr:1916`) writes the lock only when
-      `cyrius deps` actually copied a dep. Since sakshi moved into
-      `[deps].stdlib` at 3.12.7 nothing is ever copied, so the lock silently
-      drifts against `lib/` on every toolchain bump and must be hand-refreshed
-      (as it was at 3.12.8: 10 of 107 hashes). For a trust-verification library
-      a tamper-detection record that stops tracking its own inputs deserves an
-      upstream fix in cyrius — either lock-on-`lib sync`, or lock the resolved
-      stdlib snapshot. Not actioned; the fix could land in cyrius `cbt/deps.cyr` or as a sigil-side check.
+- [x] ~~**`cyrius.lock` no longer self-refreshes — sigil has zero git deps.**~~
+      **CLOSED at 3.13.2 — fixed upstream in cyrius 6.6.4; sigil now gates on it.**
+      The complaint was that `cmd_deps_lock()` wrote the lock only when `cyrius deps`
+      copied a git dep, so a stdlib-only project's lock drifted on every toolchain bump.
+      cyrius 6.6.4 changed both halves: the lock carries a `cyrius <pin>` trailer and is
+      re-written when the pin changes, and under an unchanged pin `cyrius deps` refuses a
+      stdlib leaf whose snapshot hash disagrees with the lock (it compares against the
+      pinned snapshot, not `lib/`). Checked on sigil's own manifest in a scratch copy: a
+      pin change re-locked by itself (17 hashes moved); a one-digit edit to the lock made
+      `cyrius deps` exit 1 naming both hashes, without re-locking; a one-byte edit to a
+      `lib/` file failed `cyrius deps --verify`. CI's build job and `scripts/check.sh`
+      now run `cyrius deps --verify`.
 - [ ] **3.12.7's CHANGELOG assertion count (1,730) does not reproduce.**
       Measured at 3.12.8 two independent ways — `scripts/check.sh` and CLAUDE.md's
       canonical per-file `cyrius test` loop — both give **1,665 across 65 files**,
@@ -232,7 +238,22 @@ see **[Planned — 3.14.0](#planned--3140--retire-cbank)** above.
       AGNOS consumer needs key agreement. (ML-DSA-65 PQC sign ships
       default-on since 3.7.6.)
 
-**Open audit findings — NONE.** 3.12.2's audit found 1 HIGH (the
+**Towards v4.0** (decided, not scheduled)
+
+- [ ] **Remove the heap-allocating trust constructors** — `verification_result_new`,
+      `trusted_artifact_new`, `trust_check_new`. Decided at 3.2.0 (CHANGELOG `[3.2.0]`,
+      "Deprecation note (4.0 target)"): they stay for backward compatibility, and 4.0 removes
+      them in favour of in-place scratch-slot writes (the `_init`-into-slot pattern).
+      `src/verify.cyr` points here from above `sv_verify_artifact`. This section had dropped
+      out of the roadmap, which left that pointer dangling and the deferral untracked;
+      restored at 3.13.2. No 4.0 is scheduled.
+
+**Open audit findings — one LOW.** L23 from the 3.13.0 list: `ima_get_status`'s
+`policy_loaded` may read backwards on kernels built without `CONFIG_IMA_WRITE_POLICY`. It
+needs a host with IMA enabled before the logic changes — the dev host's kernel has
+`CONFIG_IMA` unset. See
+[`issues/2026-09-23-ima-policy-loaded-needs-ima-host.md`](issues/2026-09-23-ima-policy-loaded-needs-ima-host.md).
+The rest of that list was fixed at 3.13.1. Earlier: 3.12.2's audit found 1 HIGH (the
 `authenticode_pe_sign` pad-in-hash defect), 1 LOW and 4 hardenings — **all fixed
 in the same release**, none carried forward. See
 [`docs/audit/2026-07-30-3.12.2-asm-multiply-authenticode-verify-audit.md`](../audit/2026-07-30-3.12.2-asm-multiply-authenticode-verify-audit.md).

@@ -122,7 +122,8 @@ fn dmverity_status_new(name, is_active, is_verified, corruption_detected, root_h
 }
 
 # Hand-rolled JSON serializer (mirrors #derive(Serialize) shape;
-# replace when cyrius cstring-pointer Serialize lands).
+# replace when cyrius cstring-pointer Serialize lands — see docs/development/roadmap.md
+# backlog "switch hand-rolled JSON serializers to #derive(Serialize)").
 fn dmverity_status_to_json(s, sb): i64 {
     str_builder_add_cstr(sb, "{\"name\":");
     agnosys_json_emit_cstr_or_null(sb, dmverity_status_name(s));
