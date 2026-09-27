@@ -296,6 +296,10 @@ fn main(): i64 {
 > above and the crash disappears. (This was the 3.7.8 fix; see
 > `docs/development/issues/archive/2026-06-09-cyrius-6120-rebreaks-ni-paths-sigill.md`.)
 
+`lib/sys.cyr` (`sys_uname` / `uname_release`, the Secure Boot kernel-version read) is
+**not** on that list: since 3.13.3 the bundle includes it itself, so a hand-written include
+list does not need it.
+
 Requires **cyrius ≥ 6.4.65** (`thread_local_alloc`; `lib/thread_local.cyr`
 itself shipped in 6.0.52).
 

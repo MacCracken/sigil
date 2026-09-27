@@ -1,0 +1,97 @@
+# errno_peer.tcyr — sigil uses the PLATFORM's EAGAIN, and its uname path is
+# self-sufficient.
+#
+# 3.13.3. src/sys_error.cyr declared a global `EAGAIN = 11`. cyrius resolves a
+# redeclared enum name program-wide ("last definition wins"), so on macOS every
+# consumer that included sigil after lib/syscalls.cyr had Darwin's EAGAIN (35)
+# rewritten to Linux's 11 — its own code included. sigil now leaves the name to
+# the platform peer, and its one EAGAIN check (the bounded-capture drain in
+# src/sys_util.cyr, which was the literal -11) compares against it.
+#
+# The same release makes src/sysinfo.cyr include lib/sys.cyr, where `sys_uname`
+# and `uname_release` live. This file deliberately does NOT include lib/sys.cyr,
+# so it compiles only if sysinfo.cyr brings it in.
+#
+# Every check is the same on Linux and macOS: the ground truth is what the
+# kernel actually returns for an empty non-blocking read, compared with EAGAIN.
+
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/string.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fs.cyr"
+include "lib/fmt.cyr"
+include "lib/chrono.cyr"
+include "lib/tagged.cyr"
+include "lib/result.cyr"
+include "lib/process.cyr"
+
+include "src/sys_error.cyr"
+include "src/sys_util.cyr"
+include "src/sysinfo.cyr"
+
+fn main() {
+    alloc_init();
+
+    test_group("EAGAIN is the platform peer's");
+    #ifdef CYRIUS_TARGET_MACOS
+    assert_eq(EAGAIN, 35, "macOS: EAGAIN is Darwin's 35, not overridden by sigil");
+    #endif
+    #ifdef CYRIUS_TARGET_LINUX
+    assert_eq(EAGAIN, 11, "Linux: EAGAIN is 11");
+    #endif
+
+    # Ground truth: an empty non-blocking pipe read returns -EAGAIN on this kernel.
+    var pipefd[16];
+    assert_eq(sys_pipe(&pipefd), 0, "pipe");
+    var rfd = load32(&pipefd);
+    var wfd = load32(&pipefd + 4);
+    var fl = syscall(SYS_FCNTL, rfd, 3, 0);
+    syscall(SYS_FCNTL, rfd, 4, fl | O_NONBLOCK);
+    var probe[16];
+    var n = sys_read(rfd, &probe, 8);
+    assert_eq(n, 0 - EAGAIN, "an empty non-blocking read returns -EAGAIN");
+    sys_close(rfd);
+    sys_close(wfd);
+
+    test_group("sigil's errno mapping");
+    var wb_t, wb_v = sigil_err_would_block();
+    assert_eq(is_err_result(wb_t), 1, "would_block is Err");
+    assert_eq(syserr_kind(wb_v), SIGIL_ERR_WOULD_BLOCK, "kind is WOULD_BLOCK");
+    assert_eq(syserr_errno(wb_v), EAGAIN, "and carries the platform EAGAIN");
+    var fe_t, fe_v = sigil_err_from_syscall_ret(n);
+    assert_eq(syserr_kind(fe_v), SIGIL_ERR_WOULD_BLOCK,
+      "the kernel's own would-block return maps to WOULD_BLOCK");
+
+    test_group("bounded capture drains past an empty poll");
+    # The child writes only after the drain's first reads have come back empty,
+    # so the loop must treat the kernel's would-block return as "nothing yet".
+    # On macOS the old literal -11 ended the drain there and closed the pipe, so
+    # the child died of SIGPIPE and the capture came back Err.
+    var late = vec_new();
+    vec_push(late, "/bin/sh");
+    vec_push(late, "-c");
+    vec_push(late, "sleep 0.3; echo sigil");
+    var cbuf = alloc(256);
+    var lt, lv = agnosys_run_capture_timeout(late, cbuf, 255, 5000, "late");
+    assert_eq(is_err_result(lt), 0, "a child that writes late returns Ok");
+    assert_eq(lv, 6, "and all of its stdout was captured");
+    assert_eq(memeq(cbuf, "sigil", 5), 1, "the captured bytes are the child's");
+
+    test_group("uname without a hand-listed lib/sys.cyr");
+    var uts = alloc(UTS_SIZE);
+    var ut, uv = agnosys_uname(uts);
+    assert_eq(is_err_result(ut), 0, "agnosys_uname is Ok");
+    var rel = uname_release(uts);
+    assert(load8(rel) != 0, "uname_release is non-empty");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+sys_exit(exit_code);

@@ -8,6 +8,15 @@
 # on Linux (x86_64 and aarch64), macOS (utsname synthesised from sysctl) and agnos; on
 # Windows sys_uname is ENOSYS and agnosys_uname returns Err. Requires sys_error.cyr
 # (sigil_err_from_syscall_ret / Ok).
+#
+# 3.13.3: includes lib/sys.cyr itself. `sys_uname` and `uname_release` both live there, and
+# before this a consumer with a hand-written include list (lib/sigil.cyr without lib/sys.cyr,
+# as cyrius's own lib/tls_native.cyr has) had both undefined: cyrius 6.6.6 refuses the build
+# when the uname path is reachable (Linux, Mach-O), and on agnos / PE compiles trap stubs.
+# The UtsOffset / UtsConst enums below match lib/sys.cyr's value for value, so redeclaring
+# them is silent.
+
+include "lib/sys.cyr"
 
 # AGNOS uname#34: 64-byte struct, four 16-byte NUL-padded fields. Linux utsname:
 # six 65-byte fields (390 B).

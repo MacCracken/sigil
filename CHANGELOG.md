@@ -7,6 +7,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.13.3] - 2026-09-27
+
+Three fixes, found while preparing the cyrius 6.6.7 fold of `lib/sigil.cyr`.
+Public API unchanged. Pin stays 6.6.6.
+
+### Fixed
+
+- **sigil no longer overrides the platform's `EAGAIN`.** `src/sys_error.cyr` declared a
+  global `EAGAIN = 11` in its `Errno` enum. cyrius resolves a redeclared enum name
+  program-wide with "last definition wins", so on macOS any program that included sigil
+  after `lib/syscalls.cyr` had Darwin's `EAGAIN` (35) replaced by Linux's 11, in its own
+  code too. cyrius 6.6.6 warns about it on both Mach-O targets (`duplicate symbol 'EAGAIN'
+  redefined with conflicting value`). The name now comes from the platform peer on Linux
+  and macOS. The Windows and agnos peers declare no `EAGAIN`, so sigil still defines it
+  there (as 11) and the constant stays available on every target.
+- **`agnosys_run_capture_timeout` drained only one poll on macOS.** Its would-block test
+  was the literal `-11`. Darwin's empty non-blocking read returns `-35`, which fell into
+  the "real read error" arm: the drain stopped on its first empty poll and closed the
+  pipe, so a child that wrote later died of SIGPIPE and the capture came back `Err`. The
+  test is now `0 - EAGAIN`. Every capture goes through this function:
+  `agnosys_run_capture`, `agnosys_capture_n`, `tpm_run_capture_timeout`, and the luks and
+  dm-verity captures.
+- **`src/sysinfo.cyr` includes `lib/sys.cyr` itself.** `agnosys_uname` calls `sys_uname`,
+  and the Secure Boot kernel-version read calls `uname_release`, and both live there.
+  Before this, a consumer whose include list had `lib/sigil.cyr` without `lib/sys.cyr`
+  (cyrius's `lib/tls_native.cyr` is one) was left with both undefined. cyrius 6.6.6
+  refuses that build on Linux and Mach-O, and compiles trap stubs on agnos and PE. The
+  bundle now carries `include "lib/sys.cyr"`, and `src/sys_error.cyr` includes
+  `lib/syscalls.cyr` for `EAGAIN`. `dist/sigil.deps` lists the same 26 leaves as before;
+  only their order changed. The README "Usage" section says `lib/sys.cyr` is not needed
+  in a hand-written list.
+
+### Tests
+
+- New `tests/tcyr/errno_peer.tcyr` (12 assertions). It checks that `EAGAIN` is 11 on Linux
+  and 35 on macOS, and compares it with what the kernel returns for an empty non-blocking
+  pipe read. It checks that `sigil_err_would_block` and `sigil_err_from_syscall_ret` map
+  that return to `SIGIL_ERR_WOULD_BLOCK`, and that a capture whose child writes after
+  300 ms returns all six bytes. It deliberately does not include `lib/sys.cyr`, so it only
+  builds if `src/sysinfo.cyr` includes it. Suite: **2622 / 0 across 79 files** on x86_64
+  and **2613 / 0** cross-built for aarch64 under qemu (`cyrius test --aarch64`); the
+  9-assertion gap is the same x86 CPU-feature-gated set as 3.13.2.
+
+### Verification
+
+- **The bundle builds on six targets** with the 6.6.6 toolchain: x86_64 Linux, aarch64
+  Linux, agnos, PE, x86_64 Mach-O and arm64 Mach-O. The probe includes the `sigil.deps`
+  leaves without `lib/sys.cyr`, and every target builds with no undefined function and no
+  `EAGAIN` redefinition. The 3.13.2 bundle, built the same way, fails with a reachable
+  undefined `sys_uname` on x86_64 Linux, aarch64 Linux and both Mach-O targets. It also
+  warns `duplicate symbol 'EAGAIN'` on both Mach-O targets.
+- **The probe was run on real macOS hardware**: ecb (macOS arm64) and ach (macOS x86_64).
+  To isolate `EAGAIN`, the 3.13.2 build added `lib/sys.cyr` by hand. It failed 5 of 9 checks
+  on both hosts:
+  - `EAGAIN` was 11.
+  - The kernel returned -35.
+  - That return mapped to `SIGIL_ERR_SYSCALL_FAILED`, not `WOULD_BLOCK`.
+  - The late-writer capture returned `Err`.
+  The 3.13.3 bundle passes 9 of 9 on both hosts. The probe also passes on x86_64 Linux,
+  on aarch64 under qemu, and on PE under wine, where `EAGAIN` is sigil's 11. agnos was
+  compile-checked only.
+
 ## [3.13.2] - 2026-09-25
 
 The closeout pass that CLAUDE.md requires before the 3.14.0 minor (the `cbank()` retirement),

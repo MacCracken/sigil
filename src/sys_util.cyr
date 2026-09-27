@@ -187,6 +187,11 @@ fn agnosys_run_capture_timeout(args, buf, buflen, timeout_ms, errmsg): i64 {
     # replaces is Linux's value; Darwin's O_NONBLOCK is 4 and 2048 there is O_EXCL,
     # which F_SETFL ignores — so on macOS the pipe stayed BLOCKING and a silent
     # child could hold the "bounded" drain in read(2) past its deadline.
+    # 3.13.3: the would-block test below is `0 - EAGAIN` (the platform peer's value), not
+    # the literal -11. Darwin's empty non-blocking read is -35, which fell into the
+    # "real read error" arm: the drain stopped on its first empty poll and closed the pipe,
+    # so a child that wrote later died of SIGPIPE and the capture came back Err (measured
+    # on macOS arm64 and x86_64).
     var fl = syscall(SYS_FCNTL, rfd, 3, 0);          # F_GETFL
     syscall(SYS_FCNTL, rfd, 4, fl | O_NONBLOCK);     # F_SETFL |= O_NONBLOCK
 
@@ -201,7 +206,7 @@ fn agnosys_run_capture_timeout(args, buf, buflen, timeout_ms, errmsg): i64 {
             var n = sys_read(rfd, buf + total, buflen - total);
             if (n > 0) { total = total + n; }
             elif (n == 0) { draining = 0; }              # EOF: child closed stdout
-            elif (n == 0 - 11) { sleep_ms(5); }          # EAGAIN: nothing yet
+            elif (n == 0 - EAGAIN) { sleep_ms(5); }      # nothing yet (EAGAIN: 11 Linux, 35 macOS)
             else { draining = 0; }                        # a real read error
         }
     }
