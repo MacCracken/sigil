@@ -4,13 +4,12 @@ syscalls
 sys
 alloc
 freelist
+str
 string
 vec
 io
 fmt
 result
-process
-str
 sigil
 chrono
 ct

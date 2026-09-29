@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.13.4] - 2026-09-28
+
+⛔ **Tag this release before cyrius 6.6.10 is tagged** — cyrius 6.6.10 folds it as
+`lib/sigil.cyr`. One fix, found during cyrius 6.6.10. Public API unchanged. Pin moves
+**6.6.6 → 6.6.9** (the released toolchain; `cyrius.lock` follows).
+
+### Fixed
+
+- **A subprocess deadline ends the child's whole tree, not only its pid.**
+  `agnosys_run_capture_timeout` and `agnosys_run_checked_timeout` (`src/sys_util.cyr`)
+  SIGKILLed only the pid they forked, on all three kill paths (the capture drain's
+  deadline and both bounded reaps). Anything the tool had started itself was reparented to
+  init and kept running past the deadline: a shell's background job in the test, a
+  `cryptsetup` / `veritysetup` / tpm2 helper in production, which under kybernet as PID 1
+  outlived the boot step that had given up on it. The child now calls `setsid()` between
+  fork and execve, so it leads a process group that its descendants inherit, and the new
+  `_agnosys_kill_tree` SIGKILLs that group (`kill(-pid)`) and then the pid. A descendant
+  that leaves the group on purpose (its own `setsid`) is still out of reach, as with any
+  process-group kill. The same defect was fixed in cyrius 6.6.10's stdlib and CLI.
+
+### Changed
+
+- The agnos refusal note in `agnosys_run_capture_timeout` is corrected (from cyrius 6.6.10
+  bite 13): agnos has had `fork` since 1.56.55 and a wait status since 1.57.7. What it lacks
+  is `execve`, `dup2`, a three-argument `waitpid`, `WNOHANG` and `SYS_FCNTL`, so the refusal
+  stays. The note names cyrius's `lib/process_agnos.cyr` `exec_capture_status` as the port
+  target.
+
+### Tests
+
+- New `tests/tcyr/subprocess_tree.tcyr` (5 assertions; agnos and Windows report the refusal).
+  - **Capture row:** a shell records its background child's pid and waits, under a 500 ms
+    deadline. The result is `Err`, and the background child is gone.
+  - **Checked row:** a background subshell would write a marker about 1 s after a 300 ms
+    deadline. The result is `Err`, and the marker never appears.
+  - **Mutation run:** with `_agnosys_kill_tree` reduced to `sys_kill(pid, SIGKILL)`, both
+    rows fail.
+- Suite: **2627 / 0 across 80 files** on x86_64 (6.6.9 toolchain). The new file also
+  passes as aarch64 under qemu (`cyrius test --aarch64`), on real macOS arm64 (ecb) and on
+  Intel macOS (ach).
+
+### Verification
+
+- **The bundle builds on six targets** with the 6.6.9 toolchain, with no undefined function
+  or error: x86_64 Linux, aarch64 Linux, agnos, PE, x86_64 Mach-O and arm64 Mach-O. The
+  probe includes the `sigil.deps` leaves.
+- **All 14 bundles were regenerated and are reproducible:** a second `cyrius distlib` pass
+  is byte-identical. `dist/sigil.deps` is unchanged. All 13 profile sidecars recompute their
+  leaf sets under 6.6.9, because its stdlib modules include their own definers since 6.6.9.
+  Each profile bundle still builds from its own sidecar leaves alone (x86_64, 6.6.9).
+
 ## [3.13.3] - 2026-09-27
 
 Three fixes, found while preparing the cyrius 6.6.7 fold of `lib/sigil.cyr`.

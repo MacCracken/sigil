@@ -1,0 +1,162 @@
+# subprocess_tree.tcyr — a sigil subprocess deadline ends the child's WHOLE TREE, not its pid.
+#
+# 3.13.4. `agnosys_run_capture_timeout` and `agnosys_run_checked_timeout` SIGKILLed only the pid
+# they forked, so whatever that tool had started itself (a shell's background job here; a
+# `cryptsetup` helper in production) was reparented to init and kept running past the deadline.
+# The child now calls setsid() before execve and the deadline SIGKILLs its process GROUP.
+#   capture  a shell that records its background child's pid and waits, under a 500 ms bound
+#            -> Err, and that background child is gone
+#   checked  a shell whose background subshell would write a marker ~1 s later, 300 ms bound
+#            -> Err, and the marker never appears
+# POSIX only (Linux, macOS): agnos and Windows refuse both helpers, and the file reports that.
+# MUTATION (run): `_agnosys_kill_tree` reduced to `sys_kill(pid, SIGKILL)` -> both rows RED.
+
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/string.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fs.cyr"
+include "lib/fmt.cyr"
+include "lib/bayan.cyr"
+include "lib/sakshi.cyr"
+include "lib/chrono.cyr"
+include "lib/tagged.cyr"
+include "lib/process.cyr"
+include "lib/slice.cyr"
+include "lib/sys.cyr"
+
+include "lib/thread_local.cyr"
+include "src/crypto_scratch.cyr"
+include "src/mul64.cyr"
+include "src/types.cyr"
+include "src/error.cyr"
+include "lib/random.cyr"
+include "src/random.cyr"
+include "src/sha256.cyr"
+include "src/hex.cyr"
+include "lib/ct.cyr"
+include "src/hmac.cyr"
+include "src/sha512.cyr"
+include "src/bigint_ext.cyr"
+include "src/ed25519.cyr"
+include "src/sys_error.cyr"
+include "src/sys_util.cyr"
+include "src/sysinfo.cyr"
+include "src/certpin_core.cyr"
+include "src/tpm_core.cyr"
+include "src/ima_core.cyr"
+include "src/secureboot_core.cyr"
+include "src/luks.cyr"
+include "src/dmverity.cyr"
+
+
+fn argv3(a0, a1, a2): i64 {
+    var v = vec_new();
+    vec_push(v, a0);
+    vec_push(v, a1);
+    vec_push(v, a2);
+    return v;
+}
+
+# `pre` + `mid` + `post` as one cstr.
+fn cat3(pre, mid, post): i64 {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, pre);
+    str_builder_add_cstr(sb, mid);
+    str_builder_add_cstr(sb, post);
+    return str_data(str_builder_build(sb));
+}
+
+# The decimal number in file `path` (0 when unreadable).
+fn read_num(path): i64 {
+    var fd = file_open(path, O_RDONLY, 0);
+    if (fd < 0) { return 0; }
+    var b[32];
+    var n = sys_read(fd, &b, 31);
+    file_close(fd);
+    var v = 0;
+    var i = 0;
+    while (i < n && load8(&b + i) >= 48 && load8(&b + i) <= 57) { v = v * 10 + load8(&b + i) - 48; i = i + 1; }
+    return v;
+}
+
+# 1 when `p` is a zombie (Linux /proc; 0 elsewhere). A killed orphan waits there for a PID 1
+# that, in a container, may never reap it — kill(p, 0) still succeeds on a zombie.
+fn is_zombie(p): i64 {
+    #ifdef CYRIUS_TARGET_LINUX
+    var path = cat3("/proc/", str_data(str_from_int(p)), "/stat");
+    var fd = file_open(path, O_RDONLY, 0);
+    if (fd < 0) { return 0; }
+    var b[512];
+    var n = sys_read(fd, &b, 511);
+    file_close(fd);
+    var i = n - 1;
+    while (i > 0 && load8(&b + i) != 41) { i = i - 1; }
+    if (i <= 0 || i + 2 >= n) { return 0; }
+    var st = load8(&b + i + 2);
+    if (st == 90 || st == 88) { return 1; }
+    #endif
+    return 0;
+}
+
+# 1 once `p` has ended (gone, or a zombie), waiting up to 3 s.
+fn ended(p): i64 {
+    var k = 0;
+    while (k < 150) {
+        if (sys_kill(p, 0) != 0) { return 1; }
+        if (is_zombie(p) == 1) { return 1; }
+        sleep_ms(20);
+        k = k + 1;
+    }
+    return 0;
+}
+
+fn main(): i64 {
+    alloc_init();
+    #ifndef CYRIUS_TARGET_AGNOS
+    #ifndef CYRIUS_TARGET_WIN
+    var cbuf = alloc(4096);
+    var pidf = cat3("sigil_tree_pid.", str_data(str_from_int(sys_getpid())), "");
+    var mark = cat3("sigil_tree_mark.", str_data(str_from_int(sys_getpid())), "");
+    sys_unlink(pidf);
+    sys_unlink(mark);
+
+    test_group("agnosys_run_capture_timeout ends the tree");
+    var c_tag, c_v = agnosys_run_capture_timeout(
+      argv3("/bin/sh", "-c", cat3("sleep 30 & echo $! > ", pidf, "; wait")), cbuf, 4095, 500, "tree");
+    assert_eq(is_err_result(c_tag), 1, "capture: the deadline is Err");
+    var bg = read_num(pidf);
+    assert(bg > 0, "capture: premise — the shell recorded its background child");
+    if (bg > 0) {
+        assert_eq(ended(bg), 1, "capture: the shell's background child was ended too");
+        sys_kill(bg, SIGKILL);
+    }
+
+    test_group("agnosys_run_checked_timeout ends the tree");
+    var k_tag, k_v = agnosys_run_checked_timeout(
+      argv3("/bin/sh", "-c", cat3("(sleep 1; echo x > ", mark, ") & wait")), 300, "tree");
+    assert_eq(is_err_result(k_tag), 1, "checked: the deadline is Err");
+    sleep_ms(2500);
+    assert_eq(file_exists(mark), 0, "checked: the background subshell never wrote its marker");
+    sys_unlink(pidf);
+    sys_unlink(mark);
+    #endif
+    #endif
+    #ifdef CYRIUS_TARGET_AGNOS
+    test_group("agnos refuses subprocess capture");
+    assert(1 == 1, "nothing to end: the helpers are refused on agnos");
+    #endif
+    #ifdef CYRIUS_TARGET_WIN
+    test_group("windows refuses subprocess capture");
+    assert(1 == 1, "nothing to end: the helpers are refused on windows");
+    #endif
+    return assert_summary();
+}
+
+var exit_code = main();
+sys_exit(exit_code);

@@ -5,6 +5,7 @@ string
 fmt
 alloc
 vec
+tagged
 io
 process
 freelist
