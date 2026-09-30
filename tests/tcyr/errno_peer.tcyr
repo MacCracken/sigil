@@ -14,6 +14,13 @@
 #
 # Every check is the same on Linux and macOS: the ground truth is what the
 # kernel actually returns for an empty non-blocking read, compared with EAGAIN.
+#
+# 3.13.5. The same defect for eight more names: sigil declared ENOSYS, ENOTEMPTY,
+# ENODATA, EOVERFLOW, EOPNOTSUPP, EADDRINUSE, ECONNREFUSED and ETIMEDOUT with
+# their Linux values on every target, and the macOS peer declares none of them,
+# so on Darwin every consumer read the Linux number (ENOSYS 38 is Darwin's
+# ENOTSOCK; ENODATA 61 is Darwin's ECONNREFUSED). They are now per-target. One
+# row per name on each platform, plus the kernel's own answer for ENOTEMPTY.
 
 include "lib/assert.cyr"
 include "lib/alloc.cyr"
@@ -67,6 +74,48 @@ fn main() {
     var fe_t, fe_v = sigil_err_from_syscall_ret(n);
     assert_eq(syserr_kind(fe_v), SIGIL_ERR_WOULD_BLOCK,
       "the kernel's own would-block return maps to WOULD_BLOCK");
+
+    test_group("the Darwin-divergent errno names carry the platform's values");
+    #ifdef CYRIUS_TARGET_MACOS
+    assert_eq(ENOSYS, 78, "macOS: ENOSYS is 78 (38 is Darwin's ENOTSOCK)");
+    assert_eq(ENOTEMPTY, 66, "macOS: ENOTEMPTY is 66");
+    assert_eq(ENODATA, 96, "macOS: ENODATA is 96 (61 is Darwin's ECONNREFUSED)");
+    assert_eq(EOVERFLOW, 84, "macOS: EOVERFLOW is 84");
+    assert_eq(EOPNOTSUPP, 102, "macOS: EOPNOTSUPP is 102");
+    assert_eq(EADDRINUSE, 48, "macOS: EADDRINUSE is 48");
+    assert_eq(ECONNREFUSED, 61, "macOS: ECONNREFUSED is 61");
+    assert_eq(ETIMEDOUT, 60, "macOS: ETIMEDOUT is 60");
+    #endif
+    #ifdef CYRIUS_TARGET_LINUX
+    assert_eq(ENOSYS, 38, "Linux: ENOSYS is 38");
+    assert_eq(ENOTEMPTY, 39, "Linux: ENOTEMPTY is 39");
+    assert_eq(ENODATA, 61, "Linux: ENODATA is 61");
+    assert_eq(EOVERFLOW, 75, "Linux: EOVERFLOW is 75");
+    assert_eq(EOPNOTSUPP, 95, "Linux: EOPNOTSUPP is 95");
+    assert_eq(EADDRINUSE, 98, "Linux: EADDRINUSE is 98");
+    assert_eq(ECONNREFUSED, 111, "Linux: ECONNREFUSED is 111");
+    assert_eq(ETIMEDOUT, 110, "Linux: ETIMEDOUT is 110");
+    #endif
+
+    # Ground truth: rmdir of a non-empty directory returns -ENOTEMPTY on this kernel.
+    # The scratch directory is relative (the test's own working tree), never a fixed /tmp name.
+    var dpath = ".sigil_errno_peer_dir";
+    var fpath = ".sigil_errno_peer_dir/f";
+    sys_unlink(fpath);
+    sys_rmdir(dpath);
+    assert_eq(sys_mkdir(dpath, 448), 0, "mkdir a scratch directory");
+    var ffd = file_open(fpath, O_WRONLY | O_CREAT, 420);
+    assert(ffd >= 0, "create a file inside it");
+    file_close(ffd);
+    assert_eq(sys_rmdir(dpath), 0 - ENOTEMPTY, "rmdir of a non-empty directory returns -ENOTEMPTY");
+    sys_unlink(fpath);
+    assert_eq(sys_rmdir(dpath), 0, "and succeeds once it is empty");
+
+    # sigil's own mapping reads the same names.
+    var ns_t, ns_v = sigil_err_from_errno(ENOSYS);
+    assert_eq(syserr_kind(ns_v), SIGIL_ERR_NOT_SUPPORTED, "the platform ENOSYS maps to NOT_SUPPORTED");
+    var nn_t, nn_v = sigil_err_not_supported_nr();
+    assert_eq(syserr_errno(nn_v), ENOSYS, "and a not-supported Err carries the platform ENOSYS");
 
     test_group("bounded capture drains past an empty poll");
     # The child writes only after the drain's first reads have come back empty,

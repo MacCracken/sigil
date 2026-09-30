@@ -195,6 +195,30 @@ fn main() {
         assert_eq(is_err_result(ra_tag), 1, "no IMA log -> Err");
     }
 
+    # 3.13.5 (SA1). Both subprocess helpers used their argv/envp allocs unchecked, so a
+    # refused alloc was stored through address 0 and the process died of SIGSEGV. The refusal
+    # is driven by an argv vector whose header claims 2^32 elements: `(argc + 1) * 8` is far
+    # past ALLOC_MAX, so the global allocator refuses it deterministically. The vector's one
+    # real element is never reached, because the check returns before the store loop and
+    # before any pipe or fork. (agnos and Windows refuse the whole call before the alloc.)
+    test_group("a refused argv alloc is Err, not SIGSEGV");
+    var huge = alloc(24);
+    var hdata = alloc(8);
+    store64(hdata, "/bin/true");
+    store64(huge, hdata);
+    store64(huge + 8, 0x100000000);
+    store64(huge + 16, 0x100000000);
+    var hc_t, hc_v = agnosys_run_capture_timeout(huge, cbuf, 255, 1000, "refused capture");
+    assert_eq(is_err_result(hc_t), 1, "agnosys_run_capture_timeout: a refused argv alloc is Err");
+    var hk_t, hk_v = agnosys_run_checked_timeout(huge, 1000, "refused checked run");
+    assert_eq(is_err_result(hk_t), 1, "agnosys_run_checked_timeout: a refused argv alloc is Err");
+    #ifndef CYRIUS_TARGET_AGNOS
+    #ifndef CYRIUS_TARGET_WIN
+    assert_eq(syserr_errno(hc_v), ENOMEM, "and the capture's Err carries ENOMEM");
+    assert_eq(syserr_errno(hk_v), ENOMEM, "and the checked run's Err carries ENOMEM");
+    #endif
+    #endif
+
     return assert_summary();
 }
 

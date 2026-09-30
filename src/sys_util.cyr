@@ -173,7 +173,11 @@ fn agnosys_run_capture_timeout(args, buf, buflen, timeout_ms, errmsg): i64 {
     var tmo = timeout_ms;
     if (tmo <= 0) { tmo = AGNOSYS_CAPTURE_DEFAULT_TIMEOUT_MS; }
 
+    # 3.13.5 — both allocs are checked BEFORE the pipe and the fork, so a refusal leaks no fd
+    # and starts no child. Unchecked, a refused argv was stored through address 0 and the
+    # process died of SIGSEGV instead of getting an Err.
     var argv = alloc((argc + 1) * 8);
+    if (argv == 0) { return sigil_err_syscall_failed(ENOMEM, errmsg); }
     var avi = 0;
     while (avi < argc) {
         store64(argv + avi * 8, vec_get(args, avi));
@@ -181,6 +185,7 @@ fn agnosys_run_capture_timeout(args, buf, buflen, timeout_ms, errmsg): i64 {
     }
     store64(argv + argc * 8, 0);
     var envp = alloc(8);
+    if (envp == 0) { return sigil_err_syscall_failed(ENOMEM, errmsg); }
     store64(envp, 0);
 
     var pipefd[16];
@@ -319,7 +324,9 @@ fn agnosys_run_checked_timeout(args, timeout_ms, errmsg): i64 {
     var tmo = timeout_ms;
     if (tmo <= 0) { tmo = AGNOSYS_CAPTURE_DEFAULT_TIMEOUT_MS; }
 
+    # 3.13.5 — both allocs are checked before the fork (see agnosys_run_capture_timeout).
     var argv = alloc((argc + 1) * 8);
+    if (argv == 0) { return sigil_err_syscall_failed(ENOMEM, errmsg); }
     var avi = 0;
     while (avi < argc) {
         store64(argv + avi * 8, vec_get(args, avi));
@@ -327,6 +334,7 @@ fn agnosys_run_checked_timeout(args, timeout_ms, errmsg): i64 {
     }
     store64(argv + argc * 8, 0);
     var envp = alloc(8);
+    if (envp == 0) { return sigil_err_syscall_failed(ENOMEM, errmsg); }
     store64(envp, 0);
 
     var pid = sys_fork();

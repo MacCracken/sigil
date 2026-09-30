@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.13.5] - 2026-09-30
+
+⛔ **Tag this release before cyrius 6.6.12 is tagged** — cyrius 6.6.12 folds it as
+`lib/sigil.cyr`. Two fixes, found during cyrius 6.6.12 (bite B13, items SA1 and SA4).
+Public API unchanged. The toolchain pin stays **6.6.9**.
+
+### Fixed
+
+- **The eight errno names whose values differ on Darwin now carry the Darwin values
+  there.** `src/sys_error.cyr` declared `ENOSYS`, `ENOTEMPTY`, `ENODATA`, `EOVERFLOW`,
+  `EOPNOTSUPP`, `EADDRINUSE`, `ECONNREFUSED` and `ETIMEDOUT` with their Linux values on
+  every target, and cyrius's macOS peer declares none of them, so sigil alone supplied them
+  program-wide on macOS — to sigil and to every consumer that reads the names. Eight were
+  wrong there: ENOSYS 38 (Darwin 78; 38 is `ENOTSOCK`), ENOTEMPTY 39 (66), ENODATA 61 (96;
+  61 is Darwin's `ECONNREFUSED`), EOVERFLOW 75 (84), EOPNOTSUPP 95 (102), EADDRINUSE 98
+  (48), ECONNREFUSED 111 (61), ETIMEDOUT 110 (60). Inside sigil, `sigil_err_from_errno`
+  misclassified a real Darwin ENOSYS and every packed not-supported Err carried 38. They
+  are now declared per target (`#ifdef CYRIUS_TARGET_MACOS`, BSD values from the macOS SDK
+  `sys/errno.h`), the same move 3.13.3 made for `EAGAIN`. Every other name in `Errno`
+  already has the same value on both. Linux, Windows and agnos values are unchanged.
+- **A refused argv/envp alloc in the subprocess helpers is an Err, not a SIGSEGV.**
+  `agnosys_run_capture_timeout` and `agnosys_run_checked_timeout` (`src/sys_util.cyr`)
+  used both allocs unchecked, so a refused alloc was stored through address 0. Each alloc
+  is now checked before the pipe and the fork (no fd leaks, no child starts) and returns
+  `sigil_err_syscall_failed(ENOMEM, errmsg)`. The body only runs on POSIX targets; agnos
+  and Windows refuse the call before it.
+
+### Tests
+
+- `tests/tcyr/errno_peer.tcyr`: one row per Darwin-divergent name on macOS and on Linux,
+  the kernel's own `-ENOTEMPTY` for rmdir of a non-empty directory, and sigil's ENOSYS
+  mapping (26 assertions, was 12). Cross-built for Mach-O and run on ecb (macOS arm64) and
+  ach (macOS x86_64): 26/0 on both; with 3.13.4's `sys_error.cyr` it fails 9 of 26 on
+  both hosts.
+- `tests/tcyr/capture_bounded.tcyr`: a refused argv alloc (an argv vector whose header
+  claims 2^32 elements, past `ALLOC_MAX`) comes back Err carrying ENOMEM from both helpers.
+  Without the fix the test dies of SIGSEGV. Passes on x86_64, ecb and ach.
+- Suite **2645/0 across 80 files** (2627 at 3.13.4).
+
+### Changed
+
+- `dist/` regenerated (the fold carriers `sigil.cyr`, `sigil-tpm.cyr` and
+  `sigil-secureboot.cyr` change; the rest change only their `# Version:` header).
+
 ## [3.13.4] - 2026-09-28
 
 ⛔ **Tag this release before cyrius 6.6.10 is tagged** — cyrius 6.6.10 folds it as
