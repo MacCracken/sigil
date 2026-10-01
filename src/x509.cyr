@@ -70,6 +70,12 @@ var X509_SIG_RSA_SHA256      = 2;
 var X509_SIG_RSA_SHA384      = 3;
 var X509_SIG_ECDSA_SHA384    = 4;   # P-384 chain-link issuers (3.6.7)
 var X509_SIG_ED25519         = 5;   # Ed25519 leaf / self-signed certs (RFC 8410, 3.7.9)
+var X509_SIG_RSA_SHA512      = 6;   # PKCS#1 v1.5 with SHA-512 (3.13.6; D-TRUST 2023, Certum)
+# PKCS#1 v1.5 with SHA-1 (3.13.6): PARSED, NEVER VERIFIED. SHA-1 has practical chosen-prefix
+# collisions, so `_x509_verify_link` refuses any link signed with it. The value exists so a root
+# that is merely SELF-signed with SHA-1 parses and can serve as a trust anchor, whose own
+# signature RFC 5280 §6.1 never checks. Before 3.13.6 such roots failed x509_parse outright.
+var X509_SIG_RSA_SHA1        = 7;
 
 # Public-key type enum stored in X509Cert.curve (the slot doubles as a
 # key-type discriminant). P-256 / P-384 are EC affine points held in the
@@ -184,6 +190,8 @@ var _oid_eku_any           = 0;   # CVE-17: anyExtendedKeyUsage 2.5.29.37.0
 var _oid_rsa_encryption    = 0;
 var _oid_sha256_with_rsa   = 0;
 var _oid_sha384_with_rsa   = 0;
+var _oid_sha512_with_rsa   = 0;   # 3.13.6
+var _oid_sha1_with_rsa     = 0;   # 3.13.6 — parsed only, never verified (see X509_SIG_RSA_SHA1)
 var _oid_ed25519           = 0;
 var _x509_oids_inited      = 0;
 
@@ -214,6 +222,10 @@ fn _x509_oids_init(): i64 {
     _oid_sha256_with_rsa   = _build_oid("2a864886f70d01010b", 18);
     # 9-byte content for sha384WithRSAEncryption: 2A 86 48 86 F7 0D 01 01 0C
     _oid_sha384_with_rsa   = _build_oid("2a864886f70d01010c", 18);
+    # 9-byte content for sha512WithRSAEncryption: 2A 86 48 86 F7 0D 01 01 0D
+    _oid_sha512_with_rsa   = _build_oid("2a864886f70d01010d", 18);
+    # 9-byte content for sha1WithRSAEncryption:   2A 86 48 86 F7 0D 01 01 05
+    _oid_sha1_with_rsa     = _build_oid("2a864886f70d010105", 18);
     # 3-byte content for id-Ed25519 (1.3.101.112): 2B 65 70 (RFC 8410 §3)
     _oid_ed25519           = _build_oid("2b6570", 6);
     # CVE-17: 3-byte content for extendedKeyUsage 2.5.29.37: 55 1D 25
@@ -338,7 +350,8 @@ fn x509_cert_is_ca(c): i64         { return load64(c + 216); }
 # basicConstraints pathLenConstraint, or -1 when absent.
 fn x509_cert_path_len(c): i64      { return load64(c + 224); }
 # This cert's signature algorithm as an X509_SIG_* value (the TBS and outer
-# AlgorithmIdentifiers are required to match at parse time).
+# AlgorithmIdentifiers are required to match at parse time). X509_SIG_RSA_SHA1
+# parses but is never verified: such a cert can only be a trust anchor.
 fn x509_cert_sig_algo(c): i64      { return load64(c + 192); }
 # Subject key type as an X509_CURVE_* tag: P256, P384, RSA or ED25519.
 fn x509_cert_curve(c): i64         { return load64(c + 232); }
@@ -583,11 +596,12 @@ fn _xp_init(): i64 {
 }
 
 # Parse a signatureAlgorithm AlgorithmIdentifier at `pos`. Recognizes
-# ecdsa-with-SHA256, sha256WithRSAEncryption, sha384WithRSAEncryption.
-# Writes the matched X509_SIG_* enum to *out_algo and returns the next
-# position; -1 on unknown algo / malformed. The parameters field handling
-# differs by family: ECDSA omits it (NULL tolerated), RSA PKCS#1 (RFC
-# 4055 §2.1) REQUIRES an explicit NULL.
+# ecdsa-with-SHA256/384, sha256/384/512WithRSAEncryption, id-Ed25519 and
+# (3.13.6) sha1WithRSAEncryption — the last parsed only, never verified (see
+# X509_SIG_RSA_SHA1). Writes the matched X509_SIG_* enum to *out_algo and
+# returns the next position; -1 on unknown algo / malformed. The parameters
+# field handling differs by family: ECDSA omits it (NULL tolerated), RSA
+# PKCS#1 (RFC 4055 §2.1) REQUIRES an explicit NULL.
 fn _xp_parse_sig_algid(buf, buf_len, pos, out_algo): i64 {
     _x509_oids_init();
     var content_pos = 0;
@@ -618,9 +632,15 @@ fn _xp_parse_sig_algid(buf, buf_len, pos, out_algo): i64 {
                         # id-Ed25519 (RFC 8410 §6): no parameters; the absent-params path
                         # below accepts it (rsa_null_required stays 0).
                         algo = X509_SIG_ED25519;
-                    } else {
-                        return 0 - 1;
-                    } } } } }
+                    } else { if (_oid_eq(buf, oid_cp, oid_len, _oid_sha512_with_rsa, 9) == 1) {
+                            algo = X509_SIG_RSA_SHA512;
+                            rsa_null_required = 1;
+                        } else { if (_oid_eq(buf, oid_cp, oid_len, _oid_sha1_with_rsa, 9) == 1) {
+                                algo = X509_SIG_RSA_SHA1;
+                                rsa_null_required = 1;
+                            } else {
+                                return 0 - 1;
+                            } } } } } } }
 
     # Parameters: if present, must be NULL (zero-length). ECDSA omits it
     # (RFC 5758 §3.2); RSA PKCS#1 requires the explicit NULL be present.
@@ -960,8 +980,7 @@ fn x509_parse_into(der, der_len, out_cert, arena): i64 {
     cur = s_np;
 
     # signature (inner) — AlgorithmIdentifier. Must match the outer sig
-    # algo (checked below). Accepts ecdsa-with-SHA256 or RSA PKCS#1
-    # SHA-256/384.
+    # algo (checked below). Accepts what `_xp_parse_sig_algid` recognizes.
     var inner_algo = 0;
     var inner_algo_next = _xp_parse_sig_algid(der, der_len, cur, &inner_algo);
     if (inner_algo_next < 0) { return 0; }
@@ -1155,9 +1174,11 @@ fn _x509_dn_eq(buf_a, off_a, len_a, buf_b, off_b, len_b): i64 {
 #     INDEPENDENTLY — so all four {P-256,P-384} × {SHA-256,SHA-384}
 #     combos verify, off-diagonal links included (FIPS 186-4 §6.4 maps
 #     the digest to the scalar via the leftmost-bits rule).
-#   • RSA-SHA256/384 (3.6.5) → rsa_pkcs1v15_verify_sha{256,384} against
+#   • RSA-SHA256/384 (3.6.5) and RSA-SHA512 (3.13.6) →
+#     rsa_pkcs1v15_verify_sha{256,384} / _rsa_pkcs1v15_verify_sha512 against
 #     the issuer's RSA (n, e) (issuer must be X509_CURVE_RSA). Real AMD
-#     ARK/ASK links are RSA-4096 + SHA-384.
+#     ARK/ASK links are RSA-4096 + SHA-384; D-TRUST's 2023 hierarchy is SHA-512.
+#   • RSA-SHA1 → refused, always: a SHA-1 signature is never verified.
 # The ECDSA path hashes the TBS here and feeds the digest; the RSA path
 # hashes the raw TBS bytes internally. The digest buffer is a per-call stack
 # local: through 3.13.0 it was one module-global shared by every caller, so two
@@ -1216,6 +1237,19 @@ fn _x509_verify_link(child, issuer_cert): i64 {
         return rsa_pkcs1v15_verify_sha384(rblk, load64(rblk + 528),
           rblk + 512, load64(rblk + 536), der_ptr + tbs_off, tbs_len, sig_addr, sig_len);
     }
+
+    if (algo == X509_SIG_RSA_SHA512) {
+        if (x509_cert_curve(issuer_cert) != X509_CURVE_RSA) { return 0; }
+        var rblk = x509_cert_rsa_pubkey(issuer_cert);
+        if (rblk == 0) { return 0; }
+        return _rsa_pkcs1v15_verify_sha512(rblk, load64(rblk + 528),
+          rblk + 512, load64(rblk + 536), der_ptr + tbs_off, tbs_len, sig_addr, sig_len);
+    }
+
+    # SHA-1 (3.13.6): parsed so a SHA-1-self-signed ROOT can be a trust anchor, but never verified
+    # — a link signed with it is refused even when the signature is genuine. Spelled out rather
+    # than left to the fall-through below, so that adding a SHA-1 arm has to delete this line.
+    if (algo == X509_SIG_RSA_SHA1) { return 0; }
 
     # Ed25519 chain-link (RFC 8410). The issuer's 32-byte key sits in the
     # 96-byte pubkey slot; the signature is the raw 64-byte BIT STRING value.

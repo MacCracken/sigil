@@ -136,6 +136,18 @@ fn _rsa_di_sha384(buf): i64 {
     return 19;
 }
 
+# SHA-512 (2.16.840.1.101.3.4.2.3). 3.13.6: X.509 links signed sha512WithRSAEncryption.
+fn _rsa_di_sha512(buf): i64 {
+    store8(buf + 0, 0x30);  store8(buf + 1, 0x51);  store8(buf + 2, 0x30);
+    store8(buf + 3, 0x0d);  store8(buf + 4, 0x06);  store8(buf + 5, 0x09);
+    store8(buf + 6, 0x60);  store8(buf + 7, 0x86);  store8(buf + 8, 0x48);
+    store8(buf + 9, 0x01);  store8(buf + 10, 0x65); store8(buf + 11, 0x03);
+    store8(buf + 12, 0x04); store8(buf + 13, 0x02); store8(buf + 14, 0x03);
+    store8(buf + 15, 0x05); store8(buf + 16, 0x00); store8(buf + 17, 0x04);
+    store8(buf + 18, 0x40);
+    return 19;
+}
+
 # EMSA-PKCS1-v1.5 encode (RFC 8017 §9.2): write EM = 0x00 01 PS 00 T
 # into `out` (k bytes), where T = prefix || hash and PS is (k - 3 -
 # |T|) bytes of 0xFF (>= 8 required). Returns 0, or -1 if k is too
@@ -247,6 +259,19 @@ fn rsa_pkcs1v15_verify_sha384(n_be, n_len, e_be, e_len, msg, msg_len, sig, sig_l
     sha384(msg, msg_len, rh);
     var pl = _rsa_di_sha384(rd);
     return _rsa_pkcs1v15_check(n_be, n_len, e_be, e_len, rd, pl, rh, 48, sig, sig_len);
+}
+
+# Verify an RSASSA-PKCS1-v1.5 signature over SHA-512(msg). Private (3.13.6): its only caller is
+# X.509 chain-link verification (`_x509_verify_link`), for links signed sha512WithRSAEncryption.
+fn _rsa_pkcs1v15_verify_sha512(n_be, n_len, e_be, e_len, msg, msg_len, sig, sig_len): i64 {
+    # Function-scope: per-call, per-thread. 88 B of a 122,880 B budget.
+    var hbuf[64];
+    var dbuf[24];
+    var rh = &hbuf;
+    var rd = &dbuf;
+    sha512(msg, msg_len, rh);
+    var pl = _rsa_di_sha512(rd);
+    return _rsa_pkcs1v15_check(n_be, n_len, e_be, e_len, rd, pl, rh, 64, sig, sig_len);
 }
 
 # ================================================================
