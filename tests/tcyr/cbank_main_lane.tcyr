@@ -9,8 +9,9 @@
 #     worker was given bank 0, the main thread's lane;
 #   - the main thread never got a block, and its first crypto call read thread-local storage
 #     through a null thread pointer: SIGSEGV.
-# cyrius issue 2026-09-30-tls-first-use-thread-race (scenario C). Each group runs in a fresh
-# process (fork), because the state under test is the cold one.
+# cyrius issue 2026-09-30-tls-first-use-thread-race (scenario C). On Linux each group runs in a
+# fresh process (fork), because the state under test is the cold one; elsewhere the first group
+# runs in this still-cold process and the other two, which test the Linux mechanism, skip.
 
 include "lib/assert.cyr"
 include "lib/alloc.cyr"
@@ -159,23 +160,32 @@ fn main() {
     _cl_pk = hex_decode("60fed4ba255a9d31c961eb74c6356d68c049b8923b61fa6ce669622e60f29fb67903fe1008b8bc99a41ae9e95628bc64f2f1b20c2d7e9f5177a3c294d4462299", 128);
     _cl_sig = hex_decode("efd48b2aacb6a8fd1140dd9cd45e81d69d2c877b56aaf991c34d0ea84eaf3716f7cb1c942d657c41d436c7a1b6e29f65f3e900dbb9aff4064dc4ab2f843acda8", 128);
 
-    test_group("a worker's crypto call comes first, then main's (fresh process)");
+    test_group("a worker's crypto call comes first, then main's");
+    #ifdef CYRIUS_TARGET_LINUX
     var r1 = _cl_fork(1);
-    if (r1 == 3000) {
-        println("  SKIP: fork unavailable on this target");
-    } else {
-        assert_eq(r1, 0, "both verify; the worker draws a lane of its own and main keeps bank 0 (1000+ = killed by that signal)");
-    }
+    assert_eq(r1, 0, "both verify; the worker draws a lane of its own and main keeps bank 0, in a fresh process (1000+ = killed by that signal)");
+    #endif
+    #ifndef CYRIUS_TARGET_LINUX
+    # Off Linux the scenario runs in this process, which is still cold (nothing above touched
+    # sigil): a forked child cannot create a thread on arm64 macOS (a cyrius limitation, measured
+    # on ecb), and Windows has no fork.
+    assert_eq(_cl_worker_first(), 0, "both verify, worker first (in this process)");
+    #endif
 
+    # The two groups below test the Linux mechanism: a thread reaches its thread-local block
+    # through the thread pointer, and only the main thread can lack one.
     test_group("a thread-local block the program installed on main survives sigil's first use");
+    #ifdef CYRIUS_TARGET_LINUX
     var r2 = _cl_fork(2);
-    if (r2 == 3000) {
-        println("  SKIP: fork unavailable on this target");
-    } elif (r2 == 77) {
+    if (r2 == 77) {
         println("  SKIP: the thread pointer cannot be read on this host (x86 without FSGSBASE)");
     } else {
         assert_eq(r2, 0, "main's own slot keeps its value and sigil still works on main");
     }
+    #endif
+    #ifndef CYRIUS_TARGET_LINUX
+    println("  SKIP: Linux only");
+    #endif
 
     test_group("the thread-pointer probe reads the block cyrius uses");
     #ifdef CYRIUS_TARGET_LINUX
@@ -187,7 +197,7 @@ fn main() {
     }
     #endif
     #ifndef CYRIUS_TARGET_LINUX
-    println("  SKIP: the thread pointer is Linux's mechanism only");
+    println("  SKIP: Linux only");
     #endif
     return assert_summary();
 }

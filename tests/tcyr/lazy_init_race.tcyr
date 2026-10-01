@@ -155,7 +155,14 @@ fn main() {
     _lr_bad384 = hex_decode("94edbb92a5ecb8aad4736e56c691916b3f88140666ce9fa73d64c4ea95ad133c81a648152e44acf96e36dd1e80fabe4699ef4aeb15f178cea1fe40db2603138f130e740a19624526203b6351d0a3a94fa329c145786e679e7b82c71a38628ac9", 192);
     _lr_pem_len = strlen(LR_PEM);
 
-    test_group("concurrent first use of the lazy tables (fresh process per trial)");
+    test_group("concurrent first use of the lazy tables");
+    if (THREADS_CONCURRENT == 0) {
+        # x86 macOS, Windows and agnos run a thread body inline at thread_create under this
+        # toolchain, so no first use is ever concurrent (and the start barrier would never open).
+        println("  SKIP: threads run serially on this target");
+        return assert_summary();
+    }
+    #ifdef CYRIUS_TARGET_LINUX
     var clean = 0; var wrong = 0; var crashed = 0; var hung = 0; var nofork = 0;
     var t = 0;
     while (t < LR_TRIALS) {
@@ -167,15 +174,18 @@ fn main() {
         if (r == 4) { nofork = nofork + 1; }
         t = t + 1;
     }
-    if (nofork == LR_TRIALS) {
-        # No fork on this target (Windows): there is no way to get a cold process per trial.
-        println("  SKIP: fork unavailable on this target");
-        return assert_summary();
-    }
+    assert_eq(nofork, 0, "every trial got a fresh process");
     assert_eq(crashed, 0, "no trial process crashed");
     assert_eq(hung, 0, "no trial process hung");
     assert_eq(wrong, 0, "every worker's first call returned the right answer, in every trial");
     assert_eq(clean, LR_TRIALS, "every trial was clean");
+    #endif
+    #ifndef CYRIUS_TARGET_LINUX
+    # arm64 macOS: a forked child cannot create a thread there (a cyrius limitation — measured on
+    # ecb, the child dies of SIGSEGV with no sigil code in the program), so this process is the
+    # one cold trial: nothing above has touched sigil.
+    assert_eq(_lr_trial(), 0, "every worker's first call returned the right answer (one in-process trial)");
+    #endif
     return assert_summary();
 }
 
