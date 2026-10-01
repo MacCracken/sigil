@@ -1,0 +1,196 @@
+# cbank_main_lane.tcyr — whose thread-local block sigil installs, and who gets bank 0 (3.13.6).
+#
+# cbank() reads the calling thread's crypto lane from a thread-local slot. On Linux a thread reaches
+# that slot through its thread-pointer register (%fs / TPIDR_EL0). A worker made by thread_create
+# has a block from CLONE_SETTLS, but the MAIN thread has none until one is installed, and sigil
+# installed it in crypto_tls_main_init — which ran on whichever thread made the FIRST crypto call.
+# When that was a worker:
+#   - the worker's own block was replaced (every other library's slots on it were wiped) and the
+#     worker was given bank 0, the main thread's lane;
+#   - the main thread never got a block, and its first crypto call read thread-local storage
+#     through a null thread pointer: SIGSEGV.
+# cyrius issue 2026-09-30-tls-first-use-thread-race (scenario C). Each group runs in a fresh
+# process (fork), because the state under test is the cold one.
+
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/string.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fmt.cyr"
+include "lib/bayan.cyr"
+include "lib/sakshi.cyr"
+include "lib/chrono.cyr"
+include "lib/ct.cyr"
+include "lib/sys.cyr"
+include "lib/thread.cyr"
+include "lib/thread_local.cyr"
+include "src/crypto_scratch.cyr"
+include "src/mul64.cyr"
+include "src/types.cyr"
+include "src/error.cyr"
+include "lib/random.cyr"
+include "src/random.cyr"
+include "src/sha256.cyr"
+include "src/hex.cyr"
+include "src/sha512.cyr"
+include "src/sha384.cyr"
+include "src/hmac.cyr"
+include "src/bigint_ext.cyr"
+include "src/ecdsa_p256.cyr"
+
+var CL_DEADLINE_MS = 60000;
+
+var _cl_pk = 0;        # RFC 6979 A.2.5 public key
+var _cl_sig = 0;       # its "sample" signature
+var _cl_w_ok = 0;      # worker's verify result
+var _cl_w_lane = 0 - 1;   # worker's cbank()
+
+fn _cl_worker(arg): i64 {
+    _cl_w_ok = ecdsa_p256_verify(_cl_pk, "sample", 6, _cl_sig);
+    _cl_w_lane = cbank();
+    return 0;
+}
+
+# Group 1 child: a worker makes the process's first crypto call, then the main thread makes its own.
+# Exit code: bit 0 = the worker's verify failed, bit 1 = main's verify failed, bit 2 = the worker
+# got bank 0, bit 3 = main did not get bank 0. The lane bits are Linux-only: elsewhere the thread
+# pointer is not how cyrius reaches thread-local storage, and bank 0 goes to the first caller.
+fn _cl_worker_first(): i64 {
+    var th = thread_create(&_cl_worker, 0);
+    thread_join(th);
+    var code = 0;
+    if (_cl_w_ok != 1) { code = code | 1; }
+    if (ecdsa_p256_verify(_cl_pk, "sample", 6, _cl_sig) != 1) { code = code | 2; }
+    #ifdef CYRIUS_TARGET_LINUX
+    if (_cl_w_lane == 0) { code = code | 4; }
+    if (cbank() != 0) { code = code | 8; }
+    #endif
+    return code;
+}
+
+# Group 2 child: the program installed the main thread's block itself and keeps a value in a slot of
+# its own; sigil's first use must not replace that block. Exit 77 = not checkable here (the calling
+# thread's pointer cannot be read on this host, so sigil falls back to asking whether it is the main
+# thread and installs over whatever is there, as 3.13.5 always did).
+fn _cl_main_block_kept(): i64 {
+    #ifdef CYRIUS_TARGET_LINUX
+    if (_sigil_tp_base() < 0) { return 77; }
+    #endif
+    thread_local_init();
+    var s = thread_local_alloc();
+    thread_local_set(s, 0x5EA15EA1);
+    var code = 0;
+    if (ecdsa_p256_verify(_cl_pk, "sample", 6, _cl_sig) != 1) { code = code | 1; }
+    if (thread_local_get(s) != 0x5EA15EA1) { code = code | 2; }
+    var lane = cbank();
+    if (lane < 0) { code = code | 4; }
+    if (lane >= SIGIL_CRYPTO_BANKS) { code = code | 4; }
+    return code;
+}
+
+# Group 3 child: `_sigil_tp_base` must read the register cyrius really keeps the block in — it is
+# hand-encoded (rdfsbase / mrs TPIDR_EL0 into the first local's frame slot), so pin it: 0 on a cold
+# main thread, then the block that holds main's slots, and a worker's own, different block.
+var _cl_s = 0;
+var _cl_w_tp = 0;
+var _cl_w_seen = 0;
+fn _cl_tp_worker(arg): i64 {
+    _cl_w_tp = _sigil_tp_base();
+    thread_local_set(_cl_s, 0x77);
+    if (_cl_w_tp > 0) { _cl_w_seen = load64(_cl_w_tp + _cl_s * 8); }
+    return 0;
+}
+fn _cl_tp_probe(): i64 {
+    if (_sigil_tp_base() < 0) { return 77; }
+    var code = 0;
+    if (_sigil_tp_base() != 0) { code = code | 1; }       # cold main: no block yet
+    thread_local_init();
+    _cl_s = thread_local_alloc();
+    thread_local_set(_cl_s, 0x1234);
+    var tp = _sigil_tp_base();
+    if (tp <= 0) { code = code | 2; }
+    elif (load64(tp + _cl_s * 8) != 0x1234) { code = code | 4; }
+    var th = thread_create(&_cl_tp_worker, 0);
+    thread_join(th);
+    if (_cl_w_tp <= 0) { code = code | 8; }
+    if (_cl_w_tp == tp) { code = code | 16; }
+    if (_cl_w_seen != 0x77) { code = code | 32; }
+    return code;
+}
+
+# Fork `which` (1, 2 or 3) and reap it within the deadline. Returns the child's exit code, or
+# 1000 + signal if it was killed, 2000 if it hung, 3000 if fork failed.
+fn _cl_fork(which): i64 {
+    var pid = sys_fork();
+    if (pid < 0) { return 3000; }
+    if (pid == 0) {
+        var c = 0;
+        if (which == 1) { c = _cl_worker_first(); }
+        if (which == 2) { c = _cl_main_block_kept(); }
+        if (which == 3) { c = _cl_tp_probe(); }
+        sys_exit(c);
+    }
+    var st = 0;
+    var deadline = clock_now_ms() + CL_DEADLINE_MS;
+    var reaped = 0;
+    while (clock_now_ms() <= deadline) {
+        var r = sys_waitpid(pid, &st, WNOHANG);
+        if (r > 0) { reaped = 1; break; }
+        if (r < 0) { break; }
+        sleep_ms(5);
+    }
+    if (reaped == 0) {
+        sys_kill(pid, SIGKILL);
+        sys_waitpid(pid, &st, 0);
+        return 2000;
+    }
+    var status = st & 0xFFFF;
+    if ((status & 0x7F) != 0) { return 1000 + (status & 0x7F); }
+    return (status >> 8) & 0xFF;
+}
+
+fn main() {
+    alloc_init();
+    _cl_pk = hex_decode("60fed4ba255a9d31c961eb74c6356d68c049b8923b61fa6ce669622e60f29fb67903fe1008b8bc99a41ae9e95628bc64f2f1b20c2d7e9f5177a3c294d4462299", 128);
+    _cl_sig = hex_decode("efd48b2aacb6a8fd1140dd9cd45e81d69d2c877b56aaf991c34d0ea84eaf3716f7cb1c942d657c41d436c7a1b6e29f65f3e900dbb9aff4064dc4ab2f843acda8", 128);
+
+    test_group("a worker's crypto call comes first, then main's (fresh process)");
+    var r1 = _cl_fork(1);
+    if (r1 == 3000) {
+        println("  SKIP: fork unavailable on this target");
+    } else {
+        assert_eq(r1, 0, "both verify; the worker draws a lane of its own and main keeps bank 0 (1000+ = killed by that signal)");
+    }
+
+    test_group("a thread-local block the program installed on main survives sigil's first use");
+    var r2 = _cl_fork(2);
+    if (r2 == 3000) {
+        println("  SKIP: fork unavailable on this target");
+    } elif (r2 == 77) {
+        println("  SKIP: the thread pointer cannot be read on this host (x86 without FSGSBASE)");
+    } else {
+        assert_eq(r2, 0, "main's own slot keeps its value and sigil still works on main");
+    }
+
+    test_group("the thread-pointer probe reads the block cyrius uses");
+    #ifdef CYRIUS_TARGET_LINUX
+    var r3 = _cl_fork(3);
+    if (r3 == 77) {
+        println("  SKIP: the thread pointer cannot be read on this host (x86 without FSGSBASE)");
+    } else {
+        assert_eq(r3, 0, "0 on a cold main, then main's block, then a worker's own block");
+    }
+    #endif
+    #ifndef CYRIUS_TARGET_LINUX
+    println("  SKIP: the thread pointer is Linux's mechanism only");
+    #endif
+    return assert_summary();
+}
+
+var exit_code = main();
+sys_exit(exit_code);
