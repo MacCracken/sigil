@@ -278,5 +278,19 @@ jobs:
                | grep -v test | grep -v example | grep -v rfc8032; then
             echo "WARN: possible hardcoded secret"; fail=1
           fi
+          # 3.13.6: a lazily-built table must use the race-free claim/publish in
+          # src/crypto_scratch.cyr (_sigil_once_*). A plain check-then-set let two first
+          # callers both build it and overwrite each other's pointers (cyrius issue
+          # 2026-09-30-tls-first-use-thread-race); 31 of these were converted at 3.13.6.
+          if grep -rnE 'if \(_[A-Za-z0-9_]+_(inited|ready) == 1\) \{ return 0; \}' src/; then
+            echo "FAIL: check-then-set lazy init (use _sigil_once_claim / _sigil_once_publish)"; fail=1
+          fi
+          # ...and a lazily-allocated scratch pointer must be CAS-published (_sigil_lazy_scratch);
+          # 15 converted at 3.13.6. Exempt: the AES-NI / SHA-NI probe buffers (allocated inside a
+          # CAS latch) and the fixed-base table builders' own scratch (inside the builder's claim).
+          if grep -rnE 'if \((_[A-Za-z0-9_]+) *== 0\) \{ *\1 *= [a-z0-9_]*alloc\(' src/ \
+               | grep -v -E '^src/(aes_ni|sha_ni)\.cyr:' | grep -v -E '_p(256|384)_gt_(tmp|row)'; then
+            echo "FAIL: unpublished lazy scratch allocation (use _sigil_lazy_scratch)"; fail=1
+          fi
           echo "security scan complete"
           test $fail -eq 0

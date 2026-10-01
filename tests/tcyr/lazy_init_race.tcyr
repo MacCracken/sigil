@@ -1,0 +1,183 @@
+# lazy_init_race.tcyr — sigil's lazily-built tables under CONCURRENT FIRST USE (3.13.6).
+#
+# Every table sigil builds on first use (the P-256 / P-384 constants and scratch, the fixed-base
+# comb, SHA-256's K, the PEM and X.509 tables, ...) was guarded by a plain check-then-set flag
+# stored LAST. Two threads making their first call at the same moment both ran the build, both
+# alloc'd, and each overwrote the table pointers the other was already using. Reported by cyrius
+# (issue 2026-09-30-tls-first-use-thread-race): two threads whose first TLS connects overlapped
+# failed 10 handshakes of 10, and the process stayed poisoned for every thread started afterwards.
+#
+# Every other concurrent test pre-warms on the main thread before spawning (crypto_tls_main_init,
+# ecdsa_p256_warm), which is exactly why none of them could see this. Here nothing is warm: each
+# trial is a FRESH PROCESS (fork) whose threads are released together from a barrier, so every one
+# of them makes a first call. A fork child starts cold only if its parent never touched sigil, so
+# this file's main thread does no crypto at all — it only decodes hex and forks.
+#
+# Per worker: SHA-256("abc") against FIPS 180-2; ECDSA P-256 and P-384 verify of the RFC 6979
+# A.2.5 / A.2.6 "sample" signatures (must accept) and of the same signatures with one bit flipped
+# (must reject — a corrupted table that accepted a bad signature is the worst outcome there is);
+# PEM-decode and x509_parse a P-256 certificate, whose key is checked on the curve.
+# A trial exits with its failure count; a crash or a hang is a failure too.
+
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/string.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fmt.cyr"
+include "lib/bayan.cyr"
+include "lib/sakshi.cyr"
+include "lib/chrono.cyr"
+include "lib/ct.cyr"
+include "lib/thread.cyr"
+include "lib/thread_local.cyr"
+include "src/crypto_scratch.cyr"
+include "src/mul64.cyr"
+include "src/types.cyr"
+include "src/error.cyr"
+include "lib/random.cyr"
+include "src/random.cyr"
+include "src/sha256.cyr"
+include "src/hex.cyr"
+include "src/sha512.cyr"
+include "src/sha384.cyr"
+include "src/hmac.cyr"
+include "src/hmac_sha384.cyr"
+include "src/bigint_ext.cyr"
+include "src/ed25519.cyr"
+include "src/ecdsa_p256.cyr"
+include "src/ecdsa_p384.cyr"
+include "src/ecdsa_sign.cyr"
+include "src/pem.cyr"
+include "src/x509.cyr"
+include "src/bignum.cyr"
+include "src/rsa.cyr"
+
+var LR_THREADS = 8;
+var LR_TRIALS = 6;
+var LR_DEADLINE_MS = 60000;   # per trial; a trial that has not exited by then is a hang
+
+# Self-signed P-256 certificate (generated 2026-10-01: openssl ecparam -name prime256v1 -genkey;
+# openssl req -new -x509 -sha256 -days 36500 -subj "/CN=Sigil P-256 Cold-Start Test Cert").
+var LR_PEM = "-----BEGIN CERTIFICATE-----\nMIIBrDCCAVOgAwIBAgIUWnws27Sf42XyjJ1B4hGV21snkQowCgYIKoZIzj0EAwIw\nKzEpMCcGA1UEAwwgU2lnaWwgUC0yNTYgQ29sZC1TdGFydCBUZXN0IENlcnQwIBcN\nMjYxMDAxMTcwMDM1WhgPMjEyNjA5MDcxNzAwMzVaMCsxKTAnBgNVBAMMIFNpZ2ls\nIFAtMjU2IENvbGQtU3RhcnQgVGVzdCBDZXJ0MFkwEwYHKoZIzj0CAQYIKoZIzj0D\nAQcDQgAE91uSq2UI17BNONqiq0O+HB+hWycS6mJFSr35/qOwJXl4fWcSnBAoLUyG\nzdwf5ylECRY1AHGjQEN+t41s521+6aNTMFEwHQYDVR0OBBYEFLsSybwhPeIqZDHh\nBC0D9JlM6i+oMB8GA1UdIwQYMBaAFLsSybwhPeIqZDHhBC0D9JlM6i+oMA8GA1Ud\nEwEB/wQFMAMBAf8wCgYIKoZIzj0EAwIDRwAwRAIgY3eI1OePhkwZ7+k/TBrXOGaS\nETS/u64E+mFD/nWO1OQCIC8+tybmMBRWHaAbbawsztoelGyPRp8r2v/AlVCJ9SKN\n-----END CERTIFICATE-----\n";
+
+var _lr_abc = 0;       # SHA-256("abc")
+var _lr_pk256 = 0;     # RFC 6979 A.2.5 public key (x||y, 64 bytes)
+var _lr_sig256 = 0;    # its "sample" signature (r||s, 64 bytes)
+var _lr_bad256 = 0;    # the same signature with one bit of s flipped
+var _lr_pk384 = 0;     # RFC 6979 A.2.6 public key (96 bytes)
+var _lr_sig384 = 0;
+var _lr_bad384 = 0;
+var _lr_pem_len = 0;
+
+var _lr_ready = 0;     # workers parked at the barrier
+var _lr_go = 0;        # barrier release
+var _lr_bad = 0;       # failures, summed over the workers
+
+fn _lr_worker(arg): i64 {
+    atomic_fetch_add(&_lr_ready, 1);
+    while (atomic_load(&_lr_go) == 0) { }
+    var bad = 0;
+    var dig = alloc(32);
+    sha256("abc", 3, dig);
+    if (memeq(dig, _lr_abc, 32) != 1) { bad = bad + 1; }
+    if (ecdsa_p256_verify(_lr_pk256, "sample", 6, _lr_sig256) != 1) { bad = bad + 1; }
+    if (ecdsa_p256_verify(_lr_pk256, "sample", 6, _lr_bad256) != 0) { bad = bad + 1; }
+    if (ecdsa_p384_verify(_lr_pk384, "sample", 6, _lr_sig384) != 1) { bad = bad + 1; }
+    if (ecdsa_p384_verify(_lr_pk384, "sample", 6, _lr_bad384) != 0) { bad = bad + 1; }
+    var chain = alloc(16);
+    if (pem_decode_certs(LR_PEM, _lr_pem_len, chain, 1) != 1) {
+        bad = bad + 1;
+    } else {
+        var c = x509_cert_alloc();
+        if (x509_parse(load64(chain), load64(chain + 8), c) != 1) { bad = bad + 1; }
+        elif (x509_cert_curve(c) != X509_CURVE_P256) { bad = bad + 1; }
+    }
+    atomic_fetch_add(&_lr_bad, bad);
+    return 0;
+}
+
+# One trial, in a fresh process: release LR_THREADS cold first callers at once.
+fn _lr_trial(): i64 {
+    var ths = alloc(LR_THREADS * 8);
+    var i = 0;
+    while (i < LR_THREADS) {
+        store64(ths + i * 8, thread_create(&_lr_worker, i));
+        i = i + 1;
+    }
+    while (atomic_load(&_lr_ready) < LR_THREADS) { }
+    atomic_store(&_lr_go, 1);
+    i = 0;
+    while (i < LR_THREADS) { thread_join(load64(ths + i * 8)); i = i + 1; }
+    var b = atomic_load(&_lr_bad);
+    if (b > 100) { b = 100; }
+    return b;
+}
+
+# Fork one trial and reap it within the deadline. Returns 0 = clean, 1 = wrong answers,
+# 2 = crashed (signal), 3 = hung (killed at the deadline), 4 = could not fork.
+fn _lr_run_trial(): i64 {
+    var pid = sys_fork();
+    if (pid < 0) { return 4; }
+    if (pid == 0) { sys_exit(_lr_trial()); }
+    var st = 0;
+    var deadline = clock_now_ms() + LR_DEADLINE_MS;
+    var reaped = 0;
+    while (clock_now_ms() <= deadline) {
+        var r = sys_waitpid(pid, &st, WNOHANG);
+        if (r > 0) { reaped = 1; break; }
+        if (r < 0) { break; }
+        sleep_ms(5);
+    }
+    if (reaped == 0) {
+        sys_kill(pid, SIGKILL);
+        sys_waitpid(pid, &st, 0);
+        return 3;
+    }
+    var status = st & 0xFFFF;
+    if ((status & 0x7F) != 0) { return 2; }
+    if (((status >> 8) & 0xFF) != 0) { return 1; }
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    _lr_abc = hex_decode("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", 64);
+    _lr_pk256 = hex_decode("60fed4ba255a9d31c961eb74c6356d68c049b8923b61fa6ce669622e60f29fb67903fe1008b8bc99a41ae9e95628bc64f2f1b20c2d7e9f5177a3c294d4462299", 128);
+    _lr_sig256 = hex_decode("efd48b2aacb6a8fd1140dd9cd45e81d69d2c877b56aaf991c34d0ea84eaf3716f7cb1c942d657c41d436c7a1b6e29f65f3e900dbb9aff4064dc4ab2f843acda8", 128);
+    _lr_bad256 = hex_decode("efd48b2aacb6a8fd1140dd9cd45e81d69d2c877b56aaf991c34d0ea84eaf3716f7cb1c942d657c41d436c7a1b6e29f65f3e900dbb9aff4064dc4ab2f843acda9", 128);
+    _lr_pk384 = hex_decode("ec3a4e415b4e19a4568618029f427fa5da9a8bc4ae92e02e06aae5286b300c64def8f0ea9055866064a254515480bc138015d9b72d7d57244ea8ef9ac0c621896708a59367f9dfb9f54ca84b3f1c9db1288b231c3ae0d4fe7344fd2533264720", 192);
+    _lr_sig384 = hex_decode("94edbb92a5ecb8aad4736e56c691916b3f88140666ce9fa73d64c4ea95ad133c81a648152e44acf96e36dd1e80fabe4699ef4aeb15f178cea1fe40db2603138f130e740a19624526203b6351d0a3a94fa329c145786e679e7b82c71a38628ac8", 192);
+    _lr_bad384 = hex_decode("94edbb92a5ecb8aad4736e56c691916b3f88140666ce9fa73d64c4ea95ad133c81a648152e44acf96e36dd1e80fabe4699ef4aeb15f178cea1fe40db2603138f130e740a19624526203b6351d0a3a94fa329c145786e679e7b82c71a38628ac9", 192);
+    _lr_pem_len = strlen(LR_PEM);
+
+    test_group("concurrent first use of the lazy tables (fresh process per trial)");
+    var clean = 0; var wrong = 0; var crashed = 0; var hung = 0; var nofork = 0;
+    var t = 0;
+    while (t < LR_TRIALS) {
+        var r = _lr_run_trial();
+        if (r == 0) { clean = clean + 1; }
+        if (r == 1) { wrong = wrong + 1; }
+        if (r == 2) { crashed = crashed + 1; }
+        if (r == 3) { hung = hung + 1; }
+        if (r == 4) { nofork = nofork + 1; }
+        t = t + 1;
+    }
+    if (nofork == LR_TRIALS) {
+        # No fork on this target (Windows): there is no way to get a cold process per trial.
+        println("  SKIP: fork unavailable on this target");
+        return assert_summary();
+    }
+    assert_eq(crashed, 0, "no trial process crashed");
+    assert_eq(hung, 0, "no trial process hung");
+    assert_eq(wrong, 0, "every worker's first call returned the right answer, in every trial");
+    assert_eq(clean, LR_TRIALS, "every trial was clean");
+    return assert_summary();
+}
+
+var exit_code = main();
+sys_exit(exit_code);

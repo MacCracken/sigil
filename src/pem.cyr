@@ -73,10 +73,11 @@ var PEM_END_CERT_LEN   = 25;
 var _pem_b64_table = 0;
 var _pem_begin     = 0;
 var _pem_end       = 0;
-var _pem_inited    = 0;
+var _pem_inited    = 0;   # 0 / 1 building / 2 published (_sigil_once_*)
 
 fn _pem_init(): i64 {
-    if (_pem_inited == 1) { return 0; }
+    if (atomic_load(&_pem_inited) == 2) { return _sigil_once_acquired(); }
+    if (_sigil_once_claim(&_pem_inited) == 0) { return 0; }
 
     # Build the lookup table.
     _pem_b64_table = alloc(256);
@@ -131,7 +132,7 @@ fn _pem_init(): i64 {
         i = i + 1;
     }
 
-    _pem_inited = 1;
+    _sigil_once_publish(&_pem_inited);
     return 0;
 }
 

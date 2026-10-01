@@ -220,3 +220,64 @@ fn crypto_banks_exhausted(): i64 {
 fn crypto_banks_claimed(): i64 {
     return _crypto_next_bank;
 }
+
+# ================================================================
+# Lazy one-time initialisation, race-free (3.13.6)
+# ================================================================
+# Every table sigil builds on first use moves through three states: 0 = not built, 1 = being built
+# (one thread won the claim), 2 = published. Each init has the same shape:
+#
+#   fn _x_init(): i64 {
+#       if (atomic_load(&_x_inited) == 2) { return _sigil_once_acquired(); }
+#       if (_sigil_once_claim(&_x_inited) == 0) { return 0; }
+#       ... build the tables ...
+#       _sigil_once_publish(&_x_inited);
+#       return 0;
+#   }
+#
+# WHY. Until 3.13.6 most of them were a plain check-then-set with the flag stored LAST (the AES,
+# BLAKE2b, SHA-512, Ed25519 and ML-DSA NTT inits were converted at 3.13.1; the other ~30 were not).
+# Two threads making their first call at once both ran the build and each overwrote table pointers
+# the other was already using; two TLS clients whose first connects overlapped failed every
+# handshake, and the process stayed poisoned (cyrius issue 2026-09-30-tls-first-use-thread-race).
+#
+# ⚠ A build must never `return` between the claim and the publish: the flag would stay 1 and every
+# later caller would spin forever. And a build must not, directly or through anything it calls,
+# reach its OWN init again — that is a deadlock now, where it used to be unbounded recursion.
+
+# The fast path's acquire half: on aarch64 a plain load may be reordered after the table reads that
+# follow it, so fence; x86 (TSO) never reorders loads with loads. Returns 0.
+fn _sigil_once_acquired(): i64 {
+    #ifdef CYRIUS_ARCH_AARCH64
+    atomic_fence();
+    #endif
+    return 0;
+}
+
+# Claim the build (0 -> 1). Returns 1 if the caller won and must build and then publish; 0 once
+# another thread has published (it spins until then).
+fn _sigil_once_claim(flag): i64 {
+    if (atomic_cas(flag, 0, 1) == 1) { return 1; }
+    while (atomic_load(flag) != 2) { }
+    atomic_fence();
+    return 0;
+}
+
+# Publish (-> 2) after the build: every table write is made visible before the flag. Returns 0.
+fn _sigil_once_publish(flag): i64 {
+    atomic_fence();
+    atomic_store(flag, 2);
+    return 0;
+}
+
+# Publish a lazily-allocated, process-lifetime SCRATCH block in *slot exactly once. Every racing
+# first caller allocates and one CAS wins; the losers' blocks are abandoned (the bump heap has no
+# free, so a few KB, once, and only under a first-use race). Because the block is scratch — written
+# before it is read on every use — publishing the pointer is enough and there is no build to wait
+# for. The caller re-reads *slot afterwards. Returns 0.
+#   if (_p256_sol_t == 0) { _sigil_lazy_scratch(&_p256_sol_t, 32 * SIGIL_CRYPTO_BANKS); }
+fn _sigil_lazy_scratch(slot, size): i64 {
+    var p = alloc(size);
+    atomic_cas(slot, 0, p);
+    return 0;
+}

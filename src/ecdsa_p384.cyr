@@ -49,7 +49,7 @@ var _p384_tmp1 = 0;        # 48-byte
 var _p384_tmp2 = 0;        # 48-byte
 var _p384_one  = 0;
 
-var _p384_inited = 0;
+var _p384_inited = 0;   # 0 / 1 building / 2 published (_sigil_once_*)
 
 # ----------------------------------------------------------------
 # u384 helpers — 6 × 64-bit LE limbs = 48 bytes
@@ -215,7 +215,7 @@ var _p384_m64 = 0;
 # out: 96 bytes (12 limbs)
 fn u384_mul_full(out, a, b): i64 {
     memset(out, 0, 96);
-    if (_p384_m64 == 0) { _p384_m64 = alloc(16 * SIGIL_CRYPTO_BANKS); }
+    if (_p384_m64 == 0) { _sigil_lazy_scratch(&_p384_m64, 16 * SIGIL_CRYPTO_BANKS); }
     var m64b = _p384_m64 + cbank() * 16;
     var sbit = 1 << 63;
     var i = 0;
@@ -316,7 +316,8 @@ fn u384_store_be(dst, src): i64 {
 # ----------------------------------------------------------------
 
 fn _p384_init(): i64 {
-    if (_p384_inited == 1) { return 0; }
+    if (atomic_load(&_p384_inited) == 2) { return _sigil_once_acquired(); }
+    if (_sigil_once_claim(&_p384_inited) == 0) { return 0; }
     _p384_p  = u384_from_hex(
       "fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffeffffffff0000000000000000ffffffff");
     _p384_n  = u384_from_hex(
@@ -331,7 +332,7 @@ fn _p384_init(): i64 {
     _p384_tmp1 = alloc(48 * SIGIL_CRYPTO_BANKS);
     _p384_tmp2 = alloc(48 * SIGIL_CRYPTO_BANKS);
     _p384_one  = u384_from(1);
-    _p384_inited = 1;
+    _sigil_once_publish(&_p384_inited);
     return 0;
 }
 
@@ -374,7 +375,7 @@ fn _p384_long_div_reduce(R, lo): i64 {
 # now uses the fast Solinas path below (3.7.1).
 fn _p384_reduce_longdiv(out, val): i64 {
     _p384_init();
-    if (_p384_R == 0) { _p384_R = alloc(48 * SIGIL_CRYPTO_BANKS); }
+    if (_p384_R == 0) { _sigil_lazy_scratch(&_p384_R, 48 * SIGIL_CRYPTO_BANKS); }
     var _p384_Rb = _p384_R + cbank() * 48;
     # R = high half of val
     memcpy(_p384_Rb, val + 48, 48);
@@ -429,7 +430,7 @@ fn _p384_sol_red1(t): i64 {
 
 fn _p384_solinas_reduce(out, val): i64 {
     _p384_init();
-    if (_p384_sol_t == 0) { _p384_sol_t = alloc(48 * SIGIL_CRYPTO_BANKS); }
+    if (_p384_sol_t == 0) { _sigil_lazy_scratch(&_p384_sol_t, 48 * SIGIL_CRYPTO_BANKS); }
     var T = _p384_sol_t + cbank() * 48;
 
     var c0 = _p384_wd(val, 0);   var c1 = _p384_wd(val, 1);
@@ -550,17 +551,18 @@ var _p384_inv_tmp = 0;
 var _p384_inv_res = 0;
 var _p384_inv_base = 0;
 var _p384_inv_exp = 0;
-var _p384_inv_inited = 0;
+var _p384_inv_inited = 0;   # 0 / 1 building / 2 published (_sigil_once_*)
 
 fn _p384_inv_init(): i64 {
-    if (_p384_inv_inited == 1) { return 0; }
+    if (atomic_load(&_p384_inv_inited) == 2) { return _sigil_once_acquired(); }
+    if (_sigil_once_claim(&_p384_inv_inited) == 0) { return 0; }
     _p384_init();
     _p384_inv_tmp  = alloc(48 * SIGIL_CRYPTO_BANKS);
     _p384_inv_res  = alloc(48 * SIGIL_CRYPTO_BANKS);
     _p384_inv_base = alloc(48 * SIGIL_CRYPTO_BANKS);
     _p384_inv_exp  = u384_clone(_p384_p);
     store64(_p384_inv_exp, load64(_p384_inv_exp) - 2);
-    _p384_inv_inited = 1;
+    _sigil_once_publish(&_p384_inv_inited);
     return 0;
 }
 
@@ -621,7 +623,7 @@ fn _p384_long_div_reduce_n(R, lo): i64 {
 # bitwise long division (384 shift / conditional-subtract steps) in cbank() lane scratch.
 fn n384_reduce(out, val): i64 {
     _p384_init();
-    if (_p384_n_R == 0) { _p384_n_R = alloc(48 * SIGIL_CRYPTO_BANKS); }
+    if (_p384_n_R == 0) { _sigil_lazy_scratch(&_p384_n_R, 48 * SIGIL_CRYPTO_BANKS); }
     var _p384_n_Rb = _p384_n_R + cbank() * 48;
     memcpy(_p384_n_Rb, val + 48, 48);
     if (u384_cmp(_p384_n_Rb, _p384_n) >= 0) { u384_sub(_p384_n_Rb, _p384_n_Rb, _p384_n); }
@@ -645,7 +647,7 @@ var _p384_n_prod = 0;
 # division. r may alias a and/or b.
 fn fn_p384_mul(r, a, b): i64 {
     _p384_init();
-    if (_p384_n_prod == 0) { _p384_n_prod = alloc(96 * SIGIL_CRYPTO_BANKS); }
+    if (_p384_n_prod == 0) { _sigil_lazy_scratch(&_p384_n_prod, 96 * SIGIL_CRYPTO_BANKS); }
     var _p384_n_prodb = _p384_n_prod + cbank() * 96;
     u384_mul_full(_p384_n_prodb, a, b);
     n384_reduce(r, _p384_n_prodb);
@@ -657,17 +659,18 @@ var _p384_ninv_tmp = 0;
 var _p384_ninv_res = 0;
 var _p384_ninv_base = 0;
 var _p384_ninv_exp = 0;
-var _p384_ninv_inited = 0;
+var _p384_ninv_inited = 0;   # 0 / 1 building / 2 published (_sigil_once_*)
 
 fn _p384_ninv_init(): i64 {
-    if (_p384_ninv_inited == 1) { return 0; }
+    if (atomic_load(&_p384_ninv_inited) == 2) { return _sigil_once_acquired(); }
+    if (_sigil_once_claim(&_p384_ninv_inited) == 0) { return 0; }
     _p384_init();
     _p384_ninv_tmp  = alloc(48 * SIGIL_CRYPTO_BANKS);
     _p384_ninv_res  = alloc(48 * SIGIL_CRYPTO_BANKS);
     _p384_ninv_base = alloc(48 * SIGIL_CRYPTO_BANKS);
     _p384_ninv_exp  = u384_clone(_p384_n);
     store64(_p384_ninv_exp, load64(_p384_ninv_exp) - 2);
-    _p384_ninv_inited = 1;
+    _sigil_once_publish(&_p384_ninv_inited);
     return 0;
 }
 
@@ -707,16 +710,17 @@ var _onc384_lhs = 0;
 var _onc384_rhs = 0;
 var _onc384_tmp = 0;
 var _onc384_three_x = 0;
-var _onc384_inited = 0;
+var _onc384_inited = 0;   # 0 / 1 building / 2 published (_sigil_once_*)
 
 fn _onc384_init(): i64 {
-    if (_onc384_inited == 1) { return 0; }
+    if (atomic_load(&_onc384_inited) == 2) { return _sigil_once_acquired(); }
+    if (_sigil_once_claim(&_onc384_inited) == 0) { return 0; }
     _p384_init();
     _onc384_lhs = alloc(48 * SIGIL_CRYPTO_BANKS);
     _onc384_rhs = alloc(48 * SIGIL_CRYPTO_BANKS);
     _onc384_tmp = alloc(48 * SIGIL_CRYPTO_BANKS);
     _onc384_three_x = alloc(48 * SIGIL_CRYPTO_BANKS);
-    _onc384_inited = 1;
+    _sigil_once_publish(&_onc384_inited);
     return 0;
 }
 
@@ -818,9 +822,9 @@ var _pt384_aff_zinv3 = 0;
 # fp_p384_inv. Returns 1, or 0 with out_x/out_y untouched if `p` is the point at infinity.
 fn pt384_to_affine(out_x, out_y, p): i64 {
     if (pt384_is_infinity(p) == 1) { return 0; }
-    if (_pt384_aff_zinv  == 0) { _pt384_aff_zinv  = alloc(48 * SIGIL_CRYPTO_BANKS); }
-    if (_pt384_aff_zinv2 == 0) { _pt384_aff_zinv2 = alloc(48 * SIGIL_CRYPTO_BANKS); }
-    if (_pt384_aff_zinv3 == 0) { _pt384_aff_zinv3 = alloc(48 * SIGIL_CRYPTO_BANKS); }
+    if (_pt384_aff_zinv  == 0) { _sigil_lazy_scratch(&_pt384_aff_zinv, 48 * SIGIL_CRYPTO_BANKS); }
+    if (_pt384_aff_zinv2 == 0) { _sigil_lazy_scratch(&_pt384_aff_zinv2, 48 * SIGIL_CRYPTO_BANKS); }
+    if (_pt384_aff_zinv3 == 0) { _sigil_lazy_scratch(&_pt384_aff_zinv3, 48 * SIGIL_CRYPTO_BANKS); }
     var bk = cbank();
     var _pt384_aff_zinvb  = _pt384_aff_zinv  + bk * 48;
     var _pt384_aff_zinv2b = _pt384_aff_zinv2 + bk * 48;
@@ -843,10 +847,11 @@ var _ptd384_t2    = 0;
 var _ptd384_x3    = 0;
 var _ptd384_y3    = 0;
 var _ptd384_z3    = 0;
-var _ptd384_inited = 0;
+var _ptd384_inited = 0;   # 0 / 1 building / 2 published (_sigil_once_*)
 
 fn _ptd384_init(): i64 {
-    if (_ptd384_inited == 1) { return 0; }
+    if (atomic_load(&_ptd384_inited) == 2) { return _sigil_once_acquired(); }
+    if (_sigil_once_claim(&_ptd384_inited) == 0) { return 0; }
     _ptd384_delta = alloc(48 * SIGIL_CRYPTO_BANKS);
     _ptd384_gamma = alloc(48 * SIGIL_CRYPTO_BANKS);
     _ptd384_beta  = alloc(48 * SIGIL_CRYPTO_BANKS);
@@ -856,7 +861,7 @@ fn _ptd384_init(): i64 {
     _ptd384_x3    = alloc(48 * SIGIL_CRYPTO_BANKS);
     _ptd384_y3    = alloc(48 * SIGIL_CRYPTO_BANKS);
     _ptd384_z3    = alloc(48 * SIGIL_CRYPTO_BANKS);
-    _ptd384_inited = 1;
+    _sigil_once_publish(&_ptd384_inited);
     return 0;
 }
 
@@ -931,10 +936,11 @@ var _pta384_t2   = 0;
 var _pta384_x3   = 0;
 var _pta384_y3   = 0;
 var _pta384_z3   = 0;
-var _pta384_inited = 0;
+var _pta384_inited = 0;   # 0 / 1 building / 2 published (_sigil_once_*)
 
 fn _pta384_init(): i64 {
-    if (_pta384_inited == 1) { return 0; }
+    if (atomic_load(&_pta384_inited) == 2) { return _sigil_once_acquired(); }
+    if (_sigil_once_claim(&_pta384_inited) == 0) { return 0; }
     _pta384_z1z1 = alloc(48 * SIGIL_CRYPTO_BANKS);
     _pta384_z2z2 = alloc(48 * SIGIL_CRYPTO_BANKS);
     _pta384_u1   = alloc(48 * SIGIL_CRYPTO_BANKS);
@@ -951,7 +957,7 @@ fn _pta384_init(): i64 {
     _pta384_x3   = alloc(48 * SIGIL_CRYPTO_BANKS);
     _pta384_y3   = alloc(48 * SIGIL_CRYPTO_BANKS);
     _pta384_z3   = alloc(48 * SIGIL_CRYPTO_BANKS);
-    _pta384_inited = 1;
+    _sigil_once_publish(&_pta384_inited);
     return 0;
 }
 
@@ -1045,15 +1051,16 @@ var _ptm384_r0 = 0;
 var _ptm384_r1 = 0;
 var _ptm384_sum = 0;
 var _ptm384_dbl = 0;
-var _ptm384_inited = 0;
+var _ptm384_inited = 0;   # 0 / 1 building / 2 published (_sigil_once_*)
 
 fn _ptm384_init(): i64 {
-    if (_ptm384_inited == 1) { return 0; }
+    if (atomic_load(&_ptm384_inited) == 2) { return _sigil_once_acquired(); }
+    if (_sigil_once_claim(&_ptm384_inited) == 0) { return 0; }
     _ptm384_r0  = alloc(144 * SIGIL_CRYPTO_BANKS);
     _ptm384_r1  = alloc(144 * SIGIL_CRYPTO_BANKS);
     _ptm384_sum = alloc(144 * SIGIL_CRYPTO_BANKS);
     _ptm384_dbl = alloc(144 * SIGIL_CRYPTO_BANKS);
-    _ptm384_inited = 1;
+    _sigil_once_publish(&_ptm384_inited);
     return 0;
 }
 
@@ -1218,11 +1225,12 @@ fn pt384_scalarmul_secret(out, k, P): i64 {
 # ================================================================
 
 var _p384_G_table   = 0;
-var _p384_Gt_inited = 0;
+var _p384_Gt_inited = 0;   # 0 / 1 building / 2 published (_sigil_once_*)
 var _p384_gt_tmp    = 0;
 
 fn _build_p384_G_table(): i64 {
-    if (_p384_Gt_inited == 1) { return 0; }
+    if (atomic_load(&_p384_Gt_inited) == 2) { return _sigil_once_acquired(); }
+    if (_sigil_once_claim(&_p384_Gt_inited) == 0) { return 0; }
     _p384_init();
     _ptm384_init();
     _p384_G_table = alloc(221184);                # 96 * 16 * 144
@@ -1249,14 +1257,14 @@ fn _build_p384_G_table(): i64 {
         }
         i = i + 1;
     }
-    _p384_Gt_inited = 1;
+    _sigil_once_publish(&_p384_Gt_inited);
     return 0;
 }
 
 # out = k · G via the fixed-base comb. PUBLIC scalar only (non-CT).
 # k is 384-bit LE limbs (6 × i64); nibble i = bits [4i, 4i+3], i ∈ [0,96).
 fn p384_scalarmul_base(out, k): i64 {
-    if (_p384_Gt_inited == 0) { _build_p384_G_table(); }
+    _build_p384_G_table();   # its fast path is one load; a bare `== 0` test would read a half-built table (3.13.6)
     pt384_set_infinity(out);
     var i = 0;
     while (i < 96) {
@@ -1271,13 +1279,14 @@ fn p384_scalarmul_base(out, k): i64 {
 # Windowed scalar mul for the VARIABLE point Q. PUBLIC scalar/point only.
 var _ecq384_tab    = 0;    # 16 multiples k·Q (144 B each)
 var _ecq384_acc    = 0;
-var _ecq384_inited = 0;
+var _ecq384_inited = 0;   # 0 / 1 building / 2 published (_sigil_once_*)
 
 fn _ecq384_init(): i64 {
-    if (_ecq384_inited == 1) { return 0; }
+    if (atomic_load(&_ecq384_inited) == 2) { return _sigil_once_acquired(); }
+    if (_sigil_once_claim(&_ecq384_inited) == 0) { return 0; }
     _ecq384_tab = alloc(2304 * SIGIL_CRYPTO_BANKS);     # 16 * 144
     _ecq384_acc = alloc(144 * SIGIL_CRYPTO_BANKS);
-    _ecq384_inited = 1;
+    _sigil_once_publish(&_ecq384_inited);
     return 0;
 }
 
@@ -1341,10 +1350,11 @@ var _ecv384_Rx       = 0;
 var _ecv384_Ry       = 0;
 var _ecv384_Rx_modn  = 0;
 var _ecv384_Q        = 0;
-var _ecv384_inited   = 0;
+var _ecv384_inited   = 0;   # 0 / 1 building / 2 published (_sigil_once_*)
 
 fn _ecv384_init(): i64 {
-    if (_ecv384_inited == 1) { return 0; }
+    if (atomic_load(&_ecv384_inited) == 2) { return _sigil_once_acquired(); }
+    if (_sigil_once_claim(&_ecv384_inited) == 0) { return 0; }
     _p384_init();
     _ecv384_e        = alloc(48 * SIGIL_CRYPTO_BANKS);
     _ecv384_r        = alloc(48 * SIGIL_CRYPTO_BANKS);
@@ -1364,7 +1374,7 @@ fn _ecv384_init(): i64 {
     _ecv384_Rx_modn  = alloc(48 * SIGIL_CRYPTO_BANKS);
     _ecv384_Q        = alloc(144 * SIGIL_CRYPTO_BANKS);
     _build_p384_G_table();        # fixed-base comb for the u1·G term
-    _ecv384_inited = 1;
+    _sigil_once_publish(&_ecv384_inited);
     return 0;
 }
 

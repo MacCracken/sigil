@@ -193,7 +193,7 @@ var _oid_sha384_with_rsa   = 0;
 var _oid_sha512_with_rsa   = 0;   # 3.13.6
 var _oid_sha1_with_rsa     = 0;   # 3.13.6 — parsed only, never verified (see X509_SIG_RSA_SHA1)
 var _oid_ed25519           = 0;
-var _x509_oids_inited      = 0;
+var _x509_oids_inited      = 0;   # 0 / 1 building / 2 published (_sigil_once_*)
 
 # Build a small heap buffer holding the OID's content bytes.
 fn _build_oid(bytes_hex, hex_len): i64 {
@@ -201,7 +201,8 @@ fn _build_oid(bytes_hex, hex_len): i64 {
 }
 
 fn _x509_oids_init(): i64 {
-    if (_x509_oids_inited == 1) { return 0; }
+    if (atomic_load(&_x509_oids_inited) == 2) { return _sigil_once_acquired(); }
+    if (_sigil_once_claim(&_x509_oids_inited) == 0) { return 0; }
     # 7-byte content for id-ecPublicKey: 2A 86 48 CE 3D 02 01
     _oid_ec_pub_key        = _build_oid("2a8648ce3d0201", 14);
     # 8-byte content for prime256v1:    2A 86 48 CE 3D 03 01 07
@@ -234,7 +235,7 @@ fn _x509_oids_init(): i64 {
     _oid_eku_server_auth   = _build_oid("2b06010505070301", 16);
     # 4-byte content for anyExtendedKeyUsage 2.5.29.37.0: 55 1D 25 00
     _oid_eku_any           = _build_oid("551d2500", 8);
-    _x509_oids_inited = 1;
+    _sigil_once_publish(&_x509_oids_inited);
     return 0;
 }
 
@@ -401,9 +402,10 @@ fn _x509_set_eku(c, v): i64               { store64(c + 264, v); return 0; }
 
 # Days-in-month table (non-leap). Initialised once.
 var _x509_mdays = 0;
-var _x509_mdays_inited = 0;
+var _x509_mdays_inited = 0;   # 0 / 1 building / 2 published (_sigil_once_*)
 fn _x509_init_mdays(): i64 {
-    if (_x509_mdays_inited == 1) { return 0; }
+    if (atomic_load(&_x509_mdays_inited) == 2) { return _sigil_once_acquired(); }
+    if (_sigil_once_claim(&_x509_mdays_inited) == 0) { return 0; }
     _x509_mdays = alloc(96);   # 12 × 8 bytes
     store64(_x509_mdays + 0,  31);
     store64(_x509_mdays + 8,  28);
@@ -417,7 +419,7 @@ fn _x509_init_mdays(): i64 {
     store64(_x509_mdays + 72, 31);
     store64(_x509_mdays + 80, 30);
     store64(_x509_mdays + 88, 31);
-    _x509_mdays_inited = 1;
+    _sigil_once_publish(&_x509_mdays_inited);
     return 0;
 }
 
@@ -576,24 +578,6 @@ fn _x509_parse_time(buf, buf_len, pos, out_epoch, out_next_pos): i64 {
 # stashes offsets into the X509Cert struct. Every step bounds-
 # checks against `der_len`.
 # ================================================================
-
-# Globals for nested-call survival (Cyrius quirk #1).
-var _xp_buf = 0;
-var _xp_buf_len = 0;
-var _xp_cert = 0;
-var _xp_cp = 0;        # scratch content_pos
-var _xp_np = 0;        # scratch next_pos
-var _xp_n2p = 0;       # second scratch next_pos
-var _xp_alloced = 0;
-
-fn _xp_init(): i64 {
-    if (_xp_alloced == 1) { return 0; }
-    _xp_cp  = alloc(8);
-    _xp_np  = alloc(8);
-    _xp_n2p = alloc(8);
-    _xp_alloced = 1;
-    return 0;
-}
 
 # Parse a signatureAlgorithm AlgorithmIdentifier at `pos`. Recognizes
 # ecdsa-with-SHA256/384, sha256/384/512WithRSAEncryption, id-Ed25519 and
@@ -939,7 +923,6 @@ fn x509_parse(der, der_len, out_cert): i64 {
 # side blocks are drawn from the caller's `arena` (0 ⇒ global bump).
 # Returns 1 on success, 0 on malformed input or arena exhaustion.
 fn x509_parse_into(der, der_len, out_cert, arena): i64 {
-    _xp_init();
     _x509_oids_init();
     memset(out_cert, 0, 272);   # CVE-17: grown struct (keyUsage + EKU at +256/+264)
     _x509_set_der(out_cert, der, der_len);
