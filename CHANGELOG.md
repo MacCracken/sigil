@@ -7,6 +7,138 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.13.6] - 2026-10-01
+
+⛔ **Tag this release before cyrius 6.6.13 is tagged** — cyrius 6.6.13 folds it as
+`lib/sigil.cyr`. Three repairs for the sigil-side causes of two issues cyrius filed on
+2026-09-30 from an abaco 2.4.9 TLS study (`tls-first-use-thread-race`, and part (e) of
+`tls-client-memory-and-alert-gaps`). Public API unchanged. The toolchain pin stays **6.6.9**.
+Audit: [`docs/audit/2026-10-01-3.13.6-first-use-races-x509-root-algorithms-audit.md`](docs/audit/2026-10-01-3.13.6-first-use-races-x509-root-algorithms-audit.md).
+
+### Fixed
+
+- **First use from several threads at once no longer corrupts sigil's tables.** About 30
+  lazily-built tables were guarded by a plain check-then-set flag stored last: the P-256 and
+  P-384 constants, scratch and fixed-base combs, ECDSA signing, SHA-256's round constants, the
+  PEM and X.509 OID tables, Authenticode's OIDs and the EFI signature tables. Two threads
+  making their first call together both built them and each overwrote pointers the other was
+  already using. Two TLS clients whose first connects overlapped failed every handshake, and
+  the process stayed broken for every thread started later. Every one of them now builds under
+  a 0 → 1 → 2 claim / publish (`_sigil_once_*` in `src/crypto_scratch.cyr`, the shape the AES,
+  SHA-512, Ed25519 and ML-DSA NTT inits got at 3.13.1). The 15 lazily-allocated scratch
+  pointers in the P-256 / P-384 field, scalar and affine code CAS-publish their pointer
+  (`_sigil_lazy_scratch`). `p256_scalarmul_base` / `p384_scalarmul_base` no longer test the
+  table flag against 0 themselves (under three states that reads a half-built table).
+- **A worker making the process's first crypto call no longer kills the main thread.**
+  `crypto_tls_main_init` ran on whichever thread arrived first. A worker that won had its own
+  `CLONE_SETTLS` thread-local block replaced (wiping every other library's slots on it) and took
+  bank 0. Meanwhile the main thread never got a block, and its first crypto call read
+  thread-local storage through a null thread pointer: SIGSEGV. On Linux the calling thread's
+  thread pointer now decides: a thread with a block is left alone and draws a lane, and only a
+  thread with none — only ever the main thread — installs one and takes bank 0. The register is
+  read with `TPIDR_EL0` on aarch64 and `rdfsbase` on x86, and only once `/proc/self/auxv`
+  reports HWCAP2_FSGSBASE (`rdfsbase` without it is SIGILL); otherwise the test is tid == pid.
+  This also stops sigil replacing a block the program itself installed on the main thread.
+  macOS, Windows, agnos and cx do not reach thread-local storage through the thread pointer,
+  cannot fault, and keep the first-caller behaviour. Calling `crypto_tls_main_init()` /
+  `ecdsa_p256_warm()` / `ecdsa_p384_warm()` on the main thread before spawning workers is now
+  optional (ADR 0007 amended; README, CLAUDE.md quirk #7 and the `*_warm` headers updated).
+- **Seven trust-store roots that `x509_parse` refused now install.** It rejected any
+  certificate whose OWN signature algorithm it could not verify, so 8 of the 121 roots in
+  Arch's `/etc/ssl/cert.pem` never loaded:
+  - four self-signed sha512WithRSAEncryption — Certum ×2, and D-TRUST BR / EV Root CA 2 2023,
+    which are current roots;
+  - three sha1WithRSAEncryption;
+  - one ECDSA P-521.
+
+  `sha512WithRSAEncryption` is now parsed and verified (a private
+  `_rsa_pkcs1v15_verify_sha512`), so a chain whose links are SHA-512 — D-TRUST's 2023
+  hierarchy — can verify at all.
+
+### Security
+
+- **SHA-1 signatures are parsed, never verified.** `sha1WithRSAEncryption` parses as
+  `X509_SIG_RSA_SHA1` so that a root merely self-signed with SHA-1 can be a trust anchor, whose
+  own signature RFC 5280 §6.1 never checks. `_x509_verify_link` refuses every SHA-1 link
+  explicitly, and the test proves it with a genuine SHA-1 link signature. Authenticode mode 0
+  (a pinned `db` certificate, trusted by byte-equality) now accepts a SHA-1-signed pinned
+  certificate, as firmware does; the PE's own signature is still verified with its key.
+- **ECDSA P-521 is still refused** at parse: sigil has no P-521 (see *Not in this release*).
+
+### Changed
+
+- `src/crypto_scratch.cyr` includes `lib/sys.cyr` (`sys_gettid` / `sys_getpid`, the no-FSGSBASE
+  fallback). Every profile sidecar gains `sys`, and `syscalls` and `io` are now listed explicitly
+  (`result` arrives through `io`). `dist/sigil.deps` is unchanged.
+- `x509.cyr`'s unused `_xp_*` globals and their 24-byte allocation removed.
+- CI's security scan fails on either check-then-set lazy-init shape (31 + 15 hits on 3.13.5,
+  0 now).
+- `dist/` regenerated: all 14 bundles; a second pass is byte-identical.
+
+### Performance
+
+Same box, same 6.6.9 pin, DCE builds, user CPU, minimum of 7 alternating runs against 3.13.5
+rebuilt from its tag (the box ran at load 5–35, so averages are not used):
+
+| Workload | 3.13.5 | 3.13.6 |
+|---|---|---|
+| 40 × `ecdsa_p256_verify`, main thread | 0.810 s | 0.810 s |
+| 20 × `ecdsa_p384_verify`, main thread | 0.540 s | 0.540 s |
+| 200k × SHA-256 (64 B) + 5k PEM/`x509_parse`, main thread | 0.190 s | 0.190 s |
+| the same three, one worker only, main never does crypto | 0.790 / 0.540 / 0.190 s | 0.810 / 0.550 / 0.190 s |
+
+The worker-only row is the only cost. Until the main thread's block exists, every `cbank()`
+reads the thread pointer: 0–2 ticks of 10 ms here, up to +2.5%. One `crypto_tls_main_init()`
+(or any sigil crypto) on the main thread removes it. On an x86 kernel without FSGSBASE that
+read is two syscalls (~660 ns on this box). Before 3.13.6 that path was broken whenever two
+workers reached it cold.
+
+### Tests
+
+- New `tests/tcyr/lazy_init_race.tcyr`. Eight cold threads per fresh (forked) process, released
+  from a barrier, each make a first call:
+  - SHA-256;
+  - P-256 and P-384 verify, accept and reject;
+  - PEM-decode plus `x509_parse` of a P-256 certificate.
+
+  On 3.13.5, 6 of 6 trials gave wrong answers; now 0 of 6, stable over repeated runs. Serial
+  targets skip it (x86 macOS, Windows and agnos have THREADS_CONCURRENT = 0), and arm64 macOS
+  runs one in-process trial, because a forked child cannot create a thread there (cyrius 6.6.9;
+  that crash reproduces with no sigil code at all).
+- New `tests/tcyr/cbank_main_lane.tcyr`:
+  - **Worker first, then main.** Both verify, the worker draws its own lane and main keeps bank
+    0. On 3.13.5 the main thread was killed by signal 11.
+  - **A block the program installed on main survives sigil's first use.** On 3.13.5 it was
+    replaced.
+  - **The hand-encoded thread-pointer read is pinned.** It reads 0 on a cold main, then main's
+    block, then a worker's own.
+  - The no-FSGSBASE fallback, forced locally: the first group passes and the other two skip.
+- `tests/tcyr/x509_rsa.tcyr`: +18 assertions, all 18 failing on 3.13.5. They use generated
+  SHA-512 and SHA-1 RSA chains, plus three real roots (D-TRUST BR 2023, TWCA, e-Szigno 2023
+  P-521).
+- Suite **2678/0 across 82 files** on x86_64 (2645 across 80 at 3.13.5); fuzz 24/0. The three
+  changed files also pass on aarch64 (qemu and the pi), ecb and ach.
+
+### Verification
+
+- The bundle builds on six targets with the 6.6.9 toolchain from its `sigil.deps` leaves, with
+  all 873 public functions address-taken (so reachable): x86_64 Linux, aarch64 Linux, agnos, PE,
+  x86_64 Mach-O and arm64 Mach-O. 0 undefined, 0 errors.
+- Each of the 13 profile bundles builds from its own sidecar leaves alone (x86_64, 6.6.9; all
+  public functions reachable). The harness was proven to bite: without `thread_local` the `sha`
+  profile is refused (4 reachable undefined functions).
+- `cyrius doc --check dist/sigil.cyr`: 873 documented, 0 undocumented.
+
+### Not in this release (named in the roadmap, awaiting the maintainer)
+
+- **ECDSA P-521** — the one stock-store root still refused (e-Szigno TLS Root CA 2023). A new
+  curve is a feature.
+- **x86 kernels without FSGSBASE (before Linux 5.9)** — the main thread still installs a fresh
+  block over one the program installed itself, as before 3.13.6.
+- **`fork()` during a first-use build** — a child forked while another thread holds a lazy-init
+  claim spins forever on that table if it uses it without exec (inherent to claim / publish; the
+  five 3.13.1 inits already had it).
+
 ## [3.13.5] - 2026-09-30
 
 ⛔ **Tag this release before cyrius 6.6.12 is tagged** — cyrius 6.6.12 folds it as
