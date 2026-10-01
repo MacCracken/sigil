@@ -501,17 +501,17 @@ fn ecdsa_p256_sign(d_be, msg, msg_len, sig_out): i64 {
 }
 
 # ================================================================
-# ecdsa_p256_warm — main-thread prewarm (ADR 0007)
+# ecdsa_p256_warm — optional main-thread prewarm (ADR 0007)
 # ================================================================
-# The per-call P-256 scratch is lane-banked (3.9.7) for race-freedom, but
-# the lazy `_init` allocations themselves use the NON-thread-safe bump
-# allocator (quirk #7), so the FIRST touch of each must happen on a single
-# thread. A server that fans ECDSA work out to worker threads MUST call
-# this once on the MAIN thread at startup, before spawning workers — the
-# same prewarm contract as `crypto_tls_main_init`. One sign + one verify
-# exercises every sign- AND verify-path lazy alloc / table build (the
-# verify-only inits `_ecv_init`/`_ecq_init` are not reached by signing, so
-# both paths must run). Returns 0.
+# Builds every lazy P-256 table and scratch block now, so that the first
+# handshake does not pay for it (the fixed-base comb is the bulk). Since
+# 3.13.6 this is OPTIONAL: every lazy init is race-free (crypto_scratch.cyr
+# `_sigil_once_*`), so concurrent first use from worker threads is correct
+# without it. Through 3.13.5 it was a MUST — the inits were plain
+# check-then-set, and two cold first callers corrupted each other's tables.
+# One sign + one verify exercises every sign- AND verify-path lazy alloc /
+# table build (the verify-only inits `_ecv_init`/`_ecq_init` are not reached
+# by signing, so both paths must run). Returns 0.
 fn ecdsa_p256_warm(): i64 {
     var d[32]; memset(&d, 0, 32); store8(&d + 31, 7);   # any scalar in [1, n-1]
     var sig[64];
@@ -585,17 +585,14 @@ fn ecdsa_p384_sign(d_be, msg, msg_len, sig_out): i64 {
 }
 
 # ================================================================
-# ecdsa_p384_warm — main-thread prewarm (ADR 0007)
+# ecdsa_p384_warm — optional main-thread prewarm (ADR 0007)
 # ================================================================
-# P-384 mirror of ecdsa_p256_warm. The per-call P-384 scratch is lane-
-# banked for race-freedom, but the lazy `_init` allocations themselves use
-# the NON-thread-safe bump allocator (quirk #7), so the FIRST touch of each
-# must happen on a single thread. A server that fans P-384 ECDSA work out to
-# worker threads MUST call this once on the MAIN thread at startup, before
-# spawning workers. One sign + one verify exercises every sign- AND
-# verify-path lazy alloc / table build (the verify-only inits _ecv384_init /
-# _ecq384_init / _onc384_init are not reached by signing, so both paths must
-# run). Returns 0.
+# P-384 mirror of ecdsa_p256_warm: builds every lazy P-384 table now so the
+# first handshake does not pay for it. OPTIONAL since 3.13.6 (every lazy init
+# is race-free); a MUST through 3.13.5. One sign + one verify exercises every
+# sign- AND verify-path lazy alloc / table build (the verify-only inits
+# _ecv384_init / _ecq384_init / _onc384_init are not reached by signing, so
+# both paths must run). Returns 0.
 fn ecdsa_p384_warm(): i64 {
     var d[48]; memset(&d, 0, 48); store8(&d + 47, 7);   # any scalar in [1, n-1]
     var sig[96];

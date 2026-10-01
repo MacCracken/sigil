@@ -111,3 +111,29 @@ cert is Ed25519); the bignum modexp/Montgomery and tls12_prf statics
 - **Keep banks at 8** — rejected; 8 cannot cover a per-core TLS pool, and
   an auto-assigned thread could otherwise alias a live lane at low
   worker counts.
+
+## Amendment — 3.13.6 (2026-10-01): first use, and whose block main gets
+
+Two gaps this ADR's mechanism left, both reported by cyrius (issue
+`2026-09-30-tls-first-use-thread-race`, from an abaco TLS client whose threads made
+their first HTTPS fetches at the same time):
+
+- **The lazy one-time inits were not race-free.** Banking made each *call* safe, but
+  the ~30 lazily-built tables the calls depend on were plain check-then-set inits, so
+  two threads making their first call at once both built them and overwrote each
+  other's pointers: every handshake failed, permanently. 3.13.6 builds every lazy table
+  under a 0 → 1 → 2 claim/publish (`_sigil_once_*`, `src/crypto_scratch.cyr`) and
+  CAS-publishes the lazily-allocated scratch pointers (`_sigil_lazy_scratch`).
+- **`crypto_tls_main_init` ran on whichever thread arrived first.** A worker that won
+  had its own `CLONE_SETTLS` block replaced and took bank 0, and the main thread never
+  got a block: its first `cbank()` read thread-local storage through a null thread
+  pointer (SIGSEGV). Now only a thread with no block installs one — on Linux, only ever
+  the main thread, decided by the calling thread's own thread pointer (`TPIDR_EL0`, or
+  `%fs` via `rdfsbase` when the kernel enables FSGSBASE; tid == pid otherwise).
+
+So the "should still call `crypto_tls_main_init()` once on the main thread" contract
+above is **no longer required for correctness**. It remains worthwhile: it moves the
+one-time table builds off the first request, and until the main thread's block exists
+every `cbank()` takes a slow path (one thread-pointer read; two syscalls on an x86
+kernel without FSGSBASE). The 3.14.0 retirement of `cbank()` (roadmap) removes this
+mechanism altogether.

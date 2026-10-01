@@ -107,6 +107,30 @@ footprint and API-surface work, and it is scheduled rather than urgent.
       `secureboot_core` to cyrius's portable uname. Part of the `agnosys → agnodrm`
       decomposition (plan: `agnosys/docs/development/2026-06-18-agnosys-to-agnodrm-decomposition-plan.md`).
 
+**Named at 3.13.6 — awaiting the maintainer's call** (CLAUDE.md: nothing deferred without
+sign-off). 3.13.6 fixed the three sigil-side defects behind cyrius's 2026-09-30 TLS issues;
+these were left out of it, and each is the maintainer's decision:
+
+- [ ] **ECDSA P-521.** The one root in a stock trust store that sigil still refuses at
+      parse: e-Szigno TLS Root CA 2023 (Microsec, secp521r1 / ecdsa-with-SHA512). 3.13.6
+      made the seven RSA roots that failed alongside it install (four sha512WithRSA, three
+      self-signed sha1WithRSA); this one needs a curve sigil does not have — a feature
+      (field arithmetic, point ops, verify, SPKI parse, tests), not a repair. Planned on the
+      cyrius side for 6.6.13: a count of the roots a bundle load skipped, so this one is
+      at least visible.
+- [ ] **Residual, x86 kernels without FSGSBASE (before Linux 5.9).** There the thread
+      pointer cannot be read, so `crypto_tls_main_init` falls back to tid == pid and the
+      main thread still installs a fresh thread-local block even if the program had
+      installed one itself — replacing it, as every release before 3.13.6 did. Fixable only
+      with a thread-pointer read that needs no FSGSBASE (`arch_prctl(ARCH_GET_FS)`, i.e. a
+      second raw-syscall exception, or a stdlib wrapper for it).
+- [ ] **Residual, `fork()` during a first-use build.** A process that forks while another
+      thread holds a lazy-init claim (state 1) gives its child a table that will never be
+      published: a child that then uses that table spins forever. Inherent to the
+      claim/publish shape (the five 3.13.1 inits had it already; 3.13.6 extends the shape to
+      all of them). Exposure: a multi-threaded process that forks during its very first
+      crypto calls and runs sigil in the child without exec.
+
 **Backlog — gated / parked** (open, but not actionable until the gate lifts)
 
 - [ ] **EC scalar-mult ≤ 10 ms — DECISION NEEDED: the target is now met.**

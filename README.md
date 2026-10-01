@@ -65,9 +65,14 @@ All cryptography implemented in Cyrius — no external crypto libraries:
 
 > **Concurrency (since 3.9.7):** every reachable concurrent crypto path is
 > race-free — per-thread `cbank()` lanes back all banked scratch (no caller
-> mutex). A server that fans crypto out to worker threads calls
-> `crypto_tls_main_init()` plus, for ECDSA, `ecdsa_p256_warm()` /
-> `ecdsa_p384_warm()` once on the main thread before spawning workers (ADR 0007).
+> mutex). **Since 3.13.6 first use is race-free too**: every lazily-built table
+> is claimed and published atomically, and a worker that makes the process's
+> first crypto call no longer leaves the main thread without its thread-local
+> block. Calling `crypto_tls_main_init()` (and, for ECDSA, `ecdsa_p256_warm()` /
+> `ecdsa_p384_warm()`) once on the main thread before spawning workers is
+> optional now: it moves the one-time table builds off the first request and
+> skips a per-call thread-pointer check while the main thread has done no
+> crypto (ADR 0007).
 
 ## Modules
 
