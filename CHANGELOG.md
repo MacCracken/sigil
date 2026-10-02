@@ -76,7 +76,7 @@ inside it) and rescans from the body only after a failure.
 
 ### Tests
 
-- `tests/tcyr/pem.tcyr`: **39 → 148** assertions —
+- `tests/tcyr/pem.tcyr`: **39 → 158** assertions —
   - one bad-base64 block first / middle / last, and a certificate-sized block whose only defect is
     its last body byte;
   - an unmatched BEGIN first / middle / last, and a run of three at the tail;
@@ -85,24 +85,35 @@ inside it) and rescans from the body only after a failure.
   - capacity edges: a malformed block before or after `max_certs` good ones takes no entry; one
     entry short is -1; a pool exactly the good DER survives a certificate-sized bad block between
     them; one byte short is -1; a full pool then a MALFORMED block is a skip, then a well-formed
-    one is -1; entries past the count are untouched; every bad argument;
+    one is -1; entries past the count are untouched; every bad argument, and each argument check
+    again on an input where nothing else returns -1 (no BEGIN, or every block malformed before a
+    byte is written), so the check alone decides;
   - the survivors parse and chain-verify (`x509_verify_chain`);
   - an END sharing its dashes with the next BEGIN: the count and the lenient walk find both
     blocks, the strict decode still finds one (pinned, unchanged);
+  - two BEGIN markers overlapping (a BEGIN whose closing dashes open the next): one block, and it
+    is skipped — counted markers never overlap, so the walk and the count agree and
+    `decoded + skipped == pem_count_cert_blocks` holds (the identity cyrius derives its
+    skipped-root count from);
   - 400 generated bundles against a model: decoded entries in order, the skipped count, the block
     count, and the strict decode's answer.
 
   On 3.13.6 the file does not compile (`pem_decode_certs_lenient_into` and
-  `pem_count_cert_blocks` are undefined). 13 mutants of the new code each turn it red (1 to 39
+  `pem_count_cert_blocks` are undefined). 17 mutants of the new code each turn it red (1 to 39
   failed assertions; two crash after their first failure): all-or-nothing on a bad block,
   resuming after the END on failure, an entry claimed before the block decodes, a full pool
   always skipped / always fatal, an unmatched BEGIN at the tail not counted, the END searched only
   once, the count stepping too far, the validate-only walk taking the writing path, a success
   resuming past its END, a skipped block consuming pool, an off-by-one entry check, an empty input
-  counted as -1.
+  counted as -1, the count stepping one byte past a match instead of 27, a skip resuming at the
+  BEGIN + 1 instead of the body start, and the `max_certs <= 0` / `der_pool_size < 0` checks
+  removed. (The last four were found green by review and are pinned by the overlapping-BEGIN group
+  and the decide-alone argument checks.) The fixture buffer holds 8 of the largest block and its
+  appender fails an assertion rather than write past it: the 400-bundle generator can build
+  4,389 B and the buffer was 4,096 (the fixed seed peaks at 3,210 today).
 - Passing on x86_64 Linux, the pi (aarch64), ecb (arm64 macOS), ach (x86_64 macOS) and cass
   (Windows PE), toolchain 6.6.9.
-- Suite **2787/0 across 82 files** on x86_64 (2678 at 3.13.6); fuzz 24/0.
+- Suite **2797/0 across 82 files** on x86_64 (2678 at 3.13.6); fuzz 24/0.
 
 ### Verification
 
