@@ -69,8 +69,9 @@ for bfile in "$ROOT"/tests/bcyr/*.bcyr; do
     name=$(basename "$bfile" .bcyr)
     tmpbin="/tmp/sigil_b_$$"
     if cat "$bfile" | "$CC" > "$tmpbin" 2>/dev/null && chmod +x "$tmpbin"; then
-        timeout 300 "$tmpbin" 2>&1
-        check "bench_$name" "$?"
+        brc=0
+        timeout 300 "$tmpbin" 2>&1 || brc=$?
+        check "bench_$name" "$brc"
     else
         echo "  COMPILE FAIL: $name"
         check "bench_$name" 1
@@ -83,6 +84,11 @@ echo ""
 # NOTE: `|| true` used to previously swallow crashes; removed so
 # exit codes >= 128 (signal termination) are treated as failures.
 # Acceptable exits: 0 (clean), 124 (SIGTERM from timeout).
+# The exit code is captured with `|| rc=$?`: under `set -e` a bare
+# non-zero command ends the script, so the first harness to outrun its
+# budget (fuzz_ed25519 takes ~11 s) aborted the audit with exit 124 and
+# no summary — the 124 this block accepts was unreachable. Same for a
+# failing bench above. CHANGELOG [3.13.7].
 echo "── Fuzz (5s each) ──"
 for ffile in "$ROOT"/fuzz/*.fcyr; do
     [ -f "$ffile" ] || continue
@@ -90,8 +96,8 @@ for ffile in "$ROOT"/fuzz/*.fcyr; do
     tmpbin="/tmp/sigil_f_$$"
     printf "  %-25s " "$name"
     if cat "$ffile" | "$CC" > "$tmpbin" 2>/dev/null && chmod +x "$tmpbin"; then
-        timeout 5 "$tmpbin" >/dev/null 2>&1
-        rc=$?
+        rc=0
+        timeout 5 "$tmpbin" >/dev/null 2>&1 || rc=$?
         if [ "$rc" -eq 0 ] || [ "$rc" -eq 124 ]; then
             echo "OK"
             check "$name" 0
