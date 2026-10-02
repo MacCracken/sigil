@@ -12,10 +12,6 @@ shipped").
   `fork()` child SIGSEGV'd on arm64 macOS. cyrius 6.6.13 (I6) routes `sys_fork` there through libSystem's
   `fork()`, so the fork-per-trial shape works on ecb; restore it (keep the `THREADS_CONCURRENT` gate for
   x86 macOS / Windows / agnos, where threads run inline) and re-verify on ecb.
-- **`pem_decode_certs_into` fails the WHOLE bundle on one malformed block** (an unmatched BEGIN or bad
-  base64), so one corrupt block in an OS store installs zero roots. cyrius 6.6.13 counts each refused
-  block (`tls_native_ca_skipped`), but tolerating a per-block decode error is sigil's change. Found by the
-  cyrius 6.6.13 I2 review.
 - At the pin bump, re-vendor `lib/math.cyr` with `cyrius deps` in the same commit — 6.6.13 made `f64_le` / `f64_ge` / `f64_trunc` compiler builtins (reserved names), and a pre-6.6.13 vendored copy still defines them (`reserved keyword`).
 
 **One scheduled cycle — [3.14.0, retire `cbank()`](#planned--3140--retire-cbank)

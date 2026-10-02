@@ -122,7 +122,10 @@ All cryptography implemented in Cyrius — no external crypto libraries:
 - **`x509.cyr`** — minimal X.509 cert parser + chain walker (P-256, P-384,
   RSA and Ed25519 SPKIs; ECDSA-SHA256/384, RSA-PKCS#1-SHA256/384 and
   Ed25519 chain-link signatures)
-- **`pem.cyr`** — RFC 4648 base64 + PEM block decoder
+- **`pem.cyr`** — RFC 4648 base64 + PEM block decoder: `pem_decode_certs_into` (all-or-nothing,
+  for attestation chains and any caller that wants a specific certificate) and, since 3.13.7,
+  `pem_decode_certs_lenient_into` for trust bundles (a malformed block is skipped and counted,
+  every other block decodes; size `out_chain` with `pem_count_cert_blocks`)
 - **`sgx.cyr`** — Intel SGX DCAP v3 quote parser +
   `sgx_quote_verify_with_pck` + `sgx_quote_verify_full`
 - **`tdx.cyr`** — Intel TDX v4 TD-quote parser + verify

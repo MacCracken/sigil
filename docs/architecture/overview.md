@@ -42,6 +42,7 @@ lib.cyr (entry point)
   │                       — P-256 and P-384 SPKIs
   │                       — ECDSA-SHA256 chain-link signatures only
   ├── pem.cyr           RFC 4648 base64 + PEM block decoder
+  │                       — strict (chains) + lenient (trust bundles, 3.13.7)
   ├── privkey.cyr       EC + Ed25519 private-key parsers (PEM + DER)
   ├── rsa.cyr           RSA PKCS#1 v1.5 verify + sign + keys (RFC 8017)
   ├── sgx.cyr           Intel SGX DCAP v3 quote parse + verify
