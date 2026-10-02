@@ -354,6 +354,20 @@ fn lenient_tests(): i64 {
       0 - 1, "null der_pool with a size: -1");
     assert_eq(pem_count_cert_blocks(_pb_buf, 0 - 1), 0 - 1, "pem_count_cert_blocks: pem_len < 0 -> -1");
     assert_eq(pem_count_cert_blocks(0, 16), 0 - 1, "pem_count_cert_blocks: null pem -> -1");
+    # Each argument check on its own: on inputs where nothing else returns -1 (no capacity
+    # failure — no BEGIN marker, or every block malformed before a byte is written), so the
+    # check alone decides.
+    sk = 77;
+    assert_eq(pem_decode_certs_lenient_into("no markers", 10, chain, 0, pool, 8, &sk),
+      0 - 1, "max_certs = 0, no BEGIN marker: -1");
+    assert_eq(sk, 0, "max_certs = 0, no BEGIN marker: out_skipped 0");
+    pb_reset(); pb_str(EMPTY_BODY); pb_str(UNMATCHED);
+    assert_eq(pem_decode_certs_lenient_into(_pb_buf, _pb_len, chain, 8, pool, 0 - 1, &sk),
+      0 - 1, "der_pool_size < 0, every block malformed: -1");
+    assert_eq(pem_decode_certs_lenient_into(_pb_buf, _pb_len, 0, 8, pool, _pb_len, &sk),
+      0 - 1, "null out_chain, every block malformed: -1");
+    assert_eq(pem_decode_certs_lenient_into(_pb_buf, _pb_len, chain, 8, 0, 16, &sk),
+      0 - 1, "null der_pool with a size, every block malformed: -1");
 
     # ============================================================
     # Group 16 — what survives is usable: parse + chain-verify
@@ -388,6 +402,24 @@ fn lenient_tests(): i64 {
     assert_eq(sk, 0, "nothing skipped");
     assert_eq(entry_is(chain, 1, _ld, LEAF_DER_LEN), 1, "entry 1 is the leaf");
     assert_eq(pb_strict(chain), 1, "the strict walk sees only the first (unchanged behaviour)");
+
+    # Two BEGIN markers overlapping: a BEGIN whose closing dashes are the next BEGIN's
+    # opening ones. Counted markers never overlap (each search resumes 27 bytes past the last
+    # match), so this is ONE block, whose body runs into the second marker's text and is
+    # skipped — and the walk agrees with the count. A count, or a skip, that rescanned inside
+    # a counted marker would see the root behind it and break decoded + skipped == the count,
+    # which is the identity cyrius derives its skipped-root count from.
+    test_group("pem_count_cert_blocks — overlapping BEGIN markers are one block");
+    pb_reset();
+    pb_add(_rp, 22);                         # "-----BEGIN CERTIFICATE", no closing dashes
+    pb_root();                               # the root's BEGIN dashes close the first one
+    assert_eq(pb_count(), 1, "pem_count_cert_blocks = 1");
+    sk = 99;
+    n = pb_lenient(chain, &sk);
+    assert_eq(n, 0, "lenient: nothing decodes");
+    assert_eq(sk, 1, "lenient: the one block is skipped");
+    assert_eq(n + sk, pb_count(), "decoded + skipped == pem_count_cert_blocks");
+    assert_eq(pb_strict(chain), 0 - 1, "strict: -1");
 
     # ============================================================
     # Group 18 — 400 generated bundles against a model
