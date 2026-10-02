@@ -7,6 +7,111 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.13.7] - 2026-10-02
+
+⛔ **Tag this release before cyrius 6.6.14 is tagged** — cyrius 6.6.14 folds it as
+`lib/sigil.cyr` and switches its trust-bundle install to the new decode. One library fix,
+recorded by the cyrius 6.6.13 I2 review, and a `check.sh` repair. Public API additive (two new
+functions); nothing existing changes behaviour. The toolchain pin stays **6.6.9**.
+Audit: [`docs/audit/2026-10-02-3.13.7-pem-trust-bundle-audit.md`](docs/audit/2026-10-02-3.13.7-pem-trust-bundle-audit.md).
+
+### Fixed
+
+- **One malformed block no longer costs a whole trust bundle.** `pem_decode_certs_into` is
+  all-or-nothing: an unmatched BEGIN or one bad-base64 block anywhere failed the entire input.
+  That is right for an attestation chain, which needs every certificate, and wrong for a trust
+  bundle — an OS store of ~120–150 independent roots — where cyrius's native TLS then installed
+  **zero** roots (6.6.13 at least counted them: `tls_native_ca_skipped` reported every block).
+  On Arch's 121-block `/etc/ssl/cert.pem` with one corrupted block, the strict decode returns -1;
+  the new decode returns 120 and reports 1 skipped. New, for trust bundles:
+  - `pem_decode_certs_lenient_into(pem, pem_len, out_chain, max_certs, der_pool, der_pool_size,
+    out_skipped)` — the strict decode's layout and pool; a malformed block is skipped and
+    counted, every other block decodes in order. Returns the number decoded (`>= 0`; 0 when
+    nothing decodes) and writes the number skipped through `out_skipped` (may be 0).
+  - `pem_count_cert_blocks(pem, pem_len)` — the BEGIN-marker count that walk visits, for sizing
+    `out_chain`: every non-negative return has `decoded + skipped ==` this count.
+
+  After a failed block the walk resumes at the **next BEGIN**, never after the END it ran into:
+  given an unmatched BEGIN, the strict decode walks on to the next block's END and fails on the
+  BEGIN text inside, and a decode that resumed there would lose that next certificate too. Every
+  decoded entry is exactly what the strict decode produces for that block alone — no entry is
+  assembled across a block boundary. Keep the strict decode wherever a SPECIFIC certificate is
+  wanted (cyrius's `tls_native_set_client_cert` takes the first block as the leaf): skipping a bad
+  first block there would silently hand back the next certificate.
+
+### Changed
+
+- ⚠ **Capacity is not malformation.** The lenient decode returns -1 (with `out_skipped` 0) for a
+  bad argument or when a **well-formed** block finds no entry or no pool space; a skipped block
+  takes neither, whatever its size. When the pool runs out partway through a block, a
+  validate-only walk decides which it was. Room never runs out with `max_certs >=
+  pem_count_cert_blocks(...)` and `der_pool_size >= pem_len`.
+- `_pem_b64_decode` is now a wrapper over `_pem_b64_walk`, which adds a validate-only mode and
+  reports a full output buffer (-2) apart from a malformed body (-1). The wrapper still returns -1
+  for both, so the strict decode and `pem_decode_privkey` are unchanged.
+- `scripts/check.sh` completes again. It runs under `set -e` and ran each fuzz harness as a bare
+  `timeout 5 ...` then `rc=$?`, so the timeout exit (124) it was written to accept ended the
+  script first: `fuzz_ed25519` takes ~11 s here, so every run on this box exited 124 with no
+  summary, after the test and bench sections had passed. The bench loop had the same shape. Both now capture the
+  status with `|| rc=$?`; the audit reports 91 passed, 0 failed (lock, 82 `.tcyr`, 5 benches,
+  3 fuzz).
+- README and the architecture overview name the two decodes and which callers each is for.
+- `dist/` regenerated: all 14 bundles (`sigil.cyr` and `sigil-x509.cyr` carry the change, the
+  other twelve only the version header); a second pass is byte-identical. `dist/*.deps`
+  unchanged.
+
+### Performance
+
+Same box, 6.6.9, DCE builds, 100 decodes of the 121-block Arch store per run, 5–7 alternating
+runs:
+
+| Decode | 3.13.6 | 3.13.7 |
+|---|---|---|
+| `pem_decode_certs_into` (strict) | 2.66 ms | 2.66 ms |
+| `pem_decode_certs_lenient_into` | — | 2.71 ms |
+
+A first cut that searched for the next BEGIN inside every body cost +45 %; the walk now resumes
+from the END after a block that decodes (a body that decodes holds no `-`, so no BEGIN can start
+inside it) and rescans from the body only after a failure.
+
+### Tests
+
+- `tests/tcyr/pem.tcyr`: **39 → 148** assertions —
+  - one bad-base64 block first / middle / last, and a certificate-sized block whose only defect is
+    its last body byte;
+  - an unmatched BEGIN first / middle / last, and a run of three at the tail;
+  - every malformed-body kind (empty, excess padding, alphabet after padding, partial quad, bad
+    byte) with a stray END between blocks; all bad; no BEGIN; empty input;
+  - capacity edges: a malformed block before or after `max_certs` good ones takes no entry; one
+    entry short is -1; a pool exactly the good DER survives a certificate-sized bad block between
+    them; one byte short is -1; a full pool then a MALFORMED block is a skip, then a well-formed
+    one is -1; entries past the count are untouched; every bad argument;
+  - the survivors parse and chain-verify (`x509_verify_chain`);
+  - an END sharing its dashes with the next BEGIN: the count and the lenient walk find both
+    blocks, the strict decode still finds one (pinned, unchanged);
+  - 400 generated bundles against a model: decoded entries in order, the skipped count, the block
+    count, and the strict decode's answer.
+
+  On 3.13.6 the file does not compile (`pem_decode_certs_lenient_into` and
+  `pem_count_cert_blocks` are undefined). 13 mutants of the new code each turn it red (1 to 39
+  failed assertions; two crash after their first failure): all-or-nothing on a bad block,
+  resuming after the END on failure, an entry claimed before the block decodes, a full pool
+  always skipped / always fatal, an unmatched BEGIN at the tail not counted, the END searched only
+  once, the count stepping too far, the validate-only walk taking the writing path, a success
+  resuming past its END, a skipped block consuming pool, an off-by-one entry check, an empty input
+  counted as -1.
+- Passing on x86_64 Linux, the pi (aarch64), ecb (arm64 macOS), ach (x86_64 macOS) and cass
+  (Windows PE), toolchain 6.6.9.
+- Suite **2787/0 across 82 files** on x86_64 (2678 at 3.13.6); fuzz 24/0.
+
+### Verification
+
+- A bundle-only consumer (the 26 `sigil.deps` leaves + `dist/sigil.cyr`, calling both new
+  functions and the strict decode) builds with 6.6.9 for x86_64 Linux, aarch64 Linux, agnos, PE,
+  x86_64 Mach-O and arm64 Mach-O, 0 undefined, and runs correctly on x86_64, the pi, ecb, ach and
+  cass.
+- `cyrius doc --check dist/sigil.cyr`: 875 documented, 0 undocumented (873 + the two new).
+
 ## [3.13.6] - 2026-10-01
 
 ⛔ **Tag this release before cyrius 6.6.13 is tagged** — cyrius 6.6.13 folds it as
