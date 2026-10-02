@@ -93,17 +93,25 @@ var _ld = 0;
 var _rp = 0;
 var _lp = 0;
 
-# The bundle under construction.
+# The bundle under construction. The buffer holds 8 of the largest block (the root PEM):
+# Group 18 writes up to 7. pb_add refuses to write past it — the decode's pool is allocated
+# right after, so an overrun would be decoded over before it was read.
 var _pb_buf = 0;
 var _pb_len = 0;
+var _pb_cap = 0;
 
 fn pb_reset(): i64 {
-    _pb_buf = alloc(4096);
+    _pb_cap = 8 * ROOT_PEM_LEN;
+    _pb_buf = alloc(_pb_cap);
     _pb_len = 0;
     return 0;
 }
 
 fn pb_add(p, n): i64 {
+    if (_pb_len + n > _pb_cap) {
+        assert_eq(_pb_len + n, _pb_cap, "pb_add: the bundle fits its buffer");
+        return 0 - 1;
+    }
     memcpy(_pb_buf + _pb_len, p, n);
     _pb_len = _pb_len + n;
     return 0;
