@@ -124,13 +124,16 @@ fn _nmul64_hi(a, b): i64 {
     #endif
 }
 
-# Portable high-half multiply for non-x86 targets. Same 32-bit-halves
-# decomposition bayan's `_mul64` uses, reduced to the high word. Never
-# compiled on x86-64; kept unguarded so `cyrius doc --check` and the aarch64
-# build both see it.
+# Portable high-half multiply for non-x86 targets: the 32-bit-halves
+# decomposition, reduced to the high word. BRANCH-FREE since 3.13.8 — the
+# constant-time EC engine (src/ec_ct.cyr) multiplies secret operands through
+# this on aarch64, and the form it replaced carried two value-dependent `if`
+# carry fix-ups. The three 32-bit column terms are summed in one 64-bit word
+# (each is below 2^32, so the sum is below 3·2^32 and cannot overflow) and the
+# column carry is that word's high half. Never compiled on x86-64; kept
+# unguarded so `cyrius doc --check` and the aarch64 build both see it.
 fn _nmul64_hi_sw(a, b): i64 {
     var mask32 = 0xFFFFFFFF;
-    var sbit = 1 << 63;
     var aL = a & mask32;
     var aH = (a >> 32) & mask32;
     var bL = b & mask32;
@@ -139,11 +142,6 @@ fn _nmul64_hi_sw(a, b): i64 {
     var lh = aL * bH;
     var hl = aH * bL;
     var hh = aH * bH;
-    var mid = lh + hl;
-    var mid_carry = 0;
-    if ((mid ^ sbit) < (lh ^ sbit)) { mid_carry = 1; }
-    var lo = ll + (mid << 32);
-    var lo_carry = 0;
-    if ((lo ^ sbit) < (ll ^ sbit)) { lo_carry = 1; }
-    return hh + (mid >> 32) + (mid_carry << 32) + lo_carry;
+    var mid = (ll >> 32) + (lh & mask32) + (hl & mask32);
+    return hh + (lh >> 32) + (hl >> 32) + (mid >> 32);
 }
