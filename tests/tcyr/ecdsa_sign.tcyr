@@ -148,7 +148,14 @@ fn _rz_dirty(ref, lo, hi): i64 {
     var i = lo + 8;
     while (i <= hi) {
         var v = load64(ref - i);
-        if (v != 0x5a5a5a5a5a5a5a5a) { if (v != 0) { if (load8(_rz_map + i / 8 - 1) == 0) { c = c + 1; } } }
+        var hit = 1;
+        if (v == 0x5a5a5a5a5a5a5a5a) { hit = 0; }
+        if (v == 0) { hit = 0; }
+        # A word equal to its own address is the PE prologue's stack probe, which stores each
+        # new page's address into it (`mov [rsp], rsp`, cyrius ESUBRSP): public, not data.
+        if (v == ref - i) { hit = 0; }
+        if (load8(_rz_map + i / 8 - 1) != 0) { hit = 0; }
+        c = c + hit;
         i = i + 8;
     }
     return c;
