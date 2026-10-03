@@ -303,5 +303,16 @@ jobs:
                | grep -v -E '^tests/tcyr/(fd_hygiene|rooted_paths)\.tcyr:'; then
             echo "FAIL: fixed /tmp path in a test or fuzz harness (use tests/scratch.cyr)"; fail=1
           fi
+          # 3.13.8: file operations go through lib/io.cyr's x* set (CLAUDE.md "No raw syscalls").
+          # agnos's sys_open / sys_mkdir / sys_unlink / sys_rmdir / sys_stat / sys_rename /
+          # sys_readlink / ... take (path, pathlen), so a bare POSIX-shaped call is wrong there and
+          # usually does not compile: tests/scratch.cyr's bare calls stopped eleven tests and
+          # fuzz_integrity building for agnos until the 3.13.8 review. Comment lines are skipped.
+          # Exempt: crypto_scratch's /proc/self/auxv read, inside #ifdef CYRIUS_TARGET_LINUX.
+          if grep -rnE '^[^#]*\bsys_(open|unlink|mkdir|rmdir|stat|lstat|statfs|rename|link|symlink|readlink)\(' \
+                 src tests fuzz programs --include='*.cyr' --include='*.tcyr' --include='*.bcyr' --include='*.fcyr' \
+               | grep -v -E '^src/crypto_scratch\.cyr:[0-9]+: *var fd = sys_open\("/proc/self/auxv", O_RDONLY, 0\);$'; then
+            echo "FAIL: bare sys_* file call (use lib/io.cyr's xopen / xunlink / xmkdir / xrmdir / xstat / xreadlink)"; fail=1
+          fi
           echo "security scan complete"
           test $fail -eq 0
