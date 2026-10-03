@@ -6,20 +6,14 @@ shipped").
 
 ## Outstanding work
 
-**Follow-ups recorded by cyrius 6.6.13 (2026-10-02):**
-- **Drop the arm64-macOS cold-trial workaround once sigil pins ≥ 6.6.13.** `tests/tcyr/lazy_init_race.tcyr`
-  and `cbank_main_lane.tcyr` run their cold trial in-process off Linux because a thread created in a
-  `fork()` child SIGSEGV'd on arm64 macOS. cyrius 6.6.13 (I6) routes `sys_fork` there through libSystem's
-  `fork()`, so the fork-per-trial shape works on ecb; restore it (keep the `THREADS_CONCURRENT` gate for
-  x86 macOS / Windows / agnos, where threads run inline) and re-verify on ecb.
-- At the pin bump, re-vendor `lib/math.cyr` with `cyrius deps` in the same commit — 6.6.13 made `f64_le` / `f64_ge` / `f64_trunc` compiler builtins (reserved names), and a pre-6.6.13 vendored copy still defines them (`reserved keyword`).
-- **Recorded at 3.13.8: the pin bump also fixes the timing tests on Intel macOS.** Under 6.6.9,
-  `clock_now_ns` on x86_64 macOS writes through a stale `rdx` (cyrius CVE-51, fixed in 6.6.10). On
-  ach it overwrote whatever buffer `rdx` pointed at — in `ecdh.tcyr`'s timing helper, the peer key —
-  so the timing groups measured refusals; since 3.13.8 they assert every timed call succeeded, which
-  makes them fail there instead of passing vacuously. Built with 6.6.14 the same tests pass on ach
-  with flat medians. Any sigil test or consumer reading the clock on Intel macOS under the pin is
-  exposed the same way.
+**The cyrius 6.6.13 follow-ups and the 3.13.8 review's pin and `/tmp` items shipped in 3.13.8**
+(pin 6.6.14; the fork-per-trial threading tests restored on macOS; tests and fuzz harnesses in a
+private per-run directory) — see CHANGELOG `[3.13.8]`. The `lib/math.cyr` re-vendor that the 6.6.13
+follow-up asked for did not apply: sigil never vendored `math` (not in `[deps].stdlib`, included
+nowhere). Its premise that x86 macOS, Windows and agnos run threads inline was half wrong — Windows
+threads are real, though cyrius 6.6.14's `lib/thread_win.cyr` sets `THREADS_CONCURRENT = 0` —
+so `tests/threads.cyr` measures instead of trusting that 0 (`lazy_init_race`, and `mldsa_kat`,
+whose barrier group had hung on Intel macOS).
 
 **One scheduled cycle — [3.14.0, retire `cbank()`](#planned--3140--retire-cbank)
 — plus parked / gated / verification-only items.** The 3.6 TLS arc,
@@ -174,22 +168,6 @@ measured but not taken:
 
 **Named at 3.13.8 by the review of the first draft — awaiting the maintainer's call:**
 
-- [ ] **The toolchain pin before the 3.13.8 tag (6.6.9 → ≥ 6.6.10, e.g. 6.6.14).** Under 6.6.9,
-      `ecdh.tcyr` exits non-zero on ach (Intel macOS): its two "every timed derive succeeded"
-      assertions fail because of cyrius CVE-51 (see the follow-up at the top of this file).
-      Either bump the pin — acceptance: `cyrius deps` re-vendors `lib/` (and `lib/math.cyr`,
-      above), `check.sh` green, every `.tcyr` exits 0 locally, `ecdh.tcyr` green on ach, the
-      cross-host suite re-run on the pi / ecb / ach / cass, all fourteen bundles regenerated —
-      or ship 3.13.8 with that file red on ach, recorded as approved in CHANGELOG [3.13.8].
-- [ ] **Fixed `/tmp` paths in twelve more test files.** 3.13.8 moved `check.sh` and
-      `batch_parallel.{tcyr,bcyr}` off predictable names in the shared `/tmp`; the same class
-      remains in `agnosys`, `audit_log`, `capture_bounded`, `fd_hygiene`, `policy_hardening`,
-      `secureboot_tools`, `security`, `sigil`, `trust_hardening`, `verify`, `verify_hardening`
-      (`.tcyr`) and `fuzz/fuzz_integrity.fcyr` (63 sites; `src/luks.cyr`'s `/tmp/.agnos-luks-`
-      prefix is the library's own and separate). Most of these files are also the ones that
-      fail on cass, where `/tmp` does not exist. Acceptance: a per-run directory under
-      `$TMPDIR` (else `$TEMP` / `$TMP`, else `/tmp`) with an unpredictable name, removed on
-      exit; the twelve files green locally and re-run on every host.
 - [ ] **Dead-stack and register residue outside the secret-scalar entry points.** 3.13.8 makes
       `ecdsa_p*_sign` and `ecdh_*` leave nothing behind; elsewhere: (a) every other `secret var`
       function (Ed25519, X25519, HKDF, key parsers) has its return registers spilled below its

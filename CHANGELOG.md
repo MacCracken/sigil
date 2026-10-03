@@ -15,8 +15,11 @@ Constant-time ECDH on P-256 and P-384 (new, additive), and **two security fixes*
 ran its secret nonce and private key through variable-time arithmetic (it now runs on the same
 constant-time engine), and — found by the review of this release's first draft — every signature
 left its nonce k in dead stack and in a vector register. Signatures are byte-identical (RFC 6979
-KATs). The toolchain pin stays **6.6.9** pending the maintainer's call (roadmap: under it,
-`ecdh.tcyr`'s two timing-success assertions fail on Intel macOS because of cyrius CVE-51). Audit: [`docs/audit/2026-10-02-3.13.8-ct-ecdh-ecdsa-sign-audit.md`](docs/audit/2026-10-02-3.13.8-ct-ecdh-ecdsa-sign-audit.md).
+KATs). The toolchain pin moves **6.6.9 → 6.6.14** (the maintainer's call, 2026-10-02: under 6.6.9,
+cyrius CVE-51 made `ecdh.tcyr`'s timing group fail on Intel macOS). With the bump: a third security
+fix (**on Windows the trust cores probed rooted POSIX paths**, which are drive-relative there),
+tests and fuzz harnesses moved off fixed names in the shared `/tmp`, and the arm64-macOS
+fork-per-trial threading tests restored. Audit: [`docs/audit/2026-10-02-3.13.8-ct-ecdh-ecdsa-sign-audit.md`](docs/audit/2026-10-02-3.13.8-ct-ecdh-ecdsa-sign-audit.md).
 Decision record: [ADR 0009](docs/adr/0009-constant-time-ec-engine-for-secret-scalars.md);
 invariant: [architecture note 004](docs/architecture/004-secret-ec-scalars-run-on-ec-ct.md).
 
@@ -60,9 +63,34 @@ invariant: [architecture note 004](docs/architecture/004-secret-ec-scalars-run-o
   SHA-NI block clears xmm0–xmm7, its scratch and edx, the AES-NI blocks xmm0; each signer is a
   plain wrapper that burns 128 KB / 160 KB after a callee holding the `secret var` block has
   returned. Audit §F4.
+- **MEDIUM — on Windows, the TPM / Secure Boot / IMA / dm-verity / LUKS helpers probed rooted
+  POSIX paths, which are drive-relative there.** "/dev/tpmrm0" opens `C:\dev\tpmrm0` on Windows,
+  and any authenticated user may create folders at the root of the system drive — the class of
+  cyrius CVE-54 / -57 / -65. Measured on cass with each probed path planted at the root of a
+  scratch drive: `tpm_detect` / `tpm_available` reported a TPM; `_sb_tool_path` resolved a planted
+  `C:\usr\bin\mokutil`; `ima_get_status` reported IMA active with the planted measurement count,
+  `ima_read_measurements` returned the planted log as the measurement list and `ima_write_policy`
+  wrote the policy into the planted file; `dmverity_supported` said yes; and
+  `luks_write_keyfile` staged the LUKS key in a planted `C:\tmp` that the other user owns (a
+  source comment called LUKS "unreachable in practice" on Windows — the function is public), while
+  `luks_close` answered Ok "nothing to close". Spawning a planted tool was already impossible: the
+  subprocess helpers refuse on Windows. A planted `C:\sys\firmware\efi` did **not** reach
+  `secureboot_detect_state`, only because its `file_exists` gate opens the path as a file and that
+  fails on a directory there. In sigil's source since the trust cores were internalized at 3.8.1
+  (the same code came from agnosys before). **Fix:** new
+  `agnosys_rooted_paths_untrusted()` (`src/sys_util.cyr`, 1 on Windows); every such probe asks it
+  first and fails closed — `tpm_detect` 0; `tpm_read_pcr` / `tpm_extend_pcr` / `tpm_seal` (before
+  the plaintext is staged) / `tpm_unseal` / `tpm_get_random` Err; `_sb_tool_in` 0;
+  `secureboot_detect_state` Ok(SB_NOT_SUPPORTED); `secureboot_list_efi_variables` and the
+  module-signing sign-file fallback Err; `ima_get_status` inactive; `ima_read_measurements` /
+  `ima_write_policy` Err; `dmverity_supported` 0; `luks_keyfile_path` / `luks_close` Err. Nothing
+  changes off Windows. Test: `tests/tcyr/rooted_paths.tcyr` (below).
 
 ### Added
 
+- `agnosys_rooted_paths_untrusted()` (`src/sys_util.cyr`): 1 on Windows, where a rooted POSIX
+  path is drive-relative, else 0 — the gate every trust-core probe of a fixed rooted path asks
+  first (Security above).
 - **`src/ec_ct.cyr` — a constant-time P-256 / P-384 engine for secret scalars.** Generic over
   the limb count, so one implementation serves both fields and both scalar fields:
   Montgomery arithmetic (CIOS multiply; add / subtract / final subtract computed both ways and
@@ -95,6 +123,32 @@ invariant: [architecture note 004](docs/architecture/004-secret-ec-scalars-run-o
 
 ### Changed
 
+- **Toolchain pin 6.6.9 → 6.6.14** (`cyrius.cyml [package].cyrius`; the latest cyrius release,
+  whose store slot equals its tag). `cyrius deps` re-vendored `lib/` from that snapshot (40 files,
+  each byte-identical to `~/.cyrius/versions/6.6.14/lib`) and re-locked `cyrius.lock`
+  (`deps --verify`: 40 verified). sakshi 2.5.5 → 2.5.6 and bayan 1.5.7 → 1.5.11 arrive with it.
+  6.6.10 fixed cyrius CVE-51 (Intel macOS `clock_now_ns` wrote through a stale `rdx`), which made
+  `ecdh.tcyr`'s timing group fail on ach, and 6.6.13 (I6) made a thread created in a `fork()`
+  child work on arm64 macOS. Nothing the newer toolchain checks fires: every test, bench, fuzz
+  harness and program emits the same diagnostics as under 6.6.9 (only the large-static-data byte
+  counts move with the larger stdlib), `cyrius lint` is clean, and no Str → `cstring` or
+  `#deprecated` warning appears. `lib/math.cyr` (whose `f64_le` / `f64_ge` / `f64_trunc` 6.6.13
+  reserved) is not in sigil's `[deps].stdlib` and nothing includes it, so it needed no re-vendor.
+  The constant-time contract was re-checked on the new codegen (audit §F2): every `_ect_*` /
+  `_ecdh_*` / `_ecs_sign_*` function and both signer wrappers have the same conditional-branch
+  counts under 6.6.14 as under 6.6.9 on x86_64 and aarch64, and the engine's core functions
+  (`_ect_mul`, `_ect_padd`, `_ect_pdbl`, `_ect_lookup`, `_ect_smul`, `_ect_pow`, `_ect_add`,
+  `_ect_sub`, `_ect_reduce_be`, `_nmul64_hi_sw`, `_ecdh_shared`, `_ecs_sign_core`) compile to the
+  same instructions, addresses aside.
+- **`[lib.secureboot]` carries `src/sys_util.cyr`.** `secureboot_core` calls
+  `agnosys_capture_n` (and now `agnosys_rooted_paths_untrusted`), which live there; the profile did
+  not list it, so `dist/sigil-secureboot.cyr` was never self-contained and its `.deps` sidecar named
+  the stdlib `sigil` fold to supply the symbol — a consumer of the profile pulled in the whole of
+  `lib/sigil.cyr`, and a build of the 3.13.7 profile with its sidecar leaves reports 117
+  `duplicate fn` warnings. The sidecar now lists 11 leaves (was 19, `sigil` among them) and the same
+  consumer builds clean. `dist/sigil-tpm.deps` gains `sys` (what `cyrius distlib` 6.6.14 computes).
+- `src/luks.cyr`: the comment that called LUKS "unreachable in practice" on Windows is corrected
+  (the Security entry above).
 - **`pt_scalarmul_secret` / `pt384_scalarmul_secret` moved to `src/ec_ct.cyr` and run on the
   engine.** Same names and arguments; they now return the result with Z = 1 (affine), or the
   point at infinity, so a caller needs no further field operation on a secret-derived Z. The
@@ -128,8 +182,8 @@ invariant: [architecture note 004](docs/architecture/004-secret-ec-scalars-run-o
 - `tests/tcyr/batch_parallel.tcyr` and `tests/bcyr/batch_parallel.bcyr` write per-run files under
   `$TMPDIR` (else `$TEMP` / `$TMP`, else `/tmp`) with an unpredictable name and remove them — they
   wrote fixed names in the shared `/tmp` and left them behind. `batch_parallel` now also passes on
-  cass, where `/tmp` does not exist. Eleven more test files and one fuzz harness have the same
-  class; named for the maintainer in the roadmap.
+  cass, where `/tmp` does not exist. The eleven other test files and the fuzz harness with the
+  same class follow (Tests).
 
 ### Removed
 
@@ -175,6 +229,15 @@ within ±0.7%) — the 128 / 160 KB stack burns with 8-byte stores cost what the
 did; `hkdf_extract` 1.917 → **1.727 µs** (−10%: the HMAC exit wipes moved to 8-byte stores);
 `sha256_64kb_ni` and the AES-GCM rows within noise.
 
+**The pin bump** (interleaved A/B, five runs each, medians: 3.13.8 at 6.6.14 against the first
+draft at 6.6.9, same host; rows `v3.13.8-pin-6.6.14` / `v3.13.8-baseline-pin-6.6.9` in
+`benches/history.csv`): every SHA / HMAC / HKDF / AES / ChaCha20 / Ed25519 / X25519 row within
+±0.8%; ML-DSA 1.5–2.9% faster (`mldsa65_verify` 2.163 → 2.102 ms, `mldsa_invntt` 14.0 → 13.6 µs,
+the 6.6.14 runs all below the 6.6.9 ones); signing and ECDH +0.4 to +1.7% at the median with the
+two builds' per-run ranges overlapping (`ecdsa_p256_sign` 2.965–2.994 vs 2.919–3.019 ms) — the
+engine compiles to the same instructions under both toolchains (Changed). Absolute values on this
+host ran ~8% above the `v3.13.8-ct-ecdh` rows the day before, for both builds alike.
+
 ### Tests
 
 - New `tests/tcyr/ecdh.tcyr` (460 assertions): RFC 5903 §8.1 / §8.2; **all 25 + 25 NIST CAVP
@@ -206,7 +269,7 @@ did; `hkdf_extract` 1.917 → **1.727 µs** (−10%: the HMAC exit wipes moved t
   helper `rdx` held the peer key, so the clock read overwrote it, every timed derive was a
   refusal (~15 µs) and the band check passed on four refusals. Both timing tests now assert that
   every timed call returned 0 (`ecdh.tcyr` +2, `ecdsa_sign_timing.tcyr` +2). The library is not
-  affected; the pin is the cause (roadmap).
+  affected; the pin was the cause, and the move to 6.6.14 removes it (`ecdh` 460/0 on ach).
 - `ecdsa_sign_timing.tcyr` rewritten for the engine: `pt_scalarmul_secret` against the reference
   ladder for the old edge scalars and random ones (Z = 1 checked), the RFC 6979 KATs, and two
   timing groups — the scalar multiply, and the whole signing core with chosen (k, d) = (1, 1)
@@ -223,54 +286,128 @@ did; `hkdf_extract` 1.917 → **1.727 µs** (−10%: the HMAC exit wipes moved t
 - A live randomized cross-check outside the suite: 100 random key pairs (50 per curve) from
   sigil's keygen against OpenSSL-generated peers — 0 mismatches.
 - `tests/bcyr/sigil.bcyr`: four ECDH rows.
-- Suite **3229/0 across 83 files** on x86_64 at the final code (2797 at 3.13.7;
-  `state-sync.sh --write --count`, and a per-file exit-code loop: 83 of 83 exit 0); fuzz 24/0;
-  `check.sh` 92 passed, 0 failed.
+- **Tests and fuzz harnesses write only inside a private per-run directory.** New
+  `tests/scratch.cyr`: `scratch_init(tag)` makes `<base>/sigil-<tag>-<16 random hex>` with one
+  `mkdir` (0700) that fails if the name exists — `<base>` is `$TMPDIR`, else `$TEMP` / `$TMP`,
+  else `/tmp`; `scratch_path` / `scratch_dir` name things inside it; `scratch_cleanup` removes the
+  tree (symlinks unlinked, never followed). `agnosys`, `audit_log`, `capture_bounded`,
+  `fd_hygiene`, `policy_hardening`, `secureboot_tools`, `security`, `sigil`, `trust_hardening`,
+  `verify`, `verify_hardening` and `fuzz/fuzz_integrity.fcyr` wrote fixed names in the shared
+  `/tmp` (63 `"/tmp…"` literals — predictable, so a planted symlink redirected the write; TMPDIR
+  ignored; files left behind; red on Windows, which has no `/tmp`); each now creates its fixtures
+  there and asserts the directory is gone before it exits (+1 each). The two literals left are
+  `fd_hygiene`'s count of the library's own `/tmp/.agnos-luks-*` keyfiles (`src/luks.cyr`'s
+  staging directory is what it tests); its `sh -c` scripts now single-quote the recorded paths.
+  CI's security scan fails on a `"/tmp/..."` literal in `tests/tcyr`, `tests/bcyr` or `fuzz`
+  (exempt: `batch_parallel`'s fallback, `fd_hygiene`, `rooted_paths`) — red on the previous tree.
+- New `tests/tcyr/rooted_paths.tcyr`: `agnosys_rooted_paths_untrusted()` on every target; on
+  Windows 22 rows that each helper fails closed, 26 with `SIGIL_PLANT_ROOT=1` (plants every probed
+  path at the current drive's root, asserts the plants exist, removes them — for a scratch drive,
+  e.g. `subst`). With every guard off: cass 3 / 22 red unplanted, 11 / 26 planted; wine 4 / 22.
+- **`lazy_init_race.tcyr` and `cbank_main_lane.tcyr` fork per trial on macOS again.** 3.13.6 ran
+  their cold trial in-process off Linux because a thread created in a `fork()` child died of
+  SIGSEGV on arm64 macOS; cyrius 6.6.13 (I6) fixed that, and with the pin ≥ 6.6.13 Linux and macOS
+  fork a fresh process per trial / group (Windows, with no fork, runs one cold trial in-process).
+  The same two files built with 6.6.9 on ecb: 6 of 6 trials crashed. And the skip gate now says the
+  truth: it read `THREADS_CONCURRENT == 0` with a comment that x86 macOS, Windows and agnos "run a
+  thread body inline". **On Windows that is false** — `thread_create` is `CreateThread` and the
+  threads run beside main (cass: a body waiting for a store main makes after `thread_create`
+  returns sees it; create returns in 0 ms), yet the 6.6.14 stdlib sets `THREADS_CONCURRENT = 0` in
+  `lib/thread_win.cyr` (drafted for the cyrius integrator). The new `tests/threads.cyr`
+  (`test_threads_concurrent()`) measures a 0 instead of trusting it (the probe touches no sigil
+  state), so Windows runs `lazy_init_race`'s 8-thread cold trial — green on cass, and red there
+  with `_sigil_once_claim` mutated to a check-then-set — and x86 macOS, which does run bodies
+  inline (ach: create returns after the body's full 2 s), skips.
+- **`mldsa_kat.tcyr` no longer hangs where thread bodies run inline.** Its zetas-race group
+  releases two workers from a spin barrier and had no concurrency gate: on x86 macOS the first
+  worker ran inline at `thread_create` and spun for ever, so the file was killed at the 900 s limit
+  on ach (3.13.7 and the first draft; 0.5 s on Linux). That group now skips where
+  `test_threads_concurrent()` is 0; the six-worker keygen / sign / verify group has no barrier and
+  runs everywhere (ach 40/0).
+- `agnosys`, `capture_bounded`, `fd_hygiene` and `verify_hardening` now say the truth off Linux:
+  macOS has no `/bin/true` / `/bin/false` (so "a zero exit is Ok" failed on ecb and ach and the
+  `/bin/false` rows passed because the binary was missing) — they take `/usr/bin/<tool>` where it
+  exists; on Windows the rows that need a child process (refused there by design), a directory
+  opened as a file, a read error on a write-only handle, POSIX mode bits (`_sv_store_file_safe`
+  documents it skips Windows) or LUKS / `tpm_seal` staging (refused there since this release)
+  assert the refusal or print a SKIP; and Intel macOS extends a file to the end of a write whose
+  source is unmapped although `write(2)` returns EFAULT (a 10-byte file is 74 bytes after
+  `write(fd, 1, 64)` = -14), so `fd_hygiene` checks the good write's bytes and the length per
+  kernel. `secureboot_tools` records its cwd from `$PWD` where there is no `/proc/self/cwd`.
+- `ed25519.tcyr` fails cleanly when its RFC 8032 TEST 1024 fixture (`tests/data/`, read by
+  relative path) is missing: it signed through a null message and died of SIGSEGV, losing every
+  later group. The fixture-dependent rows now run only when it loaded.
+- `cyrius fmt` on the five test files it flagged (whitespace only); every src / test / bench /
+  fuzz / program file passes `cyrius fmt --check`.
+- Suite **3243/0 across 84 files** on x86_64 at the final code, pinned 6.6.14
+  (`state-sync.sh --write --count`, and a per-file exit-code loop: 84 of 84 exit 0); fuzz 25/0;
+  `check.sh` 93 passed, 0 failed. At the review-fix code under 6.6.9 it was 3229/0 across 83 files
+  (2797 at 3.13.7).
 
 ### Verification
 
-- **Cross-host, toolchain 6.6.9, at the final code.** Every `.tcyr` (all 83, the two that include
-  `dist/sigil.cyr` too) cross-built locally for the target — `cycc_aarch64` (pi),
-  `CYRIUS_MACHO_ARM=1 cycc_aarch64` (ecb, each binary ad-hoc signed there), `CYRIUS_MACHO=1 cycc`
-  (ach), `CYRIUS_TARGET_WIN=1 cycc` (cass; `errno_peer` and `secureboot_tools` do not compile for
-  PE) — and run on the host with a 900 s limit:
+- **Cross-host, toolchain 6.6.14, at the final code.** Every `.tcyr` (all 84, the two that include
+  `dist/sigil.cyr` too) cross-built locally with 6.6.14's compilers for the target —
+  `cycc_aarch64` (pi), `CYRIUS_MACHO_ARM=1 cycc_aarch64` (ecb, each binary ad-hoc signed there),
+  `CYRIUS_MACHO=1 cycc` (ach), `CYRIUS_TARGET_WIN=1 cycc` (cass; `errno_peer` and
+  `secureboot_tools` do not compile for PE) — and run on the host with `tests/data/` beside it and
+  a 900 s limit:
+
+  | Host | files exit 0 |
+  |---|---|
+  | pi (Raspberry Pi 4, aarch64 Linux) | **84 / 84** |
+  | ecb (Apple M5 Pro, arm64 macOS) | **84 / 84** |
+  | ach (Intel, x86_64 macOS) | **84 / 84** |
+  | cass (Windows, PE) | **82 / 82** |
+
+  `ecdh` 460/0 (its timing group included: flat medians, ach P-256 3.86 ms for every d), `ecdsa_sign`
+  90/0, `ecdsa_sign_timing` 142/0, `ecdsa_p256` / `ecdsa_p384` / `ecdsa_concurrent` green on all
+  four. Getting there took the test fixes above; the first 6.6.14 pass (before them) left
+  `agnosys`, `fd_hygiene` and `mldsa_kat` (hung at the barrier, killed at 900 s) red on ach,
+  `agnosys`, `capture_bounded`, `fd_hygiene` and `verify_hardening` red on cass, and nothing else
+  on any host but `ed25519`, which reads `tests/data/` by relative path that pass did not ship. `rooted_paths` on cass with the plants: 26/0. Before the pin bump, at 6.6.9:
 
   | Host | files exit 0 | non-zero (all also non-zero on the first draft and on 3.13.7) |
   |---|---|---|
-  | pi (Raspberry Pi 4, aarch64 Linux) | 83 / 83 | — |
-  | ecb (Apple M5 Pro, arm64 macOS) | 80 / 83 | agnosys, random, secureboot_tools |
-  | ach (Intel, x86_64 macOS) | 74 / 83 | agnosys, audit_log, fd_hygiene, mldsa_kat (900 s limit), random, secureboot_tools, verify, verify_hardening; and `ecdh` 458/2 — its two "every timed derive succeeded" assertions, cyrius CVE-51 under the 6.6.9 pin (460/0 built with cycc 6.6.14, flat medians) |
-  | cass (Windows, PE) | 72 / 81 | agnosys, capture_bounded, fd_hygiene, policy_hardening, security, sigil, trust_hardening, verify, verify_hardening |
+  | pi | 83 / 83 | — |
+  | ecb | 80 / 83 | agnosys, random, secureboot_tools |
+  | ach | 74 / 83 | agnosys, audit_log, fd_hygiene, mldsa_kat (900 s limit), random, secureboot_tools, verify, verify_hardening; and `ecdh` 458/2 — its two "every timed derive succeeded" assertions, cyrius CVE-51 under the 6.6.9 pin |
+  | cass | 72 / 81 | agnosys, capture_bounded, fd_hygiene, policy_hardening, security, sigil, trust_hardening, verify, verify_hardening |
 
-  `batch_parallel` now passes on cass (it was non-zero there on the first draft and on 3.13.7:
-  `/tmp` does not exist on Windows). `ecdh` 460/0, `ecdsa_sign` 90/0 and `ecdsa_sign_timing`
-  142/0 on the pi, ecb and cass, and `ecdsa_sign` / `ecdsa_sign_timing` on ach — so the 192 KB
-  nonce scan, the 64 KB ECDH scan, the register-spill probes and both survives-past-the-burn
-  checks hold on aarch64 Linux, both macOS ABIs and Win64. On cass the two burn checks first
-  found 1–6 words: the PE prologue's stack probe, which writes each new page's own address into
-  it; they now skip a word equal to its own address. The concurrency tests (`ecdsa_concurrent`,
-  `concurrent_tls_handshake`, `banking_concurrent`, `tee_verify_concurrent`) pass on every host,
-  so the 128 / 160 KB burns fit worker-thread stacks. `bignum.tcyr`'s fallback cross-check
-  passes on the pi and ecb with the branch-free `_nmul64_hi_sw`.
+  On cass the two burn checks first found 1–6 words: the PE prologue's stack probe, which writes
+  each new page's own address into it; they skip a word equal to its own address. The
+  concurrency tests (`ecdsa_concurrent`, `concurrent_tls_handshake`, `banking_concurrent`,
+  `tee_verify_concurrent`) pass on every host — so the 128 / 160 KB burns fit worker-thread stacks
+  on Linux, ecb and cass, whose threads are real; ach runs thread bodies inline on the main stack.
+  `bignum.tcyr`'s fallback cross-check passes on the pi and ecb with the branch-free
+  `_nmul64_hi_sw`.
 - **Constant-time evidence, mechanical:** every `_ect_*` / `_ecdh_*` / `_ecs_sign_*` function and the
   two signer wrappers in a 6.6.9 build (x86_64 `cycc` and `cycc_aarch64`, `CYRIUS_SYMS` +
   objdump / llvm-objdump) has exactly the conditional branches its source accounts for — loop
   bounds, the public exponent bit, a pointer comparison, public sizes, public verdicts, and the
   compiler's `secret var` wipe loop; the point formulas and the wrappers have none (table in the
-  audit, §F2).
+  audit, §F2). Repeated on a 6.6.14 build at the pin bump: the same counts for every function on
+  both architectures, and the engine's core functions compile to the same instructions.
 - **The bundle.** A bundle-only consumer (the 26 `sigil.deps` leaves + `dist/sigil.cyr`, running
   RFC 5903 ECDH, fresh CSPRNG key pairs agreeing both ways on both curves, an RFC 6979 signature
-  and the RFC 5869 A.1 HKDF-extract PRK) builds with 6.6.9 for x86_64 Linux, aarch64 Linux, agnos,
-  PE, x86_64 Mach-O and arm64 Mach-O with 0 undefined, and prints `BUNDLE OK` on x86_64, the pi,
-  ecb, ach and cass — rerun at the final code.
-- `dist/` regenerated after the review fixes: all 14 bundles, each profile on its own, after
-  `cyrius fmt`; a second pass is byte-identical; the `.deps` sidecars are unchanged. `ec_ct.cyr`
+  and the RFC 5869 A.1 HKDF-extract PRK, and since the pin bump `agnosys_rooted_paths_untrusted()`
+  per target with `tpm_available()` 0 on Windows) builds with 6.6.14 for x86_64 Linux, aarch64
+  Linux, agnos, PE, x86_64 Mach-O and arm64 Mach-O with 0 undefined, and prints `BUNDLE OK` on
+  x86_64, the pi, ecb, ach and cass — at the final code (and before, with 6.6.9).
+- `dist/` regenerated under 6.6.14 after the last source change: all 14 bundles, each profile on
+  its own, after `cyrius fmt`; a second pass is byte-identical. `sigil.cyr` and `sigil-tpm.cyr`
+  carry the rooted-path guards, `sigil-secureboot.cyr` / `.deps` the profile change; the other
+  eleven are byte-identical to the review-fix regeneration, when the `.deps` sidecars were
+  unchanged too. `ec_ct.cyr`
   is in `sigil.cyr`, `sigil-ecdsa.cyr`, `sigil-x509.cyr` and `sigil-authenticode.cyr`; `ecdh.cyr` in
   `sigil.cyr` and `sigil-ecdsa.cyr`; `secureboot` and `tpm` hold none of the changed modules.
-- `cyrius doc --check dist/sigil.cyr`: 879 documented, 0 undocumented (875 + the four ECDH
-  functions); `sigil-ecdsa` 133 / 0, `sigil-x509` 203 / 0, `sigil-authenticode` 230 / 0,
-  `sigil-hmac` 42 / 0, `sigil-hkdf` 48 / 0, `sigil-sha` 40 / 0, `sigil-aes` 29 / 0.
-- `state-sync.sh --check` clean.
+- `cyrius doc --check dist/sigil.cyr`: 880 documented, 0 undocumented (875 + the four ECDH
+  functions + `agnosys_rooted_paths_untrusted`); `sigil-ecdsa` 133 / 0, `sigil-x509` 203 / 0,
+  `sigil-authenticode` 230 / 0, `sigil-tpm` 61 / 0, `sigil-secureboot` 104 / 0, `sigil-hmac`
+  42 / 0, `sigil-hkdf` 48 / 0, `sigil-sha` 40 / 0, `sigil-aes` 29 / 0, `sigil-mldsa` 167 / 0,
+  `sigil-ed25519` 52 / 0, `sigil-argon2` 27 / 0, `sigil-chacha` 20 / 0.
+- `state-sync.sh --check` clean; every src / test / bench / fuzz / program file passes
+  `cyrius fmt --check` and `cyrius lint` (src, programs) under 6.6.14.
 
 ## [3.13.7] - 2026-10-02
 
