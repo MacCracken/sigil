@@ -122,8 +122,8 @@ fn main(): i64 {
     #ifndef CYRIUS_TARGET_AGNOS
     #ifndef CYRIUS_TARGET_WIN
     var cbuf = alloc(4096);
-    # Inside this run's private directory (tests/scratch.cyr; until 3.13.8 the cwd), quoted for
-    # the shell. x* wrappers, not bare sys_*: agnos's take (path, pathlen).
+    # The shell's pid file and marker live in this run's private directory (tests/scratch.cyr;
+    # until 3.13.8 the cwd), single-quoted for the shell, and go with it at the end.
     assert(scratch_init("subprocess_tree") != 0, "a private per-run scratch directory under $TMPDIR");
     var pidf = scratch_path("pid");
     var mark = scratch_path("mark");
