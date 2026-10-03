@@ -298,12 +298,49 @@ host ran ~8% above the `v3.13.8-ct-ecdh` rows the day before, for both builds al
   there and asserts the directory is gone before it exits (+1 each). The two literals left are
   `fd_hygiene`'s count of the library's own `/tmp/.agnos-luks-*` keyfiles (`src/luks.cyr`'s
   staging directory is what it tests); its `sh -c` scripts now single-quote the recorded paths.
-  CI's security scan fails on a `"/tmp/..."` literal in `tests/tcyr`, `tests/bcyr` or `fuzz`
-  (exempt: `batch_parallel`'s fallback, `fd_hygiene`, `rooted_paths`) — red on the previous tree.
+  `errno_peer` and `subprocess_tree`, which wrote fixed or pid-named files in the cwd, moved in
+  too (+2 each: the directory is made, and removed). The helper creates and removes with
+  `lib/io.cyr`'s `xmkdir` / `xunlink` / `xrmdir` and confirms removal with `is_dir` — its first
+  cut, found by the review, called the bare `sys_mkdir` / `sys_unlink` / `sys_rmdir`, which on
+  agnos take `(path, pathlen)`, so all eleven tests and `fuzz_integrity` stopped compiling for
+  agnos (`'sys_unlink' expects 2 arguments, got 1`; every one built at bbaecc4), and
+  its removal check used `sys_access`, a stub that always answers -1 on agnos. CI's security scan
+  fails on a `"/tmp/..."` literal in `tests/*.cyr`, `tests/tcyr`, `tests/bcyr` or `fuzz` — red on
+  the previous tree. Comment lines are skipped and each exemption pins ONE line (the `$TMPDIR`
+  fallbacks in `tests/scratch.cyr` and `batch_parallel`, `fd_hygiene`'s two reads of the LUKS
+  staging dir, `rooted_paths`' `\tmp` plant): the first cut exempted `fd_hygiene` and
+  `rooted_paths` whole, so a new fixed name there would have passed. A `"/tmp/evil"` planted in
+  either file, or in `tests/scratch.cyr`, turns it red.
+- **CI's security scan fails on a bare file `sys_*` call.** CLAUDE.md's "No raw syscalls" rule
+  says file operations go through `lib/io.cyr`'s `x*` set because agnos's `sys_open` /
+  `sys_mkdir` / `sys_unlink` / `sys_rmdir` / `sys_stat` / `sys_rename` / `sys_readlink` take
+  `(path, pathlen)`, and nothing enforced it — which is how the scratch helper's bare calls
+  shipped in the first cut. The scan greps `src/`, `tests/`, `fuzz/` and `programs/` outside
+  comments; its one exemption pins `crypto_scratch`'s `/proc/self/auxv` read, which sits inside
+  `#ifdef CYRIUS_TARGET_LINUX`. Red on the first cut (`tests/scratch.cyr`, `rooted_paths`,
+  `secureboot_tools`), green now, red again with a bare `sys_unlink` planted in `verify.tcyr`.
+  After the fix every `.tcyr` and fuzz harness that compiled for agnos before the scratch helper
+  (at bbaecc4) compiles again, and `rooted_paths` and `secureboot_tools` now do too; three still
+  do not, as before (`errno_peer`: the tracked `SYS_FCNTL` exception; `lazy_init_race` and
+  `cbank_main_lane`: a three-argument `waitpid` with `WNOHANG`, which agnos lacks, since 3.13.6).
+- **CI's fuzz job reports a crashing harness.** It ran `timeout 30 … || true` and then read
+  `rc=$?` — true's 0 — so every harness printed OK whatever it did (the shape `check.sh`'s own
+  loop was fixed for at 3.13.7). It now captures `rc=0; … || rc=$?`; 0 and 124 still pass. All
+  three harnesses exit 0 inside the budget.
 - New `tests/tcyr/rooted_paths.tcyr`: `agnosys_rooted_paths_untrusted()` on every target; on
   Windows 22 rows that each helper fails closed, 26 with `SIGIL_PLANT_ROOT=1` (plants every probed
   path at the current drive's root, asserts the plants exist, removes them — for a scratch drive,
   e.g. `subst`). With every guard off: cass 3 / 22 red unplanted, 11 / 26 planted; wine 4 / 22.
+  The unplanted run only notices a regression in the helper itself — a dropped per-site guard has
+  nothing at the drive root to find — so the planted pass is now a checked-in driver,
+  **`scripts/cass-rooted-paths.sh`** (found by the review: no gate or script ran it): it builds
+  the test for PE with the pinned toolchain, runs it on cass from a per-run directory under
+  `C:\cyrius-tests`, then from a free `subst` drive over that directory with
+  `SIGIL_PLANT_ROOT=1` (unmapped in a `finally`), checks the planted run ran its plant rows and
+  left nothing behind, and removes the directory. cass: 22 / 0 and 26 / 0; with `tpm_detect`'s
+  guard alone removed, 22 / 0 and **24 / 2** (`tpm_detect`, `tpm_available`), exit 1. CLAUDE.md
+  and state.md make it mandatory whenever `tpm_core`, `ima_core`, `secureboot_core`, `dmverity`
+  or `luks` changes.
 - **`lazy_init_race.tcyr` and `cbank_main_lane.tcyr` fork per trial on macOS again.** 3.13.6 ran
   their cold trial in-process off Linux because a thread created in a `fork()` child died of
   SIGSEGV on arm64 macOS; cyrius 6.6.13 (I6) fixed that, and with the pin ≥ 6.6.13 Linux and macOS
@@ -333,39 +370,51 @@ host ran ~8% above the `v3.13.8-ct-ecdh` rows the day before, for both builds al
   assert the refusal or print a SKIP; and Intel macOS extends a file to the end of a write whose
   source is unmapped although `write(2)` returns EFAULT (a 10-byte file is 74 bytes after
   `write(fd, 1, 64)` = -14), so `fd_hygiene` checks the good write's bytes and the length per
-  kernel. `secureboot_tools` records its cwd from `$PWD` where there is no `/proc/self/cwd`.
+  kernel. `secureboot_tools` records its cwd from `$PWD` where there is no `/proc/self/cwd`,
+  and reads `/proc/self/cwd` with `xreadlink`: the bare `sys_readlink` it used is undefined on
+  PE (so it was the one test of the twelve above that never ran on cass) and takes four
+  arguments on agnos. On Windows `sys_chdir` is a stub (-1), so the move-into-the-planted-dir
+  rows SKIP by name, and the resolver row asserts this release's contract there — no tool
+  resolves, the trusted tool dirs being drive-relative (cass 23 / 0; it did not compile before).
 - `ed25519.tcyr` fails cleanly when its RFC 8032 TEST 1024 fixture (`tests/data/`, read by
   relative path) is missing: it signed through a null message and died of SIGSEGV, losing every
   later group. The fixture-dependent rows now run only when it loaded.
 - `cyrius fmt` on the five test files it flagged (whitespace only); every src / test / bench /
   fuzz / program file passes `cyrius fmt --check`.
-- Suite **3243/0 across 84 files** on x86_64 at the final code, pinned 6.6.14
+- Suite **3247/0 across 84 files** on x86_64 at the final code, pinned 6.6.14
   (`state-sync.sh --write --count`, and a per-file exit-code loop: 84 of 84 exit 0); fuzz 25/0;
-  `check.sh` 93 passed, 0 failed. At the review-fix code under 6.6.9 it was 3229/0 across 83 files
-  (2797 at 3.13.7).
+  `check.sh` 93 passed, 0 failed. It was 3243 before the review pass's +4 (`errno_peer`,
+  `subprocess_tree`), 3229/0 across 83 files at the review-fix code under 6.6.9, and 2797 at 3.13.7.
 
 ### Verification
 
 - **Cross-host, toolchain 6.6.14, at the final code.** Every `.tcyr` (all 84, the two that include
   `dist/sigil.cyr` too) cross-built locally with 6.6.14's compilers for the target —
   `cycc_aarch64` (pi), `CYRIUS_MACHO_ARM=1 cycc_aarch64` (ecb, each binary ad-hoc signed there),
-  `CYRIUS_MACHO=1 cycc` (ach), `CYRIUS_TARGET_WIN=1 cycc` (cass; `errno_peer` and
-  `secureboot_tools` do not compile for PE) — and run on the host with `tests/data/` beside it and
-  a 900 s limit:
+  `CYRIUS_MACHO=1 cycc` (ach), `CYRIUS_TARGET_WIN=1 cycc` (cass; `errno_peer` does not compile
+  for PE — `SYS_FCNTL`, the tracked exception) — and run on the host with `tests/data/` beside it
+  and a 900 s limit:
 
   | Host | files exit 0 |
   |---|---|
   | pi (Raspberry Pi 4, aarch64 Linux) | **84 / 84** |
   | ecb (Apple M5 Pro, arm64 macOS) | **84 / 84** |
   | ach (Intel, x86_64 macOS) | **84 / 84** |
-  | cass (Windows, PE) | **82 / 82** |
+  | cass (Windows, PE) | **83 / 83** |
 
   `ecdh` 460/0 (its timing group included: flat medians, ach P-256 3.86 ms for every d), `ecdsa_sign`
   90/0, `ecdsa_sign_timing` 142/0, `ecdsa_p256` / `ecdsa_p384` / `ecdsa_concurrent` green on all
   four. Getting there took the test fixes above; the first 6.6.14 pass (before them) left
   `agnosys`, `fd_hygiene` and `mldsa_kat` (hung at the barrier, killed at 900 s) red on ach,
   `agnosys`, `capture_bounded`, `fd_hygiene` and `verify_hardening` red on cass, and nothing else
-  on any host but `ed25519`, which reads `tests/data/` by relative path that pass did not ship. `rooted_paths` on cass with the plants: 26/0. Before the pin bump, at 6.6.9:
+  on any host but `ed25519`, which reads `tests/data/` by relative path that pass did not ship. `rooted_paths` on cass with the plants: 26/0.
+  **The review pass** changed 14 test binaries — the eleven first users of `tests/scratch.cyr`,
+  `rooted_paths`, `errno_peer` and `subprocess_tree` — plus `fuzz_integrity`; those were rebuilt and
+  re-run on all four hosts, every one exit 0 (cass: `secureboot_tools` 23 / 0, compiling for PE
+  for the first time, which is the 83rd file; `errno_peer` stays PE-less). Every other `.tcyr`
+  binary is byte-identical to the previous pass's on each of the five targets (70 per target,
+  by `cmp`), so the table holds at the final code. `scripts/cass-rooted-paths.sh`:
+  unplanted 22 / 0, planted 26 / 0. Before the pin bump, at 6.6.9:
 
   | Host | files exit 0 | non-zero (all also non-zero on the first draft and on 3.13.7) |
   |---|---|---|
