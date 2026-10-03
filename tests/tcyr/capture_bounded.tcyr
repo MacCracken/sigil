@@ -74,6 +74,20 @@ fn argv2(a0, a1): i64 {
     return v;
 }
 
+# /usr/bin/<name> where it exists, else /bin/<name>. macOS has no /bin/true or /bin/false, so a
+# hard-coded /bin/false row "passed" there because the binary was missing, not because it exited
+# 1 (3.13.8).
+fn tool(name): i64 {
+    var nl = strlen(name);
+    var p = alloc(10 + nl);
+    memcpy(p, "/usr/bin/", 9);
+    memcpy(p + 9, name, nl + 1);
+    if (sys_access(p, 1) == 0) { return p; }
+    memcpy(p, "/bin/", 5);
+    memcpy(p + 5, name, nl + 1);
+    return p;
+}
+
 fn main() {
     alloc_init();
     if (scratch_init("capture_bounded") == 0) {
@@ -82,11 +96,24 @@ fn main() {
     }
     var cbuf = alloc(256);
 
+    #ifdef CYRIUS_TARGET_WIN
+    # Windows has no fork/execve: every capture helper refuses (not_supported) before it builds
+    # an argv, so the status and deadline semantics below cannot be exercised there.
+    test_group("Windows: subprocess capture is refused");
+    var w1_t, w1_v = agnosys_run_capture(argv2("/bin/echo", "sigil"), cbuf, 255, "echo");
+    assert_eq(syserr_kind(w1_v), SIGIL_ERR_NOT_SUPPORTED, "agnosys_run_capture: not_supported");
+    var w2_t, w2_v = luks_run_capture(argv2("/bin/echo", "sigil"), cbuf, 255);
+    assert_eq(syserr_kind(w2_v), SIGIL_ERR_NOT_SUPPORTED, "luks_run_capture: not_supported");
+    var w3_t, w3_v = dmverity_run_capture(argv2("/bin/echo", "sigil"), cbuf, 255);
+    assert_eq(syserr_kind(w3_v), SIGIL_ERR_NOT_SUPPORTED, "dmverity_run_capture: not_supported");
+    println("  SKIP: exit-status, inheritance and deadline groups (POSIX fork/execve)");
+    #endif
+    #ifndef CYRIUS_TARGET_WIN
     # ============================================================
     # agnosys_run_capture — status-checked.
     # ============================================================
     test_group("agnosys_run_capture status");
-    var f_tag, f_v = agnosys_run_capture(argv1("/bin/false"), cbuf, 255, "false");
+    var f_tag, f_v = agnosys_run_capture(argv1(tool("false")), cbuf, 255, "false");
     assert_eq(is_err_result(f_tag), 1, "/bin/false (exit 1) is Err, never Ok(0)");
 
     var m_tag, m_v = agnosys_run_capture(argv1("/nonexistent/sigil-probe"), cbuf, 255,
@@ -103,7 +130,7 @@ fn main() {
     # luks_run_capture / dmverity_run_capture inherit it.
     # ============================================================
     test_group("luks_run_capture inherits");
-    var lf_tag, lf_v = luks_run_capture(argv1("/bin/false"), cbuf, 255);
+    var lf_tag, lf_v = luks_run_capture(argv1(tool("false")), cbuf, 255);
     assert_eq(is_err_result(lf_tag), 1, "luks: /bin/false is Err");
     var lm_tag, lm_v = luks_run_capture(argv1("/nonexistent/losetup"), cbuf, 255);
     assert_eq(is_err_result(lm_tag), 1, "luks: a missing losetup is Err, not an empty loop dev");
@@ -113,7 +140,7 @@ fn main() {
     assert_eq(le_v, 6, "luks: captured 6 bytes");
 
     test_group("dmverity_run_capture inherits");
-    var df_tag, df_v = dmverity_run_capture(argv1("/bin/false"), cbuf, 255);
+    var df_tag, df_v = dmverity_run_capture(argv1(tool("false")), cbuf, 255);
     assert_eq(is_err_result(df_tag), 1, "dmverity: /bin/false is Err");
     var dm_tag, dm_v = dmverity_run_capture(argv1("/nonexistent/veritysetup"), cbuf, 255);
     assert_eq(is_err_result(dm_tag), 1, "dmverity: a missing veritysetup is Err");
@@ -134,21 +161,28 @@ fn main() {
     var s_ms = clock_now_ms() - t0;
     assert_eq(is_err_result(s_tag), 1, "a child that outruns the default bound is Err");
     assert(s_ms < 12000, "and the capture returned near the 10 s bound, not after the child");
+    #endif
 
     # ============================================================
     # _ima_read_log_fd — a read ERROR is Err, never a truncated log.
     # ============================================================
     test_group("ima read error");
+    #ifndef CYRIUS_TARGET_WIN
     var dfd = file_open(scratch_dir(), O_RDONLY, 0);
     assert(dfd >= 0, "opened a directory fd");
     var id_tag, id_v = _ima_read_log_fd(dfd);
     assert_eq(is_err_result(id_tag), 1, "read(2) -EISDIR is Err, not an empty log");
     assert_eq(file_close(dfd), 0, "the helper left the caller's fd open (caller owns it)");
+    #endif
+    #ifdef CYRIUS_TARGET_WIN
+    println("  SKIP: a directory cannot be opened as a file on Windows (the -EISDIR rows)");
+    #endif
 
-    var wfd = file_open("/dev/null", O_WRONLY, 0);
+    # A write-only descriptor on a file of our own (it was /dev/null, which Windows lacks).
+    var wfd = file_open(scratch_path("write_only"), O_WRONLY | O_CREAT | O_TRUNC, 384);
     assert(wfd >= 0, "opened a write-only fd");
     var iw_tag, iw_v = _ima_read_log_fd(wfd);
-    assert_eq(is_err_result(iw_tag), 1, "read(2) -EBADF is Err, not an empty log");
+    assert_eq(is_err_result(iw_tag), 1, "read(2) on a write-only fd is Err, not an empty log");
     file_close(wfd);
 
     # The good path still reads to EOF and the result still parses.
@@ -168,10 +202,12 @@ fn main() {
 
     # ima_get_status's count and agnosys_read_fd_to_str: a read error is not EOF (3.13.1).
     test_group("read errors are not EOF (ima_get_status, agnosys_read_fd_to_str)");
+    #ifndef CYRIUS_TARGET_WIN
     var cdf = file_open(scratch_dir(), O_RDONLY, 0);
     assert_eq(_ima_count_lines_fd(cdf), 0 - 1, "line count over -EISDIR is -1, not 0");
     assert_eq(agnosys_read_fd_to_str(cdf, 64), 0, "agnosys_read_fd_to_str over -EISDIR is 0");
     file_close(cdf);
+    #endif
     var three = "a\nb\nc\n";
     xunlink(lp);
     file_write_all(lp, three, 6);
@@ -200,7 +236,7 @@ fn main() {
     test_group("a refused argv alloc is Err, not SIGSEGV");
     var huge = alloc(24);
     var hdata = alloc(8);
-    store64(hdata, "/bin/true");
+    store64(hdata, tool("true"));
     store64(huge, hdata);
     store64(huge + 8, 0x100000000);
     store64(huge + 16, 0x100000000);

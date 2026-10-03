@@ -159,11 +159,22 @@ fn main() {
     # failed write leaves no keyfile behind.
     # ============================================================
     test_group("luks_write_keyfile");
-    var own0 = count_own_keyfiles();
     var base = lowest_free_fd();
+    var i = 0;
+    #ifdef CYRIUS_TARGET_WIN
+    # Refused on Windows since 3.13.8: the keyfile is staged under "/tmp", a drive-relative
+    # directory there (tests/tcyr/rooted_paths.tcyr has the planted-drive rows).
+    var wk_t, wk_v = luks_write_keyfile(key, 64);
+    assert_eq(syserr_kind(wk_v), SIGIL_ERR_NOT_SUPPORTED, "Windows: luks_write_keyfile is not_supported");
+    var wr_t, wr_v = _luks_run_with_keyfile(vec_new(), vec_new(), key, 64);
+    assert_eq(syserr_kind(wr_v), SIGIL_ERR_NOT_SUPPORTED,
+      "Windows: a keyed run is refused before a keyfile is staged");
+    println("  SKIP: keyfile lifecycle rows (POSIX /tmp staging, /bin/sh as the command)");
+    #endif
+    #ifndef CYRIUS_TARGET_WIN
+    var own0 = count_own_keyfiles();
     var all_ok = 1;
     var all_full = 1;
-    var i = 0;
     while (i < 8) {
         var kt, kf = luks_write_keyfile(key, 64);
         if (is_err_result(kt) == 1) { all_ok = 0; }
@@ -251,6 +262,7 @@ fn main() {
     xunlink(rec_path);
     xunlink(rec_body);
     xunlink(rec_tail);
+    #endif
 
     # ============================================================
     # secureboot_read_efi_variable — the fd is closed on the success
@@ -290,6 +302,16 @@ fn main() {
     # leaks. On a host without tpm2-tools the call stops at tpm2_create.
     # ============================================================
     test_group("tpm_seal staging");
+    #ifdef CYRIUS_TARGET_WIN
+    # Refused on Windows since 3.13.8, before any plaintext is staged (no tpm2-tools there).
+    var wv = vec_new();
+    vec_push(wv, 7);
+    var ws_t, ws_v = tpm_seal(TPM_SHA256, wv, "top-secret-plaintext", 20, scratch_dir());
+    assert_eq(syserr_kind(ws_v), SIGIL_ERR_NOT_SUPPORTED, "Windows: tpm_seal is not_supported");
+    assert_eq(file_exists(scratch_path("seal_input.bin")), 0, "and staged nothing");
+    println("  SKIP: staging rows (the POSIX tpm2_create path)");
+    #endif
+    #ifndef CYRIUS_TARGET_WIN
     var sdir = tmp_name("seal");
     var sinput = cat2(sdir, "/seal_input.bin");
     var starget = cat2(sdir, "/target");
@@ -326,6 +348,7 @@ fn main() {
     xunlink(cat2(sdir, "/sealed.pub"));
     xunlink(cat2(sdir, "/sealed.priv"));
     xrmdir(sdir);
+    #endif
 
     assert_eq(scratch_cleanup(), 0, "the scratch directory and everything in it is removed");
     return assert_summary();
