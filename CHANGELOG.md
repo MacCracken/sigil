@@ -408,6 +408,12 @@ host ran ~8% above the `v3.13.8-ct-ecdh` rows the day before, for both builds al
   `sigil-ed25519` 52 / 0, `sigil-argon2` 27 / 0, `sigil-chacha` 20 / 0.
 - `state-sync.sh --check` clean; every src / test / bench / fuzz / program file passes
   `cyrius fmt --check` and `cyrius lint` (src, programs) under 6.6.14.
+- The faithful CI run (`cyrius-tools/sibci.sh`: a clean `git archive` of the commit, a throwaway
+  `CYRIUS_HOME` holding a copy of the 6.6.14 slot and an empty dep cache, every `ci.yml` step under
+  GitHub's shell semantics): **17 ok, 0 failed, 0 skipped** — build + smoke, `deps --verify` (40),
+  the `.tcyr` suite (84 passed, 0 failed), lint, `state-sync --check`, the bundle doc gate (880 / 0)
+  and the thirteen profile drift checks, the benchmark job, fuzz (3 / 0) and the security scan
+  (with its new fixed-`/tmp` check).
 
 ## [3.13.7] - 2026-10-02
 
