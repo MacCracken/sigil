@@ -453,12 +453,18 @@ fn main() {
     assert_eq(sv_save_trust_store(sv_pm, ts_path), SIGIL_ERR_NONE, "store saved");
     var sv_pm2 = sigil_verifier_new(kr, trust_policy_new());
     assert_eq(sv_load_trust_store(sv_pm2, ts_path), 1, "0644 store loads");
-    sys_chmod(ts_path, 438);   # 0666
     var sv_pm3 = sigil_verifier_new(kr, trust_policy_new());
+    #ifndef CYRIUS_TARGET_WIN
+    sys_chmod(ts_path, 438);   # 0666
     assert_eq(sv_load_trust_store(sv_pm3, ts_path), 0, "world-writable store refused");
     sys_chmod(ts_path, 436);   # 0664
     assert_eq(sv_load_trust_store(sv_pm3, ts_path), 0, "group-writable store refused");
     sys_chmod(ts_path, 420);   # 0644
+    #endif
+    #ifdef CYRIUS_TARGET_WIN
+    # `_sv_store_file_safe` skips the check on Windows (no POSIX mode bits there; src/verify.cyr).
+    println("  SKIP: the group- / world-writable rows (POSIX mode bits)");
+    #endif
     assert_eq(sv_load_trust_store(sv_pm3, ts_path), 1, "0644 again loads");
     assert_eq(sv_save_trust_store(sv_pm, scratch_path("sigil_vh_no_such_dir/store.json")), SIGIL_ERR_IO,
       "a save that cannot be written is SIGIL_ERR_IO");
