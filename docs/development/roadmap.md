@@ -6,24 +6,24 @@ shipped").
 
 ## Outstanding work
 
-**The cyrius 6.6.13 follow-ups and the 3.13.8 review's pin and `/tmp` items shipped in 3.13.8**
-(pin 6.6.14; the fork-per-trial threading tests restored on macOS; tests and fuzz harnesses in a
-private per-run directory) — see CHANGELOG `[3.13.8]`. The `lib/math.cyr` re-vendor that the 6.6.13
+**The cyrius 6.6.13 follow-ups and the pin and `/tmp` items the 3.13.8 review named shipped in
+3.13.9** (pin 6.6.14; the fork-per-trial threading tests restored on macOS; tests and fuzz harnesses
+in a private per-run directory) — see CHANGELOG `[3.13.9]`. The `lib/math.cyr` re-vendor that the 6.6.13
 follow-up asked for did not apply: sigil never vendored `math` (not in `[deps].stdlib`, included
 nowhere). Its premise that x86 macOS, Windows and agnos run threads inline was half wrong — Windows
 threads are real, though cyrius 6.6.14's `lib/thread_win.cyr` sets `THREADS_CONCURRENT = 0` —
 so `tests/threads.cyr` measures instead of trusting that 0 (`lazy_init_race`, and `mldsa_kat`,
-whose barrier group had hung on Intel macOS). The review of that pass also shipped in 3.13.8: the
+whose barrier group had hung on Intel macOS). The review of that pass also shipped in 3.13.9: the
 scratch helper's bare file syscalls (which broke eleven tests' agnos build) replaced with
 `lib/io.cyr`'s `x*` set and a CI scan for the class, `secureboot_tools` on PE, the
 fixed-`/tmp` scan's exemptions pinned to single lines, and the planted Windows run of
 `rooted_paths` checked in as `scripts/cass-rooted-paths.sh`.
 
-**Open — the maintainer's call, named here so it is not buried (found by the 3.13.8 review
-pass):** three tests still do not compile for agnos, as before 3.13.8 — `errno_peer` (the
+**Open — the maintainer's call, named here so it is not buried (found by the 3.13.9 review
+pass):** three tests still do not compile for agnos, as at 3.13.8 — `errno_peer` (the
 tracked `SYS_FCNTL` exception, until cyrius ships `sys_fcntl`) and `lazy_init_race` /
 `cbank_main_lane` (their fork-per-trial reaper calls a three-argument `sys_waitpid` with
-`WNOHANG`, which agnos lacks; since 3.13.6). No CI step compiles the tests for agnos — the 3.13.8
+`WNOHANG`, which agnos lacks; since 3.13.6). No CI step compiles the tests for agnos — the 3.13.9
 scan greps the file-syscall class only — so an agnos ABI slip outside that class stays invisible
 until someone builds for agnos. Options: guard the two reapers with a named agnos SKIP (agnos
 runs thread bodies inline, so `lazy_init_race` already skips there at run time) and add an
