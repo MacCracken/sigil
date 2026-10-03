@@ -697,15 +697,31 @@ fn _ect_reduce_once(r, a, m, nl): i64 {
     return 0;
 }
 
-# Overwrites the `n` bytes of stack directly below the caller's frame (n <= 16384): run at the
-# end of a public entry point, it clears the frames the field and point operations used, which
-# held secret-derived intermediates. The stack grows down, so those dead frames lie at the HIGH
-# end of `pad` (nearest the caller); wiping from &pad upward would clear the wrong 8 KB — a
-# probe that plants a sentinel in a dead frame found exactly that before this was written.
-# Returns 0.
+# Overwrites the `n` bytes of stack directly below the caller's frame (n a multiple of 8, any
+# size): run at the end of a public entry point, AFTER the call that did the secret work has
+# returned, it clears the frames that call used, which held secret-derived intermediates. The
+# stack grows down, so those dead frames lie at the HIGH end of `pad` (nearest the caller);
+# wiping from &pad upward would clear the wrong 8 KB — a probe that plants a sentinel in a
+# dead frame found exactly that before this was written. Past 16 KB it recurses (not a tail
+# call, so each frame lies below the last) and wipes each further 16 KB the same way; n is a
+# public size, so the branch is public. Stores are 8 bytes wide (the byte-loop memset made a
+# 160 KB burn cost a measurable share of a signature). Returns 0.
+#
+# The caller must NOT itself hold a `secret var`: the compiler's epilogue for one spills live
+# registers into the 64 bytes below the frame AFTER its own wipe (cyrius EDEFER_SAVE), so the
+# burn would run before the spill. Keep the secret work in a callee and burn from a plain
+# wrapper. CHANGELOG [3.13.8].
 fn _ect_burn_stack(n): i64 {
     var pad[16384];
-    memset(&pad + 16384 - n, 0, n);
+    var m = n;
+    if (m > 16384) { m = 16384; }
+    var p = &pad + 16384 - m;
+    var i = 0;
+    while (i < m) {
+        store64(p + i, 0);
+        i = i + 8;
+    }
+    if (n > 16384) { _ect_burn_stack(n - 16384); }
     return 0;
 }
 

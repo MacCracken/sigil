@@ -31,8 +31,8 @@
 # `key`, writing the 48-byte MAC to `out48`. Keys longer than the
 # 128-byte block are first SHA-384-hashed per the spec (yielding 48
 # bytes, zero-padded to 128); shorter keys are zero-padded. The K' /
-# ipad / opad scratch buffers are `secret var` and zeroized on
-# return. Returns 0.
+# ipad / opad scratch, the inner hash and the SHA-384 context (whose
+# final state is the MAC) are zeroized on return. Returns 0.
 fn hmac_sha384(key, key_len, msg, msg_len, out48): i64 {
     # Per-worker banked scratch (3.9.6 — concurrent-TLS-handshake fix).
     # kprime384/ipad384/opad384/inner_hash384 were function-scope
@@ -86,10 +86,14 @@ fn hmac_sha384(key, key_len, msg, msg_len, out48): i64 {
     sha384_finalize(hctxb, out48);
 
     # Per-lane secret zeroization (replaces the lost `secret var`
-    # guarantee; wipes only THIS worker's lane). inner_hash384 is a
-    # public digest — left as-is.
-    memset(kprime384b, 0, 128);
-    memset(ipad384b, 0, 128);
-    memset(opad384b, 0, 128);
+    # guarantee; wipes only THIS worker's lane). The context and the inner
+    # hash are wiped too (3.13.8): the context's final state IS the MAC —
+    # the P-384 signing nonce k in RFC 6979's HMAC_DRBG, a derived key in
+    # HKDF-SHA384 — so neither is a public digest.
+    _sigil_wipe64(kprime384b, 128);
+    _sigil_wipe64(ipad384b, 128);
+    _sigil_wipe64(opad384b, 128);
+    _sigil_wipe64(inner_hash384b, 48);
+    _sigil_wipe64(hctxb, 208);
     return 0;
 }

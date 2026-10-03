@@ -10,7 +10,16 @@
 #     nonce derivation + signing equation);
 #   - determinism (same key+msg → identical signature);
 #   - sign → verify roundtrip with the RFC public key (raw + DER);
-#   - DER structure (SEQUENCE tag) + verify_der acceptance.
+#   - DER structure (SEQUENCE tag) + verify_der acceptance;
+#   - zeroisation: after ecdsa_p{256,384}_sign returns, no 32-bit word of the
+#     nonce k or of the private key d is left anywhere in the 192 KB of dead
+#     stack below the caller (3.13.8 — the signer's call tree reaches ~115 KB,
+#     and the HMAC_DRBG's hash state, which IS k after the last round, used to
+#     survive ~43 KB down; the signer's own secret-var epilogue also spilled a
+#     register holding half of k after its stack wipe);
+#   - HMAC-SHA256 / HMAC-SHA384 leave neither their context (whose final
+#     state is the MAC — in the DRBG, k) nor the inner hash behind, and
+#     SHA-384's finalize scratch does not keep the MAC (3.13.8).
 
 include "lib/assert.cyr"
 include "lib/alloc.cyr"
@@ -77,6 +86,231 @@ fn _dsig(out, rs, rmode): i64 {
     store8(out, 0x30);
     store8(out + 1, p - 2);
     return p;
+}
+
+# ---------------- zeroisation ----------------
+# The dead-stack scan looks for every aligned 32-bit word of k and of d, as its integer value
+# (which is how a SHA-256 / SHA-512 state slot, a packed SHA-NI dword and an engine LE limb
+# all hold it) and byte-swapped (a big-endian copy), at EVERY byte offset — so an unaligned
+# copy is found too.
+var RZ_SCAN = 196608;   # bytes of dead stack scanned (the signer reaches ~115 KB)
+var _rz_words = 0;      # up to 48 u32 values
+var _rz_nw = 0;
+
+# Adds the w/4 words of the big-endian value at be, plain and byte-swapped. Returns 0.
+fn _rz_add(be, w): i64 {
+    var i = 0;
+    while (i < w) {
+        var v = ((load8(be + i) & 0xFF) << 24) | ((load8(be + i + 1) & 0xFF) << 16)
+        | ((load8(be + i + 2) & 0xFF) << 8) | (load8(be + i + 3) & 0xFF);
+        var sw = ((load8(be + i + 3) & 0xFF) << 24) | ((load8(be + i + 2) & 0xFF) << 16)
+        | ((load8(be + i + 1) & 0xFF) << 8) | (load8(be + i) & 0xFF);
+        store64(_rz_words + _rz_nw * 8, v);
+        store64(_rz_words + _rz_nw * 8 + 8, sw);
+        _rz_nw = _rz_nw + 2;
+        i = i + 4;
+    }
+    return 0;
+}
+
+# Fills lv x 16 KB of stack below the caller with 0x5a (non-tail recursion, so the frames stack
+# up), leaving the region mapped and holding nothing from earlier calls. Returns 0.
+fn _rz_wipe(lv): i64 {
+    var pad[16384];
+    memset(&pad, 0x5a, 16384);
+    if (lv > 1) { _rz_wipe(lv - 1); }
+    return 0;
+}
+
+# Marks the 8-byte words of the RZ_SCAN bytes below the address ref (a local of the caller's
+# frame) that already hold something other than the 0x5a fill or zero (_rz_wipe's own frame
+# slots), so _rz_dirty with the same ref, after the signer, counts only what the signer wrote.
+# Returns 0.
+var _rz_map = 0;
+fn _rz_base(ref): i64 {
+    if (_rz_map == 0) { _rz_map = alloc(RZ_SCAN / 8); }
+    var i = 8;
+    while (i <= RZ_SCAN) {
+        var v = load64(ref - i);
+        var b = 0;
+        if (v != 0x5a5a5a5a5a5a5a5a) { if (v != 0) { b = 1; } }
+        store8(_rz_map + i / 8 - 1, b);
+        i = i + 8;
+    }
+    return 0;
+}
+
+# Counts the 8-byte words in [ref - hi, ref - lo) that are neither the 0x5a fill nor zero and
+# were not marked by _rz_base: something the signer wrote and the burn did not overwrite. Over the band from just past the signer's burn to RZ_SCAN it is zero
+# only while the whole call tree fits inside the burn.
+fn _rz_dirty(ref, lo, hi): i64 {
+    var c = 0;
+    var i = lo + 8;
+    while (i <= hi) {
+        var v = load64(ref - i);
+        if (v != 0x5a5a5a5a5a5a5a5a) { if (v != 0) { if (load8(_rz_map + i / 8 - 1) == 0) { c = c + 1; } } }
+        i = i + 8;
+    }
+    return c;
+}
+var _rz_last_dirty = 0;
+
+# Counts the byte offsets in the RZ_SCAN bytes of dead stack below this function's frame whose
+# 32-bit value is one of the words. Called right after the API call returns, that region holds
+# every frame the call used.
+fn _rz_scan(): i64 {
+    var mark[8];
+    var base = &mark - RZ_SCAN;
+    var c = 0;
+    var i = 0;
+    while (i < RZ_SCAN - 4) {
+        var v = load32(base + i) & 0xFFFFFFFF;
+        if (v != 0) {
+            var j = 0;
+            while (j < _rz_nw) {
+                if (v == load64(_rz_words + j * 8)) { c = c + 1; }
+                j = j + 1;
+            }
+        }
+        i = i + 1;
+    }
+    return c;
+}
+
+# A function holding a `secret var`: its compiled epilogue saves rax, rdx, r8, xmm0 and xmm1
+# into the 64 bytes below its frame (cyrius EDEFER_SAVE), so calling it right after the signer
+# writes whatever those registers still hold into the region _rz_scan reads. Through the first
+# 3.13.8 draft xmm1 still held the SHA-NI state of the DRBG's last HMAC — half of k. Returns 0.
+fn _rz_spill(): i64 {
+    secret var x[16];
+    store64(&x, 1);
+    return 0;
+}
+
+# Signs msg with d on curve c (256 / 384) and returns how many words of k and d the call left
+# in the dead stack, or in a register that a later spill writes there.
+fn _rz_sign(c, d, msg, mlen): i64 {
+    var sig[96];
+    var burn = _ECS_BURN_P384;
+    var ref[8];
+    _rz_base(&ref);
+    if (c == 256) { ecdsa_p256_sign(d, msg, mlen, &sig); burn = _ECS_BURN_P256; }
+    else { ecdsa_p384_sign(d, msg, mlen, &sig); }
+    _rz_spill();
+    _rz_last_dirty = _rz_dirty(&ref, burn + 4096, RZ_SCAN);
+    return _rz_scan();
+}
+
+# Loads the words of the RFC 6979 nonce for (d, msg) on curve c, and of d itself. Returns 0.
+fn _rz_setup(c, d, msg, mlen): i64 {
+    var w = c / 8;
+    var dg = alloc(48);
+    var e = alloc(48);
+    var h1 = alloc(48);
+    var k = alloc(48);
+    _rz_nw = 0;
+    if (c == 256) {
+        sha256(msg, mlen, dg);
+        u256_load_be(e, dg);
+        if (u256_cmp(e, _p256_n) >= 0) { u256_sub(e, e, _p256_n); }
+        u256_store_be(h1, e);
+        _rfc6979_k_p256(d, h1, k);
+    } else {
+        sha384(msg, mlen, dg);
+        u384_load_be(e, dg);
+        if (u384_cmp(e, _p384_n) >= 0) { u384_sub(e, e, _p384_n); }
+        u384_store_be(h1, e);
+        _rfc6979_k_p384(d, h1, k);
+    }
+    _rz_add(k, w);
+    _rz_add(d, w);
+    return 0;
+}
+
+# Big-endian value at be (nw words of wb bytes) -> nw 64-bit integers at dst. Returns 0.
+fn _rz_be_words(dst, be, nw, wb): i64 {
+    var i = 0;
+    while (i < nw) {
+        var v = 0;
+        var j = 0;
+        while (j < wb) { v = (v << 8) | (load8(be + i * wb + j) & 0xFF); j = j + 1; }
+        store64(dst + i * 8, v);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Counts the 8-aligned places in the n bytes of dead stack below this function's frame where
+# nw consecutive 8-byte slots hold the nw integers at words — the layout of a SHA-256 or
+# SHA-512 context's hash state.
+fn _rz_run(words, nw, n): i64 {
+    var mark[8];
+    var base = &mark - n;
+    var c = 0;
+    var i = 0;
+    while (i + nw * 8 <= n) {
+        var j = 0;
+        var eq = 1;
+        while (j < nw) {
+            if (load64(base + i + j * 8) != load64(words + j * 8)) { eq = 0; break; }
+            j = j + 1;
+        }
+        c = c + eq;
+        i = i + 8;
+    }
+    return c;
+}
+
+# Counts the byte offsets in the n bytes of dead stack below this function's frame that start
+# a copy of the len bytes at pat.
+fn _rz_bytes(pat, len, n): i64 {
+    var mark[8];
+    var base = &mark - n;
+    var c = 0;
+    var i = 0;
+    while (i + len <= n) {
+        if (memeq(base + i, pat, len) == 1) { c = c + 1; }
+        i = i + 1;
+    }
+    return c;
+}
+
+var RZ_HSCAN = 98304;   # the HMAC call trees reach ~70 KB (banked SHA scratch)
+
+# HMAC-SHA256 over msg under the 32-byte key, then counts what is left: the MAC as a context
+# state, and the inner hash ih (32 B) anywhere.
+fn _rz_hmac256(key, msg, mlen, ih, words): i64 {
+    var mac[32];
+    hmac_sha256(key, 32, msg, mlen, &mac);
+    _rz_be_words(words, &mac, 8, 4);
+    var c = _rz_run(words, 8, RZ_HSCAN);
+    return c + _rz_bytes(ih, 32, RZ_HSCAN);
+}
+
+# HMAC-SHA384 over msg under the 48-byte key, then counts the MAC as a SHA-512 state (its six
+# 64-bit words), the MAC's bytes anywhere (SHA-384's finalize scratch), and the inner hash.
+fn _rz_hmac384(key, msg, mlen, ih, words): i64 {
+    var mac[48];
+    hmac_sha384(key, 48, msg, mlen, &mac);
+    _rz_be_words(words, &mac, 6, 8);
+    var c = _rz_run(words, 6, RZ_HSCAN);
+    c = c + _rz_bytes(&mac, 48, RZ_HSCAN);
+    return c + _rz_bytes(ih, 48, RZ_HSCAN);
+}
+
+# The inner hash of HMAC: H((key xor ipad) || msg) for a key of kl <= B bytes, block size B
+# (64 / 128), hash 256 / 384, into ih. Returns 0.
+fn _rz_inner(c, key, kl, msg, mlen, ih): i64 {
+    var bsz = 64;
+    if (c == 384) { bsz = 128; }
+    var buf = alloc(bsz + mlen);
+    memset(buf, 0, bsz);
+    memcpy(buf, key, kl);
+    var i = 0;
+    while (i < bsz) { store8(buf + i, (load8(buf + i) & 0xFF) ^ 0x36); i = i + 1; }
+    memcpy(buf + bsz, msg, mlen);
+    if (c == 256) { sha256(buf, bsz + mlen, ih); } else { sha384(buf, bsz + mlen, ih); }
+    return 0;
 }
 
 fn main() {
@@ -187,6 +421,31 @@ fn main() {
     }
     assert_eq(seen_redundant, 1, "the redundant-zero case was exercised");
     assert_eq(seen_negative, 1, "the negative-encoding case was exercised");
+
+    test_group("zeroisation — no word of k or d left in the dead stack after signing");
+    _rz_words = alloc(48 * 8);
+    var rzm = "residue probe";
+    _rz_setup(256, x256, rzm, 13);
+    _rz_wipe(14);
+    assert_eq(_rz_sign(256, x256, rzm, 13), 0, "P-256 sign: no word of k or d in 192 KB of dead stack");
+    assert_eq(_rz_last_dirty, 0, "P-256 sign: the call tree fits inside its burn");
+    _rz_setup(384, x384, rzm, 13);
+    _rz_wipe(14);
+    assert_eq(_rz_sign(384, x384, rzm, 13), 0, "P-384 sign: no word of k or d in 192 KB of dead stack");
+    assert_eq(_rz_last_dirty, 0, "P-384 sign: the call tree fits inside its burn");
+
+    test_group("HMAC leaves neither its context (the MAC) nor the inner hash in the dead stack");
+    var hk = alloc(48);
+    memset(hk, 0xa5, 48);
+    var hm = "the DRBG's last round";
+    var ih = alloc(48);
+    var hw = alloc(64);
+    _rz_inner(256, hk, 32, hm, 21, ih);
+    _rz_wipe(14);
+    assert_eq(_rz_hmac256(hk, hm, 21, ih, hw), 0, "HMAC-SHA256: no context state or inner hash left");
+    _rz_inner(384, hk, 48, hm, 21, ih);
+    _rz_wipe(14);
+    assert_eq(_rz_hmac384(hk, hm, 21, ih, hw), 0, "HMAC-SHA384: no context state, finalize scratch or inner hash left");
 
     return assert_summary();
 }

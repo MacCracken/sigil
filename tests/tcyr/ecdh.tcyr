@@ -463,12 +463,74 @@ fn _dead_stack_count(v, n): i64 {
     return c;
 }
 
+# Bytes of dead stack the zeroisation group scans: eight times the 8 KB the ECDH entry points
+# burn, so a call tree that outgrows the burn is caught rather than scanned exactly as far as
+# the burn reaches (a check sized by the thing it checks cannot see past it).
+var DZ_SCAN = 65536;
+
+# Fills lv x 16 KB of stack below the caller with 0x5a (non-tail recursion), so the scanned
+# region is mapped and holds nothing from earlier calls. Returns 0.
+fn _dz_wipe(lv): i64 {
+    var pad[16384];
+    memset(&pad, 0x5a, 16384);
+    if (lv > 1) { _dz_wipe(lv - 1); }
+    return 0;
+}
+
+# Marks the 8-byte words of the DZ_SCAN bytes below the address ref (a local of the caller's
+# frame) that already hold something other than the 0x5a fill or zero (_dz_wipe's own frame
+# slots), so _dz_dirty with the same ref, after the API call, counts only what the call wrote.
+# Returns 0.
+var _dz_map = 0;
+fn _dz_base(ref): i64 {
+    if (_dz_map == 0) { _dz_map = alloc(DZ_SCAN / 8); }
+    var i = 8;
+    while (i <= DZ_SCAN) {
+        var v = load64(ref - i);
+        var b = 0;
+        if (v != 0x5a5a5a5a5a5a5a5a) { if (v != 0) { b = 1; } }
+        store8(_dz_map + i / 8 - 1, b);
+        i = i + 8;
+    }
+    return 0;
+}
+
+# Counts the 8-byte words in [ref - hi, ref - lo) that are neither the 0x5a fill nor zero and
+# were not marked by _dz_base: something the call wrote and the burn did not overwrite.
+fn _dz_dirty(ref, lo, hi): i64 {
+    var c = 0;
+    var i = lo + 8;
+    while (i <= hi) {
+        var v = load64(ref - i);
+        if (v != 0x5a5a5a5a5a5a5a5a) { if (v != 0) { if (load8(_dz_map + i / 8 - 1) == 0) { c = c + 1; } } }
+        i = i + 8;
+    }
+    return c;
+}
+
+# What the last _residue_after_* call left between the burn and DZ_SCAN, skipping the burn's
+# own frame (its 16 KB pad, whose low end it does not wipe, and its slots just below that).
+# Both are given the address of one local of the helper's frame, so they agree on every offset.
+var _dz_last_dirty = 0;
+
+# A function holding a `secret var`: its compiled epilogue saves rax, rdx, r8, xmm0 and xmm1
+# below its frame (cyrius EDEFER_SAVE), so calling it right after an ECDH call writes whatever
+# those registers still hold into the scanned region. Returns 0.
+fn _dz_spill(): i64 {
+    secret var x[16];
+    store64(&x, 1);
+    return 0;
+}
+
 # Derives with the private key d_be on curve c, then counts how many of d's limbs survive in
-# the dead stack below the caller (8 KB).
+# the DZ_SCAN bytes of dead stack below the caller, or in a register a later spill writes there.
 fn _residue_after_shared(c, d_be, peer): i64 {
     var w = _w(c);
     var z = alloc(w);
+    var ref[8];
+    _dz_base(&ref);
     _shared(c, d_be, peer, 1 + 2 * w, z);
+    _dz_spill();
     var found = 0;
     var i = 0;
     while (i < w / 8) {
@@ -478,9 +540,10 @@ fn _residue_after_shared(c, d_be, peer): i64 {
             limb = (limb << 8) | (load8(d_be + w - 8 - i * 8 + j) & 0xFF);
             j = j + 1;
         }
-        found = found + _dead_stack_count(limb, 8192);
+        found = found + _dead_stack_count(limb, DZ_SCAN);
         i = i + 1;
     }
+    _dz_last_dirty = _dz_dirty(&ref, _ECDH_BURN + 512, 16384) + _dz_dirty(&ref, 16384 + 1024, DZ_SCAN);
     return found;
 }
 
@@ -489,7 +552,10 @@ fn _residue_after_keygen(c, rnd): i64 {
     var w = _w(c);
     var priv = alloc(w);
     var pk = alloc(1 + 2 * w);
+    var ref[8];
+    _dz_base(&ref);
     _keygen(c, rnd, w + 8, priv, pk);
+    _dz_spill();
     var found = 0;
     var i = 0;
     while (i < w / 8) {
@@ -499,9 +565,10 @@ fn _residue_after_keygen(c, rnd): i64 {
             limb = (limb << 8) | (load8(priv + w - 8 - i * 8 + j) & 0xFF);
             j = j + 1;
         }
-        found = found + _dead_stack_count(limb, 8192);
+        found = found + _dead_stack_count(limb, DZ_SCAN);
         i = i + 1;
     }
+    _dz_last_dirty = _dz_dirty(&ref, _ECDH_BURN + 512, 16384) + _dz_dirty(&ref, 16384 + 1024, DZ_SCAN);
     return found;
 }
 
@@ -923,10 +990,18 @@ fn main() {
     test_group("zeroisation — no limb of the private key left in the dead stack");
     var dz256 = _h("1122334455667788a1b2c3d4e5f60718293a4b5c6d7e8f900fedcba987654321");
     var dz384 = _h("1122334455667788a1b2c3d4e5f60718293a4b5c6d7e8f900fedcba98765432113579bdf02468ace0f1e2d3c4b5a6978");
-    assert_eq(_residue_after_shared(256, dz256, good256), 0, "P-256 shared: no private-key limb in 8 KB of dead stack");
-    assert_eq(_residue_after_shared(384, dz384, good384), 0, "P-384 shared: no private-key limb in 8 KB of dead stack");
-    assert_eq(_residue_after_keygen(256, rk), 0, "P-256 keygen: no private-key limb in 8 KB of dead stack");
-    assert_eq(_residue_after_keygen(384, rk), 0, "P-384 keygen: no private-key limb in 8 KB of dead stack");
+    _dz_wipe(6);
+    assert_eq(_residue_after_shared(256, dz256, good256), 0, "P-256 shared: no private-key limb in 64 KB of dead stack");
+    assert_eq(_dz_last_dirty, 0, "P-256 shared: nothing it wrote survives past its burn");
+    _dz_wipe(6);
+    assert_eq(_residue_after_shared(384, dz384, good384), 0, "P-384 shared: no private-key limb in 64 KB of dead stack");
+    assert_eq(_dz_last_dirty, 0, "P-384 shared: nothing it wrote survives past its burn");
+    _dz_wipe(6);
+    assert_eq(_residue_after_keygen(256, rk), 0, "P-256 keygen: no private-key limb in 64 KB of dead stack");
+    assert_eq(_dz_last_dirty, 0, "P-256 keygen: nothing it wrote survives past its burn");
+    _dz_wipe(6);
+    assert_eq(_residue_after_keygen(384, rk), 0, "P-384 keygen: no private-key limb in 64 KB of dead stack");
+    assert_eq(_dz_last_dirty, 0, "P-384 keygen: nothing it wrote survives past its burn");
 
     # ============================================================
     test_group("concurrent callers — 8 threads x 3 rounds == serial results");

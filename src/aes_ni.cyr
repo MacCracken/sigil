@@ -187,6 +187,10 @@ fn aes256_encrypt_block_ni(round_keys, in_block, out_block): i64 {
 
         # movdqu [rdx], xmm0           ; out_block = state
         0xF3; 0x0F; 0x7F; 0x02;
+        # pxor xmm0, xmm0              ; scrub (3.13.8): a later register spill (a
+        #                              ; `secret var` epilogue saves xmm0) must not carry
+        #                              ; the block — a keystream block under GCM / CTR
+        0x66; 0x0F; 0xEF; 0xC0;
     }
     #endif
     return 0;
@@ -234,6 +238,10 @@ fn aes128_encrypt_block_ni(round_keys, in_block, out_block): i64 {
 
         # movdqu [rdx], xmm0           ; out_block = state
         0xF3; 0x0F; 0x7F; 0x02;
+        # pxor xmm0, xmm0              ; scrub (3.13.8): a later register spill (a
+        #                              ; `secret var` epilogue saves xmm0) must not carry
+        #                              ; the block — a keystream block under GCM / CTR
+        0x66; 0x0F; 0xEF; 0xC0;
     }
     #endif
     return 0;

@@ -59,12 +59,14 @@ fn sha384_finalize(ctx, out): i64 {
     # (quirk #1) — two concurrent SHA-384 finalizes (the TLS-SHA384
     # transcript / HKDF-SHA384 path) raced it. (SHA-256's finalize
     # writes straight to `out`, so it has no analogous buffer — which is
-    # why only the SHA-384 path showed the race.) Per-`cbank()` lane;
-    # public digest, no wipe needed.
+    # why only the SHA-384 path showed the race.) Per-`cbank()` lane.
+    # Wiped after the copy (3.13.8): under HMAC-SHA384 the digest is the
+    # MAC — the P-384 signing nonce in RFC 6979, a key in HKDF-SHA384.
     var bk = cbank();
     var tmp[4096];   var tmpb = &tmp + bk * 64;   # 64 * SIGIL_CRYPTO_BANKS
     sha512_finalize(ctx, tmpb);
     memcpy(out, tmpb, 48);
+    _sigil_wipe64(tmpb, 64);
     return 0;
 }
 

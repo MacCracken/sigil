@@ -34,6 +34,15 @@
 #     every intermediate live in `secret var` stack blocks (per call, per
 #     thread, zeroised by the compiler on every return) or in the
 #     per-lane-wiped DRBG scratch below. r and s are public outputs.
+#   - Nothing of k or d is left behind in memory the caller does not own
+#     (3.13.8). The secret work runs in _ecs_sign_p256 / _ecs_sign_p384 and
+#     the public entry point, a plain wrapper, burns the whole call tree
+#     after it returns — the DRBG's, HMAC's, SHA's and the engine's frames,
+#     and the registers the callee's `secret var` epilogue spills below its
+#     frame. HMAC wipes its own context, whose final state is the MAC (in
+#     the DRBG, k), and the SHA-NI block clears the xmm registers that held
+#     it. Through 3.13.7 all of k survived ~43 KB down in the dead stack and
+#     half of it in xmm1 (CHANGELOG [3.13.8], Security).
 
 # ================================================================
 # RFC 6979 §3.2 — deterministic nonce (P-256 / HMAC-SHA256)
@@ -263,12 +272,21 @@ fn _ecs_sign_core(d_be, k_be, e, sig_out, nl, f, nc, bm, G): i64 {
 # ================================================================
 # ecdsa_p256_sign — raw r||s (64 bytes, big-endian)
 # ================================================================
-# d_be: 32-byte big-endian private scalar in [1, n-1].
-# Hashes msg with SHA-256 internally (matches ecdsa_p256_verify).
-# Returns 0 on success, -1 on failure (degenerate r/s or no nonce).
-# Constant-time in d and k since 3.13.8 (src/ec_ct.cyr).
-fn ecdsa_p256_sign(d_be, msg, msg_len, sig_out): i64 {
-    _ect256_init();
+# How much dead stack each signer burns when it returns. The call tree reaches ~82 KB (P-256)
+# and ~115 KB (P-384) below the entry point on x86_64 — the HMAC_DRBG, HMAC and SHA scratch
+# arrays are banked across 64 cbank() lanes, so their frames are large — and the deepest
+# frames held the DRBG's hash state, which after the last round IS the nonce k. Through the
+# first 3.13.8 draft the burn was 8 KB, which left all of k ~43 KB down (CHANGELOG [3.13.8],
+# Security). tests/tcyr/ecdsa_sign.tcyr scans 192 KB after signing, on every host, so a frame
+# that outgrows these sizes is caught. Re-measure them when the cbank() banks go (3.14.0).
+var _ECS_BURN_P256 = 131072;
+var _ECS_BURN_P384 = 163840;
+
+# The P-256 signer behind ecdsa_p256_sign: every secret lives in this frame or below it, so
+# the public entry point can burn the whole call tree after this returns — including the
+# register spill this function's `secret var` epilogue makes after its own wipe (see
+# _ect_burn_stack). Returns 0, or -1 (degenerate r/s or no nonce).
+fn _ecs_sign_p256(d_be, msg, msg_len, sig_out): i64 {
     # Per-call stack block (array locals are per-thread; `secret var` wipes it on return).
     secret var S[128];
     var digest = &S;
@@ -282,20 +300,29 @@ fn ecdsa_p256_sign(d_be, msg, msg_len, sig_out): i64 {
     # bits2octets(H(m)) = int2octets(e mod n)
     u256_store_be(h1oct, e);
     # k = RFC 6979 deterministic nonce.
-    if (_rfc6979_k_p256(d_be, h1oct, k) != 0) { _ect_burn_stack(8192); return 0 - 1; }
+    if (_rfc6979_k_p256(d_be, h1oct, k) != 0) { return 0 - 1; }
     var rc = _ecs_sign_core(d_be, k, e, sig_out, 4, _ect_fp256, _ect_fn256, _ect_b256, _ect_g256);
-    _ect_burn_stack(8192);    # dead frames below here: the core's, the engine's, the DRBG's
+    return rc;
+}
+
+# Signs msg (SHA-256 internally, matching ecdsa_p256_verify) with the 32-byte big-endian
+# private scalar d_be in [1, n-1], writing the raw signature r || s (64 bytes, big-endian) to
+# sig_out. The nonce is RFC 6979 deterministic. Constant-time in d and k since 3.13.8
+# (src/ec_ct.cyr), and the stack the call used is wiped before it returns. Returns 0 on
+# success, -1 on failure (degenerate r/s or no nonce).
+fn ecdsa_p256_sign(d_be, msg, msg_len, sig_out): i64 {
+    _ect256_init();
+    var rc = _ecs_sign_p256(d_be, msg, msg_len, sig_out);
+    _ect_burn_stack(_ECS_BURN_P256);   # every frame below here: the DRBG's, HMAC's, SHA's, the engine's
     return rc;
 }
 
 # ================================================================
 # ecdsa_p384_sign — raw r||s (96 bytes, big-endian)
 # ================================================================
-# d_be: 48-byte big-endian private scalar in [1, n-1]; SHA-384 of msg.
-# Returns 0, or -1 (degenerate r/s or no nonce). Constant-time in d and k
-# since 3.13.8 (src/ec_ct.cyr).
-fn ecdsa_p384_sign(d_be, msg, msg_len, sig_out): i64 {
-    _ect384_init();
+# The P-384 signer behind ecdsa_p384_sign (the P-256 twin's shape: secrets here and below,
+# the burn in the plain wrapper). Returns 0, or -1 (degenerate r/s or no nonce).
+fn _ecs_sign_p384(d_be, msg, msg_len, sig_out): i64 {
     secret var S[192];
     var digest = &S;
     var e      = &S + 48;
@@ -305,9 +332,19 @@ fn ecdsa_p384_sign(d_be, msg, msg_len, sig_out): i64 {
     u384_load_be(e, digest);
     if (u384_cmp(e, _p384_n) >= 0) { u384_sub(e, e, _p384_n); }
     u384_store_be(h1oct, e);
-    if (_rfc6979_k_p384(d_be, h1oct, k) != 0) { _ect_burn_stack(8192); return 0 - 1; }
+    if (_rfc6979_k_p384(d_be, h1oct, k) != 0) { return 0 - 1; }
     var rc = _ecs_sign_core(d_be, k, e, sig_out, 6, _ect_fp384, _ect_fn384, _ect_b384, _ect_g384);
-    _ect_burn_stack(8192);
+    return rc;
+}
+
+# Signs msg (SHA-384 internally) with the 48-byte big-endian private scalar d_be in [1, n-1],
+# writing the raw signature r || s (96 bytes, big-endian) to sig_out. RFC 6979 nonce;
+# constant-time in d and k since 3.13.8 (src/ec_ct.cyr); the stack the call used is wiped
+# before it returns. Returns 0, or -1 (degenerate r/s or no nonce).
+fn ecdsa_p384_sign(d_be, msg, msg_len, sig_out): i64 {
+    _ect384_init();
+    var rc = _ecs_sign_p384(d_be, msg, msg_len, sig_out);
+    _ect_burn_stack(_ECS_BURN_P384);
     return rc;
 }
 

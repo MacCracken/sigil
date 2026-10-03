@@ -25,9 +25,9 @@
 
 # Computes HMAC-SHA256 (RFC 2104) over `msg` under `key`, writing the
 # 32-byte MAC to `out`. Keys longer than the 64-byte block are first
-# SHA-256-hashed per the spec; shorter keys are zero-padded. The K'
-# / ipad / opad scratch buffers are `secret var` and zeroized on
-# return. Returns 0.
+# SHA-256-hashed per the spec; shorter keys are zero-padded. The K' /
+# ipad / opad scratch, the inner hash and the SHA-256 context (whose
+# final state is the MAC) are zeroized on return. Returns 0.
 fn hmac_sha256(key, key_len, msg, msg_len, out): i64 {
     # Per-worker banked scratch (3.9.6 — concurrent-TLS-handshake fix).
     # kprime/ipad/opad/inner_hash were function-scope `secret var`s, i.e.
@@ -80,11 +80,16 @@ fn hmac_sha256(key, key_len, msg, msg_len, out): i64 {
     sha256_finalize(hctxb, out);
 
     # Per-lane secret zeroization (replaces the lost `secret var`
-    # guarantee; wipes only THIS worker's lane). inner_hash is a public
-    # digest — left as-is.
-    memset(kprimeb, 0, 64);
-    memset(ipadb, 0, 64);
-    memset(opadb, 0, 64);
+    # guarantee; wipes only THIS worker's lane). The context and the inner
+    # hash are wiped too (3.13.8): the context's final state IS the MAC, and
+    # in RFC 6979's HMAC_DRBG the MAC is the signing nonce k (and in HKDF the
+    # derived key), so neither is a public digest. Leaving them let k
+    # survive in dead stack after ecdsa_p256_sign returned.
+    _sigil_wipe64(kprimeb, 64);
+    _sigil_wipe64(ipadb, 64);
+    _sigil_wipe64(opadb, 64);
+    _sigil_wipe64(inner_hashb, 32);
+    _sigil_wipe64(hctxb, 144);
     return 0;
 }
 

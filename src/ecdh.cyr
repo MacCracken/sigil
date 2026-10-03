@@ -41,6 +41,11 @@ var ECDH_P384_PRIV_LEN   = 48;
 var ECDH_P384_PUB_LEN    = 97;
 var ECDH_P384_SECRET_LEN = 48;
 
+# Dead stack each entry point burns after the work returns (see _ect_burn_stack). The ECDH call
+# tree reaches ~4.8 KB below the entry point on x86_64 (3.13.8); tests/tcyr/ecdh.tcyr checks,
+# on every host, that nothing the call wrote survives between this size and 64 KB.
+var _ECDH_BURN = 8192;
+
 # Shared key-pair generation for a curve of nl limbs (field context f, scalar context nc,
 # Montgomery b `bm`, generator G): d = (c mod (n - 1)) + 1 from the 8·(nl + 1) bytes at rnd,
 # priv_out = d (nl·8 bytes), pub_out = 0x04 || X || Y (1 + 16·nl bytes). Returns 0, or -1
@@ -131,7 +136,7 @@ fn ecdh_p256_keygen(rnd, rnd_len, priv_out, pub_out): i64 {
     }
     _ect256_init();
     var rc = _ecdh_keygen(rnd, priv_out, pub_out, 4, _ect_fp256, _ect_fn256, _ect_b256, _ect_g256);
-    _ect_burn_stack(8192);                 # the frames below here, _ecdh_keygen's included
+    _ect_burn_stack(_ECDH_BURN);                 # the frames below here, _ecdh_keygen's included
     return rc;
 }
 
@@ -144,7 +149,7 @@ fn ecdh_p256_shared(priv, peer_pub, peer_pub_len, secret_out): i64 {
     _ect256_init();
     var rc = _ecdh_shared(priv, peer_pub, peer_pub_len, secret_out, 4,
       _ect_fp256, _ect_fn256, _ect_b256);
-    _ect_burn_stack(8192);                 # the frames below here, _ecdh_shared's included
+    _ect_burn_stack(_ECDH_BURN);                 # the frames below here, _ecdh_shared's included
     return rc;
 }
 
@@ -161,7 +166,7 @@ fn ecdh_p384_keygen(rnd, rnd_len, priv_out, pub_out): i64 {
     }
     _ect384_init();
     var rc = _ecdh_keygen(rnd, priv_out, pub_out, 6, _ect_fp384, _ect_fn384, _ect_b384, _ect_g384);
-    _ect_burn_stack(8192);
+    _ect_burn_stack(_ECDH_BURN);
     return rc;
 }
 
@@ -173,6 +178,6 @@ fn ecdh_p384_shared(priv, peer_pub, peer_pub_len, secret_out): i64 {
     _ect384_init();
     var rc = _ecdh_shared(priv, peer_pub, peer_pub_len, secret_out, 6,
       _ect_fp384, _ect_fn384, _ect_b384);
-    _ect_burn_stack(8192);
+    _ect_burn_stack(_ECDH_BURN);
     return rc;
 }
