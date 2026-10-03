@@ -12,6 +12,13 @@
 # dir, chdirs into it, drives each code path that execs a tool, and asserts NO
 # fake ever ran (each fake creates a marker file before printing its spoofed
 # output). The cwd is restored and the scratch dir removed at the end.
+#
+# Windows (3.13.8): cyrius's sys_chdir is a stub there (-1), so the test cannot move into the
+# planted dir; those rows SKIP by name, and every exec path is still driven (the subprocess helpers
+# refuse to spawn on Windows). What Windows does assert is the 3.13.8 fail-closed resolver: the
+# trusted tool dirs are rooted POSIX paths, drive-relative there, so no tool resolves at all. The
+# cwd is read with xreadlink, which builds on every target (the bare sys_readlink is undefined on
+# PE and takes (path, pathlen, buf, buflen) on agnos). CHANGELOG [3.13.8].
 
 include "lib/assert.cyr"
 include "lib/alloc.cyr"
@@ -96,7 +103,8 @@ fn main() {
     # Save the cwd so it can be restored afterwards.
     var oldcwd = alloc(4096);
     memset(oldcwd, 0, 4096);
-    var cl = sys_readlink("/proc/self/cwd", oldcwd, 4095);
+    #ifndef CYRIUS_TARGET_WIN
+    var cl = xreadlink("/proc/self/cwd", oldcwd, 4095);
     if (cl <= 0) {
         # No /proc (macOS): the cwd the shell started us in.
         var pwd = getenv("PWD");
@@ -107,6 +115,7 @@ fn main() {
         }
     }
     assert(cl > 0, "current cwd recorded");
+    #endif
 
     test_group("setup: fakes planted in the cwd");
     assert_eq(xmkdir(_sbt_dir, 448), 0, "scratch dir created");   # 0700
@@ -123,7 +132,12 @@ fn main() {
     file_write_all(kmod, "not-a-module", 12);
     file_write_all(key, "not-a-key", 9);
     file_write_all(crt, "not-a-cert", 10);
+    #ifndef CYRIUS_TARGET_WIN
     assert_eq(sys_chdir(_sbt_dir), 0, "chdir into the planted dir");
+    #endif
+    #ifdef CYRIUS_TARGET_WIN
+    println("  SKIP: chdir into the planted dir (sys_chdir is a stub on Windows)");
+    #endif
 
     # ============================================================
     # Every tool-exec path. None may pick the fake up from the cwd.
@@ -181,8 +195,13 @@ fn main() {
     # ============================================================
     test_group("_sb_tool_path");
     var lsp = _sb_tool_path("ls");
+    #ifndef CYRIUS_TARGET_WIN
     assert(lsp != 0, "ls resolves from a trusted dir");
     if (lsp != 0) { assert_eq(load8(lsp), 47, "the resolved path is absolute"); }
+    #endif
+    #ifdef CYRIUS_TARGET_WIN
+    assert_eq(lsp, 0, "Windows: no tool resolves (the trusted dirs are drive-relative there)");
+    #endif
     var only_cwd = cat2("sigil_sbt_only_in_cwd_", pid_str());
     assert_eq(plant_fake(only_cwd, "x"), 0, "a tool that exists only in the cwd planted");
     assert_eq(_sb_tool_path(only_cwd), 0, "a tool only in the cwd does not resolve");
@@ -197,7 +216,9 @@ fn main() {
     # Cleanup: restore the cwd, remove the fakes, markers and dir.
     # ============================================================
     test_group("cleanup");
+    #ifndef CYRIUS_TARGET_WIN
     assert_eq(sys_chdir(oldcwd), 0, "cwd restored");
+    #endif
     var tools = vec_new();
     vec_push(tools, "mokutil");
     vec_push(tools, "kmodsign");
