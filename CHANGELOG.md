@@ -11,10 +11,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ⛔ **Tag this release before cyrius 6.6.15 is tagged** — cyrius 6.6.15 folds it as
 `lib/sigil.cyr` and builds native TLS 1.2 ECDHE on secp256r1 / secp384r1 on the new ECDH API.
-Constant-time ECDH on P-256 and P-384 (new, additive), and a **security fix**: ECDSA signing
-ran its secret nonce and private key through variable-time arithmetic; it now runs on the same
-constant-time engine. Signatures are byte-identical (RFC 6979 KATs). The toolchain pin stays
-**6.6.9**. Audit: [`docs/audit/2026-10-02-3.13.8-ct-ecdh-ecdsa-sign-audit.md`](docs/audit/2026-10-02-3.13.8-ct-ecdh-ecdsa-sign-audit.md).
+Constant-time ECDH on P-256 and P-384 (new, additive), and **two security fixes**: ECDSA signing
+ran its secret nonce and private key through variable-time arithmetic (it now runs on the same
+constant-time engine), and — found by the review of this release's first draft — every signature
+left its nonce k in dead stack and in a vector register. Signatures are byte-identical (RFC 6979
+KATs). The toolchain pin stays **6.6.9** pending the maintainer's call (roadmap: under it,
+`ecdh.tcyr`'s two timing-success assertions fail on Intel macOS because of cyrius CVE-51). Audit: [`docs/audit/2026-10-02-3.13.8-ct-ecdh-ecdsa-sign-audit.md`](docs/audit/2026-10-02-3.13.8-ct-ecdh-ecdsa-sign-audit.md).
 Decision record: [ADR 0009](docs/adr/0009-constant-time-ec-engine-for-secret-scalars.md);
 invariant: [architecture note 004](docs/architecture/004-secret-ec-scalars-run-on-ec-ct.md).
 
@@ -40,6 +42,24 @@ invariant: [architecture note 004](docs/architecture/004-secret-ec-scalars-run-o
   since signing shipped (3.5.9). **Fix:** every secret operation — k·G, its affine conversion,
   k^-1, r·d, e + r·d — runs on the new constant-time engine (below); the RFC 6979 candidate test
   (1 <= k <= n-1) is computed without a branch and only its verdict is branched on.
+- **MEDIUM — after a signature, the nonce k was left in dead stack and in a vector register.**
+  After `ecdsa_p256_sign` returned, all eight 32-bit words of k lay ~42.7 KB below the caller and
+  words 0–3 again at 212–224 bytes; with k and the published (r, s), d = r^-1(s·k − e), so any
+  read of dead memory (an uninitialised-memory disclosure, a core dump, swap) recovers the key
+  from one signature. Pre-existing — 3.13.7 leaves the same class (17 / 30 words of k and d,
+  P-256 / P-384, under the new test) — but this release's first draft claimed it covered. Causes:
+  `hmac_sha256` / `hmac_sha384` never wiped their SHA context or inner hash, and the context's
+  final state IS the MAC (in the RFC 6979 HMAC_DRBG, k; in HKDF, a derived key);
+  `sha384_finalize` kept the SHA-512 output in its scratch; the SHA-NI compress left the state in
+  xmm1 / xmm2 / xmm7, its scratch and edx; the signers burned 8 KB of a call tree that reaches
+  ~82 KB (P-256) / ~115 KB (P-384) because the DRBG / HMAC / SHA scratch is banked 64 ways; and
+  the burn ran before the signer's own `secret var` epilogue, which saves rax / rdx / r8 / xmm0 /
+  xmm1 below its frame after its wipe and never clears them (a cyrius codegen defect, drafted for
+  the cyrius integrator; [architecture note 005](docs/architecture/005-secret-var-epilogue-spills-registers.md)).
+  **Fix:** both HMACs wipe their context and inner hash and `sha384_finalize` its scratch; the
+  SHA-NI block clears xmm0–xmm7, its scratch and edx, the AES-NI blocks xmm0; each signer is a
+  plain wrapper that burns 128 KB / 160 KB after a callee holding the `secret var` block has
+  returned. Audit §F4.
 
 ### Added
 
@@ -89,6 +109,27 @@ invariant: [architecture note 004](docs/architecture/004-secret-ec-scalars-run-o
   `ecdsa_p256.cyr` / `ecdsa_p384.cyr` is constant-time, and nothing there may be handed a secret.
   Through 3.13.7 the roadmap's scatter-store item said the signing nonce "stays on the CT
   ladder"; it did not.
+- **The signers are wrappers.** `ecdsa_p256_sign` / `ecdsa_p384_sign` (same signatures, same
+  output) call `_ecs_sign_p256` / `_ecs_sign_p384`, which hold the secret block, and then burn
+  `_ECS_BURN_P256` / `_ECS_BURN_P384` (128 / 160 KB). `_ect_burn_stack` now covers any size
+  (non-tail recursion over 16 KB frames) with 8-byte stores, so the larger burn costs no signing
+  time; ECDH's 8 KB is the named `_ECDH_BURN`.
+- **HMAC-SHA256 / HMAC-SHA384 wipe their SHA context and inner hash**, and `sha384_finalize` its
+  scratch, through the new `_sigil_wipe64` (`src/crypto_scratch.cyr`, 8-byte stores). The exit
+  wipes cost less than the byte-loop memsets they replace: a short HMAC-SHA256 went from
+  ~1.90 µs to ~1.67 µs.
+- **The SHA-NI compress and the AES-NI block functions clear the vector registers they used**
+  (and SHA-NI its scratch state and edx) before the asm block ends; `sha256_64kb_ni` is unchanged
+  within noise.
+- **`_ecs256_inited` / `_ecs384_inited` are kept.** They held the 3.13.7 signer's lazy init and an
+  ecosystem test reads them (abaco `tests/test_ccy_tls.tcyr`); they now live in `src/ec_ct.cyr`
+  and are set to 2 when the engine's init for the curve publishes, so that snapshot still
+  compiles and still sees the init. New code reads `_ect256_inited` / `_ect384_inited`.
+- `tests/tcyr/batch_parallel.tcyr` and `tests/bcyr/batch_parallel.bcyr` write per-run files under
+  `$TMPDIR` (else `$TEMP` / `$TMP`, else `/tmp`) with an unpredictable name and remove them — they
+  wrote fixed names in the shared `/tmp` and left them behind. `batch_parallel` now also passes on
+  cass, where `/tmp` does not exist. Eleven more test files and one fuzz harness have the same
+  class; named for the maintainer in the roadmap.
 
 ### Removed
 
@@ -98,6 +139,10 @@ invariant: [architecture note 004](docs/architecture/004-secret-ec-scalars-run-o
   `_p384_scrub_secret_lanes` and the banked `_ecs256_R` / `_ecs384_R` / `_ecs256_G` / `_ecs384_G`
   (private) — signing keeps its secrets in per-call `secret var` blocks now, so there are no
   banked buffers left to scrub.
+- `_ecs256_init` / `_ecs384_init` (private) — the old signer's lazy init; `_ect256_init` /
+  `_ect384_init` build what signing needs. (Their flags `_ecs256_inited` / `_ecs384_inited` are
+  kept, see Changed.) A survey of every `.cyr` / `.tcyr` / `.bcyr` / `.fcyr` under `~/Repos`
+  outside sigil and vendored copies found no other use of any removed symbol.
 
 ### Performance
 
@@ -123,9 +168,16 @@ took 97.5 ms and the engine's takes 45.7). Two further levers are named for the
 maintainer in the roadmap (a constant-time fixed-base comb for k·G / d·G, ~4x on keygen and
 signing; an aarch64 `UMULH`).
 
+**After the review fixes** (interleaved A/B against the first draft, same toolchain and host,
+rows `v3.13.8-review-fix` in `benches/history.csv`): signing and ECDH unchanged within noise
+(`ecdsa_p256_sign` 2.792 → 2.774 ms, `ecdsa_p384_sign` 7.924 → 7.972 ms, the four ECDH rows
+within ±0.7%) — the 128 / 160 KB stack burns with 8-byte stores cost what the 8 KB byte-loop burn
+did; `hkdf_extract` 1.917 → **1.727 µs** (−10%: the HMAC exit wipes moved to 8-byte stores);
+`sha256_64kb_ni` and the AES-GCM rows within noise.
+
 ### Tests
 
-- New `tests/tcyr/ecdh.tcyr` (448 assertions): RFC 5903 §8.1 / §8.2; **all 25 + 25 NIST CAVP
+- New `tests/tcyr/ecdh.tcyr` (460 assertions): RFC 5903 §8.1 / §8.2; **all 25 + 25 NIST CAVP
   "KAS ECC CDH primitive" vectors** (Z, and QIUT = dIUT·G); 6 OpenSSL 3.6.5 cross-check vectors
   (sigil keygen from fixed input; OpenSSL loads the private key, recomputes the same public key,
   and `pkeyutl -derive` agrees in both directions); keygen at the FIPS 186-5 reduction edges
@@ -133,12 +185,20 @@ signing; an aarch64 `UMULH`).
   long input, 16 random pairs agreeing both ways; every peer-key refusal (lengths 0 / 1 / 33 /
   64 / 66, SEC 1 infinity, prefixes 0x00 / 0x02 / 0x03 / 0x05 / 0x06 / 0x07, off-curve, (0, 0),
   x or y = p and 2^bits - 1, and the x = p **non-canonical encoding of the valid point with
-  x = 0**), each checked to zero the output; the private-scalar range (0, n, n + 1, 2^bits - 1
-  refused; 1, 2, n - 1 exact); valid edge points (x = 0, -Q); an output buffer that is also an
+  x = 0**, and — added after review — the y = 1 + p encoding of the valid point (x1, 1), the only
+  vector that isolates the y < p check: it satisfies the curve equation mod p, so with that check
+  deleted the suite used to stay green), each checked to zero the output; the private-scalar
+  range (0, n, n + 1, 2^bits - 1 refused; 1, 2, n - 1 exact); valid edge points (x = 0, y = 1,
+  -Q); an output buffer that is also an
   input (secret_out == priv, == peer_pub, priv_out == rnd: red on a draft that zeroed secret_out
   before reading its inputs); 8 concurrent callers against the
   serial results (and every worker ran); a dead-stack scan that no limb of the private key survives a keygen or a derive
-  (mutation-proven: red with the stack wipe removed or pointed at the wrong end); and a timing
+  (mutation-proven: red with the stack wipe removed or pointed at the wrong end) — widened after
+  review to 64 KB instead of exactly the 8 KB the burn covers, with a `secret var` function called
+  after each entry point so a register still holding a secret is spilled into the scanned region,
+  and a check that nothing the call wrote survives past the burn (red with a 1 KB burn: 117–138
+  words; the limb scan alone was blind to the burn, because d's limbs only ever sit in the
+  `secret var` block); and a timing
   smoke check (medians for d = 1, 2^k, 0x55…, n - 1 within [0.75, 1.33], every timed derive
   checked to have succeeded).
 - **The timing groups fail when a timed call fails.** On ach (x86_64 macOS) under the 6.6.9 pin,
@@ -152,44 +212,64 @@ signing; an aarch64 `UMULH`).
   timing groups — the scalar multiply, and the whole signing core with chosen (k, d) = (1, 1)
   vs (n - 1, n - 1), which covers k^-1 and r·d (142 assertions). The k_hat and blinding groups
   went with the helpers they tested.
+- `tests/tcyr/ecdsa_sign.tcyr` (82 → 90) gains, after review: a "zeroisation" group — after each
+  signer returns, and a `secret var` function is called so a register still holding k is spilled
+  into the scanned region, no 32-bit word of k or d, plain or byte-swapped, at any byte offset of
+  192 KB of dead stack (red: 21 / 24 words on the first draft, 17 / 30 on 3.13.7, 4 with only the
+  SHA-NI clear removed), and nothing the signer wrote survives between its burn and 192 KB (red
+  with 64 / 96 KB burns); an "HMAC" group — neither HMAC leaves its context state, SHA-384's
+  finalize scratch or the inner hash in 96 KB of dead stack (red without the wipes: 3 / 4); and
+  the two kept init flags.
 - A live randomized cross-check outside the suite: 100 random key pairs (50 per curve) from
   sigil's keygen against OpenSSL-generated peers — 0 mismatches.
 - `tests/bcyr/sigil.bcyr`: four ECDH rows.
-- Suite **3209/0 across 83 files** on x86_64 (2797 at 3.13.7; `state-sync.sh --write --count`,
-  and a per-file exit-code loop: 83 of 83 exit 0); fuzz 24/0; `check.sh` 92 passed, 0 failed.
+- Suite **3229/0 across 83 files** on x86_64 at the final code (2797 at 3.13.7;
+  `state-sync.sh --write --count`, and a per-file exit-code loop: 83 of 83 exit 0); fuzz 24/0;
+  `check.sh` 92 passed, 0 failed.
 
 ### Verification
 
-- **Cross-host, toolchain 6.6.9.** Every `.tcyr` cross-built locally for the target and run on the
-  host, 3.13.7 and 3.13.8 side by side (the two `dist/`-including files excepted):
+- **Cross-host, toolchain 6.6.9, at the final code.** Every `.tcyr` (all 83, the two that include
+  `dist/sigil.cyr` too) cross-built locally for the target — `cycc_aarch64` (pi),
+  `CYRIUS_MACHO_ARM=1 cycc_aarch64` (ecb, each binary ad-hoc signed there), `CYRIUS_MACHO=1 cycc`
+  (ach), `CYRIUS_TARGET_WIN=1 cycc` (cass; `errno_peer` and `secureboot_tools` do not compile for
+  PE) — and run on the host with a 900 s limit:
 
-  | Host | 3.13.8 files exit 0 | 3.13.7 files exit 0 | non-zero in both (platform, unchanged) |
-  |---|---|---|---|
-  | pi (Raspberry Pi 4, aarch64 Linux) | 81 / 81 | 80 / 80 | — |
-  | ecb (Apple M5 Pro, arm64 macOS) | 78 / 81 | 77 / 80 | agnosys, random, secureboot_tools |
-  | ach (Intel, x86_64 macOS) | 73 / 81 | 72 / 80 | agnosys, audit_log, fd_hygiene, mldsa_kat (900 s limit), random, secureboot_tools, verify, verify_hardening |
-  | cass (Windows, PE) | 69 / 79 | 68 / 78 | agnosys, batch_parallel, capture_bounded, fd_hygiene, policy_hardening, security, sigil, trust_hardening, verify, verify_hardening |
+  | Host | files exit 0 | non-zero (all also non-zero on the first draft and on 3.13.7) |
+  |---|---|---|
+  | pi (Raspberry Pi 4, aarch64 Linux) | 83 / 83 | — |
+  | ecb (Apple M5 Pro, arm64 macOS) | 80 / 83 | agnosys, random, secureboot_tools |
+  | ach (Intel, x86_64 macOS) | 74 / 83 | agnosys, audit_log, fd_hygiene, mldsa_kat (900 s limit), random, secureboot_tools, verify, verify_hardening; and `ecdh` 458/2 — its two "every timed derive succeeded" assertions, cyrius CVE-51 under the 6.6.9 pin (460/0 built with cycc 6.6.14, flat medians) |
+  | cass (Windows, PE) | 72 / 81 | agnosys, capture_bounded, fd_hygiene, policy_hardening, security, sigil, trust_hardening, verify, verify_hardening |
 
-  The extra clean file on each host is `ecdh.tcyr`. At the final code: `ecdh` 448/0,
-  `ecdsa_sign` 82/0, `ecdsa_sign_timing` 142/0 on the pi, ecb and cass; on ach `ecdh` is 446/2
-  under the pin (the two "every timed derive succeeded" assertions — cyrius CVE-51, see Tests) and
-  448/0 built with cycc 6.6.14. `bignum.tcyr`'s fallback cross-check passes on the pi and ecb with
-  the branch-free `_nmul64_hi_sw`.
-- **Constant-time evidence, mechanical:** every `_ect_*` / `_ecdh_*` / `_ecs_sign_core` function in a
-  6.6.9 build (x86_64 `cycc` and `cycc_aarch64`, `CYRIUS_SYMS` + objdump / llvm-objdump) has exactly
-  the conditional branches its source accounts for — loop bounds, the public exponent bit, a
-  pointer comparison, public verdicts, and the compiler's `secret var` wipe loop; the point
-  formulas have none (table in the audit, §F2).
+  `batch_parallel` now passes on cass (it was non-zero there on the first draft and on 3.13.7:
+  `/tmp` does not exist on Windows). `ecdh` 460/0, `ecdsa_sign` 90/0 and `ecdsa_sign_timing`
+  142/0 on the pi, ecb and cass, and `ecdsa_sign` / `ecdsa_sign_timing` on ach — so the 192 KB
+  nonce scan, the 64 KB ECDH scan, the register-spill probes and both survives-past-the-burn
+  checks hold on aarch64 Linux, both macOS ABIs and Win64. On cass the two burn checks first
+  found 1–6 words: the PE prologue's stack probe, which writes each new page's own address into
+  it; they now skip a word equal to its own address. The concurrency tests (`ecdsa_concurrent`,
+  `concurrent_tls_handshake`, `banking_concurrent`, `tee_verify_concurrent`) pass on every host,
+  so the 128 / 160 KB burns fit worker-thread stacks. `bignum.tcyr`'s fallback cross-check
+  passes on the pi and ecb with the branch-free `_nmul64_hi_sw`.
+- **Constant-time evidence, mechanical:** every `_ect_*` / `_ecdh_*` / `_ecs_sign_*` function and the
+  two signer wrappers in a 6.6.9 build (x86_64 `cycc` and `cycc_aarch64`, `CYRIUS_SYMS` +
+  objdump / llvm-objdump) has exactly the conditional branches its source accounts for — loop
+  bounds, the public exponent bit, a pointer comparison, public sizes, public verdicts, and the
+  compiler's `secret var` wipe loop; the point formulas and the wrappers have none (table in the
+  audit, §F2).
 - **The bundle.** A bundle-only consumer (the 26 `sigil.deps` leaves + `dist/sigil.cyr`, running
-  RFC 5903 ECDH on both curves, keygen, fresh CSPRNG key pairs agreeing both ways, and RFC 6979
-  signatures) builds with 6.6.9 for x86_64 Linux, aarch64 Linux, agnos, PE, x86_64 Mach-O and arm64
-  Mach-O with 0 undefined, and prints `BUNDLE OK` on x86_64, the pi, ecb, ach and cass.
-- `dist/` regenerated: all 14 bundles, after the version bump, each profile on its own; a second
-  pass is byte-identical; the `.deps` sidecars are unchanged. `ec_ct.cyr` joins `sigil.cyr`,
-  `sigil-ecdsa.cyr`, `sigil-x509.cyr` and `sigil-authenticode.cyr`; `ecdh.cyr` joins `sigil.cyr` and
-  `sigil-ecdsa.cyr`; the other nine change only their version header.
+  RFC 5903 ECDH, fresh CSPRNG key pairs agreeing both ways on both curves, an RFC 6979 signature
+  and the RFC 5869 A.1 HKDF-extract PRK) builds with 6.6.9 for x86_64 Linux, aarch64 Linux, agnos,
+  PE, x86_64 Mach-O and arm64 Mach-O with 0 undefined, and prints `BUNDLE OK` on x86_64, the pi,
+  ecb, ach and cass — rerun at the final code.
+- `dist/` regenerated after the review fixes: all 14 bundles, each profile on its own, after
+  `cyrius fmt`; a second pass is byte-identical; the `.deps` sidecars are unchanged. `ec_ct.cyr`
+  is in `sigil.cyr`, `sigil-ecdsa.cyr`, `sigil-x509.cyr` and `sigil-authenticode.cyr`; `ecdh.cyr` in
+  `sigil.cyr` and `sigil-ecdsa.cyr`; `secureboot` and `tpm` hold none of the changed modules.
 - `cyrius doc --check dist/sigil.cyr`: 879 documented, 0 undocumented (875 + the four ECDH
-  functions); `sigil-ecdsa` 133 / 0, `sigil-x509` 203 / 0, `sigil-authenticode` 230 / 0.
+  functions); `sigil-ecdsa` 133 / 0, `sigil-x509` 203 / 0, `sigil-authenticode` 230 / 0,
+  `sigil-hmac` 42 / 0, `sigil-hkdf` 48 / 0, `sigil-sha` 40 / 0, `sigil-aes` 29 / 0.
 - `state-sync.sh --check` clean.
 
 ## [3.13.7] - 2026-10-02

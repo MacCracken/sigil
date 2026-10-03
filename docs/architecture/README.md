@@ -51,11 +51,18 @@ deep-dives on individual invariants.
   `pt_scalarmul_secret`) runs on the constant-time engine `src/ec_ct.cyr`, and
   how that is checked in the compiled code. Cross-links ADR 0009.
 
+- [`005-secret-var-epilogue-spills-registers.md`](005-secret-var-epilogue-spills-registers.md) —
+  **written (3.13.8).** A `secret var` function's compiled epilogue saves the
+  return registers (x86_64 rax / rdx / r8 / xmm0 / xmm1; aarch64 x0–x3 / q0 / q1)
+  below its frame after its wipe and never clears them (cyrius EDEFER_SAVE). So
+  burn from a plain wrapper, and clear vector registers at the end of an `asm`
+  block that held secrets.
+
 *The remaining cross-cutting constraints from CLAUDE.md "Known Cyrius Compiler
 Quirks" become numbered notes the first time a reader hits one from grep
 instead of from CLAUDE.md. Candidates for next extraction — they take the next
-free number when written (the numbers they carried here were claimed by 003 and
-004 instead):*
+free number when written (the numbers they carried here were claimed by 003,
+004 and 005 instead):*
 
 - `preprocessor-output-cap` — quirk #8, the cap that
   motivated ADR 0002.

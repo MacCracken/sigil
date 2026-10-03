@@ -44,11 +44,21 @@ memory address depends on a secret*.
   where cyrius currently lowers a comparison to `setcc`, because that is codegen, not contract.
 - **`_nmul64_hi_sw` is on the secret path on aarch64.** It became branch-free at 3.13.8; the
   32-bit-halves form it replaced had two value-dependent carry fix-ups.
-- **Wipe from the outermost frame.** `_ect_burn_stack(n)` clears the n bytes directly below its
-  caller, which is where the dead frames of the field and point operations lie (the stack grows
-  down, so that is the HIGH end of its pad). Call it from the public entry point after the
-  worker returns; a worker that calls it on itself leaves its own scalar spill slots behind
-  (`tests/tcyr/ecdh.tcyr` "zeroisation" finds them).
+- **Wipe from the outermost frame, from a function with no `secret var`, and far enough.**
+  `_ect_burn_stack(n)` clears the n bytes directly below its caller, which is where the dead
+  frames of the field and point operations lie (the stack grows down, so that is the HIGH end
+  of its pad; past 16 KB it recurses). Call it from the public entry point after the worker
+  returns; a worker that calls it on itself leaves its own scalar spill slots behind
+  (`tests/tcyr/ecdh.tcyr` "zeroisation" finds them). The entry point must hold no `secret var`
+  itself: that epilogue spills registers below the frame after its wipe
+  ([note 005](005-secret-var-epilogue-spills-registers.md)), so the secret block lives in the
+  worker and the wrapper burns after it. And n must cover the whole call tree, not the engine:
+  the signers' trees reach ~82 KB (P-256) / ~115 KB (P-384) because the HMAC_DRBG, HMAC and SHA
+  scratch is banked across 64 lanes, and the first 3.13.8 draft's 8 KB burn left the DRBG's
+  hash state — the nonce k — ~43 KB down. `_ECS_BURN_P256` / `_ECS_BURN_P384` (128 / 160 KB)
+  and `_ECDH_BURN` (8 KB; the ECDH tree is ~4.8 KB) are the sizes; the "zeroisation" groups of
+  `ecdsa_sign.tcyr` and `ecdh.tcyr` fail on any host where something the call wrote survives
+  past them. Re-measure when the `cbank()` banks go.
 - **A public point is still validated.** ECDH refuses a peer key that is not exactly
   `0x04 || X || Y` with X, Y < p on the curve; the comparison of X and Y against p must not be
   done modulo p (the x = p encoding of the point with x = 0 is a test case).

@@ -406,3 +406,16 @@ timestamp,label,benchmark,estimate,unit
 2026-10-02T00:00:00Z,v3.13.8-ct-ecdh,ecdh_p256_shared,2.554,ms
 2026-10-02T00:00:00Z,v3.13.8-ct-ecdh,ecdh_p384_keygen,7.181,ms
 2026-10-02T00:00:00Z,v3.13.8-ct-ecdh,ecdh_p384_shared,7.481,ms
+2026-10-02T00:00:00Z,v3.13.8-review-fix-baseline-draft,hkdf_extract_draft_baseline,1.917,µs
+2026-10-02T00:00:00Z,v3.13.8-review-fix-baseline-draft,ecdsa_p256_sign_draft_baseline,2.792,ms
+2026-10-02T00:00:00Z,v3.13.8-review-fix-baseline-draft,ecdsa_p384_sign_draft_baseline,7.924,ms
+2026-10-02T00:00:00Z,v3.13.8-review-fix,ecdsa_p256_sign,2.774,ms
+2026-10-02T00:00:00Z,v3.13.8-review-fix,ecdsa_p384_sign,7.972,ms
+2026-10-02T00:00:00Z,v3.13.8-review-fix,ecdh_p256_keygen,2.573,ms
+2026-10-02T00:00:00Z,v3.13.8-review-fix,ecdh_p256_shared,2.567,ms
+2026-10-02T00:00:00Z,v3.13.8-review-fix,ecdh_p384_keygen,7.218,ms
+2026-10-02T00:00:00Z,v3.13.8-review-fix,ecdh_p384_shared,7.205,ms
+2026-10-02T00:00:00Z,v3.13.8-review-fix,hkdf_extract,1.727,µs
+2026-10-02T00:00:00Z,v3.13.8-review-fix,hkdf_expand_4kb,263.116,µs
+2026-10-02T00:00:00Z,v3.13.8-review-fix,sha256_64kb_ni,185.281,µs
+2026-10-02T00:00:00Z,v3.13.8-review-fix,aes_gcm_encrypt_1kb,65.120,µs

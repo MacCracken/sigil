@@ -89,6 +89,12 @@ the job on the **symmetric and EC** scratch and then deletes the mechanism.
   every return path, at declared buffer width. Watch for scrub functions left
   pointing at deleted globals — 3.12.5 shipped exactly that with
   `_bn_modrem`/`_bn_modn1` and it went unnoticed for four releases.
+- **Re-measure the signers' stack burns** (`_ECS_BURN_P256` / `_ECS_BURN_P384` in
+  `src/ecdsa_sign.cyr`, 128 / 160 KB at 3.13.8). The signing call tree reaches
+  ~82 / ~115 KB only because the HMAC_DRBG, HMAC and SHA scratch is banked 64
+  ways; once it is not, shrink the burns to the new depth plus margin.
+  `ecdsa_sign.tcyr` "zeroisation" fails if the tree outgrows them, so the check
+  is mechanical (architecture note 004).
 - **`crypto_scratch.cyr` goes last**, once nothing references it.
 
 **Prerequisite:** CLAUDE.md's closeout pass runs before any minor bump and ships
@@ -165,6 +171,38 @@ measured but not taken:
       than on the x86_64 dev host; the pi pays more. A one-instruction `asm{}`
       leaf (the `src/mul64.cyr` pattern) would remove most of that, if cyrius's
       aarch64 `asm{}` supports the needed parameter loads.
+
+**Named at 3.13.8 by the review of the first draft — awaiting the maintainer's call:**
+
+- [ ] **The toolchain pin before the 3.13.8 tag (6.6.9 → ≥ 6.6.10, e.g. 6.6.14).** Under 6.6.9,
+      `ecdh.tcyr` exits non-zero on ach (Intel macOS): its two "every timed derive succeeded"
+      assertions fail because of cyrius CVE-51 (see the follow-up at the top of this file).
+      Either bump the pin — acceptance: `cyrius deps` re-vendors `lib/` (and `lib/math.cyr`,
+      above), `check.sh` green, every `.tcyr` exits 0 locally, `ecdh.tcyr` green on ach, the
+      cross-host suite re-run on the pi / ecb / ach / cass, all fourteen bundles regenerated —
+      or ship 3.13.8 with that file red on ach, recorded as approved in CHANGELOG [3.13.8].
+- [ ] **Fixed `/tmp` paths in twelve more test files.** 3.13.8 moved `check.sh` and
+      `batch_parallel.{tcyr,bcyr}` off predictable names in the shared `/tmp`; the same class
+      remains in `agnosys`, `audit_log`, `capture_bounded`, `fd_hygiene`, `policy_hardening`,
+      `secureboot_tools`, `security`, `sigil`, `trust_hardening`, `verify`, `verify_hardening`
+      (`.tcyr`) and `fuzz/fuzz_integrity.fcyr` (63 sites; `src/luks.cyr`'s `/tmp/.agnos-luks-`
+      prefix is the library's own and separate). Most of these files are also the ones that
+      fail on cass, where `/tmp` does not exist. Acceptance: a per-run directory under
+      `$TMPDIR` (else `$TEMP` / `$TMP`, else `/tmp`) with an unpredictable name, removed on
+      exit; the twelve files green locally and re-run on every host.
+- [ ] **Dead-stack and register residue outside the secret-scalar entry points.** 3.13.8 makes
+      `ecdsa_p*_sign` and `ecdh_*` leave nothing behind; elsewhere: (a) every other `secret var`
+      function (Ed25519, X25519, HKDF, key parsers) has its return registers spilled below its
+      frame by the cyrius defer walker (architecture note 005) — closed for all of them by the
+      cyrius `EDEFER_RESTORE` fix drafted for the 6.6.15 integrator, after which quirk #10 can
+      be lifted with a test; (b) HMAC / HKDF called outside the signers wipe their context and
+      inner hash, but the SHA compression frames below them (software message schedule, working
+      variables, a finalize temporary) are not wiped per call; (c) `hmac_sha256` with a key
+      longer than 64 bytes (`hmac_sha384`: 128) leaves the hashed key's SHA state in the
+      one-shot `sha256()` / `sha384()` dead frame (`sha512()` has wiped its context since 3.13.1;
+      `sha256()` / `sha384()` do not). The
+      choice for (b)/(c) is a per-call wipe (cost on every hash) or burns at the HKDF / TLS PRF
+      entry points.
 
 **Backlog — gated / parked** (open, but not actionable until the gate lifts)
 
