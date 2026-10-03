@@ -402,6 +402,24 @@ fn agnosys_cstr_starts_with(str, prefix): i64 {
     return 1;
 }
 
+# 1 where a rooted POSIX path ("/dev/tpmrm0", "/usr/bin/mokutil", "/sys/firmware/efi") does
+# not name the system object it spells, else 0. On Windows a rooted path is DRIVE-RELATIVE:
+# "/dev/tpmrm0" opens C:\dev\tpmrm0, and any authenticated user may create folders at the root
+# of the system drive, so a probe there answers whatever another local user planted (a "TPM",
+# a Secure Boot variable saying enabled, an IMA log) and a key file staged under "/tmp" lands
+# in a directory that user can own. Every device-node, sysfs, tool-path or /tmp probe in the
+# trust cores asks this first and fails closed; the subprocess helpers below already refuse
+# on Windows, so no tool is ever spawned there either. The cyrius stdlib's CVE-54 / -57 / -65
+# are the same class. CHANGELOG [3.13.8].
+fn agnosys_rooted_paths_untrusted(): i64 {
+    #ifdef CYRIUS_TARGET_WIN
+    return 1;
+    #endif
+    #ifndef CYRIUS_TARGET_WIN
+    return 0;
+    #endif
+}
+
 # ⚠ BOUNDED AND STATUS-CHECKED (M10). This delegated to the stdlib's
 # `exec_capture`, which is unbounded and DISCARDS the child's exit status, so a
 # missing or failing tool came back as Ok(bytes) — fail open. It now delegates
@@ -1414,8 +1432,10 @@ fn tpm_pcr_selection(bank, indices): i64 {
 # ================================================================
 
 # Check if a TPM 2.0 device is available.
-# Returns 1 if available, 0 if not.
+# Returns 1 if available, 0 if not. Always 0 on Windows, where "/dev/tpmrm0" is a drive-relative
+# path another local user can plant (agnosys_rooted_paths_untrusted). CHANGELOG [3.13.8].
 fn tpm_detect(): i64 {
+    if (agnosys_rooted_paths_untrusted() == 1) { return 0; }
     if (sys_access("/dev/tpmrm0", 0) == 0) { return 1; }
     return sys_access("/dev/tpm0", 0) == 0;
 }
@@ -1445,6 +1465,9 @@ fn tpm_read_pcr(bank, indices): i64 {
 # successful read. Prefer this over `tpm_read_pcr` in a long-lived or
 # pre-reactor caller that owns a time budget.
 fn tpm_read_pcr_timeout(bank, indices, timeout_ms): i64 {
+    if (agnosys_rooted_paths_untrusted() == 1) {
+        return sigil_err_not_supported("TPM PCR read (no tpm2-tools path on windows)");
+    }
     var count = vec_len(indices);
     if (count == 0) {
         return sigil_err_invalid_argument("Must specify at least one PCR index");
@@ -1565,6 +1588,9 @@ fn tpm_read_pcr_timeout(bank, indices, timeout_ms): i64 {
 
 # Extend a PCR in the given bank with a hash. Returns Result.
 fn tpm_extend_pcr(bank, index, hash): i64 {
+    if (agnosys_rooted_paths_untrusted() == 1) {
+        return sigil_err_not_supported("TPM PCR extend (no tpm2-tools path on windows)");
+    }
     if (index > TPM_PCR_MAX) {
         return sigil_err_invalid_argument("PCR index out of range (0-23)");
     }
@@ -1639,8 +1665,13 @@ fn _tpm_shred_unlink(path, len): i64 {
     return 0;
 }
 
-# Seal data to the current PCR state; writes the sealed object. Returns Result.
+# Seal data to the current PCR state; writes the sealed object. Returns Result. Refused on
+# Windows before the plaintext is staged: tpm2_create cannot run there, so the secret would
+# reach the disk for nothing.
 fn tpm_seal(bank, pcr_indices, data_ptr, data_len, output_dir): i64 {
+    if (agnosys_rooted_paths_untrusted() == 1) {
+        return sigil_err_not_supported("TPM seal (no tpm2-tools path on windows)");
+    }
     if (data_len == 0) {
         return sigil_err_invalid_argument("Cannot seal empty data");
     }
@@ -1755,6 +1786,9 @@ fn tpm_seal(bank, pcr_indices, data_ptr, data_len, output_dir): i64 {
 
 # Unseal a sealed object into buf if PCRs still match. Returns Result(len).
 fn tpm_unseal(sealed, buf, buflen): i64 {
+    if (agnosys_rooted_paths_untrusted() == 1) {
+        return sigil_err_not_supported("TPM unseal (no tpm2-tools path on windows)");
+    }
     var ctx = tpm_sealed_context(sealed);
     var pcr_sel = tpm_sealed_pcr_sel(sealed);
 
@@ -1789,6 +1823,9 @@ fn tpm_unseal(sealed, buf, buflen): i64 {
 
 # Draw count random bytes from the TPM RNG into buf. Returns Result.
 fn tpm_get_random(buf, count): i64 {
+    if (agnosys_rooted_paths_untrusted() == 1) {
+        return sigil_err_not_supported("TPM random (no tpm2-tools path on windows)");
+    }
     if (count == 0) {
         return sigil_err_invalid_argument("Cannot request 0 random bytes");
     }
@@ -2255,8 +2292,10 @@ fn _ima_count_lines_fd(fd): i64 {
 }
 
 # Probe the running IMA subsystem and return its status. Returns Result; Err if the
-# measurement log cannot be read to the end.
+# measurement log cannot be read to the end. Inactive on Windows without reading anything:
+# "/sys/kernel/security/ima" is drive-relative there (agnosys_rooted_paths_untrusted).
 fn ima_get_status(): i64 {
+    if (agnosys_rooted_paths_untrusted() == 1) { return Ok(ima_status_new(0, 0, 0)); }
     var ima_dir = "/sys/kernel/security/ima";
     var acc = sys_access(ima_dir, 0);
 
@@ -2439,8 +2478,12 @@ fn _ima_read_log_fd(fd): i64 {
     return Ok(buf);
 }
 
-# Read + parse the kernel IMA measurement log. Returns Result.
+# Read + parse the kernel IMA measurement log. Returns Result (Err on Windows: the log path
+# is drive-relative there, so another local user could supply the "measurements").
 fn ima_read_measurements(): i64 {
+    if (agnosys_rooted_paths_untrusted() == 1) {
+        return sigil_err_not_supported("IMA measurement log (no securityfs on windows)");
+    }
     var path = "/sys/kernel/security/ima/ascii_runtime_measurements";
     var fd = file_open(path, O_RDONLY, 0);
     if (fd < 0) {
@@ -2460,8 +2503,11 @@ fn ima_read_measurements(): i64 {
 # Returns Ok(0) or Err.
 # ================================================================
 
-# Write IMA policy rules to the kernel policy interface. Returns Result.
+# Write IMA policy rules to the kernel policy interface. Returns Result (Err on Windows).
 fn ima_write_policy(rules): i64 {
+    if (agnosys_rooted_paths_untrusted() == 1) {
+        return sigil_err_not_supported("IMA policy write (no securityfs on windows)");
+    }
     var count = vec_len(rules);
     if (count == 0) {
         return sigil_err_invalid_argument("IMA policy has no rules");
@@ -2707,8 +2753,11 @@ fn secureboot_efi_var_size(data): i64 {
 # (/usr/sbin/cryptsetup) and tpm_core.cyr (/usr/bin/tpm2_*) already use — and
 # a tool found in none of them FAILS CLOSED. The cwd and $PATH are never used.
 
-# `dir` + `name` if that file exists and is executable, else 0.
+# `dir` + `name` if that file exists and is executable, else 0. Always 0 on Windows, where
+# "/usr/bin/" is a drive-relative directory another local user can plant
+# (agnosys_rooted_paths_untrusted). CHANGELOG [3.13.8].
 fn _sb_tool_in(dir, name): i64 {
+    if (agnosys_rooted_paths_untrusted() == 1) { return 0; }
     var dl = strlen(dir);
     var nl = strlen(name);
     var p = alloc(dl + nl + 1);
@@ -2775,8 +2824,12 @@ fn _secureboot_state_from_mokutil(): i64 {
 }
 
 # Detect the current Secure Boot state.
-# Returns Result: Ok(SecureBootState) or Err.
+# Returns Result: Ok(SecureBootState) or Err. Ok(SB_NOT_SUPPORTED) on Windows without reading
+# anything: "/sys/firmware/efi/..." is drive-relative there (agnosys_rooted_paths_untrusted).
+# Through 3.13.7 the only thing between a planted C:\sys\firmware\efi and this function's
+# answer was `file_exists` failing on a directory there. CHANGELOG [3.13.8].
 fn secureboot_detect_state(): i64 {
+    if (agnosys_rooted_paths_untrusted() == 1) { return Ok(SB_NOT_SUPPORTED); }
     # Check if EFI is available. `file_exists` (io.cyr) rather than a raw
     # sys_open for the same namelen-bridging reason as above — the probe
     # is an existence test, and open-then-close was only ever standing in
@@ -3096,6 +3149,11 @@ fn secureboot_sign_module(module_path, private_key, certificate): i64 {
         if (n >= 0) { return Ok(0); }
     }
 
+    # The sign-file probes below are rooted POSIX paths, drive-relative on Windows.
+    if (agnosys_rooted_paths_untrusted() == 1) {
+        return sigil_err_not_supported("module signing (no kmodsign / sign-file on windows)");
+    }
+
     # Fallback: sign-file from kernel headers. Audit F-4 (2026-04-26):
     # the prior hardcoded "/usr/lib/modules-load.d/../linux/scripts/sign-file"
     # resolved to /usr/lib/linux/scripts/sign-file which does not exist on
@@ -3252,8 +3310,12 @@ fn secureboot_efi_var_new(name, size): i64 {
 }
 
 # List security-relevant EFI variables from sysfs.
-# Returns Result: Ok(vec_of_efi_vars) or Err.
+# Returns Result: Ok(vec_of_efi_vars) or Err (always Err on Windows: sysfs paths are
+# drive-relative there).
 fn secureboot_list_efi_variables(): i64 {
+    if (agnosys_rooted_paths_untrusted() == 1) {
+        return sigil_err_not_supported("EFI variable listing (no sysfs on windows)");
+    }
     var efivars_dir = "/sys/firmware/efi/efivars";
     if (file_exists(efivars_dir) == 0) {
         return sigil_err_io(ENOENT, "EFI variables directory not found; is this a UEFI system?");
@@ -3834,8 +3896,10 @@ fn dmverity_verify(data_device, hash_device, root_hash): i64 {
 }
 
 # Check if dm-verity is supported on this system.
-# Returns 1 if supported, 0 if not.
+# Returns 1 if supported, 0 if not. Always 0 on Windows, where "/sys/module/dm_verity" is a
+# drive-relative path another local user can plant (agnosys_rooted_paths_untrusted).
 fn dmverity_supported(): i64 {
+    if (agnosys_rooted_paths_untrusted() == 1) { return 0; }
     # Check for kernel module
     if (sys_access("/sys/module/dm_verity", 0) == 0) { return 1; }
 
@@ -4171,8 +4235,13 @@ fn luks_cipher_str(config): i64 {
 # symlink to /etc/shadow. The random suffix from getrandom(2) defeats
 # prediction; the O_EXCL | O_NOFOLLOW flags in luks_write_keyfile defeat
 # symlink races.
-# Returns Ok(path) on success or Err if getrandom fails.
+# Returns Ok(path) on success or Err if getrandom fails. Always Err on Windows: "/tmp" is a
+# drive-relative directory there that another local user can create and own, so a key staged
+# in it would be theirs to read (agnosys_rooted_paths_untrusted). CHANGELOG [3.13.8].
 fn luks_keyfile_path(): i64 {
+    if (agnosys_rooted_paths_untrusted() == 1) {
+        return sigil_err_not_supported("LUKS keyfile (no /tmp on windows)");
+    }
     var pid = sys_getpid();
     var pid_buf[24];
     var pid_len = fmt_int_buf(pid, &pid_buf);
@@ -4232,8 +4301,9 @@ fn luks_write_keyfile(key_ptr, key_len): i64 {
     # 3.13.0: io.cyr's `file_open`, not a raw `sys_open` — on agnos `sys_open` is
     # (name, namelen, flags), so the Linux-shaped call passed the flags as the name length.
     # On Windows (PE), O_CREAT|O_EXCL|O_NOFOLLOW resolves a final reparse point instead of
-    # refusing it (cyrius 6.6.6 documents this), so the symlink refusal is weaker there. LUKS has
-    # no Windows path at all (no cryptsetup, no fork+exec), so it is unreachable in practice.
+    # refusing it (cyrius 6.6.6 documents this). Not reached there: luks_keyfile_path refuses on
+    # Windows. (Through 3.13.7 this said LUKS was "unreachable in practice" on Windows; this
+    # function is public, and it wrote the key to C:\tmp\.agnos-luks-* whenever C:\tmp existed.)
     var open_flags = O_WRONLY | O_CREAT | O_TRUNC | O_EXCL | O_NOFOLLOW;
     var fd = file_open(keyfile, open_flags, 384);  # 0600
     if (fd < 0) {
@@ -4465,6 +4535,9 @@ fn luks_open(config, key_ptr, key_len): i64 {
 # name: volume name (string pointer).
 # Returns Ok(0) or Err.
 fn luks_close(name): i64 {
+    if (agnosys_rooted_paths_untrusted() == 1) {
+        return sigil_err_not_supported("LUKS close (no device mapper on windows)");
+    }
     if (strlen(name) == 0) {
         return sigil_err_invalid_argument("Volume name cannot be empty");
     }
