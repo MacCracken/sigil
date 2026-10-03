@@ -121,9 +121,12 @@ include "src/x25519.cyr"
 include "src/ecdsa_p256.cyr"
 include "src/ecdsa_p384.cyr"
 # Constant-time P-256 / P-384 engine (3.13.8) — every SECRET-scalar EC
-# operation (ECDSA signing, next). Builds on the curve constants of the two
-# verify modules above; nothing on the verify path uses it.
+# operation: ECDH (next) and ECDSA signing (after it). Builds on the curve
+# constants of the two verify modules above; nothing on the verify path
+# uses it.
 include "src/ec_ct.cyr"
+# ECDH on P-256 / P-384 (3.13.8): keygen + shared secret for TLS ECDHE.
+include "src/ecdh.cyr"
 include "src/ecdsa_sign.cyr"
 include "src/x509.cyr"
 include "src/pem.cyr"

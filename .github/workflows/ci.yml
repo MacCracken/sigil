@@ -177,7 +177,7 @@ jobs:
       - name: Verify per-primitive distlib profiles are in sync
         # `[lib.<prof>]` profiles (3.11.0) let a consumer pull only the
         # primitive it needs (`cyrius distlib sha` -> dist/sigil-sha.cyr, a
-        # 5-module closure vs. the 65-module full bundle). Regenerate every
+        # 5-module closure vs. the 67-module full bundle). Regenerate every
         # profile and fail if any committed bundle drifted from src/.
         #
         # KEEP THIS LIST IN SYNC WITH `[lib.*]` IN cyrius.cyml. `argon2`

@@ -40,6 +40,7 @@ include "src/x25519.cyr"
 include "src/ecdsa_p256.cyr"
 include "src/ecdsa_p384.cyr"
 include "src/ec_ct.cyr"
+include "src/ecdh.cyr"
 include "src/ecdsa_sign.cyr"
 include "lib/keccak.cyr"
 include "src/mldsa_params.cyr"
@@ -759,6 +760,55 @@ fn main() {
         ri = ri + 1;
     }
     vec_push(benches, b_ecs384);
+
+    # ============================================================
+    # ECDH (3.13.8) — key generation and shared secret, P-256 + P-384.
+    # A TLS ECDHE handshake pays one of each.
+    # ============================================================
+    var dh_rnd = alloc(64); memset(dh_rnd, 0x5A, 64);
+    var dh_priv = alloc(48);
+    var dh_pk = alloc(97);
+    var dh_z = alloc(48);
+    var b_dhk256 = bench_new("ecdh_p256_keygen");
+    ri = 0;
+    while (ri < rounds) {
+        bench_batch_start(b_dhk256);
+        var bi = 0;
+        while (bi < 10) { ecdh_p256_keygen(dh_rnd, 40, dh_priv, dh_pk); bi = bi + 1; }
+        bench_batch_stop(b_dhk256, 10);
+        ri = ri + 1;
+    }
+    vec_push(benches, b_dhk256);
+    var b_dhs256 = bench_new("ecdh_p256_shared");
+    ri = 0;
+    while (ri < rounds) {
+        bench_batch_start(b_dhs256);
+        var bi = 0;
+        while (bi < 10) { ecdh_p256_shared(dh_priv, dh_pk, 65, dh_z); bi = bi + 1; }
+        bench_batch_stop(b_dhs256, 10);
+        ri = ri + 1;
+    }
+    vec_push(benches, b_dhs256);
+    var b_dhk384 = bench_new("ecdh_p384_keygen");
+    ri = 0;
+    while (ri < rounds) {
+        bench_batch_start(b_dhk384);
+        var bi = 0;
+        while (bi < 10) { ecdh_p384_keygen(dh_rnd, 56, dh_priv, dh_pk); bi = bi + 1; }
+        bench_batch_stop(b_dhk384, 10);
+        ri = ri + 1;
+    }
+    vec_push(benches, b_dhk384);
+    var b_dhs384 = bench_new("ecdh_p384_shared");
+    ri = 0;
+    while (ri < rounds) {
+        bench_batch_start(b_dhs384);
+        var bi = 0;
+        while (bi < 10) { ecdh_p384_shared(dh_priv, dh_pk, 97, dh_z); bi = bi + 1; }
+        bench_batch_stop(b_dhs384, 10);
+        ri = ri + 1;
+    }
+    vec_push(benches, b_dhs384);
 
     # Report
     sys_write(1, "=== Sigil Benchmarks ===\n", 25);

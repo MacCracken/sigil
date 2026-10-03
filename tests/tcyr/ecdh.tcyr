@@ -1,0 +1,940 @@
+# ecdh.tcyr — ECDH on P-256 / P-384 (src/ecdh.cyr, 3.13.8).
+#
+# Known answers come from three independent sources, none of them sigil:
+#   - RFC 5903 §8.1 / §8.2 (the IKE ECP groups 19 and 20 vectors);
+#   - NIST CAVP "KAS ECC CDH primitive" — KAS_ECC_CDH_PrimitiveTest.txt,
+#     all 25 vectors for each of P-256 and P-384 (dIUT, QIUT = dIUT·G, and
+#     Z = x(dIUT·QCAVS));
+#   - OpenSSL 3.6.5: the key pairs keygen derives from fixed random input,
+#     loaded into OpenSSL as SEC 1 private keys (OpenSSL recomputed the same
+#     public keys) and `openssl pkeyutl -derive` against OpenSSL-generated
+#     peers, in both directions.
+# Keygen edge expectations (all-zero / all-one input, the n - 2 / n - 1
+# boundaries of the reduction) were computed with an independent Python
+# big-integer model of FIPS 186-5 A.2.1.
+#
+# Groups: known answers, keygen, peer-key validation (every rejection
+# zeroes the output), private-scalar range, valid edge points, concurrent
+# callers, and a timing smoke check (the structural constant-time review is
+# docs/audit/2026-10-02-3.13.8-ct-ecdh-ecdsa-sign-audit.md).
+
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/string.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fmt.cyr"
+include "lib/bayan.cyr"
+include "lib/sakshi.cyr"
+include "lib/chrono.cyr"
+include "lib/ct.cyr"
+include "lib/thread.cyr"
+include "lib/thread_local.cyr"
+include "src/crypto_scratch.cyr"
+include "src/mul64.cyr"
+include "src/types.cyr"
+include "src/error.cyr"
+include "lib/random.cyr"
+include "src/random.cyr"
+include "src/sha256.cyr"
+include "src/hex.cyr"
+include "src/sha512.cyr"
+include "src/sha384.cyr"
+include "src/hmac.cyr"
+include "src/hmac_sha384.cyr"
+include "src/bigint_ext.cyr"
+include "src/ecdsa_p256.cyr"
+include "src/ecdsa_p384.cyr"
+include "src/ec_ct.cyr"
+include "src/ecdh.cyr"
+
+# Decodes a hex C-string into a fresh buffer.
+fn _h(s): i64 { return hex_decode(s, strlen(s)); }
+
+# Field width in bytes for curve selector c (256 or 384).
+fn _w(c): i64 {
+    if (c == 256) { return 32; }
+    return 48;
+}
+
+# ECDH shared secret through the public API for curve c.
+fn _shared(c, priv, peer, peer_len, out): i64 {
+    if (c == 256) { return ecdh_p256_shared(priv, peer, peer_len, out); }
+    return ecdh_p384_shared(priv, peer, peer_len, out);
+}
+
+# Keygen through the public API for curve c.
+fn _keygen(c, rnd, rnd_len, priv, pubk): i64 {
+    if (c == 256) { return ecdh_p256_keygen(rnd, rnd_len, priv, pubk); }
+    return ecdh_p384_keygen(rnd, rnd_len, priv, pubk);
+}
+
+# pubk (1 + 2w bytes) = 0x04 || d·G for the big-endian scalar d_be, through the engine
+# directly (the API derives public keys only inside keygen). Test-side helper.
+fn _pubkey(c, d_be, pubk): i64 {
+    var nl = 4;
+    var f = 0; var bm = 0; var G = 0;
+    if (c == 256) { _ect256_init(); f = _ect_fp256; bm = _ect_b256; G = _ect_g256; }
+    else { _ect384_init(); nl = 6; f = _ect_fp384; bm = _ect_b384; G = _ect_g384; }
+    var d[48];
+    var R[144];
+    var x[48];
+    var y[48];
+    _ect_load_be(&d, d_be, nl);
+    _ect_smul(&R, &d, G, f, bm);
+    _ect_affine(&x, &y, &R, f);
+    store8(pubk, 4);
+    _ect_store_be(pubk + 1, &x, nl);
+    _ect_store_be(pubk + 1 + nl * 8, &y, nl);
+    return 0;
+}
+
+# One known-answer check: d (hex), peer point (hex x, y), expected Z (hex), and when
+# qx/qy are non-empty, the expected public key d·G.
+fn _kat(c, dh, px, py, zh, qx, qy, label): i64 {
+    var w = _w(c);
+    var peer = alloc(1 + 2 * w);
+    store8(peer, 4);
+    memcpy(peer + 1, _h(px), w);
+    memcpy(peer + 1 + w, _h(py), w);
+    var z = alloc(w);
+    assert_eq(_shared(c, _h(dh), peer, 1 + 2 * w, z), 0, label);
+    assert_streq(hex_encode(z, w), zh, label);
+    if (strlen(qx) > 0) {
+        var pk = alloc(1 + 2 * w);
+        _pubkey(c, _h(dh), pk);
+        assert_eq(memeq(pk + 1, _h(qx), w), 1, label);
+        assert_eq(memeq(pk + 1 + w, _h(qy), w), 1, label);
+    }
+    return 0;
+}
+
+# Expects keygen(rnd) to give exactly priv_hex / pub_hex.
+fn _kg(c, rnd_hex, priv_hex, pub_hex, label): i64 {
+    var w = _w(c);
+    var rnd = _h(rnd_hex);
+    var priv = alloc(w);
+    var pk = alloc(1 + 2 * w);
+    assert_eq(_keygen(c, rnd, w + 8, priv, pk), 0, label);
+    assert_streq(hex_encode(priv, w), priv_hex, label);
+    assert_streq(hex_encode(pk, 1 + 2 * w), pub_hex, label);
+    return 0;
+}
+
+# Expects a rejection: -1 and every byte of the (0xAA-prefilled) output zeroed.
+fn _reject(c, priv, peer, peer_len, label): i64 {
+    var w = _w(c);
+    var z = alloc(w);
+    memset(z, 0xAA, w);
+    assert_eq(_shared(c, priv, peer, peer_len, z), 0 - 1, label);
+    var acc = 0;
+    var i = 0;
+    while (i < w) { acc = acc | (load8(z + i) & 0xFF); i = i + 1; }
+    assert_eq(acc, 0, label);
+    return 0;
+}
+
+fn _cavp256(): i64 {
+    _kat(256, "7d7dc5f71eb29ddaf80d6214632eeae03d9058af1fb6d22ed80badb62bc1a534",
+      "700c48f77f56584c5cc632ca65640db91b6bacce3a4df6b42ce7cc838833d287",
+      "db71e509e3fd9b060ddb20ba5c51dcc5948d46fbf640dfe0441782cab85fa4ac",
+      "46fc62106420ff012e54a434fbdd2d25ccc5852060561e68040dd7778997bd7b",
+      "ead218590119e8876b29146ff89ca61770c4edbbf97d38ce385ed281d8a6b230",
+      "28af61281fd35e2fa7002523acc85a429cb06ee6648325389f59edfce1405141", "CAVP P-256 COUNT 0");
+    _kat(256, "38f65d6dce47676044d58ce5139582d568f64bb16098d179dbab07741dd5caf5",
+      "809f04289c64348c01515eb03d5ce7ac1a8cb9498f5caa50197e58d43a86a7ae",
+      "b29d84e811197f25eba8f5194092cb6ff440e26d4421011372461f579271cda3",
+      "057d636096cb80b67a8c038c890e887d1adfa4195e9b3ce241c8a778c59cda67",
+      "119f2f047902782ab0c9e27a54aff5eb9b964829ca99c06b02ddba95b0a3f6d0",
+      "8f52b726664cac366fc98ac7a012b2682cbd962e5acb544671d41b9445704d1d", "CAVP P-256 COUNT 1");
+    _kat(256, "1accfaf1b97712b85a6f54b148985a1bdc4c9bec0bd258cad4b3d603f49f32c8",
+      "a2339c12d4a03c33546de533268b4ad667debf458b464d77443636440ee7fec3",
+      "ef48a3ab26e20220bcda2c1851076839dae88eae962869a497bf73cb66faf536",
+      "2d457b78b4614132477618a5b077965ec90730a8c81a1c75d6d4ec68005d67ec",
+      "d9f2b79c172845bfdb560bbb01447ca5ecc0470a09513b6126902c6b4f8d1051",
+      "f815ef5ec32128d3487834764678702e64e164ff7315185e23aff5facd96d7bc", "CAVP P-256 COUNT 2");
+    _kat(256, "207c43a79bfee03db6f4b944f53d2fb76cc49ef1c9c4d34d51b6c65c4db6932d",
+      "df3989b9fa55495719b3cf46dccd28b5153f7808191dd518eff0c3cff2b705ed",
+      "422294ff46003429d739a33206c8752552c8ba54a270defc06e221e0feaf6ac4",
+      "96441259534b80f6aee3d287a6bb17b5094dd4277d9e294f8fe73e48bf2a0024",
+      "24277c33f450462dcb3d4801d57b9ced05188f16c28eda873258048cd1607e0d",
+      "c4789753e2b1f63b32ff014ec42cd6a69fac81dfe6d0d6fd4af372ae27c46f88", "CAVP P-256 COUNT 3");
+    _kat(256, "59137e38152350b195c9718d39673d519838055ad908dd4757152fd8255c09bf",
+      "41192d2813e79561e6a1d6f53c8bc1a433a199c835e141b05a74a97b0faeb922",
+      "1af98cc45e98a7e041b01cf35f462b7562281351c8ebf3ffa02e33a0722a1328",
+      "19d44c8d63e8e8dd12c22a87b8cd4ece27acdde04dbf47f7f27537a6999a8e62",
+      "a8c5fdce8b62c5ada598f141adb3b26cf254c280b2857a63d2ad783a73115f6b",
+      "806e1aafec4af80a0d786b3de45375b517a7e5b51ffb2c356537c9e6ef227d4a", "CAVP P-256 COUNT 4");
+    _kat(256, "f5f8e0174610a661277979b58ce5c90fee6c9b3bb346a90a7196255e40b132ef",
+      "33e82092a0f1fb38f5649d5867fba28b503172b7035574bf8e5b7100a3052792",
+      "f2cf6b601e0a05945e335550bf648d782f46186c772c0f20d3cd0d6b8ca14b2f",
+      "664e45d5bba4ac931cd65d52017e4be9b19a515f669bea4703542a2c525cd3d3",
+      "7b861dcd2844a5a8363f6b8ef8d493640f55879217189d80326aad9480dfc149",
+      "c4675b45eeb306405f6c33c38bc69eb2bdec9b75ad5af4706aab84543b9cc63a", "CAVP P-256 COUNT 5");
+    _kat(256, "3b589af7db03459c23068b64f63f28d3c3c6bc25b5bf76ac05f35482888b5190",
+      "6a9e0c3f916e4e315c91147be571686d90464e8bf981d34a90b6353bca6eeba7",
+      "40f9bead39c2f2bcc2602f75b8a73ec7bdffcbcead159d0174c6c4d3c5357f05",
+      "ca342daa50dc09d61be7c196c85e60a80c5cb04931746820be548cdde055679d",
+      "9fb38e2d58ea1baf7622e96720101cae3cde4ba6c1e9fa26d9b1de0899102863",
+      "d5561b900406edf50802dd7d73e89395f8aed72fba0e1d1b61fe1d22302260f0", "CAVP P-256 COUNT 6");
+    _kat(256, "d8bf929a20ea7436b2461b541a11c80e61d826c0a4c9d322b31dd54e7f58b9c8",
+      "a9c0acade55c2a73ead1a86fb0a9713223c82475791cd0e210b046412ce224bb",
+      "f6de0afa20e93e078467c053d241903edad734c6b403ba758c2b5ff04c9d4229",
+      "35aa9b52536a461bfde4e85fc756be928c7de97923f0416c7a3ac8f88b3d4489",
+      "20f07631e4a6512a89ad487c4e9d63039e579cb0d7a556cb9e661cd59c1e7fa4",
+      "6de91846b3eee8a5ec09c2ab1f41e21bd83620ccdd1bdce3ab7ea6e02dd274f5", "CAVP P-256 COUNT 7");
+    _kat(256, "0f9883ba0ef32ee75ded0d8bda39a5146a29f1f2507b3bd458dbea0b2bb05b4d",
+      "94e94f16a98255fff2b9ac0c9598aac35487b3232d3231bd93b7db7df36f9eb9",
+      "d8049a43579cfa90b8093a94416cbefbf93386f15b3f6e190b6e3455fedfe69a",
+      "605c16178a9bc875dcbff54d63fe00df699c03e8a888e9e94dfbab90b25f39b4",
+      "abb61b423be5d6c26e21c605832c9142dc1dfe5a5fff28726737936e6fbf516d",
+      "733d2513ef58beab202090586fac91bf0fee31e80ab33473ab23a2d89e58fad6", "CAVP P-256 COUNT 8");
+    _kat(256, "2beedb04b05c6988f6a67500bb813faf2cae0d580c9253b6339e4a3337bb6c08",
+      "e099bf2a4d557460b5544430bbf6da11004d127cb5d67f64ab07c94fcdf5274f",
+      "d9c50dbe70d714edb5e221f4e020610eeb6270517e688ca64fb0e98c7ef8c1c5",
+      "f96e40a1b72840854bb62bc13c40cc2795e373d4e715980b261476835a092e0b",
+      "3d63e429cb5fa895a9247129bf4e48e89f35d7b11de8158efeb3e106a2a87395",
+      "0cae9e477ef41e7c8c1064379bb7b554ddcbcae79f9814281f1e50f0403c61f3", "CAVP P-256 COUNT 9");
+    _kat(256, "77c15dcf44610e41696bab758943eff1409333e4d5a11bbe72c8f6c395e9f848",
+      "f75a5fe56bda34f3c1396296626ef012dc07e4825838778a645c8248cff01658",
+      "33bbdf1b1772d8059df568b061f3f1122f28a8d819167c97be448e3dc3fb0c3c",
+      "8388fa79c4babdca02a8e8a34f9e43554976e420a4ad273c81b26e4228e9d3a3",
+      "ad5d13c3db508ddcd38457e5991434a251bed49cf5ddcb59cdee73865f138c9f",
+      "62cec1e70588aa4fdfc7b9a09daa678081c04e1208b9d662b8a2214bf8e81a21", "CAVP P-256 COUNT 10");
+    _kat(256, "42a83b985011d12303db1a800f2610f74aa71cdf19c67d54ce6c9ed951e9093e",
+      "2db4540d50230756158abf61d9835712b6486c74312183ccefcaef2797b7674d",
+      "62f57f314e3f3495dc4e099012f5e0ba71770f9660a1eada54104cdfde77243e",
+      "72877cea33ccc4715038d4bcbdfe0e43f42a9e2c0c3b017fc2370f4b9acbda4a",
+      "ab48caa61ea35f13f8ed07ffa6a13e8db224dfecfae1a7df8b1bb6ebaf0cb97d",
+      "1274530ca2c385a3218bddfbcbf0b4024c9badd5243bff834ebff24a8618dccb", "CAVP P-256 COUNT 11");
+    _kat(256, "ceed35507b5c93ead5989119b9ba342cfe38e6e638ba6eea343a55475de2800b",
+      "cd94fc9497e8990750309e9a8534fd114b0a6e54da89c4796101897041d14ecb",
+      "c3def4b5fe04faee0a11932229fff563637bfdee0e79c6deeaf449f85401c5c4",
+      "e4e7408d85ff0e0e9c838003f28cdbd5247cdce31f32f62494b70e5f1bc36307",
+      "9a8cd9bd72e71752df91440f77c547509a84df98114e7de4f26cdb39234a625d",
+      "d07cfc84c8e144fab2839f5189bb1d7c88631d579bbc58012ed9a2327da52f62", "CAVP P-256 COUNT 12");
+    _kat(256, "43e0e9d95af4dc36483cdd1968d2b7eeb8611fcce77f3a4e7d059ae43e509604",
+      "15b9e467af4d290c417402e040426fe4cf236bae72baa392ed89780dfccdb471",
+      "cdf4e9170fb904302b8fd93a820ba8cc7ed4efd3a6f2d6b05b80b2ff2aee4e77",
+      "ed56bcf695b734142c24ecb1fc1bb64d08f175eb243a31f37b3d9bb4407f3b96",
+      "f989cf8ee956a82e7ebd9881cdbfb2fd946189b08db53559bc8cfdd48071eb14",
+      "5eff28f1a18a616b04b7d337868679f6dd84f9a7b3d7b6f8af276c19611a541d", "CAVP P-256 COUNT 13");
+    _kat(256, "b2f3600df3368ef8a0bb85ab22f41fc0e5f4fdd54be8167a5c3cd4b08db04903",
+      "49c503ba6c4fa605182e186b5e81113f075bc11dcfd51c932fb21e951eee2fa1",
+      "8af706ff0922d87b3f0c5e4e31d8b259aeb260a9269643ed520a13bb25da5924",
+      "bc5c7055089fc9d6c89f83c1ea1ada879d9934b2ea28fcf4e4a7e984b28ad2cf",
+      "69c627625b36a429c398b45c38677cb35d8beb1cf78a571e40e99fe4eac1cd4e",
+      "81690112b0a88f20f7136b28d7d47e5fbc2ada3c8edd87589bc19ec9590637bd", "CAVP P-256 COUNT 14");
+    _kat(256, "4002534307f8b62a9bf67ff641ddc60fef593b17c3341239e95bdb3e579bfdc8",
+      "19b38de39fdd2f70f7091631a4f75d1993740ba9429162c2a45312401636b29c",
+      "09aed7232b28e060941741b6828bcdfa2bc49cc844f3773611504f82a390a5ae",
+      "9a4e8e657f6b0e097f47954a63c75d74fcba71a30d83651e3e5a91aa7ccd8343",
+      "5fe964671315a18aa68a2a6e3dd1fde7e23b8ce7181471cfac43c99e1ae80262",
+      "d5827be282e62c84de531b963884ba832db5d6b2c3a256f0e604fe7e6b8a7f72", "CAVP P-256 COUNT 15");
+    _kat(256, "4dfa12defc60319021b681b3ff84a10a511958c850939ed45635934ba4979147",
+      "2c91c61f33adfe9311c942fdbff6ba47020feff416b7bb63cec13faf9b099954",
+      "6cab31b06419e5221fca014fb84ec870622a1b12bab5ae43682aa7ea73ea08d0",
+      "3ca1fc7ad858fb1a6aba232542f3e2a749ffc7203a2374a3f3d3267f1fc97b78",
+      "c9b2b8496f1440bd4a2d1e52752fd372835b364885e154a7dac49295f281ec7c",
+      "fbe6b926a8a4de26ccc83b802b1212400754be25d9f3eeaf008b09870ae76321", "CAVP P-256 COUNT 16");
+    _kat(256, "1331f6d874a4ed3bc4a2c6e9c74331d3039796314beee3b7152fcdba5556304e",
+      "a28a2edf58025668f724aaf83a50956b7ac1cfbbff79b08c3bf87dfd2828d767",
+      "dfa7bfffd4c766b86abeaf5c99b6e50cb9ccc9d9d00b7ffc7804b0491b67bc03",
+      "1aaabe7ee6e4a6fa732291202433a237df1b49bc53866bfbe00db96a0f58224f",
+      "59e1e101521046ad9cf1d082e9d2ec7dd22530cce064991f1e55c5bcf5fcb591",
+      "482f4f673176c8fdaa0bb6e59b15a3e47454e3a04297d3863c9338d98add1f37", "CAVP P-256 COUNT 17");
+    _kat(256, "dd5e9f70ae740073ca0204df60763fb6036c45709bf4a7bb4e671412fad65da3",
+      "a2ef857a081f9d6eb206a81c4cf78a802bdf598ae380c8886ecd85fdc1ed7644",
+      "563c4c20419f07bc17d0539fade1855e34839515b892c0f5d26561f97fa04d1a",
+      "430e6a4fba4449d700d2733e557f66a3bf3d50517c1271b1ddae1161b7ac798c",
+      "30b9db2e2e977bcdc98cb87dd736cbd8e78552121925cf16e1933657c2fb2314",
+      "6a45028800b81291bce5c2e1fed7ded650620ebbe6050c6f3a7f0dfb4673ab5c", "CAVP P-256 COUNT 18");
+    _kat(256, "5ae026cfc060d55600717e55b8a12e116d1d0df34af831979057607c2d9c2f76",
+      "ccd8a2d86bc92f2e01bce4d6922cf7fe1626aed044685e95e2eebd464505f01f",
+      "e9ddd583a9635a667777d5b8a8f31b0f79eba12c75023410b54b8567dddc0f38",
+      "1ce9e6740529499f98d1f1d71329147a33df1d05e4765b539b11cf615d6974d3",
+      "46c9ebd1a4a3c8c0b6d572b5dcfba12467603208a9cb5d2acfbb733c40cf6391",
+      "46c913a27d044185d38b467ace011e04d4d9bbbb8cb9ae25fa92aaf15a595e86", "CAVP P-256 COUNT 19");
+    _kat(256, "b601ac425d5dbf9e1735c5e2d5bdb79ca98b3d5be4a2cfd6f2273f150e064d9d",
+      "c188ffc8947f7301fb7b53e36746097c2134bf9cc981ba74b4e9c4361f595e4e",
+      "bf7d2f2056e72421ef393f0c0f2b0e00130e3cac4abbcc00286168e85ec55051",
+      "4690e3743c07d643f1bc183636ab2a9cb936a60a802113c49bb1b3f2d0661660",
+      "7c9e950841d26c8dde8994398b8f5d475a022bc63de7773fcf8d552e01f1ba0a",
+      "cc42b9885c9b3bee0f8d8c57d3a8f6355016c019c4062fa22cff2f209b5cc2e1", "CAVP P-256 COUNT 20");
+    _kat(256, "fefb1dda1845312b5fce6b81b2be205af2f3a274f5a212f66c0d9fc33d7ae535",
+      "317e1020ff53fccef18bf47bb7f2dd7707fb7b7a7578e04f35b3beed222a0eb6",
+      "09420ce5a19d77c6fe1ee587e6a49fbaf8f280e8df033d75403302e5a27db2ae",
+      "30c2261bd0004e61feda2c16aa5e21ffa8d7e7f7dbf6ec379a43b48e4b36aeb0",
+      "38b54db85500cb20c61056edd3d88b6a9dc26780a047f213a6e1b900f76596eb",
+      "6387e4e5781571e4eb8ae62991a33b5dc33301c5bc7e125d53794a39160d8fd0", "CAVP P-256 COUNT 21");
+    _kat(256, "334ae0c4693d23935a7e8e043ebbde21e168a7cba3fa507c9be41d7681e049ce",
+      "45fb02b2ceb9d7c79d9c2fa93e9c7967c2fa4df5789f9640b24264b1e524fcb1",
+      "5c6e8ecf1f7d3023893b7b1ca1e4d178972ee2a230757ddc564ffe37f5c5a321",
+      "2adae4a138a239dcd93c243a3803c3e4cf96e37fe14e6a9b717be9599959b11c",
+      "3f2bf1589abf3047bf3e54ac9a95379bff95f8f55405f64eca36a7eebe8ffca7",
+      "5212a94e66c5ae9a8991872f66a72723d80ec5b2e925745c456f5371943b3a06", "CAVP P-256 COUNT 22");
+    _kat(256, "2c4bde40214fcc3bfc47d4cf434b629acbe9157f8fd0282540331de7942cf09d",
+      "a19ef7bff98ada781842fbfc51a47aff39b5935a1c7d9625c8d323d511c92de6",
+      "e9c184df75c955e02e02e400ffe45f78f339e1afe6d056fb3245f4700ce606ef",
+      "2e277ec30f5ea07d6ce513149b9479b96e07f4b6913b1b5c11305c1444a1bc0b",
+      "29c0807f10cbc42fb45c9989da50681eead716daa7b9e91fd32e062f5eb92ca0",
+      "ff1d6d1955d7376b2da24fe1163a271659136341bc2eb1195fc706dc62e7f34d", "CAVP P-256 COUNT 23");
+    _kat(256, "85a268f9d7772f990c36b42b0a331adc92b5941de0b862d5d89a347cbf8faab0",
+      "356c5a444c049a52fee0adeb7e5d82ae5aa83030bfff31bbf8ce2096cf161c4b",
+      "57d128de8b2a57a094d1a001e572173f96e8866ae352bf29cddaf92fc85b2f92",
+      "1e51373bd2c6044c129c436e742a55be2a668a85ae08441b6756445df5493857",
+      "9cf4b98581ca1779453cc816ff28b4100af56cf1bf2e5bc312d83b6b1b21d333",
+      "7a5504fcac5231a0d12d658218284868229c844a04a3450d6c7381abe080bf3b", "CAVP P-256 COUNT 24");
+    return 0;
+}
+
+fn _cavp384(): i64 {
+    _kat(384, "3cc3122a68f0d95027ad38c067916ba0eb8c38894d22e1b15618b6818a661774ad463b205da88cf699ab4d43c9cf98a1",
+      "a7c76b970c3b5fe8b05d2838ae04ab47697b9eaf52e764592efda27fe7513272734466b400091adbf2d68c58e0c50066",
+      "ac68f19f2e1cb879aed43a9969b91a0839c4c38a49749b661efedf243451915ed0905a32b060992b468c64766fc8437a",
+      "5f9d29dc5e31a163060356213669c8ce132e22f57c9a04f40ba7fcead493b457e5621e766c40a2e3d4d6a04b25e533f1",
+      "9803807f2f6d2fd966cdd0290bd410c0190352fbec7ff6247de1302df86f25d34fe4a97bef60cff548355c015dbb3e5f",
+      "ba26ca69ec2f5b5d9dad20cc9da711383a9dbe34ea3fa5a2af75b46502629ad54dd8b7d73a8abb06a3a3be47d650cc99", "CAVP P-384 COUNT 0");
+    _kat(384, "92860c21bde06165f8e900c687f8ef0a05d14f290b3f07d8b3a8cc6404366e5d5119cd6d03fb12dc58e89f13df9cd783",
+      "30f43fcf2b6b00de53f624f1543090681839717d53c7c955d1d69efaf0349b7363acb447240101cbb3af6641ce4b88e0",
+      "25e46c0c54f0162a77efcc27b6ea792002ae2ba82714299c860857a68153ab62e525ec0530d81b5aa15897981e858757",
+      "a23742a2c267d7425fda94b93f93bbcc24791ac51cd8fd501a238d40812f4cbfc59aac9520d758cf789c76300c69d2ff",
+      "ea4018f5a307c379180bf6a62fd2ceceebeeb7d4df063a66fb838aa35243419791f7e2c9d4803c9319aa0eb03c416b66",
+      "68835a91484f05ef028284df6436fb88ffebabcdd69ab0133e6735a1bcfb37203d10d340a8328a7b68770ca75878a1a6", "CAVP P-384 COUNT 1");
+    _kat(384, "12cf6a223a72352543830f3f18530d5cb37f26880a0b294482c8a8ef8afad09aa78b7dc2f2789a78c66af5d1cc553853",
+      "1aefbfa2c6c8c855a1a216774550b79a24cda37607bb1f7cc906650ee4b3816d68f6a9c75da6e4242cebfb6652f65180",
+      "419d28b723ebadb7658fcebb9ad9b7adea674f1da3dc6b6397b55da0f61a3eddacb4acdb14441cb214b04a0844c02fa3",
+      "3d2e640f350805eed1ff43b40a72b2abed0a518bcebe8f2d15b111b6773223da3c3489121db173d414b5bd5ad7153435",
+      "fcfcea085e8cf74d0dced1620ba8423694f903a219bbf901b0b59d6ac81baad316a242ba32bde85cb248119b852fab66",
+      "972e3c68c7ab402c5836f2a16ed451a33120a7750a6039f3ff15388ee622b7065f7122bf6d51aefbc29b37b03404581b", "CAVP P-384 COUNT 2");
+    _kat(384, "8dd48063a3a058c334b5cc7a4ce07d02e5ee6d8f1f3c51a1600962cbab462690ae3cd974fb39e40b0e843daa0fd32de1",
+      "8bc089326ec55b9cf59b34f0eb754d93596ca290fcb3444c83d4de3a5607037ec397683f8cef07eab2fe357eae36c449",
+      "d9d16ce8ac85b3f1e94568521aae534e67139e310ec72693526aa2e927b5b322c95a1a033c229cb6770c957cd3148dd7",
+      "6a42cfc392aba0bfd3d17b7ccf062b91fc09bbf3417612d02a90bdde62ae40c54bb2e56e167d6b70db670097eb8db854",
+      "e38c9846248123c3421861ea4d32669a7b5c3c08376ad28104399494c84ff5efa3894adb2c6cbe8c3c913ef2eec5bd3c",
+      "9fa84024a1028796df84021f7b6c9d02f0f4bd1a612a03cbf75a0beea43fef8ae84b48c60172aadf09c1ad016d0bf3ce", "CAVP P-384 COUNT 3");
+    _kat(384, "84ece6cc3429309bd5b23e959793ed2b111ec5cb43b6c18085fcaea9efa0685d98a6262ee0d330ee250bc8a67d0e733f",
+      "eb952e2d9ac0c20c6cc48fb225c2ad154f53c8750b003fd3b4ed8ed1dc0defac61bcdde02a2bcfee7067d75d342ed2b0",
+      "f1828205baece82d1b267d0d7ff2f9c9e15b69a72df47058a97f3891005d1fb38858f5603de840e591dfa4f6e7d489e1",
+      "ce7ba454d4412729a32bb833a2d1fd2ae612d4667c3a900e069214818613447df8c611de66da200db7c375cf913e4405",
+      "3222063a2997b302ee60ee1961108ff4c7acf1c0ef1d5fb0d164b84bce71c431705cb9aea9a45f5d73806655a058bee3",
+      "e61fa9e7fbe7cd43abf99596a3d3a039e99fa9dc93b0bdd9cad81966d17eeaf557068afa7c78466bb5b22032d1100fa6", "CAVP P-384 COUNT 4");
+    _kat(384, "68fce2121dc3a1e37b10f1dde309f9e2e18fac47cd1770951451c3484cdb77cb136d00e731260597cc2859601c01a25b",
+      "441d029e244eb7168d647d4df50db5f4e4974ab3fdaf022aff058b3695d0b8c814cc88da6285dc6df1ac55c553885003",
+      "e8025ac23a41d4b1ea2aa46c50c6e479946b59b6d76497cd9249977e0bfe4a6262622f13d42a3c43d66bdbb30403c345",
+      "ba69f0acdf3e1ca95caaac4ecaf475bbe51b54777efce01ca381f45370e486fe87f9f419b150c61e329a286d1aa265ec",
+      "868be0e694841830e424d913d8e7d86b84ee1021d82b0ecf523f09fe89a76c0c95c49f2dfbcf829c1e39709d55efbb3b",
+      "9195eb183675b40fd92f51f37713317e4a9b4f715c8ab22e0773b1bc71d3a219f05b8116074658ee86b52e36f3897116", "CAVP P-384 COUNT 5");
+    _kat(384, "b1764c54897e7aae6de9e7751f2f37de849291f88f0f91093155b858d1cc32a3a87980f706b86cc83f927bdfdbeae0bd",
+      "3d4e6bf08a73404accc1629873468e4269e82d90d832e58ad72142639b5a056ad8d35c66c60e8149fac0c797bceb7c2f",
+      "9b0308dc7f0e6d29f8c277acbc65a21e5adb83d11e6873bc0a07fda0997f482504602f59e10bc5cb476b83d0a4f75e71",
+      "1a6688ee1d6e59865d8e3ada37781d36bb0c2717eef92e61964d3927cb765c2965ea80f7f63e58c322ba0397faeaf62b",
+      "c371222feaa6770c6f3ea3e0dac9740def4fcf821378b7f91ff937c21e0470f70f3a31d5c6b2912195f10926942b48ae",
+      "047d6b4d765123563f81116bc665b7b8cc6207830d805fd84da7cb805a65baa7c12fd592d1b5b5e3e65d9672a9ef7662", "CAVP P-384 COUNT 6");
+    _kat(384, "f0f7a96e70d98fd5a30ad6406cf56eb5b72a510e9f192f50e1f84524dbf3d2439f7287bb36f5aa912a79deaab4adea82",
+      "f5f6bef1d110da03be0017eac760cc34b24d092f736f237bc7054b3865312a813bcb62d297fb10a4f7abf54708fe2d3d",
+      "06fdf8d7dc032f4e10010bf19cbf6159321252ff415fb91920d438f24e67e60c2eb0463204679fa356af44cea9c9ebf5",
+      "d06a568bf2336b90cbac325161be7695eacb2295f599500d787f072612aca313ee5d874f807ddef6c1f023fe2b6e7cd0",
+      "99c8c41cb1ab5e0854a346e4b08a537c1706a61553387c8d94943ab15196d40dbaa55b8210a77a5d00915f2c4ea69eab",
+      "5531065bdcf17bfb3cb55a02e41a57c7f694c383ad289f900fbd656c2233a93c92e933e7a26f54cbb56f0ad875c51bb0", "CAVP P-384 COUNT 7");
+    _kat(384, "9efb87ddc61d43c482ba66e1b143aef678fbd0d1bebc2000941fabe677fe5b706bf78fce36d100b17cc787ead74bbca2",
+      "7cdec77e0737ea37c67b89b7137fe38818010f4464438ee4d1d35a0c488cad3fde2f37d00885d36d3b795b9f93d23a67",
+      "28c42ee8d6027c56cf979ba4c229fdb01d234944f8ac433650112c3cf0f02844e888a3569dfef7828a8a884589aa055e",
+      "bb3b1eda9c6560d82ff5bee403339f1e80342338a991344853b56b24f109a4d94b92f654f0425edd4c205903d7586104",
+      "4c34efee8f0c95565d2065d1bbac2a2dd25ae964320eb6bccedc5f3a9b42a881a1afca1bb6b880584fa27b01c193cd92",
+      "d8fb01dbf7cd0a3868c26b951f393c3c56c2858cee901f7793ff5d271925d13a41f8e52409f4eba1990f33acb0bac669", "CAVP P-384 COUNT 8");
+    _kat(384, "d787a57fde22ec656a0a525cf3c738b30d73af61e743ea90893ecb2d7b622add2f94ee25c2171467afb093f3f84d0018",
+      "8eeea3a319c8df99fbc29cb55f243a720d95509515ee5cc587a5c5ae22fbbd009e626db3e911def0b99a4f7ae304b1ba",
+      "73877dc94db9adddc0d9a4b24e8976c22d73c844370e1ee857f8d1b129a3bd5f63f40caf3bd0533e38a5f5777074ff9e",
+      "1e97b60add7cb35c7403dd884c0a75795b7683fff8b49f9d8672a8206bfdcf0a106b8768f983258c74167422e44e4d14",
+      "171546923b87b2cbbad664f01ce932bf09d6a6118168678446bfa9f0938608cb4667a98f4ec8ac1462285c2508f74862",
+      "fa41cb4db68ae71f1f8a3e8939dc52c2dec61a83c983beb2a02baf29ec49278088882ed0cf56c74b5c173b552ccf63cf", "CAVP P-384 COUNT 9");
+    _kat(384, "83d70f7b164d9f4c227c767046b20eb34dfc778f5387e32e834b1e6daec20edb8ca5bb4192093f543b68e6aeb7ce788b",
+      "a721f6a2d4527411834b13d4d3a33c29beb83ab7682465c6cbaf6624aca6ea58c30eb0f29dd842886695400d7254f20f",
+      "14ba6e26355109ad35129366d5e3a640ae798505a7fa55a96a36b5dad33de00474f6670f522214dd7952140ab0a7eb68",
+      "1023478840e54775bfc69293a3cf97f5bc914726455c66538eb5623e218feef7df4befa23e09d77145ad577db32b41f9",
+      "57cd770f3bbcbe0c78c770eab0b169bc45e139f86378ffae1c2b16966727c2f2eb724572b8f3eb228d130db4ff862c63",
+      "7ec5c8813b685558d83e924f14bc719f6eb7ae0cbb2c474227c5bda88637a4f26c64817929af999592da6f787490332f", "CAVP P-384 COUNT 10");
+    _kat(384, "8f558e05818b88ed383d5fca962e53413db1a0e4637eda194f761944cbea114ab9d5da175a7d57882550b0e432f395a9",
+      "d882a8505c2d5cb9b8851fc676677bb0087681ad53faceba1738286b45827561e7da37b880276c656cfc38b32ade847e",
+      "34b314bdc134575654573cffaf40445da2e6aaf987f7e913cd4c3091523058984a25d8f21da8326192456c6a0fa5f60c",
+      "6ad6b9dc8a6cf0d3691c501cbb967867f6e4bbb764b60dbff8fcff3ed42dbba39d63cf325b4b4078858495ddee75f954",
+      "9a2f57f4867ce753d72b0d95195df6f96c1fae934f602efd7b6a54582f556cfa539d89005ca2edac08ad9b72dd1f60ba",
+      "d9b94ee82da9cc601f346044998ba387aee56404dc6ecc8ab2b590443319d0b2b6176f9d0eac2d44678ed561607d09a9", "CAVP P-384 COUNT 11");
+    _kat(384, "0f5dee0affa7bbf239d5dff32987ebb7cf84fcceed643e1d3c62d0b3352aec23b6e5ac7fa4105c8cb26126ad2d1892cb",
+      "815c9d773dbf5fb6a1b86799966247f4006a23c92e68c55e9eaa998b17d8832dd4d84d927d831d4f68dac67c6488219f",
+      "e79269948b2611484560fd490feec887cb55ef99a4b524880fa7499d6a07283aae2afa33feab97deca40bc606c4d8764",
+      "cc9e063566d46b357b3fcae21827377331e5e290a36e60cd7c39102b828ae0b918dc5a02216b07fe6f1958d834e42437",
+      "23346bdfbc9d7c7c736e02bdf607671ff6082fdd27334a8bc75f3b23681ebe614d0597dd614fae58677c835a9f0b273b",
+      "82ba36290d2f94db41479eb45ab4eaf67928a2315138d59eecc9b5285dfddd6714f77557216ea44cc6fc119d8243efaf", "CAVP P-384 COUNT 12");
+    _kat(384, "037b633b5b8ba857c0fc85656868232e2febf59578718391b81da8541a00bfe53c30ae04151847f27499f8d7abad8cf4",
+      "1c0eeda7a2be000c5bdcda0478aed4db733d2a9e341224379123ad847030f29e3b168fa18e89a3c0fba2a6ce1c28fc3b",
+      "ec8c1c83c118c4dbea94271869f2d868eb65e8b44e21e6f14b0f4d9b38c068daefa27114255b9a41d084cc4a1ad85456",
+      "deff7f03bd09865baf945e73edff6d5122c03fb561db87dec8662e09bed4340b28a9efe118337bb7d3d4f7f568635ff9",
+      "8878ac8a947f7d5cb2b47aad24fbb8210d86126585399a2871f84aa9c5fde3074ae540c6bf82275ca822d0feb862bc74",
+      "632f5cd2f900c2711c32f8930728eb647d31edd8d650f9654e7d33e5ed1b475489d08daa30d8cbcba6bfc3b60d9b5a37", "CAVP P-384 COUNT 13");
+    _kat(384, "e3d07106bedcc096e7d91630ffd3094df2c7859db8d7edbb2e37b4ac47f429a637d06a67d2fba33838764ef203464991",
+      "c95c185e256bf997f30b311548ae7f768a38dee43eeeef43083f3077be70e2bf39ac1d4daf360c514c8c6be623443d1a",
+      "3e63a663eaf75d8a765ab2b9a35513d7933fa5e26420a5244550ec6c3b6f033b96db2aca3d6ac6aab052ce929595aea5",
+      "c8b1038f735ad3bb3e4637c3e47eab487637911a6b7950a4e461948329d3923b969e5db663675623611a457fcda35a71",
+      "e74a1a2b85f1cbf8dbbdf050cf1aff8acb02fda2fb6591f9d3cfe4e79d0ae938a9c1483e7b75f8db24505d65065cdb18",
+      "1773ee591822f7abaa856a1a60bc0a5203548dbd1cb5025466eff8481bd07614eaa04a16c3db76905913e972a5b6b59d", "CAVP P-384 COUNT 14");
+    _kat(384, "f3f9b0c65a49a506632c8a45b10f66b5316f9eeb06fae218f2da62333f99905117b141c760e8974efc4af10570635791",
+      "3497238a7e6ad166df2dac039aa4dac8d17aa925e7c7631eb3b56e3aaa1c545fcd54d2e5985807910fb202b1fc191d2a",
+      "a49e5c487dcc7aa40a8f234c979446040d9174e3ad357d404d7765183195aed3f913641b90c81a306ebf0d8913861316",
+      "d337eaa32b9f716b8747b005b97a553c59dab0c51df41a2d49039cdae705aa75c7b9e7bc0b6a0e8c578c902bc4fff23e",
+      "a4ad77aa7d86e5361118a6b921710c820721210712f4c347985fdee58aa4effa1e28be80a17b120b139f96300f89b49b",
+      "1ddf22e07e03f1560d8f45a480094560dba9fae7f9531130c1b57ebb95982496524f31d3797793396fa823f22bdb4328", "CAVP P-384 COUNT 15");
+    _kat(384, "59fce7fad7de28bac0230690c95710c720e528f9a4e54d3a6a8cd5fc5c5f21637031ce1c5b4e3d39647d8dcb9b794664",
+      "90a34737d45b1aa65f74e0bd0659bc118f8e4b774b761944ffa6573c6df4f41dec0d11b697abd934d390871d4b453240",
+      "9b590719bb3307c149a7817be355d684893a307764b512eeffe07cb699edb5a6ffbf8d6032e6c79d5e93e94212c2aa4e",
+      "32d292b695a4488e42a7b7922e1ae537d76a3d21a0b2e36875f60e9f6d3e8779c2afb3a413b9dd79ae18e70b47d337c1",
+      "9c43bf971edf09402876ee742095381f78b1bd3aa39b5132af75dbfe7e98bd78bde10fe2e903c2b6379e1deee175a1b0",
+      "a6c58ecea5a477bb01bd543b339f1cc49f1371a2cda4d46eb4e53e250597942351a99665a122ffea9bde0636c375daf2", "CAVP P-384 COUNT 16");
+    _kat(384, "3e49fbf950a424c5d80228dc4bc35e9f6c6c0c1d04440998da0a609a877575dbe437d6a5cedaa2ddd2a1a17fd112aded",
+      "dda546acfc8f903d11e2e3920669636d44b2068aeb66ff07aa266f0030e1535b0ed0203cb8a460ac990f1394faf22f1d",
+      "15bbb2597913035faadf413476f4c70f7279769a40c986f470c427b4ee4962abdf8173bbad81874772925fd32f0b159f",
+      "1220e7e6cad7b25df98e5bbdcc6c0b65ca6c2a50c5ff6c41dca71e475646fd489615979ca92fb4389aeadefde79a24f1",
+      "5a949594228b1a3d6f599eb3db0d06070fbc551c657b58234ba164ce3fe415fa5f3eb823c08dc29b8c341219c77b6b3d",
+      "2baad447c8c290cfed25edd9031c41d0b76921457327f42db31122b81f337bbf0b1039ec830ce9061a3761953c75e4a8", "CAVP P-384 COUNT 17");
+    _kat(384, "50ccc1f7076e92f4638e85f2db98e0b483e6e2204c92bdd440a6deea04e37a07c6e72791c190ad4e4e86e01efba84269",
+      "788be2336c52f4454d63ee944b1e49bfb619a08371048e6da92e584eae70bde1f171c4df378bd1f3c0ab03048a237802",
+      "4673ebd8db604eaf41711748bab2968a23ca4476ce144e728247f08af752929157b5830f1e26067466bdfa8b65145a33",
+      "793bb9cd22a93cf468faf804a38d12b78cb12189ec679ddd2e9aa21fa9a5a0b049ab16a23574fe04c1c3c02343b91beb",
+      "756c07df0ce32c839dac9fb4733c9c28b70113a676a7057c38d223f22a3a9095a8d564653af528e04c7e1824be4a6512",
+      "17c2ce6962cbd2a2e066297b39d57dd9bb4680f0191d390f70b4e461419b2972ce68ad46127fdda6c39195774ea86df3", "CAVP P-384 COUNT 18");
+    _kat(384, "06f132b71f74d87bf99857e1e4350a594e5fe35533b888552ceccbc0d8923c902e36141d7691e28631b8bc9bafe5e064",
+      "d09bb822eb99e38060954747c82bb3278cf96bbf36fece3400f4c873838a40c135eb3babb9293bd1001bf3ecdee7bf26",
+      "d416db6e1b87bbb7427788a3b6c7a7ab2c165b1e366f9608df512037584f213a648d47f16ac326e19aae972f63fd76c9",
+      "012d191cf7404a523678c6fc075de8285b243720a903047708bb33e501e0dbee5bcc40d7c3ef6c6da39ea24d830da1e8",
+      "2a3cc6b8ff5cde926e7e3a189a1bd029c9b586351af8838f4f201cb8f4b70ef3b0da06d352c80fc26baf8f42b784459e",
+      "bf9985960176da6d23c7452a2954ffcbbcb24249b43019a2a023e0b3dabd461f19ad3e775c364f3f11ad49f3099400d3", "CAVP P-384 COUNT 19");
+    _kat(384, "12048ebb4331ec19a1e23f1a2c773b664ccfe90a28bfb846fc12f81dff44b7443c77647164bf1e9e67fd2c07a6766241",
+      "13741262ede5861dad71063dfd204b91ea1d3b7c631df68eb949969527d79a1dc59295ef7d2bca6743e8cd77b04d1b58",
+      "0baaeadc7e19d74a8a04451a135f1be1b02fe299f9dc00bfdf201e83d995c6950bcc1cb89d6f7b30bf54656b9a4da586",
+      "ad0fd3ddffe8884b9263f3c15fe1f07f2a5a22ffdc7e967085eea45f0cd959f20f18f522763e28bcc925e496a52dda98",
+      "bc18836bc7a9fdf54b5352f37d7528ab8fa8ec544a8c6180511cbfdd49cce377c39e34c031b5240dc9980503ed2f262c",
+      "8086cbe338191080f0b7a16c7afc4c7b0326f9ac66f58552ef4bb9d24de3429ed5d3277ed58fcf48f2b5f61326bec6c6", "CAVP P-384 COUNT 20");
+    _kat(384, "34d61a699ca576169fcdc0cc7e44e4e1221db0fe63d16850c8104029f7d48449714b9884328cae189978754ab460b486",
+      "9e22cbc18657f516a864b37b783348b66f1aa9626cd631f4fa1bd32ad88cf11db52057c660860d39d11fbf024fabd444",
+      "6b0d53c79681c28116df71e9cee74fd56c8b7f04b39f1198cc72284e98be9562e35926fb4f48a9fbecafe729309e8b6f",
+      "dc4ca392dc15e20185f2c6a8ea5ec31dfc96f56153a47394b3072b13d0015f5d4ae13beb3bed54d65848f9b8383e6c95",
+      "867f81104ccd6b163a7902b670ef406042cb0cce7dcdc63d1dfc91b2c40e3cdf7595834bf9eceb79849f1636fc8462fc",
+      "9d4bde8e875ec49697d258d1d59465f8431c6f5531e1c59e9f9ebe3cf164a8d9ce10a12f1979283a959bad244dd83863", "CAVP P-384 COUNT 21");
+    _kat(384, "dc60fa8736d702135ff16aab992bb88eac397f5972456c72ec447374d0d8ce61153831bfc86ad5a6eb5b60bfb96a862c",
+      "2db5da5f940eaa884f4db5ec2139b0469f38e4e6fbbcc52df15c0f7cf7fcb1808c749764b6be85d2fdc5b16f58ad5dc0",
+      "22e8b02dcf33e1b5a083849545f84ad5e43f77cb71546dbbac0d11bdb2ee202e9d3872e8d028c08990746c5e1dde9989",
+      "d765b208112d2b9ed5ad10c4046e2e3b0dbf57c469329519e239ac28b25c7d852bf757d5de0ee271cadd021d86cfd347",
+      "b69beede85d0f829fec1b893ccb9c3e052ff692e13b974537bc5b0f9feaf7b22e84f03231629b24866bdb4b8cf908914",
+      "66f85e2bfcaba2843285b0e14ebc07ef7dafff8b424416fee647b59897b619f20eed95a632e6a4206bf7da429c04c560", "CAVP P-384 COUNT 22");
+    _kat(384, "6fa6a1c704730987aa634b0516a826aba8c6d6411d3a4c89772d7a62610256a2e2f289f5c3440b0ec1e70fa339e251ce",
+      "329647baa354224eb4414829c5368c82d7893b39804e08cbb2180f459befc4b347a389a70c91a23bd9d30c83be5295d3",
+      "cc8f61923fad2aa8e505d6cfa126b9fabd5af9dce290b75660ef06d1caa73681d06089c33bc4246b3aa30dbcd2435b12",
+      "d3778850aeb58804fbe9dfe6f38b9fa8e20c2ca4e0dec335aafceca0333e3f2490b53c0c1a14a831ba37c4b9d74be0f2",
+      "53de1fc1328e8de14aecab29ad8a40d6b13768f86f7d298433d20fec791f86f8bc73f358098b256a298bb488de257bf4",
+      "ac28944fd27f17b82946c04c66c41f0053d3692f275da55cd8739a95bd8cd3af2f96e4de959ea8344d8945375905858b", "CAVP P-384 COUNT 23");
+    _kat(384, "74ad8386c1cb2ca0fcdeb31e0869bb3f48c036afe2ef110ca302bc8b910f621c9fcc54cec32bb89ec7caa84c7b8e54a8",
+      "29d8a36d22200a75b7aea1bb47cdfcb1b7fd66de967041434728ab5d533a060df732130600fe6f75852a871fb2938e39",
+      "e19b53db528395de897a45108967715eb8cb55c3fcbf23379372c0873a058d57544b102ecce722b2ccabb1a603774fd5",
+      "81e1e71575bb4505498de097350186430a6242fa6c57b85a5f984a23371123d2d1424eefbf804258392bc723e4ef1e35",
+      "27a3e83cfb9d5122e73129d801615857da7cc089cccc9c54ab3032a19e0a0a9f677346e37f08a0b3ed8da6e5dd691063",
+      "8d60e44aa5e0fd30c918456796af37f0e41957901645e5c596c6d989f5859b03a0bd7d1f4e77936fff3c74d204e5388e", "CAVP P-384 COUNT 24");
+    return 0;
+}
+
+
+# ---------------- zeroisation ----------------
+# Counts the 8-byte words in the n bytes of dead stack below this function's frame that
+# equal v. Called right after an API call returns, that region holds the frames the call
+# used; a secret limb found there is a secret left behind.
+fn _dead_stack_count(v, n): i64 {
+    var mark[8];
+    var base = &mark - n;
+    var c = 0;
+    var i = 0;
+    while (i < n) {
+        if (load64(base + i) == v) { c = c + 1; }
+        i = i + 8;
+    }
+    return c;
+}
+
+# Derives with the private key d_be on curve c, then counts how many of d's limbs survive in
+# the dead stack below the caller (8 KB).
+fn _residue_after_shared(c, d_be, peer): i64 {
+    var w = _w(c);
+    var z = alloc(w);
+    _shared(c, d_be, peer, 1 + 2 * w, z);
+    var found = 0;
+    var i = 0;
+    while (i < w / 8) {
+        var limb = 0;
+        var j = 0;
+        while (j < 8) {
+            limb = (limb << 8) | (load8(d_be + w - 8 - i * 8 + j) & 0xFF);
+            j = j + 1;
+        }
+        found = found + _dead_stack_count(limb, 8192);
+        i = i + 1;
+    }
+    return found;
+}
+
+# Same after a keygen whose input reduces to the private key of the given big-endian bytes.
+fn _residue_after_keygen(c, rnd): i64 {
+    var w = _w(c);
+    var priv = alloc(w);
+    var pk = alloc(1 + 2 * w);
+    _keygen(c, rnd, w + 8, priv, pk);
+    var found = 0;
+    var i = 0;
+    while (i < w / 8) {
+        var limb = 0;
+        var j = 0;
+        while (j < 8) {
+            limb = (limb << 8) | (load8(priv + w - 8 - i * 8 + j) & 0xFF);
+            j = j + 1;
+        }
+        found = found + _dead_stack_count(limb, 8192);
+        i = i + 1;
+    }
+    return found;
+}
+
+# ---------------- concurrent callers ----------------
+var _cc_rnd  = 0;   # NA x 64 random inputs
+var _cc_res  = 0;   # NA x 8 per-worker mismatch counts
+var _cc_ref  = 0;   # NA x (48 + 97 + 48) serial reference: priv || pub || Z
+
+# Worker: keygen + shared(own priv, G) on both curves, 3 rounds, compared with the serial
+# reference computed on the main thread.
+fn _cc_worker(arg): i64 {
+    var idx = load64(arg);
+    var bad = 0;
+    var priv[48];
+    var pk[97];
+    var z[48];
+    var r = 0;
+    while (r < 3) {
+        var ref = _cc_ref + idx * 2 * 193;
+        ecdh_p256_keygen(_cc_rnd + idx * 64, 40, &priv, &pk);
+        if (memeq(&priv, ref, 32) == 0) { bad = bad + 1; }
+        if (memeq(&pk, ref + 48, 65) == 0) { bad = bad + 1; }
+        ecdh_p256_shared(&priv, &pk, 65, &z);
+        if (memeq(&z, ref + 145, 32) == 0) { bad = bad + 1; }
+        ref = ref + 193;
+        ecdh_p384_keygen(_cc_rnd + idx * 64, 56, &priv, &pk);
+        if (memeq(&priv, ref, 48) == 0) { bad = bad + 1; }
+        if (memeq(&pk, ref + 48, 97) == 0) { bad = bad + 1; }
+        ecdh_p384_shared(&priv, &pk, 97, &z);
+        if (memeq(&z, ref + 145, 48) == 0) { bad = bad + 1; }
+        r = r + 1;
+    }
+    store64(_cc_res + idx * 8, bad);
+    return 0;
+}
+
+# ---------------- timing smoke ----------------
+# In-place insertion sort of n i64 values; returns the median.
+fn _median(arr, n): i64 {
+    var i = 1;
+    while (i < n) {
+        var v = load64(arr + i * 8);
+        var j = i - 1;
+        var moving = 1;
+        while (moving == 1) {
+            if (j < 0) { moving = 0; }
+            else {
+                if (load64(arr + j * 8) > v) {
+                    store64(arr + (j + 1) * 8, load64(arr + j * 8));
+                    j = j - 1;
+                } else { moving = 0; }
+            }
+        }
+        store64(arr + (j + 1) * 8, v);
+        i = i + 1;
+    }
+    return load64(arr + (n / 2) * 8);
+}
+
+# Nanoseconds for one shared-secret derivation on curve c.
+fn _time_shared(c, priv, peer, out): i64 {
+    var w = _w(c);
+    var t0 = clock_now_ns();
+    _shared(c, priv, peer, 1 + 2 * w, out);
+    return clock_now_ns() - t0;
+}
+
+# Medians over interleaved rounds for four private scalars of very different Hamming
+# weight and bit length: 1, 2^k (a single high bit), 0x55..55 (half weight), n - 1.
+# Asserts every median lies within [0.75, 1.33] of the n - 1 median (wide on purpose: CI
+# runners are noisy, and a leak of the kind this guards against is a factor, not percent). A ladder or window
+# that skipped work on zero bits, or arithmetic that branched on operand values, shows up
+# here as a gap of several times that (the 3.13.0 ladder ran k = 1 in < 1% of k = n - 1).
+fn _timing(c, d1, dhi, dhalf, dmax, peer, label): i64 {
+    var w = _w(c);
+    var z = alloc(w);
+    var t = alloc(4 * 8 * 16);
+    _time_shared(c, dmax, peer, z);
+    var R = 9;
+    var r = 0;
+    while (r < R) {
+        var o = 0;
+        while (o < 4) {
+            var which = (r + o) % 4;
+            if (which == 0) { store64(t + (0 * 16 + r) * 8, _time_shared(c, d1, peer, z)); }
+            if (which == 1) { store64(t + (1 * 16 + r) * 8, _time_shared(c, dhi, peer, z)); }
+            if (which == 2) { store64(t + (2 * 16 + r) * 8, _time_shared(c, dhalf, peer, z)); }
+            if (which == 3) { store64(t + (3 * 16 + r) * 8, _time_shared(c, dmax, peer, z)); }
+            o = o + 1;
+        }
+        r = r + 1;
+    }
+    var m1 = _median(t + 0 * 128, R);
+    var mh = _median(t + 1 * 128, R);
+    var m5 = _median(t + 2 * 128, R);
+    var mx = _median(t + 3 * 128, R);
+    sys_write(1, "    ", 4);
+    sys_write(1, label, strlen(label));
+    sys_write(1, " medians ns: d=1 ", 17);
+    fmt_int(m1);
+    sys_write(1, "  d=2^k ", 8);
+    fmt_int(mh);
+    sys_write(1, "  d=0x55.. ", 11);
+    fmt_int(m5);
+    sys_write(1, "  d=n-1 ", 8);
+    fmt_int(mx);
+    sys_write(1, "\n", 1);
+    assert_gte(m1 * 4, mx * 3, "d=1 median >= 0.75x d=n-1");
+    assert_lte(m1 * 3, mx * 4, "d=1 median <= 1.33x d=n-1");
+    assert_gte(mh * 4, mx * 3, "d=2^k median >= 0.75x d=n-1");
+    assert_lte(mh * 3, mx * 4, "d=2^k median <= 1.33x d=n-1");
+    assert_gte(m5 * 4, mx * 3, "d=0x55.. median >= 0.75x d=n-1");
+    assert_lte(m5 * 3, mx * 4, "d=0x55.. median <= 1.33x d=n-1");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    crypto_tls_main_init();
+
+    # ============================================================
+    test_group("RFC 5903 §8.1 — P-256 ECDH");
+    _kat(256, "c88f01f510d9ac3f70a292daa2316de544e9aab8afe84049c62a9c57862d1433",
+      "d12dfb5289c8d4f81208b70270398c342296970a0bccb74c736fc7554494bf63",
+      "56fbf3ca366cc23e8157854c13c58d6aac23f046ada30f8353e74f33039872ab",
+      "d6840f6b42f6edafd13116e0e12565202fef8e9ece7dce03812464d04b9442de",
+      "dad0b65394221cf9b051e1feca5787d098dfe637fc90b9ef945d0c3772581180",
+      "5271a0461cdb8252d61f1c456fa3e59ab1f45b33accf5f58389e0577b8990bb3", "rfc5903 P-256: i with g^r, and g^i");
+    _kat(256, "c6ef9c5d78ae012a011164acb397ce2088685d8f06bf9be0b283ab46476bee53",
+      "dad0b65394221cf9b051e1feca5787d098dfe637fc90b9ef945d0c3772581180",
+      "5271a0461cdb8252d61f1c456fa3e59ab1f45b33accf5f58389e0577b8990bb3",
+      "d6840f6b42f6edafd13116e0e12565202fef8e9ece7dce03812464d04b9442de",
+      "d12dfb5289c8d4f81208b70270398c342296970a0bccb74c736fc7554494bf63",
+      "56fbf3ca366cc23e8157854c13c58d6aac23f046ada30f8353e74f33039872ab", "rfc5903 P-256: r with g^i, and g^r");
+
+    # ============================================================
+    test_group("RFC 5903 §8.2 — P-384 ECDH");
+    _kat(384, "099f3c7034d4a2c699884d73a375a67f7624ef7c6b3c0f160647b67414dce655e35b538041e649ee3faef896783ab194",
+      "e558dbef53eecde3d3fccfc1aea08a89a987475d12fd950d83cfa41732bc509d0d1ac43a0336def96fda41d0774a3571",
+      "dcfbec7aacf3196472169e838430367f66eebe3c6e70c416dd5f0c68759dd1fff83fa40142209dff5eaad96db9e6386c",
+      "11187331c279962d93d604243fd592cb9d0a926f422e47187521287e7156c5c4d603135569b9e9d09cf5d4a270f59746",
+      "667842d7d180ac2cde6f74f37551f55755c7645c20ef73e31634fe72b4c55ee6de3ac808acb4bdb4c88732aee95f41aa",
+      "9482ed1fc0eeb9cafc4984625ccfc23f65032149e0e144ada024181535a0f38eeb9fcff3c2c947dae69b4c634573a81c", "rfc5903 P-384: i with g^r, and g^i");
+    _kat(384, "41cb0779b4bdb85d47846725fbec3c9430fab46cc8dc5060855cc9bda0aa2942e0308312916b8ed2960e4bd55a7448fc",
+      "667842d7d180ac2cde6f74f37551f55755c7645c20ef73e31634fe72b4c55ee6de3ac808acb4bdb4c88732aee95f41aa",
+      "9482ed1fc0eeb9cafc4984625ccfc23f65032149e0e144ada024181535a0f38eeb9fcff3c2c947dae69b4c634573a81c",
+      "11187331c279962d93d604243fd592cb9d0a926f422e47187521287e7156c5c4d603135569b9e9d09cf5d4a270f59746",
+      "e558dbef53eecde3d3fccfc1aea08a89a987475d12fd950d83cfa41732bc509d0d1ac43a0336def96fda41d0774a3571",
+      "dcfbec7aacf3196472169e838430367f66eebe3c6e70c416dd5f0c68759dd1fff83fa40142209dff5eaad96db9e6386c", "rfc5903 P-384: r with g^i, and g^r");
+
+    # ============================================================
+    test_group("NIST CAVP KAS ECC CDH primitive — P-256 (25 vectors)");
+    _cavp256();
+    test_group("NIST CAVP KAS ECC CDH primitive — P-384 (25 vectors)");
+    _cavp384();
+
+    # ============================================================
+    test_group("OpenSSL 3.6.5 cross-check — keygen and derive agree with pkeyutl -derive");
+    _kg(256, "c09b227a7ad2263557944cf9729c29a4ca63a1ec3e7225ee382d0f13ae0beb907a8e326b3eca6635",
+      "d266732d372ee0f5fcdf0f19d94a2b0b41a288f8e4fe1513524de2e481756486",
+      "04f3c03293f2aba4f998aac985974faedb88e7578fb7fc2288044897227a6b11f3269eb440b35472984192b292675024024f93ae9a268cac43e3f5e297886fb558", "openssl P-256 #0 keygen");
+    _kat(256, "d266732d372ee0f5fcdf0f19d94a2b0b41a288f8e4fe1513524de2e481756486",
+      "baa2d8eee97581e05b962cca66c0f20eda4468811954908eb370ed8fa165dc7e",
+      "215cb5ef97c3d4f13d046165888d733342c2babf5aff11e1eceb1c2df446f7c2",
+      "1664f8397a3564ae9abf8ea9cf83cb74dda784180ae6fe9aac8ddfba2feb057c", "", "", "openssl P-256 #0 derive");
+    _kg(256, "e6ddfd9af76c634a8f20d41ba487b6f8a26c15b65e92c2255a7450cebcfc6b6b6e53d47f80fbb4c5",
+      "868d3764c63d5613deeebf908736164de6067996e3aac4f427e5befa652d5436",
+      "0471d463e88df7309c24af0d25f2e7fc4b1c13be3d8da0ba4cc199dffe600a9fb0e73b97535e306336be9c7f46f5ecd18d8898799056f5536cb7f78582e6e07483", "openssl P-256 #1 keygen");
+    _kat(256, "868d3764c63d5613deeebf908736164de6067996e3aac4f427e5befa652d5436",
+      "bf6c8165fd58076d32a24955ed68ab266f85c3fe7878778d22d9c74373ae0c44",
+      "3d1e69be29cbc439cb13a123f9559efc4ff4bbc16f6eca17d1ec13739bb6d082",
+      "424e224488b189b71191ab60528940808b2443caf4d98947c5cdcf0a90ecd7ff", "", "", "openssl P-256 #1 derive");
+    _kg(256, "10a806cedf8eb9d2eb0104bd408af651409b6912a63b908e4d55ca618a6e9e9d9aeb68102f469a39",
+      "ca8fbe8f505435b044f9039c1d0c74403d9446f5ef2910b6821a8fe03a1022ea",
+      "04098aea04d72786c320a7a8196721943712b23ad9213dd02156207f397d506266bf6f42d02ad78bac4a3dd2838d301a8d7678f6804b865c7fab1ff13c8a132308", "openssl P-256 #2 keygen");
+    _kat(256, "ca8fbe8f505435b044f9039c1d0c74403d9446f5ef2910b6821a8fe03a1022ea",
+      "b092d8cc430485ad7f224ac81be52a2c82b1b733f625ad1787410a8dd425d9a2",
+      "fdc09b6b9665c5504ba4f6267efd097552e92d4fd57570f123fba7b81fe622fe",
+      "b3ea04d86efe4f78a4219c5b4d126439d4fe5263c795c329c10d2d7ddc9c82ea", "", "", "openssl P-256 #2 derive");
+    _kg(384, "07af17ecdcc6c30611f79ffb244cfbbe648f3f0f0a6bde54232ecfee01d515be8424ed074b19df5a051682be822d97cc2768f5ba990af633",
+      "11f79ffb244cfbbe648f3f0f0a6bde5424e1d137eda21ebe045185dd534cf9dc92467ff0263d7e3b6286c00b97ae2788",
+      "042a68891cdd9047829bdd44610a29e6651a44008f445e7cec89c49b824147b7c3c7aaa3d82252b823e4de0f3a8e8522f83e36c8af4b66523752e5774e7001469426a4b06c3dfbdce0c81707d9cbc2f1c503ec0502838a6eb81993fdfb59bebb44", "openssl P-384 #0 keygen");
+    _kat(384, "11f79ffb244cfbbe648f3f0f0a6bde5424e1d137eda21ebe045185dd534cf9dc92467ff0263d7e3b6286c00b97ae2788",
+      "2f5beca35bda397fbcb6e69c38eb1856a7296ffa9ccaf14ba611c4734f6f372e6b102c563f58e49729878f7e3110c458",
+      "fdd0858cf93c466faf083ce6454eec9425ad4b2f8cc16395b7551e447948cbdaf40f02014c31435906046e864f572c65",
+      "1408d70be6784e74b8a511ed739427f2798e980edf407a5e27f4b6615c9bff24c3618b93685f466aee0c587e8ad7b3b5", "", "", "openssl P-384 #0 derive");
+    _kg(384, "9f91d4ba27915e2d9292556e0067961334b47c869ecf12e5e6d34fea4eafc8a3cfc1a1eaf9ee9623d8ef47e2675eaeae56455d981b3766d5",
+      "9292556e0067961334b47c869ecf12e60a1ce2929fd04601c4ba30a9b41028e08f730240c8d697e3ff9b24d0dfc541cc",
+      "045b60d56b9b40e414360bccdacb4e5de62b1a41ce4d29fb4ce3a4b2db6e6fef379935759ed9743c688b49c529a92a7460807a478e667298d4e85950a5da82cfceb916b8425213a197c3195a89e234670bdae576409c69d275698e14e92e81677a", "openssl P-384 #1 keygen");
+    _kat(384, "9292556e0067961334b47c869ecf12e60a1ce2929fd04601c4ba30a9b41028e08f730240c8d697e3ff9b24d0dfc541cc",
+      "ce759762e91726b9d7450778efb4abdb11e0a79822df1958d8a6fd553ce6945f4e91f157ffc5d0eedaae7fa1c9b4c6cd",
+      "5b0fac773688386503ac8102ba0de66691db6e5420b6d897bd35e1aeb9a54aa85e21ae9528a4f9a31e7f04ab9b80fc68",
+      "b47e788137578a133729adad74ff64ef24b720bb3193ac2b7af29ecfde8a503e7115995d13743ff142afd6c2b49b0d91", "", "", "openssl P-384 #1 derive");
+    _kg(384, "f209592fc1e085c7a304b3940cd48fc2fde275f935890afd1d9888dbff60ee5419ccac11d2dc66c7b3b5bba8fddc1af9e1ffc9f5b87161ee",
+      "a304b3940cd48fc2fde275f935890afd531ebad276a58f85f64cd2cf8cc2eebc6f98ad350ed75faceed27cdce6e5f051",
+      "04d5b4881a06fa6d61b9356adc658cc3247881fc8c18ff66aa14e4a9d60e3a7c9a6ef13a27afcb8c2686261b47afd2d6eec4eb870d4550ca52eebb5561885a05de88b9775d69e7b29473506f2a91a90ba87d5ec640b87044dd9e83fecc6989804f", "openssl P-384 #2 keygen");
+    _kat(384, "a304b3940cd48fc2fde275f935890afd531ebad276a58f85f64cd2cf8cc2eebc6f98ad350ed75faceed27cdce6e5f051",
+      "0a09dfa2f1c1fcfd06c6252d8e86d533801844b77745d5634e1eece5d517e3d52643d00963c73d44888065346c8205f2",
+      "344daa292ac00c244cddcf6f87792abe58d49a556d643f910dce05c29940202148f98ca2eb970b663bdc7cc8fa602a63",
+      "cc05f94c4c2ff28d6716b367f8964c56271dc300e62934be0f6aad81307c27f38f6dade0857d2f75d94eaccd670a5887", "", "", "openssl P-384 #2 derive");
+
+    # ============================================================
+    test_group("keygen: FIPS 186-5 A.2.1 reduction edges, determinism, length");
+    _kg(256, "00000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "0000000000000000000000000000000000000000000000000000000000000001",
+      "046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5", "P-256 all-zero input -> d = 1, pub = G");
+    _kg(256, "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "fffffffe00000001431905529c0166cd22159165b6faae71f756a572fc632550",
+      "04a304c2b24d8bfb8fc0dcdd2ac0d47ae5ad279034c5418ac606bb232abf3984d74e7dfc62cd421952c2c39fe28d7147b95754cc65c875be614230f1ae5f1b45bc", "P-256 all-0xFF input");
+    _kg(256, "0000000000000000ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc63254f",
+      "ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632550",
+      "046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296b01cbd1c01e58065711814b583f061e9d431cca994cea1313449bf97c840ae0a", "P-256 c = n - 2 -> d = n - 1");
+    _kg(256, "0000000000000000ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632550",
+      "0000000000000000000000000000000000000000000000000000000000000001",
+      "046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5", "P-256 c = n - 1 -> d = 1 (wraps)");
+    _kg(256, "ffffffffffffffff00000001fffffffebce6faad63fe9932ddea6e9a4905518e08a95a8d039cdaaf",
+      "ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632550",
+      "046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296b01cbd1c01e58065711814b583f061e9d431cca994cea1313449bf97c840ae0a", "P-256 largest c = q(n-1) + n-2 -> d = n - 1");
+    _kg(384, "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001",
+      "04aa87ca22be8b05378eb1c71ef320ad746e1d3b628ba79b9859f741e082542a385502f25dbf55296c3a545e3872760ab73617de4a96262c6f5d9e98bf9292dc29f8f41dbd289a147ce9da3113b5f0b8c00a60b1ce1d7e819d7a431d7c90ea0e5f", "P-384 all-zero input -> d = 1, pub = G");
+    _kg(384, "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "00000000000000000000000000000000389cb27e0bc8d220a7e5f24db74f58851313e695333ad68e0000000000000000",
+      "04ae02daa966a5bb790b229dc4712c54ce008cc11f891160598b08265d2e1463a6fb89490928b9103743abf8e1c572504422ef91c321dcd302e67421ff8d7a159e31a819f16ce8346969c1f900cf18e3761fad93345978638fc3a2dfcfd85eae9a", "P-384 all-0xFF input");
+    _kg(384, "0000000000000000ffffffffffffffffffffffffffffffffffffffffffffffffc7634d81f4372ddf581a0db248b0a77aecec196accc52971",
+      "ffffffffffffffffffffffffffffffffffffffffffffffffc7634d81f4372ddf581a0db248b0a77aecec196accc52972",
+      "04aa87ca22be8b05378eb1c71ef320ad746e1d3b628ba79b9859f741e082542a385502f25dbf55296c3a545e3872760ab7c9e821b569d9d390a26167406d6d23d6070be242d765eb831625ceec4a0f473ef59f4e30e2817e6285bce2846f15f1a0", "P-384 c = n - 2 -> d = n - 1");
+    _kg(384, "0000000000000000ffffffffffffffffffffffffffffffffffffffffffffffffc7634d81f4372ddf581a0db248b0a77aecec196accc52972",
+      "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001",
+      "04aa87ca22be8b05378eb1c71ef320ad746e1d3b628ba79b9859f741e082542a385502f25dbf55296c3a545e3872760ab73617de4a96262c6f5d9e98bf9292dc29f8f41dbd289a147ce9da3113b5f0b8c00a60b1ce1d7e819d7a431d7c90ea0e5f", "P-384 c = n - 1 -> d = 1 (wraps)");
+    _kg(384, "ffffffffffffffffffffffffffffffffffffffffffffffffc7634d81f4372ddf581a0db248b0a77aecec196accc52971ffffffffffffffff",
+      "ffffffffffffffffffffffffffffffffffffffffffffffffc7634d81f4372ddf581a0db248b0a77aecec196accc52972",
+      "04aa87ca22be8b05378eb1c71ef320ad746e1d3b628ba79b9859f741e082542a385502f25dbf55296c3a545e3872760ab7c9e821b569d9d390a26167406d6d23d6070be242d765eb831625ceec4a0f473ef59f4e30e2817e6285bce2846f15f1a0", "P-384 largest c = q(n-1) + n-2 -> d = n - 1");
+
+    var rk = alloc(64);
+    var i = 0;
+    while (i < 64) { store8(rk + i, (i * 37 + 11) & 0xFF); i = i + 1; }
+    var pa = alloc(48); var qa = alloc(97); var pb = alloc(48); var qb = alloc(97);
+    var c2 = 256;
+    while (c2 <= 384) {
+        var w2 = _w(c2);
+        assert_eq(_keygen(c2, rk, w2 + 8, pa, qa), 0, "keygen rc 0");
+        assert_eq(_keygen(c2, rk, w2 + 8, pb, qb), 0, "keygen rc 0 (again)");
+        assert_eq(memeq(pa, pb, w2), 1, "same input -> same private key");
+        assert_eq(memeq(qa, qb, 1 + 2 * w2), 1, "same input -> same public key");
+        assert_eq(_keygen(c2, rk, 64, pb, qb), 0, "longer input accepted");
+        assert_eq(memeq(pa, pb, w2), 1, "only the first len(n)+8 bytes are used");
+        memset(pb, 0xAA, 48); memset(qb, 0xAA, 97);
+        assert_eq(_keygen(c2, rk, w2 + 7, pb, qb), 0 - 1, "one byte short -> -1");
+        var acc = 0;
+        var j = 0;
+        while (j < w2) { acc = acc | (load8(pb + j) & 0xFF); j = j + 1; }
+        j = 0;
+        while (j < 1 + 2 * w2) { acc = acc | (load8(qb + j) & 0xFF); j = j + 1; }
+        assert_eq(acc, 0, "short input zeroes both outputs");
+        assert_eq(_keygen(c2, rk, 0, pb, qb), 0 - 1, "empty input -> -1");
+        c2 = c2 + 128;
+    }
+
+    # Key agreement both ways, and 16 random inputs: d in [1, n-1], public key valid.
+    var seed[8];
+    var dg[64];
+    var za = alloc(48); var zb = alloc(48);
+    c2 = 256;
+    while (c2 <= 384) {
+        var w3 = _w(c2);
+        var ncnt = 0; var vbad = 0; var abad = 0;
+        var nn = _p256_n;
+        if (c2 == 384) { nn = _p384_n; }
+        var ri = 0;
+        while (ri < 16) {
+            store64(&seed, 0xecd40000 + ri * 7 + c2);
+            sha512(&seed, 8, &dg);
+            _keygen(c2, &dg, w3 + 8, pa, qa);
+            store64(&seed, 0xecd48000 + ri * 7 + c2);
+            sha512(&seed, 8, &dg);
+            _keygen(c2, &dg, w3 + 8, pb, qb);
+            var dl[48];
+            _ect_load_be(&dl, pa, w3 / 8);
+            if ((_ect_lt(&dl, nn, w3 / 8) & (1 ^ _ect_is_zero(&dl, w3 / 8))) == 1) { ncnt = ncnt + 1; }
+            # each public key passes the peer validation of the other side's derive
+            if (_shared(c2, pa, qb, 1 + 2 * w3, za) != 0) { vbad = vbad + 1; }
+            if (_shared(c2, pb, qa, 1 + 2 * w3, zb) != 0) { vbad = vbad + 1; }
+            if (memeq(za, zb, w3) == 0) { abad = abad + 1; }
+            ri = ri + 1;
+        }
+        assert_eq(ncnt, 16, "16 random keygens: every d in [1, n-1]");
+        assert_eq(vbad, 0, "16 random keygens: every public key validates");
+        assert_eq(abad, 0, "16 random pairs: shared(da, Qb) == shared(db, Qa)");
+        c2 = c2 + 128;
+    }
+
+    # ============================================================
+    test_group("P-256 peer-key validation — every refusal zeroes the output");
+    var d256 = _h("c88f01f510d9ac3f70a292daa2316de544e9aab8afe84049c62a9c57862d1433");
+    var good256 = _h("04d12dfb5289c8d4f81208b70270398c342296970a0bccb74c736fc7554494bf6356fbf3ca366cc23e8157854c13c58d6aac23f046ada30f8353e74f33039872ab");
+    var bad256 = alloc(1 + 2 * 32 + 2);
+    var z256 = alloc(32);
+    assert_eq(_shared(256, d256, good256, 65, z256), 0, "P-256 the unmodified key is accepted");
+    _reject(256, d256, good256, 64, "P-256 length 2w (no prefix byte)");
+    _reject(256, d256, good256, 66, "P-256 length 2w + 2 (trailing byte)");
+    _reject(256, d256, good256, 33, "P-256 length 1 + w (compressed size)");
+    _reject(256, d256, good256, 1, "P-256 length 1");
+    _reject(256, d256, good256, 0, "P-256 length 0");
+    var zero1_256[1]; store8(&zero1_256, 0);
+    _reject(256, d256, &zero1_256, 1, "P-256 0x00 (SEC 1 point at infinity)");
+    memcpy(bad256, good256, 65);
+    store8(bad256, 0x02); _reject(256, d256, bad256, 65, "P-256 prefix 0x02 (compressed)");
+    store8(bad256, 0x03); _reject(256, d256, bad256, 65, "P-256 prefix 0x03 (compressed)");
+    store8(bad256, 0x06); _reject(256, d256, bad256, 65, "P-256 prefix 0x06 (hybrid)");
+    store8(bad256, 0x07); _reject(256, d256, bad256, 65, "P-256 prefix 0x07 (hybrid)");
+    store8(bad256, 0x00); _reject(256, d256, bad256, 65, "P-256 prefix 0x00");
+    store8(bad256, 0x05); _reject(256, d256, bad256, 65, "P-256 prefix 0x05");
+    _reject(256, d256, _h("04d12dfb5289c8d4f81208b70270398c342296970a0bccb74c736fc7554494bf6356fbf3ca366cc23e8157854c13c58d6aac23f046ada30f8353e74f33039872aa"), 65, "P-256 off-curve (y low bit flipped)");
+    _reject(256, d256, _h("0400000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"), 65, "P-256 (0, 0)");
+    _reject(256, d256, _h("04ffffffff00000001000000000000000000000000ffffffffffffffffffffffff56fbf3ca366cc23e8157854c13c58d6aac23f046ada30f8353e74f33039872ab"), 65, "P-256 x = p");
+    _reject(256, d256, _h("04ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff56fbf3ca366cc23e8157854c13c58d6aac23f046ada30f8353e74f33039872ab"), 65, "P-256 x = 2^bits - 1");
+    _reject(256, d256, _h("04d12dfb5289c8d4f81208b70270398c342296970a0bccb74c736fc7554494bf63ffffffff00000001000000000000000000000000ffffffffffffffffffffffff"), 65, "P-256 y = p");
+    _reject(256, d256, _h("04d12dfb5289c8d4f81208b70270398c342296970a0bccb74c736fc7554494bf63ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"), 65, "P-256 y = 2^bits - 1");
+    # (0, y0) is a point on the curve; its non-canonical encoding x = 0 + p must not be
+    # reduced into it.
+    _reject(256, d256, _h("04ffffffff00000001000000000000000000000000ffffffffffffffffffffffff66485c780e2f83d72433bd5d84a06bb6541c2af31dae871728bf856a174f93f4"), 65, "P-256 x = p encodes x = 0 non-canonically");
+    _reject(256, d256, _h("040000000000000000000000000000000000000000000000000000000000000000ffffffff00000001000000000000000000000000ffffffffffffffffffffffff"), 65, "P-256 y >= p with x = 0");
+
+    test_group("P-256 private-scalar range — d must lie in [1, n - 1]");
+    _reject(256, _h("0000000000000000000000000000000000000000000000000000000000000000"), good256, 65, "P-256 d = 0");
+    _reject(256, _h("ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551"), good256, 65, "P-256 d = n");
+    _reject(256, _h("ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632552"), good256, 65, "P-256 d = n + 1");
+    _reject(256, _h("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"), good256, 65, "P-256 d = 2^bits - 1");
+    _kat(256, "0000000000000000000000000000000000000000000000000000000000000001", "d12dfb5289c8d4f81208b70270398c342296970a0bccb74c736fc7554494bf63", "56fbf3ca366cc23e8157854c13c58d6aac23f046ada30f8353e74f33039872ab", "d12dfb5289c8d4f81208b70270398c342296970a0bccb74c736fc7554494bf63", "", "", "P-256 d = 1 -> x(Q)");
+    _kat(256, "ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632550", "d12dfb5289c8d4f81208b70270398c342296970a0bccb74c736fc7554494bf63", "56fbf3ca366cc23e8157854c13c58d6aac23f046ada30f8353e74f33039872ab", "d12dfb5289c8d4f81208b70270398c342296970a0bccb74c736fc7554494bf63", "", "", "P-256 d = n - 1 -> x(-Q) = x(Q)");
+    _kat(256, "0000000000000000000000000000000000000000000000000000000000000002", "d12dfb5289c8d4f81208b70270398c342296970a0bccb74c736fc7554494bf63", "56fbf3ca366cc23e8157854c13c58d6aac23f046ada30f8353e74f33039872ab", "f02a03c2c961113c79d189f4ba4b114a0ab30fb6da7fe0f55e6337b98dbf250f", "", "", "P-256 d = 2 -> x(2Q)");
+
+    test_group("P-256 valid edge points");
+    _kat(256, "c88f01f510d9ac3f70a292daa2316de544e9aab8afe84049c62a9c57862d1433", "0000000000000000000000000000000000000000000000000000000000000000", "66485c780e2f83d72433bd5d84a06bb6541c2af31dae871728bf856a174f93f4", "1b2b6499613548dc171177ed60c6031caf220057e9c762dcb01da4d03b94a615", "", "", "P-256 the point with x = 0 is accepted");
+    _kat(256, "c88f01f510d9ac3f70a292daa2316de544e9aab8afe84049c62a9c57862d1433", "d12dfb5289c8d4f81208b70270398c342296970a0bccb74c736fc7554494bf63", "a9040c34c9933dc27ea87ab3ec3a729553dc0fba525cf07cac18b0ccfc678d54", "d6840f6b42f6edafd13116e0e12565202fef8e9ece7dce03812464d04b9442de", "", "", "P-256 -Q gives the same shared secret");
+
+    # ============================================================
+    test_group("P-384 peer-key validation — every refusal zeroes the output");
+    var d384 = _h("099f3c7034d4a2c699884d73a375a67f7624ef7c6b3c0f160647b67414dce655e35b538041e649ee3faef896783ab194");
+    var good384 = _h("04e558dbef53eecde3d3fccfc1aea08a89a987475d12fd950d83cfa41732bc509d0d1ac43a0336def96fda41d0774a3571dcfbec7aacf3196472169e838430367f66eebe3c6e70c416dd5f0c68759dd1fff83fa40142209dff5eaad96db9e6386c");
+    var bad384 = alloc(1 + 2 * 48 + 2);
+    var z384 = alloc(48);
+    assert_eq(_shared(384, d384, good384, 97, z384), 0, "P-384 the unmodified key is accepted");
+    _reject(384, d384, good384, 96, "P-384 length 2w (no prefix byte)");
+    _reject(384, d384, good384, 98, "P-384 length 2w + 2 (trailing byte)");
+    _reject(384, d384, good384, 49, "P-384 length 1 + w (compressed size)");
+    _reject(384, d384, good384, 1, "P-384 length 1");
+    _reject(384, d384, good384, 0, "P-384 length 0");
+    var zero1_384[1]; store8(&zero1_384, 0);
+    _reject(384, d384, &zero1_384, 1, "P-384 0x00 (SEC 1 point at infinity)");
+    memcpy(bad384, good384, 97);
+    store8(bad384, 0x02); _reject(384, d384, bad384, 97, "P-384 prefix 0x02 (compressed)");
+    store8(bad384, 0x03); _reject(384, d384, bad384, 97, "P-384 prefix 0x03 (compressed)");
+    store8(bad384, 0x06); _reject(384, d384, bad384, 97, "P-384 prefix 0x06 (hybrid)");
+    store8(bad384, 0x07); _reject(384, d384, bad384, 97, "P-384 prefix 0x07 (hybrid)");
+    store8(bad384, 0x00); _reject(384, d384, bad384, 97, "P-384 prefix 0x00");
+    store8(bad384, 0x05); _reject(384, d384, bad384, 97, "P-384 prefix 0x05");
+    _reject(384, d384, _h("04e558dbef53eecde3d3fccfc1aea08a89a987475d12fd950d83cfa41732bc509d0d1ac43a0336def96fda41d0774a3571dcfbec7aacf3196472169e838430367f66eebe3c6e70c416dd5f0c68759dd1fff83fa40142209dff5eaad96db9e6386d"), 97, "P-384 off-curve (y low bit flipped)");
+    _reject(384, d384, _h("04000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"), 97, "P-384 (0, 0)");
+    _reject(384, d384, _h("04fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffeffffffff0000000000000000ffffffffdcfbec7aacf3196472169e838430367f66eebe3c6e70c416dd5f0c68759dd1fff83fa40142209dff5eaad96db9e6386c"), 97, "P-384 x = p");
+    _reject(384, d384, _h("04ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffdcfbec7aacf3196472169e838430367f66eebe3c6e70c416dd5f0c68759dd1fff83fa40142209dff5eaad96db9e6386c"), 97, "P-384 x = 2^bits - 1");
+    _reject(384, d384, _h("04e558dbef53eecde3d3fccfc1aea08a89a987475d12fd950d83cfa41732bc509d0d1ac43a0336def96fda41d0774a3571fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffeffffffff0000000000000000ffffffff"), 97, "P-384 y = p");
+    _reject(384, d384, _h("04e558dbef53eecde3d3fccfc1aea08a89a987475d12fd950d83cfa41732bc509d0d1ac43a0336def96fda41d0774a3571ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"), 97, "P-384 y = 2^bits - 1");
+    # (0, y0) is a point on the curve; its non-canonical encoding x = 0 + p must not be
+    # reduced into it.
+    _reject(384, d384, _h("04fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffeffffffff0000000000000000ffffffffc306610fb0ae5a159cf45c06069f22a6c5eb3641c602d42dea2c4b4f75550793406d80d2b91ad54f9048bd487af1ade1"), 97, "P-384 x = p encodes x = 0 non-canonically");
+    _reject(384, d384, _h("04000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffeffffffff0000000000000000ffffffff"), 97, "P-384 y >= p with x = 0");
+
+    test_group("P-384 private-scalar range — d must lie in [1, n - 1]");
+    _reject(384, _h("000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"), good384, 97, "P-384 d = 0");
+    _reject(384, _h("ffffffffffffffffffffffffffffffffffffffffffffffffc7634d81f4372ddf581a0db248b0a77aecec196accc52973"), good384, 97, "P-384 d = n");
+    _reject(384, _h("ffffffffffffffffffffffffffffffffffffffffffffffffc7634d81f4372ddf581a0db248b0a77aecec196accc52974"), good384, 97, "P-384 d = n + 1");
+    _reject(384, _h("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"), good384, 97, "P-384 d = 2^bits - 1");
+    _kat(384, "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001", "e558dbef53eecde3d3fccfc1aea08a89a987475d12fd950d83cfa41732bc509d0d1ac43a0336def96fda41d0774a3571", "dcfbec7aacf3196472169e838430367f66eebe3c6e70c416dd5f0c68759dd1fff83fa40142209dff5eaad96db9e6386c", "e558dbef53eecde3d3fccfc1aea08a89a987475d12fd950d83cfa41732bc509d0d1ac43a0336def96fda41d0774a3571", "", "", "P-384 d = 1 -> x(Q)");
+    _kat(384, "ffffffffffffffffffffffffffffffffffffffffffffffffc7634d81f4372ddf581a0db248b0a77aecec196accc52972", "e558dbef53eecde3d3fccfc1aea08a89a987475d12fd950d83cfa41732bc509d0d1ac43a0336def96fda41d0774a3571", "dcfbec7aacf3196472169e838430367f66eebe3c6e70c416dd5f0c68759dd1fff83fa40142209dff5eaad96db9e6386c", "e558dbef53eecde3d3fccfc1aea08a89a987475d12fd950d83cfa41732bc509d0d1ac43a0336def96fda41d0774a3571", "", "", "P-384 d = n - 1 -> x(-Q) = x(Q)");
+    _kat(384, "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002", "e558dbef53eecde3d3fccfc1aea08a89a987475d12fd950d83cfa41732bc509d0d1ac43a0336def96fda41d0774a3571", "dcfbec7aacf3196472169e838430367f66eebe3c6e70c416dd5f0c68759dd1fff83fa40142209dff5eaad96db9e6386c", "adb2c75f7184f6f1a61177d7afcb91e134d2ebff2da6154a7e96d09c9f3d3e0ae5bf5a2753cb475296f4d2136d55cefa", "", "", "P-384 d = 2 -> x(2Q)");
+
+    test_group("P-384 valid edge points");
+    _kat(384, "099f3c7034d4a2c699884d73a375a67f7624ef7c6b3c0f160647b67414dce655e35b538041e649ee3faef896783ab194", "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000", "c306610fb0ae5a159cf45c06069f22a6c5eb3641c602d42dea2c4b4f75550793406d80d2b91ad54f9048bd487af1ade1", "3b5e07bd36946a71013672eebc0af34d682c802782540a381f2d379c8d0a2a203fcab95d3190572c03de25d99005d05c", "", "", "P-384 the point with x = 0 is accepted");
+    _kat(384, "099f3c7034d4a2c699884d73a375a67f7624ef7c6b3c0f160647b67414dce655e35b538041e649ee3faef896783ab194", "e558dbef53eecde3d3fccfc1aea08a89a987475d12fd950d83cfa41732bc509d0d1ac43a0336def96fda41d0774a3571", "23041385530ce69b8de9617c7bcfc980991141c3918f3be922a0f3978a622dff07c05bfdbddf6200a15526934619c793", "11187331c279962d93d604243fd592cb9d0a926f422e47187521287e7156c5c4d603135569b9e9d09cf5d4a270f59746", "", "", "P-384 -Q gives the same shared secret");
+
+    # ============================================================
+    test_group("zeroisation — no limb of the private key left in the dead stack");
+    var dz256 = _h("1122334455667788a1b2c3d4e5f60718293a4b5c6d7e8f900fedcba987654321");
+    var dz384 = _h("1122334455667788a1b2c3d4e5f60718293a4b5c6d7e8f900fedcba98765432113579bdf02468ace0f1e2d3c4b5a6978");
+    assert_eq(_residue_after_shared(256, dz256, good256), 0, "P-256 shared: no private-key limb in 8 KB of dead stack");
+    assert_eq(_residue_after_shared(384, dz384, good384), 0, "P-384 shared: no private-key limb in 8 KB of dead stack");
+    assert_eq(_residue_after_keygen(256, rk), 0, "P-256 keygen: no private-key limb in 8 KB of dead stack");
+    assert_eq(_residue_after_keygen(384, rk), 0, "P-384 keygen: no private-key limb in 8 KB of dead stack");
+
+    # ============================================================
+    test_group("concurrent callers — 8 threads x 3 rounds == serial results");
+    var NA = 8;
+    _cc_rnd = alloc(NA * 64);
+    _cc_res = alloc(NA * 8);
+    _cc_ref = alloc(NA * 2 * 193);
+    i = 0;
+    while (i < NA) {
+        store64(&seed, 0xc0c0 + i);
+        sha512(&seed, 8, _cc_rnd + i * 64);
+        var rf = _cc_ref + i * 2 * 193;
+        ecdh_p256_keygen(_cc_rnd + i * 64, 40, rf, rf + 48);
+        ecdh_p256_shared(rf, rf + 48, 65, rf + 145);
+        rf = rf + 193;
+        ecdh_p384_keygen(_cc_rnd + i * 64, 56, rf, rf + 48);
+        ecdh_p384_shared(rf, rf + 48, 97, rf + 145);
+        i = i + 1;
+    }
+    var args = alloc(NA * 8);
+    var ths = alloc(NA * 8);
+    i = 0;
+    while (i < NA) {
+        store64(args + i * 8, i);
+        store64(ths + i * 8, thread_create(&_cc_worker, args + i * 8));
+        i = i + 1;
+    }
+    i = 0;
+    while (i < NA) { thread_join(load64(ths + i * 8)); i = i + 1; }
+    var cbad = 0;
+    i = 0;
+    while (i < NA) { cbad = cbad + load64(_cc_res + i * 8); i = i + 1; }
+    assert_eq(cbad, 0, "8 concurrent ECDH callers match the serial results");
+
+    test_group("P-256 timing smoke — shared() time independent of the private scalar");
+    _timing(256, _h("0000000000000000000000000000000000000000000000000000000000000001"), _h("4000000000000000000000000000000000000000000000000000000000000000"), _h("5555555555555555555555555555555555555555555555555555555555555555"),
+      _h("ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632550"), good256, "P-256");
+    test_group("P-384 timing smoke — shared() time independent of the private scalar");
+    _timing(384, _h("000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001"), _h("400000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"), _h("555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555"),
+      _h("ffffffffffffffffffffffffffffffffffffffffffffffffc7634d81f4372ddf581a0db248b0a77aecec196accc52972"), good384, "P-384");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+sys_exit(exit_code);
