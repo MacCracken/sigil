@@ -79,6 +79,14 @@ var _ect_b384  = 0;
 var _ect_g384  = 0;
 var _ect384_inited = 0;   # 0 / 1 building / 2 published (_sigil_once_*)
 
+# Kept names (3.13.8). Through 3.13.7 the signer's lazy init lived in ecdsa_sign.cyr behind these
+# two flags, and a consumer test snapshots them (abaco tests/test_ccy_tls.tcyr: no lazy init may
+# run in a fetch after abaco_tls_init). They are set to 2 when the engine's init for the curve
+# publishes, so that check still compiles and still sees the init it was written to catch. New
+# code reads _ect256_inited / _ect384_inited.
+var _ecs256_inited = 0;
+var _ecs384_inited = 0;
+
 # Builds a field context for the odd modulus `m` (nl LE limbs; top bit set, which holds for
 # p256, n256, p384 and n384). Init-time only, public data. Returns the 272-byte block.
 fn _ect_ctx_new(m, nl): i64 {
@@ -719,6 +727,7 @@ fn _ect256_init(): i64 {
     _ect_to_mont(_ect_g256, _p256_gx, _ect_fp256);
     _ect_to_mont(_ect_g256 + 32, _p256_gy, _ect_fp256);
     memcpy(_ect_g256 + 64, _ect_fp256 + 144, 32);
+    _ecs256_inited = 2;
     _sigil_once_publish(&_ect256_inited);
     return 0;
 }
@@ -736,6 +745,7 @@ fn _ect384_init(): i64 {
     _ect_to_mont(_ect_g384, _p384_gx, _ect_fp384);
     _ect_to_mont(_ect_g384 + 48, _p384_gy, _ect_fp384);
     memcpy(_ect_g384 + 96, _ect_fp384 + 144, 48);
+    _ecs384_inited = 2;
     _sigil_once_publish(&_ect384_inited);
     return 0;
 }

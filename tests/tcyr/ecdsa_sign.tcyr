@@ -104,6 +104,8 @@ fn main() {
     assert_eq(ct_eq_bytes(&sig256, &sig256b, 64), 1, "p256 deterministic");
     # Roundtrip verify with the RFC public key.
     assert_eq(ecdsa_p256_verify(pub256, msg_sample, 6, &sig256), 1, "p256 sample verify");
+    # The 3.13.7 init-flag name is kept and set by the engine's init (a consumer snapshot reads it).
+    assert_eq(_ecs256_inited, 2, "p256 the kept init flag _ecs256_inited is set");
 
     var sig256t[64];
     assert_eq(ecdsa_p256_sign(x256, msg_test, 4, &sig256t), 0, "p256 sign test rc=0");
@@ -149,6 +151,7 @@ fn main() {
     # so here we check the structure (SEQUENCE tag + length byte).
     var der384[112];
     var dl384 = ecdsa_p384_sign_der(x384, msg_sample, 6, &der384, 112);
+    assert_eq(_ecs384_inited, 2, "p384 the kept init flag _ecs384_inited is set");
     assert_gt(dl384, 0, "p384 sign_der length > 0");
     assert_eq(load8(&der384) & 0xFF, 0x30, "p384 DER SEQUENCE tag");
     assert_eq(load8(&der384 + 1) & 0xFF, dl384 - 2, "p384 DER length byte consistent");
