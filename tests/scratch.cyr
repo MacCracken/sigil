@@ -11,6 +11,12 @@
 # write; they ignored TMPDIR; they left their files behind; and they failed on Windows, where
 # /tmp does not exist. scripts/check.sh and batch_parallel moved off it earlier in 3.13.8.
 #
+# File operations go through lib/io.cyr's x* set (xmkdir / xunlink / xrmdir), never the bare
+# sys_* wrappers: agnos's take (path, pathlen), so a bare `sys_unlink(p)` does not even compile
+# there, and every test that included this file stopped building for agnos (3.13.8 review).
+# Removal is confirmed with is_dir, which asks the filesystem on every target (agnos's
+# sys_access is a stub that always answers -1, which would read as "gone").
+#
 # Include after the stdlib (str, vec, io, fs, random). CHANGELOG [3.13.8].
 
 include "lib/fs.cyr"
@@ -45,7 +51,7 @@ fn scratch_init(tag): i64 {
         i = i + 1;
     }
     store8(p + o + 16, 0);
-    if (sys_mkdir(p, 448) != 0) { return 0; }             # 0700; fails if it exists
+    if (xmkdir(p, 448) != 0) { return 0; }                # 0700; fails if it exists
     _scratch_dir = p;
     return p;
 }
@@ -83,12 +89,12 @@ fn _scratch_rm_tree(dir, depth): i64 {
         store8(p + dl + 1 + nl, 0);
         var ps = str_from(p);
         if (is_symlink(ps) == 1) {
-            if (sys_unlink(p) != 0) { sys_rmdir(p); }    # a Windows directory link
+            if (xunlink(p) != 0) { xrmdir(p); }          # a Windows directory link
         } elif (is_dir(ps) == 1) {
             _scratch_rm_tree(p, depth + 1);
-            sys_rmdir(p);
+            xrmdir(p);
         } else {
-            sys_unlink(p);
+            xunlink(p);
         }
         i = i + 1;
     }
@@ -100,8 +106,8 @@ fn _scratch_rm_tree(dir, depth): i64 {
 fn scratch_cleanup(): i64 {
     if (_scratch_dir == 0) { return 0; }
     _scratch_rm_tree(_scratch_dir, 0);
-    sys_rmdir(_scratch_dir);
-    if (sys_access(_scratch_dir, 0) == 0) { return 0 - 1; }
+    xrmdir(_scratch_dir);
+    if (is_dir(str_from(_scratch_dir)) == 1) { return 0 - 1; }
     _scratch_dir = 0;
     return 0;
 }

@@ -78,22 +78,24 @@ fn _rp_put(path, body, len): i64 {
     return w >= 0;
 }
 
-# Plant every path the pre-3.13.8 helpers probed, relative to the current drive's root.
+# Plant every path the pre-3.13.8 helpers probed, relative to the current drive's root. This fn
+# and _rp_unplant compile on every target, so they use lib/io.cyr's x* set: agnos's bare
+# sys_mkdir / sys_unlink / sys_rmdir take (path, pathlen).
 fn _rp_plant(): i64 {
-    sys_mkdir("/dev", 493);
-    sys_mkdir("/dev/mapper", 493);
-    sys_mkdir("/usr", 493);
-    sys_mkdir("/usr/bin", 493);
-    sys_mkdir("/sys", 493);
-    sys_mkdir("/sys/firmware", 493);
-    sys_mkdir("/sys/firmware/efi", 493);
-    sys_mkdir("/sys/firmware/efi/efivars", 493);
-    sys_mkdir("/sys/kernel", 493);
-    sys_mkdir("/sys/kernel/security", 493);
-    sys_mkdir("/sys/kernel/security/ima", 493);
-    sys_mkdir("/sys/module", 493);
-    sys_mkdir("/sys/module/dm_verity", 493);
-    sys_mkdir("/tmp", 493);
+    xmkdir("/dev", 493);
+    xmkdir("/dev/mapper", 493);
+    xmkdir("/usr", 493);
+    xmkdir("/usr/bin", 493);
+    xmkdir("/sys", 493);
+    xmkdir("/sys/firmware", 493);
+    xmkdir("/sys/firmware/efi", 493);
+    xmkdir("/sys/firmware/efi/efivars", 493);
+    xmkdir("/sys/kernel", 493);
+    xmkdir("/sys/kernel/security", 493);
+    xmkdir("/sys/kernel/security/ima", 493);
+    xmkdir("/sys/module", 493);
+    xmkdir("/sys/module/dm_verity", 493);
+    xmkdir("/tmp", 493);
     var ok = 1;
     ok = ok & _rp_put("/dev/tpmrm0", "x", 1);
     ok = ok & _rp_put("/dev/mapper/sigilrp", "x", 1);
@@ -113,27 +115,27 @@ fn _rp_plant(): i64 {
 }
 
 fn _rp_unplant(): i64 {
-    sys_unlink("/dev/tpmrm0");
-    sys_unlink("/dev/mapper/sigilrp");
-    sys_unlink("/usr/bin/mokutil");
-    sys_unlink("/sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c");
-    sys_unlink("/sys/firmware/efi/efivars/SetupMode-8be4df61-93ca-11d2-aa0d-00e098032b8c");
-    sys_unlink("/sys/kernel/security/ima/ascii_runtime_measurements");
-    sys_unlink("/sys/kernel/security/ima/policy");
-    sys_rmdir("/sys/module/dm_verity");
-    sys_rmdir("/sys/module");
-    sys_rmdir("/sys/kernel/security/ima");
-    sys_rmdir("/sys/kernel/security");
-    sys_rmdir("/sys/kernel");
-    sys_rmdir("/sys/firmware/efi/efivars");
-    sys_rmdir("/sys/firmware/efi");
-    sys_rmdir("/sys/firmware");
-    sys_rmdir("/sys");
-    sys_rmdir("/usr/bin");
-    sys_rmdir("/usr");
-    sys_rmdir("/dev/mapper");
-    sys_rmdir("/dev");
-    sys_rmdir("/tmp");
+    xunlink("/dev/tpmrm0");
+    xunlink("/dev/mapper/sigilrp");
+    xunlink("/usr/bin/mokutil");
+    xunlink("/sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c");
+    xunlink("/sys/firmware/efi/efivars/SetupMode-8be4df61-93ca-11d2-aa0d-00e098032b8c");
+    xunlink("/sys/kernel/security/ima/ascii_runtime_measurements");
+    xunlink("/sys/kernel/security/ima/policy");
+    xrmdir("/sys/module/dm_verity");
+    xrmdir("/sys/module");
+    xrmdir("/sys/kernel/security/ima");
+    xrmdir("/sys/kernel/security");
+    xrmdir("/sys/kernel");
+    xrmdir("/sys/firmware/efi/efivars");
+    xrmdir("/sys/firmware/efi");
+    xrmdir("/sys/firmware");
+    xrmdir("/sys");
+    xrmdir("/usr/bin");
+    xrmdir("/usr");
+    xrmdir("/dev/mapper");
+    xrmdir("/dev");
+    xrmdir("/tmp");
     return 0;
 }
 
@@ -193,7 +195,7 @@ fn _rp_windows(): i64 {
     assert_eq(is_err_result(l1_tag), 1, "luks_keyfile_path refuses");
     var l2_tag, l2 = luks_write_keyfile("0123456789abcdef", 16);
     assert_eq(is_err_result(l2_tag), 1, "luks_write_keyfile stages no key under \\tmp");
-    if (is_err_result(l2_tag) == 0) { sys_unlink(l2); }   # a pre-3.13.8 build wrote one: remove it
+    if (is_err_result(l2_tag) == 0) { xunlink(l2); }   # a pre-3.13.8 build wrote one: remove it
     var l3_tag, l3 = luks_close("sigilrp");
     assert_eq(is_err_result(l3_tag), 1, "luks_close refuses");
 
