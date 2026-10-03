@@ -246,8 +246,10 @@ jobs:
             name=$(basename "$f" .fcyr)
             printf "  %-25s " "$name"
             if cyrius build "$f" "build/$name" >/dev/null 2>&1; then
-              timeout 30 "build/$name" >/dev/null 2>&1 || true
-              rc=$?
+              # `|| true` then `rc=$?` read true's 0, so a crashing harness printed OK; the
+              # status is captured with `|| rc=$?` (check.sh's own loop since 3.13.7).
+              rc=0
+              timeout 30 "build/$name" >/dev/null 2>&1 || rc=$?
               if [ "$rc" -eq 0 ] || [ "$rc" -eq 124 ]; then
                 echo "OK"; pass=$((pass+1))
               else
