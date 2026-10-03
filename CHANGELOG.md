@@ -462,7 +462,9 @@ host ran ~8% above the `v3.13.8-ct-ecdh` rows the day before, for both builds al
   GitHub's shell semantics): **17 ok, 0 failed, 0 skipped** — build + smoke, `deps --verify` (40),
   the `.tcyr` suite (84 passed, 0 failed), lint, `state-sync --check`, the bundle doc gate (880 / 0)
   and the thirteen profile drift checks, the benchmark job, fuzz (3 / 0) and the security scan
-  (with its new fixed-`/tmp` check).
+  (with its new fixed-`/tmp` check). Again after the review pass, at 90e3668: **17 / 0 / 0**, with
+  the fuzz job's real exit statuses and the security scan's bare-`sys_*` and single-line-exemption
+  `/tmp` checks.
 
 ## [3.13.7] - 2026-10-02
 
