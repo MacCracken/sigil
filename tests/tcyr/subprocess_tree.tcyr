@@ -53,6 +53,7 @@ include "src/ima_core.cyr"
 include "src/secureboot_core.cyr"
 include "src/luks.cyr"
 include "src/dmverity.cyr"
+include "tests/scratch.cyr"
 
 
 fn argv3(a0, a1, a2): i64 {
@@ -121,14 +122,15 @@ fn main(): i64 {
     #ifndef CYRIUS_TARGET_AGNOS
     #ifndef CYRIUS_TARGET_WIN
     var cbuf = alloc(4096);
-    var pidf = cat3("sigil_tree_pid.", str_data(str_from_int(sys_getpid())), "");
-    var mark = cat3("sigil_tree_mark.", str_data(str_from_int(sys_getpid())), "");
-    sys_unlink(pidf);
-    sys_unlink(mark);
+    # Inside this run's private directory (tests/scratch.cyr; until 3.13.8 the cwd), quoted for
+    # the shell. x* wrappers, not bare sys_*: agnos's take (path, pathlen).
+    assert(scratch_init("subprocess_tree") != 0, "a private per-run scratch directory under $TMPDIR");
+    var pidf = scratch_path("pid");
+    var mark = scratch_path("mark");
 
     test_group("agnosys_run_capture_timeout ends the tree");
     var c_tag, c_v = agnosys_run_capture_timeout(
-      argv3("/bin/sh", "-c", cat3("sleep 30 & echo $! > ", pidf, "; wait")), cbuf, 4095, 500, "tree");
+      argv3("/bin/sh", "-c", cat3("sleep 30 & echo $! > '", pidf, "'; wait")), cbuf, 4095, 500, "tree");
     assert_eq(is_err_result(c_tag), 1, "capture: the deadline is Err");
     var bg = read_num(pidf);
     assert(bg > 0, "capture: premise — the shell recorded its background child");
@@ -139,12 +141,11 @@ fn main(): i64 {
 
     test_group("agnosys_run_checked_timeout ends the tree");
     var k_tag, k_v = agnosys_run_checked_timeout(
-      argv3("/bin/sh", "-c", cat3("(sleep 1; echo x > ", mark, ") & wait")), 300, "tree");
+      argv3("/bin/sh", "-c", cat3("(sleep 1; echo x > '", mark, "') & wait")), 300, "tree");
     assert_eq(is_err_result(k_tag), 1, "checked: the deadline is Err");
     sleep_ms(2500);
     assert_eq(file_exists(mark), 0, "checked: the background subshell never wrote its marker");
-    sys_unlink(pidf);
-    sys_unlink(mark);
+    assert_eq(scratch_cleanup(), 0, "the scratch directory is removed");
     #endif
     #endif
     #ifdef CYRIUS_TARGET_AGNOS

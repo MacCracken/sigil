@@ -41,6 +41,7 @@ include "lib/process.cyr"
 include "src/sys_error.cyr"
 include "src/sys_util.cyr"
 include "src/sysinfo.cyr"
+include "tests/scratch.cyr"
 
 fn main() {
     alloc_init();
@@ -97,19 +98,20 @@ fn main() {
     assert_eq(ETIMEDOUT, 110, "Linux: ETIMEDOUT is 110");
     #endif
 
-    # Ground truth: rmdir of a non-empty directory returns -ENOTEMPTY on this kernel.
-    # The scratch directory is relative (the test's own working tree), never a fixed /tmp name.
-    var dpath = ".sigil_errno_peer_dir";
-    var fpath = ".sigil_errno_peer_dir/f";
-    sys_unlink(fpath);
-    sys_rmdir(dpath);
-    assert_eq(sys_mkdir(dpath, 448), 0, "mkdir a scratch directory");
+    # Ground truth: rmdir of a non-empty directory returns -ENOTEMPTY on this kernel. Inside this
+    # run's private directory (tests/scratch.cyr; until 3.13.8 a fixed name in the cwd), through
+    # lib/io.cyr's x* set, which on Linux and macOS returns the kernel's own -errno.
+    assert(scratch_init("errno_peer") != 0, "a private per-run scratch directory under $TMPDIR");
+    var dpath = scratch_path("d");
+    var fpath = scratch_path("d/f");
+    assert_eq(xmkdir(dpath, 448), 0, "mkdir a scratch directory");
     var ffd = file_open(fpath, O_WRONLY | O_CREAT, 420);
     assert(ffd >= 0, "create a file inside it");
     file_close(ffd);
-    assert_eq(sys_rmdir(dpath), 0 - ENOTEMPTY, "rmdir of a non-empty directory returns -ENOTEMPTY");
-    sys_unlink(fpath);
-    assert_eq(sys_rmdir(dpath), 0, "and succeeds once it is empty");
+    assert_eq(xrmdir(dpath), 0 - ENOTEMPTY, "rmdir of a non-empty directory returns -ENOTEMPTY");
+    xunlink(fpath);
+    assert_eq(xrmdir(dpath), 0, "and succeeds once it is empty");
+    assert_eq(scratch_cleanup(), 0, "the scratch directory is removed");
 
     # sigil's own mapping reads the same names.
     var ns_t, ns_v = sigil_err_from_errno(ENOSYS);
