@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [3.13.8] - 2026-10-02
+## [3.13.8] - 2026-10-03
 
 ⛔ **Tag this release before cyrius 6.6.15 is tagged** — cyrius 6.6.15 folds it as
 `lib/sigil.cyr` and builds native TLS 1.2 ECDHE on secp256r1 / secp384r1 on the new ECDH API.
