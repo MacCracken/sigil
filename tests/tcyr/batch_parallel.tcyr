@@ -70,6 +70,35 @@ fn build_artifacts(paths, types, count) {
 }
 
 # Write a file with contents — returns the path (caller-owned).
+# A per-run path under $TMPDIR, else $TEMP / $TMP (Windows), else the shared /tmp:
+# <dir>/sigil-batch-<16 random hex>-<name>. The random tag makes the name unpredictable to
+# another local user, so a pre-planted symlink cannot redirect the write, and two runs never
+# share a file. 3.13.8: these were fixed names in the shared /tmp, ignoring TMPDIR, and the
+# files were left behind. Returns the C string, or 0 if the entropy draw failed.
+var _bp_tag = 0;
+fn _bp_tmp(name): i64 {
+    if (_bp_tag == 0) {
+        var rb[8];
+        if (_sigil_random_fill(&rb, 8) != 0) { return 0; }
+        _bp_tag = hex_encode(&rb, 8);
+    }
+    var dir = getenv("TMPDIR");
+    if (dir == 0) { dir = getenv("TEMP"); }
+    if (dir == 0) { dir = getenv("TMP"); }
+    if (dir == 0) { dir = "/tmp"; }
+    var dl = strlen(dir);
+    var tl = strlen(_bp_tag);
+    var nl = strlen(name);
+    var p = alloc(dl + 14 + tl + nl + 1);
+    memcpy(p, dir, dl);
+    memcpy(p + dl, "/sigil-batch-", 13);
+    memcpy(p + dl + 13, _bp_tag, tl);
+    store8(p + dl + 13 + tl, 45);   # '-'
+    memcpy(p + dl + 14 + tl, name, nl);
+    store8(p + dl + 14 + tl + nl, 0);
+    return p;
+}
+
 fn write_test_file(path, body) {
     var fd = file_open(path, O_WRONLY | O_CREAT | O_TRUNC, 420);
     file_write(fd, body, strlen(body));
@@ -149,7 +178,7 @@ fn main() {
     var kid = generate_keypair(&sk, &pk);
     var pk_hex = hex_encode(&pk, 32);
 
-    var kr = keyring_new("/tmp/sigil_batch_test_keys");
+    var kr = keyring_new(_bp_tmp("keys"));
     var kv = key_version_new(kid, pk_hex);
     kv_set_secret_key(kv, &sk);
     keyring_add_key(kr, kv);
@@ -158,18 +187,18 @@ fn main() {
     var sv = sigil_verifier_new(kr, policy);
 
     # Archetype 1: signed + in trust store → TRUST_VERIFIED
-    var signed_path = write_test_file("/tmp/sigil_batch_signed.bin",
+    var signed_path = write_test_file(_bp_tmp("signed.bin"),
       "signed-artifact-body");
     var signed_art = sv_sign_artifact(sv, signed_path, &sk, kid,
       ARTIFACT_SYSTEM_BINARY);
     assert(signed_art != 0, "signed artifact registered");
 
     # Archetype 2: unknown (not in trust store) → TRUST_UNVERIFIED
-    var unknown_path = write_test_file("/tmp/sigil_batch_unknown.bin",
+    var unknown_path = write_test_file(_bp_tmp("unknown.bin"),
       "unknown-artifact-body");
 
     # Archetype 3: signed, then revoked → TRUST_REVOKED
-    var revoked_path = write_test_file("/tmp/sigil_batch_revoked.bin",
+    var revoked_path = write_test_file(_bp_tmp("revoked.bin"),
       "revoked-artifact-body");
     var revoked_art = sv_sign_artifact(sv, revoked_path, &sk, kid,
       ARTIFACT_SYSTEM_BINARY);
@@ -233,6 +262,9 @@ fn main() {
     assert_batch_matches_serial(sv, p32, t32, 32, "count=32");
     assert_batch_is_deterministic(sv, p32, t32, 32);
 
+    xunlink(signed_path);
+    xunlink(unknown_path);
+    xunlink(revoked_path);
     return assert_summary();
 }
 
