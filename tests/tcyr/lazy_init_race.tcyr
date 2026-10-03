@@ -38,6 +38,7 @@ include "lib/chrono.cyr"
 include "lib/ct.cyr"
 include "lib/thread.cyr"
 include "lib/thread_local.cyr"
+include "tests/threads.cyr"
 include "src/crypto_scratch.cyr"
 include "src/mul64.cyr"
 include "src/types.cyr"
@@ -122,33 +123,6 @@ fn _lr_trial(): i64 {
     return b;
 }
 
-# Does thread_create start a second thread here, or run the body inline before it returns?
-# cyrius's THREADS_CONCURRENT is 1 on Linux and arm64 macOS, and that is true. It is 0 on x86
-# macOS and agnos, which run the body inline, and ALSO on Windows, where thread_create is
-# CreateThread and the threads are real (measured on cass under cyrius 6.6.14). So a 0 is
-# measured, not trusted: the body waits up to 2 s for a store main makes only after
-# thread_create has returned, which it can only see if it is running beside main. The probe
-# touches no sigil state, so the process stays cold.
-var _lr_probe_go = 0;
-var _lr_probe_saw = 0;
-fn _lr_probe_body(arg): i64 {
-    var deadline = clock_now_ms() + 2000;
-    while (clock_now_ms() < deadline) {
-        if (atomic_load(&_lr_probe_go) == 1) {
-            atomic_store(&_lr_probe_saw, 1);
-            return 0;
-        }
-    }
-    return 0;
-}
-fn _lr_threads_concurrent(): i64 {
-    if (THREADS_CONCURRENT == 1) { return 1; }
-    var th = thread_create(&_lr_probe_body, 0);
-    atomic_store(&_lr_probe_go, 1);
-    thread_join(th);
-    return atomic_load(&_lr_probe_saw);
-}
-
 # Fork one trial and reap it within the deadline. Returns 0 = clean, 1 = wrong answers,
 # 2 = crashed (signal), 3 = hung (killed at the deadline), 4 = could not fork.
 fn _lr_run_trial(): i64 {
@@ -187,7 +161,7 @@ fn main() {
     _lr_pem_len = strlen(LR_PEM);
 
     test_group("concurrent first use of the lazy tables");
-    if (_lr_threads_concurrent() == 0) {
+    if (test_threads_concurrent() == 0) {
         # thread_create runs the body inline here (x86 macOS, measured on ach; agnos), so no
         # first use is ever concurrent, and the start barrier would never open.
         println("  SKIP: thread bodies run inline at thread_create on this target");

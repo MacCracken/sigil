@@ -62,6 +62,7 @@ include "lib/thread.cyr"
 
 # Ed25519 stack (mldsa.cyr's hybrid verifier references it).
 include "lib/thread_local.cyr"
+include "tests/threads.cyr"
 include "src/crypto_scratch.cyr"
 include "src/mul64.cyr"
 include "src/types.cyr"
@@ -567,58 +568,65 @@ fn main() {
     # 0. Zetas-table init race, from a cold start (no NTT has run yet).
     # ============================================================
     test_group("mldsa zetas lazy init raced by staggered first callers");
-    _zr_out = alloc(KAT_ZR_N * 2048);
-    var zexp = alloc(2048);
-    var zargs = alloc(KAT_ZR_N * 8);
-    var zths = alloc(KAT_ZR_N * 8);
-    # The first init of the process is cold and serial. The stagger is scaled
-    # to a decode timed inside a fresh thread (the best of three).
-    kat_ntt_input(zexp);
-    mldsa_ntt(zexp);
-    var zcal = 0;
-    var zm = 0;
-    while (zm < 3) {
-        var ct = thread_create(&_kat_zeta_cal, 0);
-        if (ct > 0) {
-            thread_join(ct);
-            if (zcal == 0 || _zr_cal < zcal) { zcal = _zr_cal; }
-        }
-        zm = zm + 1;
-    }
-    var zspawn_bad = 0;
-    var zbad = 0;
-    var trial = 0;
-    while (trial < KAT_ZR_TRIALS) {
-        # The second caller arrives 30%, 40%, ... 120% of one decode after the
-        # first (10 offsets, 4 rounds). The unguarded init fails when it lands
-        # in the back half of the first caller's decode.
-        _zr_step = zcal * (30 + 10 * (trial % 10)) / 100;
-        _zr_ready = 0;
-        _zr_go = 0;
-        kat_zr_reset();
-        var z = 0;
-        while (z < KAT_ZR_N) {
-            store64(zargs + z * 8, z);
-            var zt = thread_create(&_kat_zeta_worker, zargs + z * 8);
-            if (zt <= 0) {
-                zspawn_bad = zspawn_bad + 1;
-                kat_zr_arrive();   # stand in for the missing worker
+    # Its workers wait on a spin barrier: where thread_create runs the body inline (x86 macOS,
+    # agnos) the first worker would spin for ever, and the whole file hung there (killed at the
+    # 900 s limit on ach through 3.13.8's first draft). Group 1 has no barrier and runs anywhere.
+    if (test_threads_concurrent() == 0) {
+        println("  SKIP: thread bodies run inline at thread_create on this target");
+    } else {
+        _zr_out = alloc(KAT_ZR_N * 2048);
+        var zexp = alloc(2048);
+        var zargs = alloc(KAT_ZR_N * 8);
+        var zths = alloc(KAT_ZR_N * 8);
+        # The first init of the process is cold and serial. The stagger is scaled
+        # to a decode timed inside a fresh thread (the best of three).
+        kat_ntt_input(zexp);
+        mldsa_ntt(zexp);
+        var zcal = 0;
+        var zm = 0;
+        while (zm < 3) {
+            var ct = thread_create(&_kat_zeta_cal, 0);
+            if (ct > 0) {
+                thread_join(ct);
+                if (zcal == 0 || _zr_cal < zcal) { zcal = _zr_cal; }
             }
-            store64(zths + z * 8, zt);
-            z = z + 1;
+            zm = zm + 1;
         }
-        kat_reap(zths, KAT_ZR_N, "all staggered NTT threads finished within the deadline");
-        z = 0;
-        while (z < KAT_ZR_N) {
-            if (load64(zths + z * 8) > 0) {
-                if (kat_diff(_zr_out + z * 2048, zexp, 2048) != 0) { zbad = zbad + 1; }
+        var zspawn_bad = 0;
+        var zbad = 0;
+        var trial = 0;
+        while (trial < KAT_ZR_TRIALS) {
+            # The second caller arrives 30%, 40%, ... 120% of one decode after the
+            # first (10 offsets, 4 rounds). The unguarded init fails when it lands
+            # in the back half of the first caller's decode.
+            _zr_step = zcal * (30 + 10 * (trial % 10)) / 100;
+            _zr_ready = 0;
+            _zr_go = 0;
+            kat_zr_reset();
+            var z = 0;
+            while (z < KAT_ZR_N) {
+                store64(zargs + z * 8, z);
+                var zt = thread_create(&_kat_zeta_worker, zargs + z * 8);
+                if (zt <= 0) {
+                    zspawn_bad = zspawn_bad + 1;
+                    kat_zr_arrive();   # stand in for the missing worker
+                }
+                store64(zths + z * 8, zt);
+                z = z + 1;
             }
-            z = z + 1;
+            kat_reap(zths, KAT_ZR_N, "all staggered NTT threads finished within the deadline");
+            z = 0;
+            while (z < KAT_ZR_N) {
+                if (load64(zths + z * 8) > 0) {
+                    if (kat_diff(_zr_out + z * 2048, zexp, 2048) != 0) { zbad = zbad + 1; }
+                }
+                z = z + 1;
+            }
+            trial = trial + 1;
         }
-        trial = trial + 1;
+        assert_eq(zspawn_bad, 0, "80 staggered NTT threads spawned (40 trials x 2)");
+        assert_eq(zbad, 0, "80 racing first NTTs all equal the serial NTT");
     }
-    assert_eq(zspawn_bad, 0, "80 staggered NTT threads spawned (40 trials x 2)");
-    assert_eq(zbad, 0, "80 racing first NTTs all equal the serial NTT");
 
     # ============================================================
     # 1. Concurrent keygen/sign/verify, from an empty workspace pool.

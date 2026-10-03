@@ -1,0 +1,46 @@
+# tests/threads.cyr — does thread_create start a SECOND thread on this target? (3.13.8)
+#
+# A test that releases workers from a spin barrier deadlocks where thread_create runs the body
+# inline before it returns: the first worker spins on a release main can never give. cyrius's
+# THREADS_CONCURRENT answers 1 on Linux and arm64 macOS, and that is true. It answers 0 on x86
+# macOS and agnos, which do run bodies inline — and ALSO on Windows, where thread_create is
+# CreateThread and the threads are real (measured on cass under cyrius 6.6.14). So a 0 is
+# measured here, not trusted: the body waits up to 2 s for a store main makes only after
+# thread_create has returned, which it can only see if it runs beside main. The probe touches no
+# sigil state, so a process that must stay cold for a first-use test stays cold.
+#
+# Include after lib/thread.cyr and lib/chrono.cyr. CHANGELOG [3.13.8].
+
+var _tp_go = 0;
+var _tp_saw = 0;
+var _tp_answer = 0 - 1;
+
+fn _tp_body(arg): i64 {
+    var deadline = clock_now_ms() + 2000;
+    while (clock_now_ms() < deadline) {
+        if (atomic_load(&_tp_go) == 1) {
+            atomic_store(&_tp_saw, 1);
+            return 0;
+        }
+    }
+    return 0;
+}
+
+# 1 when thread bodies run concurrently with their creator here, 0 when they run inline (or no
+# thread could be made). Measured once per process.
+fn test_threads_concurrent(): i64 {
+    if (_tp_answer >= 0) { return _tp_answer; }
+    if (THREADS_CONCURRENT == 1) {
+        _tp_answer = 1;
+        return 1;
+    }
+    var th = thread_create(&_tp_body, 0);
+    if (th == 0) {
+        _tp_answer = 0;
+        return 0;
+    }
+    atomic_store(&_tp_go, 1);
+    thread_join(th);
+    _tp_answer = atomic_load(&_tp_saw);
+    return _tp_answer;
+}
