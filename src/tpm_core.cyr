@@ -177,8 +177,10 @@ fn tpm_pcr_selection(bank, indices): i64 {
 # ================================================================
 
 # Check if a TPM 2.0 device is available.
-# Returns 1 if available, 0 if not.
+# Returns 1 if available, 0 if not. Always 0 on Windows, where "/dev/tpmrm0" is a drive-relative
+# path another local user can plant (agnosys_rooted_paths_untrusted). CHANGELOG [3.13.8].
 fn tpm_detect(): i64 {
+    if (agnosys_rooted_paths_untrusted() == 1) { return 0; }
     if (sys_access("/dev/tpmrm0", 0) == 0) { return 1; }
     return sys_access("/dev/tpm0", 0) == 0;
 }
@@ -208,6 +210,9 @@ fn tpm_read_pcr(bank, indices): i64 {
 # successful read. Prefer this over `tpm_read_pcr` in a long-lived or
 # pre-reactor caller that owns a time budget.
 fn tpm_read_pcr_timeout(bank, indices, timeout_ms): i64 {
+    if (agnosys_rooted_paths_untrusted() == 1) {
+        return sigil_err_not_supported("TPM PCR read (no tpm2-tools path on windows)");
+    }
     var count = vec_len(indices);
     if (count == 0) {
         return sigil_err_invalid_argument("Must specify at least one PCR index");
@@ -328,6 +333,9 @@ fn tpm_read_pcr_timeout(bank, indices, timeout_ms): i64 {
 
 # Extend a PCR in the given bank with a hash. Returns Result.
 fn tpm_extend_pcr(bank, index, hash): i64 {
+    if (agnosys_rooted_paths_untrusted() == 1) {
+        return sigil_err_not_supported("TPM PCR extend (no tpm2-tools path on windows)");
+    }
     if (index > TPM_PCR_MAX) {
         return sigil_err_invalid_argument("PCR index out of range (0-23)");
     }
@@ -402,8 +410,13 @@ fn _tpm_shred_unlink(path, len): i64 {
     return 0;
 }
 
-# Seal data to the current PCR state; writes the sealed object. Returns Result.
+# Seal data to the current PCR state; writes the sealed object. Returns Result. Refused on
+# Windows before the plaintext is staged: tpm2_create cannot run there, so the secret would
+# reach the disk for nothing.
 fn tpm_seal(bank, pcr_indices, data_ptr, data_len, output_dir): i64 {
+    if (agnosys_rooted_paths_untrusted() == 1) {
+        return sigil_err_not_supported("TPM seal (no tpm2-tools path on windows)");
+    }
     if (data_len == 0) {
         return sigil_err_invalid_argument("Cannot seal empty data");
     }
@@ -518,6 +531,9 @@ fn tpm_seal(bank, pcr_indices, data_ptr, data_len, output_dir): i64 {
 
 # Unseal a sealed object into buf if PCRs still match. Returns Result(len).
 fn tpm_unseal(sealed, buf, buflen): i64 {
+    if (agnosys_rooted_paths_untrusted() == 1) {
+        return sigil_err_not_supported("TPM unseal (no tpm2-tools path on windows)");
+    }
     var ctx = tpm_sealed_context(sealed);
     var pcr_sel = tpm_sealed_pcr_sel(sealed);
 
@@ -552,6 +568,9 @@ fn tpm_unseal(sealed, buf, buflen): i64 {
 
 # Draw count random bytes from the TPM RNG into buf. Returns Result.
 fn tpm_get_random(buf, count): i64 {
+    if (agnosys_rooted_paths_untrusted() == 1) {
+        return sigil_err_not_supported("TPM random (no tpm2-tools path on windows)");
+    }
     if (count == 0) {
         return sigil_err_invalid_argument("Cannot request 0 random bytes");
     }

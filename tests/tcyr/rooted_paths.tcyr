@@ -1,0 +1,218 @@
+# rooted_paths.tcyr — on Windows the trust cores never probe or spawn a rooted POSIX path (3.13.8).
+#
+# On Windows a rooted path is DRIVE-RELATIVE: "/dev/tpmrm0" is C:\dev\tpmrm0, and any authenticated
+# user may create folders at the root of the system drive. Through 3.13.7 the TPM, Secure Boot,
+# IMA, dm-verity and LUKS helpers probed such paths there, so another local user could plant:
+#   - C:\dev\tpmrm0                       -> tpm_available() said a TPM was present;
+#   - C:\usr\bin\mokutil                  -> `_sb_tool_path` resolved the tool (spawning it was
+#                                            already refused on Windows by the subprocess helpers);
+#   - C:\sys\kernel\security\ima\...      -> ima_get_status() said active, ima_read_measurements()
+#                                            returned the planted log, and ima_write_policy() wrote
+#                                            the policy into the planted file;
+#   - C:\sys\module\dm_verity             -> dmverity_supported() said yes;
+#   - C:\tmp                              -> luks_write_keyfile() staged the key in a directory
+#                                            that user owned (and luks_close() answered Ok with
+#                                            nothing planted).
+# A planted C:\sys\firmware\efi\efivars\SecureBoot-... did NOT reach secureboot_detect_state():
+# its `file_exists("/sys/firmware/efi")` gate opens the path as a file, which fails on a
+# directory on Windows. It is refused up front now too, so it no longer rests on that.
+# The cyrius stdlib's CVE-54 / -57 / -65 are the same class. Each helper now asks
+# agnosys_rooted_paths_untrusted() first and fails closed.
+#
+# Every target: agnosys_rooted_paths_untrusted() is 1 on Windows and 0 elsewhere (the POSIX paths
+# themselves are covered by agnosys.tcyr, secureboot_tools.tcyr and fd_hygiene.tcyr).
+# Windows: every helper fails closed. With SIGIL_PLANT_ROOT=1 the test first plants each probed
+# path at the root of the CURRENT drive and asserts that the plants exist, so the rows have
+# something to refuse; set it only on a scratch drive (e.g. `subst X: <dir>`, then run from X:\),
+# never on the system drive. The plants are removed at the end. Under wine a rooted path is the
+# Linux host's own, so on a host with /dev/tpmrm0 or /sys/firmware/efi the rows bite unplanted.
+# MUTATION (3.13.8, agnosys_rooted_paths_untrusted made to answer 0 — every guard off): on cass
+# 3 of 22 rows fail unplanted (the helper, luks_keyfile_path, luks_close) and 11 of 26 planted
+# (also tpm_detect / tpm_available, the mokutil lookup, all four IMA rows, dmverity_supported,
+# luks_write_keyfile); under wine 4 of 22. CHANGELOG [3.13.8].
+
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/string.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fs.cyr"
+include "lib/fmt.cyr"
+include "lib/bayan.cyr"
+include "lib/sakshi.cyr"
+include "lib/chrono.cyr"
+include "lib/tagged.cyr"
+include "lib/process.cyr"
+include "lib/slice.cyr"
+include "lib/sys.cyr"
+include "lib/thread.cyr"
+include "lib/thread_local.cyr"
+include "src/crypto_scratch.cyr"
+include "src/mul64.cyr"
+include "src/types.cyr"
+include "src/error.cyr"
+include "lib/random.cyr"
+include "src/random.cyr"
+include "src/sys_error.cyr"
+include "src/sys_util.cyr"
+include "src/sysinfo.cyr"
+include "src/tpm_core.cyr"
+include "src/ima_core.cyr"
+include "src/secureboot_core.cyr"
+include "src/dmverity.cyr"
+include "src/luks.cyr"
+include "src/tpm.cyr"
+
+var _rp_planted = 0;
+
+# Write `body` (len bytes) to `path`, creating it. 1 on success.
+fn _rp_put(path, body, len): i64 {
+    var fd = file_open(path, O_WRONLY | O_CREAT | O_TRUNC, 420);
+    if (fd < 0) { return 0; }
+    var w = agnosys_write_all(fd, body, len);
+    file_close(fd);
+    return w >= 0;
+}
+
+# Plant every path the pre-3.13.8 helpers probed, relative to the current drive's root.
+fn _rp_plant(): i64 {
+    sys_mkdir("/dev", 493);
+    sys_mkdir("/dev/mapper", 493);
+    sys_mkdir("/usr", 493);
+    sys_mkdir("/usr/bin", 493);
+    sys_mkdir("/sys", 493);
+    sys_mkdir("/sys/firmware", 493);
+    sys_mkdir("/sys/firmware/efi", 493);
+    sys_mkdir("/sys/firmware/efi/efivars", 493);
+    sys_mkdir("/sys/kernel", 493);
+    sys_mkdir("/sys/kernel/security", 493);
+    sys_mkdir("/sys/kernel/security/ima", 493);
+    sys_mkdir("/sys/module", 493);
+    sys_mkdir("/sys/module/dm_verity", 493);
+    sys_mkdir("/tmp", 493);
+    var ok = 1;
+    ok = ok & _rp_put("/dev/tpmrm0", "x", 1);
+    ok = ok & _rp_put("/dev/mapper/sigilrp", "x", 1);
+    ok = ok & _rp_put("/usr/bin/mokutil", "x", 1);
+    # An EFI variable: a 4-byte attributes word, then the payload — SecureBoot 1 (enabled),
+    # SetupMode 0.
+    var ev = alloc(8);
+    store64(ev, 6);
+    store8(ev + 4, 1);
+    ok = ok & _rp_put("/sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c", ev, 5);
+    store8(ev + 4, 0);
+    ok = ok & _rp_put("/sys/firmware/efi/efivars/SetupMode-8be4df61-93ca-11d2-aa0d-00e098032b8c", ev, 5);
+    var log = "10 0000000000000000000000000000000000000000 ima-ng sha256:00 /planted\n";
+    ok = ok & _rp_put("/sys/kernel/security/ima/ascii_runtime_measurements", log, strlen(log));
+    ok = ok & _rp_put("/sys/kernel/security/ima/policy", "", 0);
+    return ok;
+}
+
+fn _rp_unplant(): i64 {
+    sys_unlink("/dev/tpmrm0");
+    sys_unlink("/dev/mapper/sigilrp");
+    sys_unlink("/usr/bin/mokutil");
+    sys_unlink("/sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c");
+    sys_unlink("/sys/firmware/efi/efivars/SetupMode-8be4df61-93ca-11d2-aa0d-00e098032b8c");
+    sys_unlink("/sys/kernel/security/ima/ascii_runtime_measurements");
+    sys_unlink("/sys/kernel/security/ima/policy");
+    sys_rmdir("/sys/module/dm_verity");
+    sys_rmdir("/sys/module");
+    sys_rmdir("/sys/kernel/security/ima");
+    sys_rmdir("/sys/kernel/security");
+    sys_rmdir("/sys/kernel");
+    sys_rmdir("/sys/firmware/efi/efivars");
+    sys_rmdir("/sys/firmware/efi");
+    sys_rmdir("/sys/firmware");
+    sys_rmdir("/sys");
+    sys_rmdir("/usr/bin");
+    sys_rmdir("/usr");
+    sys_rmdir("/dev/mapper");
+    sys_rmdir("/dev");
+    sys_rmdir("/tmp");
+    return 0;
+}
+
+fn _rp_windows(): i64 {
+    var plant = getenv("SIGIL_PLANT_ROOT");
+    if (plant != 0) {
+        if (streq(plant, "1") == 1) { _rp_planted = 1; }
+    }
+    if (_rp_planted == 1) {
+        test_group("the plants exist (SIGIL_PLANT_ROOT=1)");
+        assert_eq(_rp_plant(), 1, "every probed path was planted at the current drive's root");
+        assert_eq(sys_access("/dev/tpmrm0", 0), 0, "\\dev\\tpmrm0 is there to be found");
+        assert_eq(sys_access("/sys/kernel/security/ima", 0), 0, "\\sys\\kernel\\security\\ima is there to be found");
+        assert_eq(sys_access("/tmp", 0), 0, "\\tmp is there to be found");
+    }
+
+    test_group("TPM");
+    assert_eq(tpm_detect(), 0, "tpm_detect() is 0 without probing \\dev\\tpmrm0");
+    assert_eq(tpm_available(), 0, "tpm_available() is 0");
+    var idx = vec_new();
+    vec_push(idx, 0);
+    var r1_tag, r1 = tpm_read_pcr(TPM_SHA256, idx);
+    assert_eq(is_err_result(r1_tag), 1, "tpm_read_pcr refuses");
+    var r2_tag, r2 = tpm_extend_pcr(TPM_SHA256, 16, "00");
+    assert_eq(is_err_result(r2_tag), 1, "tpm_extend_pcr refuses");
+    var r3_tag, r3 = tpm_seal(TPM_SHA256, idx, "secret", 6, ".");
+    assert_eq(is_err_result(r3_tag), 1, "tpm_seal refuses");
+    assert_eq(file_exists("./seal_input.bin"), 0, "tpm_seal staged no plaintext");
+    var r4_tag, r4 = tpm_unseal(tpm_sealed_new("./sealed.ctx", "sha256:0"), alloc(64), 64);
+    assert_eq(is_err_result(r4_tag), 1, "tpm_unseal refuses");
+    var r5_tag, r5 = tpm_get_random(alloc(16), 16);
+    assert_eq(is_err_result(r5_tag), 1, "tpm_get_random refuses");
+
+    test_group("Secure Boot");
+    assert_eq(_sb_tool_path("mokutil"), 0, "no tool is resolved under \\usr\\bin");
+    var s1_tag, s1 = secureboot_detect_state();
+    assert_eq(is_err_result(s1_tag), 0, "secureboot_detect_state answers");
+    assert_eq(s1, SB_NOT_SUPPORTED, "...SB_NOT_SUPPORTED, not a planted ENABLED");
+    var s2_tag, s2 = secureboot_list_efi_variables();
+    assert_eq(is_err_result(s2_tag), 1, "secureboot_list_efi_variables refuses");
+
+    test_group("IMA");
+    var i1_tag, i1 = ima_get_status();
+    assert_eq(is_err_result(i1_tag), 0, "ima_get_status answers");
+    assert_eq(ima_status_active(i1), 0, "...inactive, not a planted securityfs");
+    assert_eq(ima_status_measurement_count(i1), 0, "...with no measurements");
+    var i2_tag, i2 = ima_read_measurements();
+    assert_eq(is_err_result(i2_tag), 1, "ima_read_measurements refuses the planted log");
+    var rules = vec_new();
+    vec_push(rules, ima_rule_new(IMA_MEASURE, IMA_BPRM_CHECK));
+    var i3_tag, i3 = ima_write_policy(rules);
+    assert_eq(is_err_result(i3_tag), 1, "ima_write_policy refuses");
+
+    test_group("dm-verity and LUKS");
+    assert_eq(dmverity_supported(), 0, "dmverity_supported() is 0 without probing \\sys\\module");
+    var l1_tag, l1 = luks_keyfile_path();
+    assert_eq(is_err_result(l1_tag), 1, "luks_keyfile_path refuses");
+    var l2_tag, l2 = luks_write_keyfile("0123456789abcdef", 16);
+    assert_eq(is_err_result(l2_tag), 1, "luks_write_keyfile stages no key under \\tmp");
+    if (is_err_result(l2_tag) == 0) { sys_unlink(l2); }   # a pre-3.13.8 build wrote one: remove it
+    var l3_tag, l3 = luks_close("sigilrp");
+    assert_eq(is_err_result(l3_tag), 1, "luks_close refuses");
+
+    if (_rp_planted == 1) { _rp_unplant(); }
+    return 0;
+}
+
+fn main(): i64 {
+    alloc_init();
+    test_group("agnosys_rooted_paths_untrusted");
+    #ifdef CYRIUS_TARGET_WIN
+    assert_eq(agnosys_rooted_paths_untrusted(), 1, "1 on Windows: a rooted path is drive-relative");
+    _rp_windows();
+    #endif
+    #ifndef CYRIUS_TARGET_WIN
+    assert_eq(agnosys_rooted_paths_untrusted(), 0, "0 here: a rooted path names the system object");
+    #endif
+    return assert_summary();
+}
+
+var exit_code = main();
+sys_exit(exit_code);

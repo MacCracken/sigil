@@ -344,8 +344,10 @@ fn _ima_count_lines_fd(fd): i64 {
 }
 
 # Probe the running IMA subsystem and return its status. Returns Result; Err if the
-# measurement log cannot be read to the end.
+# measurement log cannot be read to the end. Inactive on Windows without reading anything:
+# "/sys/kernel/security/ima" is drive-relative there (agnosys_rooted_paths_untrusted).
 fn ima_get_status(): i64 {
+    if (agnosys_rooted_paths_untrusted() == 1) { return Ok(ima_status_new(0, 0, 0)); }
     var ima_dir = "/sys/kernel/security/ima";
     var acc = sys_access(ima_dir, 0);
 
@@ -528,8 +530,12 @@ fn _ima_read_log_fd(fd): i64 {
     return Ok(buf);
 }
 
-# Read + parse the kernel IMA measurement log. Returns Result.
+# Read + parse the kernel IMA measurement log. Returns Result (Err on Windows: the log path
+# is drive-relative there, so another local user could supply the "measurements").
 fn ima_read_measurements(): i64 {
+    if (agnosys_rooted_paths_untrusted() == 1) {
+        return sigil_err_not_supported("IMA measurement log (no securityfs on windows)");
+    }
     var path = "/sys/kernel/security/ima/ascii_runtime_measurements";
     var fd = file_open(path, O_RDONLY, 0);
     if (fd < 0) {
@@ -549,8 +555,11 @@ fn ima_read_measurements(): i64 {
 # Returns Ok(0) or Err.
 # ================================================================
 
-# Write IMA policy rules to the kernel policy interface. Returns Result.
+# Write IMA policy rules to the kernel policy interface. Returns Result (Err on Windows).
 fn ima_write_policy(rules): i64 {
+    if (agnosys_rooted_paths_untrusted() == 1) {
+        return sigil_err_not_supported("IMA policy write (no securityfs on windows)");
+    }
     var count = vec_len(rules);
     if (count == 0) {
         return sigil_err_invalid_argument("IMA policy has no rules");
