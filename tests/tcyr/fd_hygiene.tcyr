@@ -150,8 +150,24 @@ fn main() {
       "an unreadable source is a negative errno, never a byte count");
     file_close(wfd);
     var wlen = 0;
-    slurp(wp, &wlen);
-    assert_eq(wlen, 64, "only the good write landed");
+    var wb = slurp(wp, &wlen);
+    assert(wlen >= 64, "the good write landed");
+    if (wlen >= 64) { assert_eq(memeq(wb, key, 64), 1, "its bytes are intact"); }
+    # Intel macOS extends the file to the end of a FAULTING write although write(2) returns
+    # EFAULT (measured on ach: a 10-byte file is 74 bytes after write(fd, 1, 64) = -14; arm64
+    # macOS and Linux leave it alone). That is the kernel's, not this call's, which reported the
+    # fault above; so there the length is 64 + 64.
+    var xnu_x86 = 0;
+    #ifdef CYRIUS_TARGET_MACOS
+    #ifndef CYRIUS_ARCH_AARCH64
+    xnu_x86 = 1;
+    #endif
+    #endif
+    if (xnu_x86 == 1) {
+        assert_eq(wlen, 128, "only the good write landed (plus the kernel's extension)");
+    } else {
+        assert_eq(wlen, 64, "only the good write landed");
+    }
     xunlink(wp);
 
     # ============================================================
