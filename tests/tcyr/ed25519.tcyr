@@ -117,15 +117,19 @@ fn main() {
     var msg_hex = alloc(2048);
     var n_read = file_read_all("tests/data/rfc8032/test_1024.hex", msg_hex, 2048);
     assert_eq(n_read, 2046, "TEST 1024 fixture loaded");
-    var msg1024 = hex_decode(msg_hex, 2046);
+    # Without the fixture (run from outside the repo root) the message cannot be decoded: fail
+    # the row above and go on, rather than signing through a null message (that was a SIGSEGV).
+    if (n_read == 2046) {
+        var msg1024 = hex_decode(msg_hex, 2046);
 
-    var sig1024 = alloc(64);
-    ed25519_sign(sk1024, msg1024, 1023, sig1024);
-    var sig1024_hex = hex_encode(sig1024, 64);
-    assert_streq(sig1024_hex, "0aab4c900501b3e24d7cdf4663326a3a87df5e4843b2cbdb67cbf6e460fec350aa5371b1508f9f4528ecea23c436d94b5e8fcd4f681e30a6ac00a9704a188a03", "TEST 1024 sig");
+        var sig1024 = alloc(64);
+        ed25519_sign(sk1024, msg1024, 1023, sig1024);
+        var sig1024_hex = hex_encode(sig1024, 64);
+        assert_streq(sig1024_hex, "0aab4c900501b3e24d7cdf4663326a3a87df5e4843b2cbdb67cbf6e460fec350aa5371b1508f9f4528ecea23c436d94b5e8fcd4f681e30a6ac00a9704a188a03", "TEST 1024 sig");
 
-    var valid1024 = ed25519_verify(pk1024, msg1024, 1023, sig1024);
-    assert_eq(valid1024, 1, "TEST 1024 verify");
+        var valid1024 = ed25519_verify(pk1024, msg1024, 1023, sig1024);
+        assert_eq(valid1024, 1, "TEST 1024 verify");
+    }
 
     # ============================================================
     # Random keypair sign/verify roundtrip
