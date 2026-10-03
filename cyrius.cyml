@@ -363,13 +363,19 @@ modules = [
 ]
 
 # `[lib.secureboot]` — Secure Boot state detection + EFI-variable read.
-# `cyrius distlib secureboot` -> dist/sigil-secureboot.cyr. 5-module closure of the
+# `cyrius distlib secureboot` -> dist/sigil-secureboot.cyr. 6-module closure of the
 # secureboot entry points, compile-verified self-contained (no undefined sigil symbol).
 # Order matches the [lib] include chain (single-pass). Lets a consumer that only
 # needs secureboot avoid the full 67-module bundle's global footprint.
+# src/sys_util.cyr joined at 3.13.8: secureboot_core calls agnosys_capture_n and
+# agnosys_rooted_paths_untrusted, which live there. Until then the profile was not
+# self-contained, and dist/sigil-secureboot.deps named the stdlib `sigil` fold, so a
+# consumer resolved those two through the whole of lib/sigil.cyr (or, for the 3.13.8
+# helper, not at all).
 [lib.secureboot]
 modules = [
     "src/sys_error.cyr",
+    "src/sys_util.cyr",
     "src/sysinfo.cyr",
     "src/secureboot_core.cyr",
     "src/types.cyr",
