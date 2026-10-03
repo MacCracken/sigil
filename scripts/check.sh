@@ -12,6 +12,12 @@ pass=0
 fail=0
 total=0
 
+# Per-run private work directory under $TMPDIR (3.13.8). The binaries used to go to fixed
+# names in the shared /tmp (`/tmp/sigil_t_$$` and friends): predictable, so another local
+# user could pre-plant a symlink there, and they ignored TMPDIR.
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/sigil-check.XXXXXX")
+trap 'rm -rf "$WORK"' EXIT
+
 check() {
     total=$((total + 1))
     if [ "$2" = "0" ]; then
@@ -43,7 +49,7 @@ echo "── Test Suite ──"
 for tfile in "$ROOT"/tests/tcyr/*.tcyr; do
     [ -f "$tfile" ] || continue
     name=$(basename "$tfile" .tcyr)
-    tmpbin="/tmp/sigil_t_$$"
+    tmpbin="$WORK/t"
     printf "  %-20s " "$name"
     if cat "$tfile" | "$CC" > "$tmpbin" 2>/dev/null && chmod +x "$tmpbin"; then
         result=$(timeout 120 "$tmpbin" 2>&1 | strings | grep -E "passed.*failed" | tail -1)
@@ -67,7 +73,7 @@ echo "── Benchmarks ──"
 for bfile in "$ROOT"/tests/bcyr/*.bcyr; do
     [ -f "$bfile" ] || continue
     name=$(basename "$bfile" .bcyr)
-    tmpbin="/tmp/sigil_b_$$"
+    tmpbin="$WORK/b"
     if cat "$bfile" | "$CC" > "$tmpbin" 2>/dev/null && chmod +x "$tmpbin"; then
         brc=0
         timeout 300 "$tmpbin" 2>&1 || brc=$?
@@ -93,7 +99,7 @@ echo "── Fuzz (5s each) ──"
 for ffile in "$ROOT"/fuzz/*.fcyr; do
     [ -f "$ffile" ] || continue
     name=$(basename "$ffile" .fcyr)
-    tmpbin="/tmp/sigil_f_$$"
+    tmpbin="$WORK/f"
     printf "  %-25s " "$name"
     if cat "$ffile" | "$CC" > "$tmpbin" 2>/dev/null && chmod +x "$tmpbin"; then
         rc=0
