@@ -17481,37 +17481,38 @@ fn _ecdh_keygen(rnd, priv_out, pub_out, nl, f, nc, bm, G): i64 {
 
 # Shared derivation for a curve of nl limbs: validates the peer's SEC 1 uncompressed point
 # and our scalar, computes d·Q in constant time and writes its x-coordinate (nl·8 bytes,
-# big-endian) to secret_out. Returns 0, or -1 with secret_out zeroed.
+# big-endian) to secret_out. Every input is read before secret_out is written, so secret_out
+# may alias priv or peer. Returns 0, or -1 with secret_out zeroed.
 fn _ecdh_shared(priv, peer, peer_len, secret_out, nl, f, nc, bm): i64 {
     var w = nl * 8;
-    memset(secret_out, 0, w);
     # --- the peer key: public data, so plain branches are fine here ---
-    if (peer_len != 1 + 2 * w) { return 0 - 1; }
-    if ((load8(peer) & 0xFF) != 0x04) { return 0 - 1; }
+    if (peer_len != 1 + 2 * w) { memset(secret_out, 0, w); return 0 - 1; }
+    if ((load8(peer) & 0xFF) != 0x04) { memset(secret_out, 0, w); return 0 - 1; }
     var Q[144];
     var qx[64];
     var qy[64];
     _ect_load_be(&qx, peer + 1, nl);
     _ect_load_be(&qy, peer + 1 + w, nl);
-    if (_ect_lt(&qx, f + 16, nl) == 0) { return 0 - 1; }   # x >= p
-    if (_ect_lt(&qy, f + 16, nl) == 0) { return 0 - 1; }   # y >= p
-    _ect_to_mont(&Q, &qx, f);
-    _ect_to_mont(&Q + w, &qy, f);
-    memcpy(&Q + 2 * w, f + 144, w);                         # Z = 1
-    if (_ect_on_curve(&Q, &Q + w, f, bm) == 0) { return 0 - 1; }
-    # --- our scalar: secret. Its range check is computed without a branch; only the final
-    #     verdict is branched on, and a refused scalar is reported as a failure anyway. ---
+    # --- our scalar: secret, read now (before secret_out is touched) ---
     secret var S[400];
     var d = &S;            # LE limbs
     var x = &S + 64;
     var y = &S + 128;
     var R = &S + 192;      # d·Q, projective (144 B)
     _ect_load_be(d, priv, nl);
+    if (_ect_lt(&qx, f + 16, nl) == 0) { memset(secret_out, 0, w); return 0 - 1; }   # x >= p
+    if (_ect_lt(&qy, f + 16, nl) == 0) { memset(secret_out, 0, w); return 0 - 1; }   # y >= p
+    _ect_to_mont(&Q, &qx, f);
+    _ect_to_mont(&Q + w, &qy, f);
+    memcpy(&Q + 2 * w, f + 144, w);                         # Z = 1
+    if (_ect_on_curve(&Q, &Q + w, f, bm) == 0) { memset(secret_out, 0, w); return 0 - 1; }
+    # The range check of d is computed without a branch; only the verdict is branched on,
+    # and a refused scalar is reported as a failure anyway.
     var valid = _ect_lt(d, nc + 16, nl) & (1 ^ _ect_is_zero(d, nl));
-    if (valid == 0) { return 0 - 1; }                       # d == 0 or d >= n
+    if (valid == 0) { memset(secret_out, 0, w); return 0 - 1; }   # d == 0 or d >= n
     _ect_smul(R, d, &Q, f, bm);
     var ok = _ect_affine(x, y, R, f);
-    if (ok == 0) { return 0 - 1; }                          # d·Q at infinity
+    if (ok == 0) { memset(secret_out, 0, w); return 0 - 1; }      # d·Q at infinity
     _ect_store_be(secret_out, x, nl);
     return 0;
 }
@@ -17519,7 +17520,8 @@ fn _ecdh_shared(priv, peer, peer_len, secret_out, nl, f, nc, bm): i64 {
 # P-256 ECDH key pair from caller-supplied randomness. rnd: at least ECDH_P256_RAND_LEN (40)
 # bytes from a CSPRNG, of which exactly the first 40 are used. priv_out (32 B) receives the
 # private scalar d = (c mod (n - 1)) + 1, big-endian (FIPS 186-5 A.2.1); pub_out (65 B) the
-# public key d·G as 0x04 || X || Y. Constant-time in rnd and d. Returns 0, or -1 (both
+# public key d·G as 0x04 || X || Y. Constant-time in rnd and d. rnd is read in full before
+# either output is written, so priv_out or pub_out may alias it. Returns 0, or -1 (both
 # outputs zeroed) when rnd_len < 40.
 fn ecdh_p256_keygen(rnd, rnd_len, priv_out, pub_out): i64 {
     if (rnd_len < ECDH_P256_RAND_LEN) {
@@ -17536,7 +17538,8 @@ fn ecdh_p256_keygen(rnd, rnd_len, priv_out, pub_out): i64 {
 # P-256 ECDH shared secret: secret_out (32 B) = the x-coordinate of d·Q, big-endian (the TLS
 # premaster secret, RFC 8422 §5.10). priv: our 32-byte big-endian scalar, which must lie in
 # [1, n - 1]. peer_pub: the peer's key, exactly 65 bytes 0x04 || X || Y with X, Y < p and on
-# the curve. Constant-time in priv. Returns 0, or -1 (secret_out zeroed) on any invalid input.
+# the curve. Constant-time in priv. secret_out may alias priv or peer_pub. Returns 0, or -1
+# (secret_out zeroed) on any invalid input.
 fn ecdh_p256_shared(priv, peer_pub, peer_pub_len, secret_out): i64 {
     _ect256_init();
     var rc = _ecdh_shared(priv, peer_pub, peer_pub_len, secret_out, 4,
@@ -17548,7 +17551,8 @@ fn ecdh_p256_shared(priv, peer_pub, peer_pub_len, secret_out): i64 {
 # P-384 ECDH key pair from caller-supplied randomness. rnd: at least ECDH_P384_RAND_LEN (56)
 # bytes from a CSPRNG, of which exactly the first 56 are used. priv_out (48 B) receives
 # d = (c mod (n - 1)) + 1, big-endian; pub_out (97 B) the public key 0x04 || X || Y.
-# Constant-time in rnd and d. Returns 0, or -1 (both outputs zeroed) when rnd_len < 56.
+# Constant-time in rnd and d; priv_out or pub_out may alias rnd. Returns 0, or -1 (both
+# outputs zeroed) when rnd_len < 56.
 fn ecdh_p384_keygen(rnd, rnd_len, priv_out, pub_out): i64 {
     if (rnd_len < ECDH_P384_RAND_LEN) {
         memset(priv_out, 0, 48);
@@ -17563,8 +17567,8 @@ fn ecdh_p384_keygen(rnd, rnd_len, priv_out, pub_out): i64 {
 
 # P-384 ECDH shared secret: secret_out (48 B) = the x-coordinate of d·Q, big-endian. priv: our
 # 48-byte big-endian scalar in [1, n - 1]. peer_pub: exactly 97 bytes 0x04 || X || Y with
-# X, Y < p and on the curve. Constant-time in priv. Returns 0, or -1 (secret_out zeroed) on
-# any invalid input.
+# X, Y < p and on the curve. Constant-time in priv. secret_out may alias priv or peer_pub.
+# Returns 0, or -1 (secret_out zeroed) on any invalid input.
 fn ecdh_p384_shared(priv, peer_pub, peer_pub_len, secret_out): i64 {
     _ect384_init();
     var rc = _ecdh_shared(priv, peer_pub, peer_pub_len, secret_out, 6,

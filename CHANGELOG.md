@@ -59,12 +59,14 @@ invariant: [architecture note 004](docs/architecture/004-secret-ec-scalars-run-o
   - `ecdh_p256_keygen(rnd, rnd_len, priv_out, pub_out)` — rnd: at least `ECDH_P256_RAND_LEN`
     (40) bytes from a CSPRNG, of which exactly the first 40 are used; priv_out (32 B) =
     d = (c mod (n - 1)) + 1 (FIPS 186-5 A.2.1: len(n) + 64 bits, bias < 2^-64, no rejection
-    loop); pub_out (65 B) = 0x04 ‖ X ‖ Y of d·G. -1 when rnd_len < 40.
+    loop); pub_out (65 B) = 0x04 ‖ X ‖ Y of d·G. -1 when rnd_len < 40. rnd is read in full
+    before either output is written, so priv_out / pub_out may alias it.
   - `ecdh_p256_shared(priv, peer_pub, peer_pub_len, secret_out)` — secret_out (32 B) = x(d·Q),
     the TLS premaster (RFC 8422 §5.10, SP 800-56A Z). -1 unless peer_pub is exactly 65 bytes,
     starts 0x04, has X, Y < p and lies on the curve (SP 800-56A §5.6.2.3.3 full validation;
     compressed / hybrid / infinity encodings refused), unless priv is in [1, n - 1], or if d·Q
-    is the identity.
+    is the identity. Every input is read before secret_out is written, so it may alias priv or
+    peer_pub.
   - `ecdh_p384_keygen` / `ecdh_p384_shared` — the same at 48-byte scalars, 97-byte points,
     56 random bytes (`ECDH_P384_RAND_LEN`).
   - Length constants `ECDH_P{256,384}_{RAND,PRIV,PUB,SECRET}_LEN`.
@@ -123,7 +125,7 @@ signing; an aarch64 `UMULH`).
 
 ### Tests
 
-- New `tests/tcyr/ecdh.tcyr` (438 assertions): RFC 5903 §8.1 / §8.2; **all 25 + 25 NIST CAVP
+- New `tests/tcyr/ecdh.tcyr` (448 assertions): RFC 5903 §8.1 / §8.2; **all 25 + 25 NIST CAVP
   "KAS ECC CDH primitive" vectors** (Z, and QIUT = dIUT·G); 6 OpenSSL 3.6.5 cross-check vectors
   (sigil keygen from fixed input; OpenSSL loads the private key, recomputes the same public key,
   and `pkeyutl -derive` agrees in both directions); keygen at the FIPS 186-5 reduction edges
@@ -132,7 +134,9 @@ signing; an aarch64 `UMULH`).
   64 / 66, SEC 1 infinity, prefixes 0x00 / 0x02 / 0x03 / 0x05 / 0x06 / 0x07, off-curve, (0, 0),
   x or y = p and 2^bits - 1, and the x = p **non-canonical encoding of the valid point with
   x = 0**), each checked to zero the output; the private-scalar range (0, n, n + 1, 2^bits - 1
-  refused; 1, 2, n - 1 exact); valid edge points (x = 0, -Q); 8 concurrent callers against the
+  refused; 1, 2, n - 1 exact); valid edge points (x = 0, -Q); an output buffer that is also an
+  input (secret_out == priv, == peer_pub, priv_out == rnd: red on a draft that zeroed secret_out
+  before reading its inputs); 8 concurrent callers against the
   serial results (and every worker ran); a dead-stack scan that no limb of the private key survives a keygen or a derive
   (mutation-proven: red with the stack wipe removed or pointed at the wrong end); and a timing
   smoke check (medians for d = 1, 2^k, 0x55…, n - 1 within [0.75, 1.33], every timed derive
@@ -151,7 +155,7 @@ signing; an aarch64 `UMULH`).
 - A live randomized cross-check outside the suite: 100 random key pairs (50 per curve) from
   sigil's keygen against OpenSSL-generated peers — 0 mismatches.
 - `tests/bcyr/sigil.bcyr`: four ECDH rows.
-- Suite **3199/0 across 83 files** on x86_64 (2797 at 3.13.7; `state-sync.sh --write --count`,
+- Suite **3209/0 across 83 files** on x86_64 (2797 at 3.13.7; `state-sync.sh --write --count`,
   and a per-file exit-code loop: 83 of 83 exit 0); fuzz 24/0; `check.sh` 92 passed, 0 failed.
 
 ### Verification
@@ -166,10 +170,10 @@ signing; an aarch64 `UMULH`).
   | ach (Intel, x86_64 macOS) | 73 / 81 | 72 / 80 | agnosys, audit_log, fd_hygiene, mldsa_kat (900 s limit), random, secureboot_tools, verify, verify_hardening |
   | cass (Windows, PE) | 69 / 79 | 68 / 78 | agnosys, batch_parallel, capture_bounded, fd_hygiene, policy_hardening, security, sigil, trust_hardening, verify, verify_hardening |
 
-  The extra clean file on each host is `ecdh.tcyr`. At the final code: `ecdh` 438/0,
-  `ecdsa_sign` 82/0, `ecdsa_sign_timing` 142/0 on the pi, ecb and cass; on ach `ecdh` is 436/2
+  The extra clean file on each host is `ecdh.tcyr`. At the final code: `ecdh` 448/0,
+  `ecdsa_sign` 82/0, `ecdsa_sign_timing` 142/0 on the pi, ecb and cass; on ach `ecdh` is 446/2
   under the pin (the two "every timed derive succeeded" assertions — cyrius CVE-51, see Tests) and
-  438/0 built with cycc 6.6.14. `bignum.tcyr`'s fallback cross-check passes on the pi and ecb with
+  448/0 built with cycc 6.6.14. `bignum.tcyr`'s fallback cross-check passes on the pi and ecb with
   the branch-free `_nmul64_hi_sw`.
 - **Constant-time evidence, mechanical:** every `_ect_*` / `_ecdh_*` / `_ecs_sign_core` function in a
   6.6.9 build (x86_64 `cycc` and `cycc_aarch64`, `CYRIUS_SYMS` + objdump / llvm-objdump) has exactly
