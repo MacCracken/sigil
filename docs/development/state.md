@@ -274,16 +274,20 @@ the compiler that runs ON Windows and resolves the stdlib differently; on ecb ea
 binary needs an ad-hoc `codesign -s - -f` before it will run):
 **pi** (Raspberry Pi 4, aarch64 Linux), **ecb** (Apple M5 Pro, arm64 macOS),
 **ach** (Intel i7-7820HQ, x86_64 macOS) and **cass** (Windows, x86_64 PE; run
-under `C:\cyrius-tests\`, where Defender is excluded). There is no scripted
-wrapper in this repo: the 3.13.8 runs compared every file's exit status against a
+under `C:\cyrius-tests\`, where Defender is excluded). Apart from the one driver
+below there is no scripted wrapper in this repo: the 3.13.8 runs compared every file's exit status against a
 3.13.7 build on each host, then re-ran the whole suite at pin 6.6.14 (CHANGELOG
 `[3.13.8]` Verification). Ship `tests/data/` beside the binaries (`ed25519` and
 `authenticode` read fixtures by relative path). Threads: real on Linux, ecb and
 **cass** (`CreateThread`, although cyrius 6.6.14 sets `THREADS_CONCURRENT = 0`
 there), inline on **ach** — a test that waits on a spin barrier gates on
-`tests/threads.cyr`. `rooted_paths.tcyr`'s plant rows run on cass with
-`SIGIL_PLANT_ROOT=1` from a `subst` drive mapped onto a directory under
-`C:\cyrius-tests\`, never from `C:\`.
+`tests/threads.cyr`. **`sh scripts/cass-rooted-paths.sh` is mandatory whenever
+`src/tpm_core.cyr`, `ima_core.cyr`, `secureboot_core.cyr`, `dmverity.cyr` or `luks.cyr`
+changes:** it builds `rooted_paths.tcyr` for PE, runs it on cass unplanted, then planted
+(`SIGIL_PLANT_ROOT=1` from a `subst` drive mapped onto a per-run directory under
+`C:\cyrius-tests\`, never from `C:\`), checks the plants are gone and removes the
+directory. Only the planted run catches a dropped per-site guard: with `tpm_detect`'s
+guard removed, unplanted stays 22/0 and planted goes 24/2.
 
 ## Audit floor
 

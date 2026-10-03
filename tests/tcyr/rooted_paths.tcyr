@@ -24,7 +24,9 @@
 # Windows: every helper fails closed. With SIGIL_PLANT_ROOT=1 the test first plants each probed
 # path at the root of the CURRENT drive and asserts that the plants exist, so the rows have
 # something to refuse; set it only on a scratch drive (e.g. `subst X: <dir>`, then run from X:\),
-# never on the system drive. The plants are removed at the end. Under wine a rooted path is the
+# never on the system drive; `sh scripts/cass-rooted-paths.sh` runs both passes on cass and is
+# the gate for any change to the five modules (only the planted pass sees a dropped per-site
+# guard). The plants are removed at the end. Under wine a rooted path is the
 # Linux host's own, so on a host with /dev/tpmrm0 or /sys/firmware/efi the rows bite unplanted.
 # MUTATION (3.13.8, agnosys_rooted_paths_untrusted made to answer 0 — every guard off): on cass
 # 3 of 22 rows fail unplanted (the helper, luks_keyfile_path, luks_close) and 11 of 26 planted
