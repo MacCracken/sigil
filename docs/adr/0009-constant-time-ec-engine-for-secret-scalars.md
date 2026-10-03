@@ -56,7 +56,7 @@ bits (FIPS 186-5 A.2.1), so it has no rejection loop and no branch on the random
 
 - **Positive** — ECDH exists for the TLS refold, and signing is constant-time end to
   end. The engine is also faster than the variable-time path it replaced for secrets:
-  ECDSA P-256 sign 13.2 → 2.8 ms, P-384 30.4 → 8.0 ms (x86_64, same host, A/B). Its
+  ECDSA P-256 sign 13.3 → 2.7 ms, P-384 30.1 → 7.9 ms (x86_64, same host, A/B; `benches/history.csv`). Its
   constant-time property is checked mechanically: every conditional branch in the
   compiled engine (x86_64 and aarch64) maps to a loop bound, a public exponent bit or a
   public verdict.
