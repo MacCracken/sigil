@@ -421,6 +421,20 @@ fn _sigil_lazy_scratch(slot, size): i64 {
     return 0;
 }
 
+# Zeroes the n bytes at p, eight at a time (n a multiple of 8, p 8-aligned): the wipe for secret
+# scratch on hot paths. The stdlib memset stores one byte per iteration, which made the HMAC
+# context wipes added in 3.13.8 cost ~10% of a short HMAC; this costs n/8 stores. A separate
+# function, so the stores are never dead code to the caller (a cleared local that is not read
+# again can be dropped). Returns 0.
+fn _sigil_wipe64(p, n): i64 {
+    var i = 0;
+    while (i < n) {
+        store64(p + i, 0);
+        i = i + 8;
+    }
+    return 0;
+}
+
 # --- mul64.cyr ---
 
 # mul64.cyr -- native 64x64 -> 128 unsigned multiply (3.12.2).

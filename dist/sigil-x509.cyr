@@ -421,6 +421,20 @@ fn _sigil_lazy_scratch(slot, size): i64 {
     return 0;
 }
 
+# Zeroes the n bytes at p, eight at a time (n a multiple of 8, p 8-aligned): the wipe for secret
+# scratch on hot paths. The stdlib memset stores one byte per iteration, which made the HMAC
+# context wipes added in 3.13.8 cost ~10% of a short HMAC; this costs n/8 stores. A separate
+# function, so the stores are never dead code to the caller (a cleared local that is not read
+# again can be dropped). Returns 0.
+fn _sigil_wipe64(p, n): i64 {
+    var i = 0;
+    while (i < n) {
+        store64(p + i, 0);
+        i = i + 8;
+    }
+    return 0;
+}
+
 # --- mul64.cyr ---
 
 # mul64.cyr -- native 64x64 -> 128 unsigned multiply (3.12.2).
@@ -1115,6 +1129,27 @@ fn _sha_ni_compress_one(ctx, buf, kbuf): i64 {
         0x8B; 0x56; 0x14; 0x48; 0x89; 0x57; 0x28;
         0x8B; 0x56; 0x18; 0x48; 0x89; 0x57; 0x30;
         0x8B; 0x56; 0x1C; 0x48; 0x89; 0x57; 0x38;
+
+        # ── Scrub (3.13.8). After the final block the state in xmm1 / xmm2 / xmm7, the
+        #    packed copies at buf+0..63 and the last word in edx ARE the digest — under
+        #    HMAC the MAC, which in RFC 6979's HMAC_DRBG is the signing nonce k (and in
+        #    HKDF a derived key); xmm0 and xmm3..xmm6 hold the message schedule. Registers
+        #    outlive this block: a later spill — a `secret var` epilogue saves xmm0, xmm1
+        #    and rdx below its frame — wrote half of k into dead stack after
+        #    ecdsa_p256_sign returned. ──
+        0x66; 0x0F; 0xEF; 0xC0;                # pxor xmm0, xmm0
+        0x66; 0x0F; 0xEF; 0xC9;                # pxor xmm1, xmm1
+        0x66; 0x0F; 0xEF; 0xD2;                # pxor xmm2, xmm2
+        0x66; 0x0F; 0xEF; 0xDB;                # pxor xmm3, xmm3
+        0x66; 0x0F; 0xEF; 0xE4;                # pxor xmm4, xmm4
+        0x66; 0x0F; 0xEF; 0xED;                # pxor xmm5, xmm5
+        0x66; 0x0F; 0xEF; 0xF6;                # pxor xmm6, xmm6
+        0x66; 0x0F; 0xEF; 0xFF;                # pxor xmm7, xmm7
+        0xF3; 0x0F; 0x7F; 0x46; 0x00;          # movdqu [rsi+0],  xmm0
+        0xF3; 0x0F; 0x7F; 0x46; 0x10;          # movdqu [rsi+16], xmm0
+        0xF3; 0x0F; 0x7F; 0x46; 0x20;          # movdqu [rsi+32], xmm0
+        0xF3; 0x0F; 0x7F; 0x46; 0x30;          # movdqu [rsi+48], xmm0
+        0x31; 0xD2;                            # xor edx, edx
     }
     #endif
     return 0;
@@ -2215,12 +2250,14 @@ fn sha384_finalize(ctx, out): i64 {
     # (quirk #1) — two concurrent SHA-384 finalizes (the TLS-SHA384
     # transcript / HKDF-SHA384 path) raced it. (SHA-256's finalize
     # writes straight to `out`, so it has no analogous buffer — which is
-    # why only the SHA-384 path showed the race.) Per-`cbank()` lane;
-    # public digest, no wipe needed.
+    # why only the SHA-384 path showed the race.) Per-`cbank()` lane.
+    # Wiped after the copy (3.13.8): under HMAC-SHA384 the digest is the
+    # MAC — the P-384 signing nonce in RFC 6979, a key in HKDF-SHA384.
     var bk = cbank();
     var tmp[4096];   var tmpb = &tmp + bk * 64;   # 64 * SIGIL_CRYPTO_BANKS
     sha512_finalize(ctx, tmpb);
     memcpy(out, tmpb, 48);
+    _sigil_wipe64(tmpb, 64);
     return 0;
 }
 
@@ -7779,6 +7816,14 @@ var _ect_b384  = 0;
 var _ect_g384  = 0;
 var _ect384_inited = 0;   # 0 / 1 building / 2 published (_sigil_once_*)
 
+# Kept names (3.13.8). Through 3.13.7 the signer's lazy init lived in ecdsa_sign.cyr behind these
+# two flags, and a consumer test snapshots them (abaco tests/test_ccy_tls.tcyr: no lazy init may
+# run in a fetch after abaco_tls_init). They are set to 2 when the engine's init for the curve
+# publishes, so that check still compiles and still sees the init it was written to catch. New
+# code reads _ect256_inited / _ect384_inited.
+var _ecs256_inited = 0;
+var _ecs384_inited = 0;
+
 # Builds a field context for the odd modulus `m` (nl LE limbs; top bit set, which holds for
 # p256, n256, p384 and n384). Init-time only, public data. Returns the 272-byte block.
 fn _ect_ctx_new(m, nl): i64 {
@@ -8389,15 +8434,31 @@ fn _ect_reduce_once(r, a, m, nl): i64 {
     return 0;
 }
 
-# Overwrites the `n` bytes of stack directly below the caller's frame (n <= 16384): run at the
-# end of a public entry point, it clears the frames the field and point operations used, which
-# held secret-derived intermediates. The stack grows down, so those dead frames lie at the HIGH
-# end of `pad` (nearest the caller); wiping from &pad upward would clear the wrong 8 KB — a
-# probe that plants a sentinel in a dead frame found exactly that before this was written.
-# Returns 0.
+# Overwrites the `n` bytes of stack directly below the caller's frame (n a multiple of 8, any
+# size): run at the end of a public entry point, AFTER the call that did the secret work has
+# returned, it clears the frames that call used, which held secret-derived intermediates. The
+# stack grows down, so those dead frames lie at the HIGH end of `pad` (nearest the caller);
+# wiping from &pad upward would clear the wrong 8 KB — a probe that plants a sentinel in a
+# dead frame found exactly that before this was written. Past 16 KB it recurses (not a tail
+# call, so each frame lies below the last) and wipes each further 16 KB the same way; n is a
+# public size, so the branch is public. Stores are 8 bytes wide (the byte-loop memset made a
+# 160 KB burn cost a measurable share of a signature). Returns 0.
+#
+# The caller must NOT itself hold a `secret var`: the compiler's epilogue for one spills live
+# registers into the 64 bytes below the frame AFTER its own wipe (cyrius EDEFER_SAVE), so the
+# burn would run before the spill. Keep the secret work in a callee and burn from a plain
+# wrapper. CHANGELOG [3.13.8].
 fn _ect_burn_stack(n): i64 {
     var pad[16384];
-    memset(&pad + 16384 - n, 0, n);
+    var m = n;
+    if (m > 16384) { m = 16384; }
+    var p = &pad + 16384 - m;
+    var i = 0;
+    while (i < m) {
+        store64(p + i, 0);
+        i = i + 8;
+    }
+    if (n > 16384) { _ect_burn_stack(n - 16384); }
     return 0;
 }
 
@@ -8419,6 +8480,7 @@ fn _ect256_init(): i64 {
     _ect_to_mont(_ect_g256, _p256_gx, _ect_fp256);
     _ect_to_mont(_ect_g256 + 32, _p256_gy, _ect_fp256);
     memcpy(_ect_g256 + 64, _ect_fp256 + 144, 32);
+    _ecs256_inited = 2;
     _sigil_once_publish(&_ect256_inited);
     return 0;
 }
@@ -8436,6 +8498,7 @@ fn _ect384_init(): i64 {
     _ect_to_mont(_ect_g384, _p384_gx, _ect_fp384);
     _ect_to_mont(_ect_g384 + 48, _p384_gy, _ect_fp384);
     memcpy(_ect_g384 + 96, _ect_fp384 + 144, 48);
+    _ecs384_inited = 2;
     _sigil_once_publish(&_ect384_inited);
     return 0;
 }
