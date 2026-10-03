@@ -322,7 +322,7 @@ fn luks_cipher_str(config): i64 {
 # symlink races.
 # Returns Ok(path) on success or Err if getrandom fails. Always Err on Windows: "/tmp" is a
 # drive-relative directory there that another local user can create and own, so a key staged
-# in it would be theirs to read (agnosys_rooted_paths_untrusted). CHANGELOG [3.13.8].
+# in it would be theirs to read (agnosys_rooted_paths_untrusted). CHANGELOG [3.13.9].
 fn luks_keyfile_path(): i64 {
     if (agnosys_rooted_paths_untrusted() == 1) {
         return sigil_err_not_supported("LUKS keyfile (no /tmp on windows)");
@@ -387,7 +387,7 @@ fn luks_write_keyfile(key_ptr, key_len): i64 {
     # (name, namelen, flags), so the Linux-shaped call passed the flags as the name length.
     # On Windows (PE), O_CREAT|O_EXCL|O_NOFOLLOW resolves a final reparse point instead of
     # refusing it (cyrius 6.6.6 documents this). Not reached there: luks_keyfile_path refuses on
-    # Windows. (Through 3.13.7 this said LUKS was "unreachable in practice" on Windows; this
+    # Windows. (Through 3.13.8 this said LUKS was "unreachable in practice" on Windows; this
     # function is public, and it wrote the key to C:\tmp\.agnos-luks-* whenever C:\tmp existed.)
     var open_flags = O_WRONLY | O_CREAT | O_TRUNC | O_EXCL | O_NOFOLLOW;
     var fd = file_open(keyfile, open_flags, 384);  # 0600

@@ -14,7 +14,7 @@
 # this file's main thread does no crypto at all — it only decodes hex and forks. Linux and macOS
 # fork per trial (arm64 macOS since cyrius 6.6.13 routes `sys_fork` through libSystem: before it,
 # a thread created in a fork child died of SIGSEGV there); Windows has no fork and runs one cold
-# trial in this process; where thread bodies run inline the group skips. CHANGELOG [3.13.8].
+# trial in this process; where thread bodies run inline the group skips. CHANGELOG [3.13.9].
 #
 # Per worker: SHA-256("abc") against FIPS 180-2; ECDSA P-256 and P-384 verify of the RFC 6979
 # A.2.5 / A.2.6 "sample" signatures (must accept) and of the same signatures with one bit flipped

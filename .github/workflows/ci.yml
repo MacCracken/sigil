@@ -294,10 +294,10 @@ jobs:
                | grep -v -E '^src/(aes_ni|sha_ni)\.cyr:' | grep -v -E '_p(256|384)_gt_(tmp|row)'; then
             echo "FAIL: unpublished lazy scratch allocation (use _sigil_lazy_scratch)"; fail=1
           fi
-          # 3.13.8: tests and fuzz harnesses write only inside their private per-run directory
+          # 3.13.9: tests and fuzz harnesses write only inside their private per-run directory
           # (tests/scratch.cyr: under $TMPDIR, an unpredictable name, removed on exit). A fixed
           # "/tmp/..." name is predictable to every local user, so a planted symlink redirects
-          # the write; eleven tests and fuzz_integrity had them until 3.13.8. Comment lines are
+          # the write; eleven tests and fuzz_integrity had them until 3.13.9. Comment lines are
           # skipped. Each exemption pins ONE line, so a new name in the same file still fails:
           # the $TMPDIR fallbacks (tests/scratch.cyr, batch_parallel); fd_hygiene's two reads of
           # the library's own LUKS staging dir (what it tests); rooted_paths' plant of \tmp at a
@@ -312,11 +312,11 @@ jobs:
                | grep -v -E '^tests/tcyr/rooted_paths\.tcyr:[0-9]+: *assert_eq\(sys_access\("/tmp", 0\), 0, "\\\\tmp is there to be found"\);$'; then
             echo "FAIL: fixed /tmp path in a test or fuzz harness (use tests/scratch.cyr)"; fail=1
           fi
-          # 3.13.8: file operations go through lib/io.cyr's x* set (CLAUDE.md "No raw syscalls").
+          # 3.13.9: file operations go through lib/io.cyr's x* set (CLAUDE.md "No raw syscalls").
           # agnos's sys_open / sys_mkdir / sys_unlink / sys_rmdir / sys_stat / sys_rename /
           # sys_readlink / ... take (path, pathlen), so a bare POSIX-shaped call is wrong there and
           # usually does not compile: tests/scratch.cyr's bare calls stopped eleven tests and
-          # fuzz_integrity building for agnos until the 3.13.8 review. Comment lines are skipped.
+          # fuzz_integrity building for agnos until the 3.13.9 review. Comment lines are skipped.
           # Exempt: crypto_scratch's /proc/self/auxv read, inside #ifdef CYRIUS_TARGET_LINUX.
           if grep -rnE '^[^#]*\bsys_(open|unlink|mkdir|rmdir|stat|lstat|statfs|rename|link|symlink|readlink)\(' \
                  src tests fuzz programs --include='*.cyr' --include='*.tcyr' --include='*.bcyr' --include='*.fcyr' \

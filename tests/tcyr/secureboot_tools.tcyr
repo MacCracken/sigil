@@ -13,12 +13,12 @@
 # fake ever ran (each fake creates a marker file before printing its spoofed
 # output). The cwd is restored and the scratch dir removed at the end.
 #
-# Windows (3.13.8): cyrius's sys_chdir is a stub there (-1), so the test cannot move into the
+# Windows (3.13.9): cyrius's sys_chdir is a stub there (-1), so the test cannot move into the
 # planted dir; those rows SKIP by name, and every exec path is still driven (the subprocess helpers
-# refuse to spawn on Windows). What Windows does assert is the 3.13.8 fail-closed resolver: the
+# refuse to spawn on Windows). What Windows does assert is the 3.13.9 fail-closed resolver: the
 # trusted tool dirs are rooted POSIX paths, drive-relative there, so no tool resolves at all. The
 # cwd is read with xreadlink, which builds on every target (the bare sys_readlink is undefined on
-# PE and takes (path, pathlen, buf, buflen) on agnos). CHANGELOG [3.13.8].
+# PE and takes (path, pathlen, buf, buflen) on agnos). CHANGELOG [3.13.9].
 
 include "lib/assert.cyr"
 include "lib/alloc.cyr"

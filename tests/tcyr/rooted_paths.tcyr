@@ -1,7 +1,7 @@
-# rooted_paths.tcyr — on Windows the trust cores never probe or spawn a rooted POSIX path (3.13.8).
+# rooted_paths.tcyr — on Windows the trust cores never probe or spawn a rooted POSIX path (3.13.9).
 #
 # On Windows a rooted path is DRIVE-RELATIVE: "/dev/tpmrm0" is C:\dev\tpmrm0, and any authenticated
-# user may create folders at the root of the system drive. Through 3.13.7 the TPM, Secure Boot,
+# user may create folders at the root of the system drive. Through 3.13.8 the TPM, Secure Boot,
 # IMA, dm-verity and LUKS helpers probed such paths there, so another local user could plant:
 #   - C:\dev\tpmrm0                       -> tpm_available() said a TPM was present;
 #   - C:\usr\bin\mokutil                  -> `_sb_tool_path` resolved the tool (spawning it was
@@ -28,10 +28,10 @@
 # the gate for any change to the five modules (only the planted pass sees a dropped per-site
 # guard). The plants are removed at the end. Under wine a rooted path is the
 # Linux host's own, so on a host with /dev/tpmrm0 or /sys/firmware/efi the rows bite unplanted.
-# MUTATION (3.13.8, agnosys_rooted_paths_untrusted made to answer 0 — every guard off): on cass
+# MUTATION (3.13.9, agnosys_rooted_paths_untrusted made to answer 0 — every guard off): on cass
 # 3 of 22 rows fail unplanted (the helper, luks_keyfile_path, luks_close) and 11 of 26 planted
 # (also tpm_detect / tpm_available, the mokutil lookup, all four IMA rows, dmverity_supported,
-# luks_write_keyfile); under wine 4 of 22. CHANGELOG [3.13.8].
+# luks_write_keyfile); under wine 4 of 22. CHANGELOG [3.13.9].
 
 include "lib/assert.cyr"
 include "lib/alloc.cyr"
@@ -80,7 +80,7 @@ fn _rp_put(path, body, len): i64 {
     return w >= 0;
 }
 
-# Plant every path the pre-3.13.8 helpers probed, relative to the current drive's root. This fn
+# Plant every path the pre-3.13.9 helpers probed, relative to the current drive's root. This fn
 # and _rp_unplant compile on every target, so they use lib/io.cyr's x* set: agnos's bare
 # sys_mkdir / sys_unlink / sys_rmdir take (path, pathlen).
 fn _rp_plant(): i64 {
@@ -197,7 +197,7 @@ fn _rp_windows(): i64 {
     assert_eq(is_err_result(l1_tag), 1, "luks_keyfile_path refuses");
     var l2_tag, l2 = luks_write_keyfile("0123456789abcdef", 16);
     assert_eq(is_err_result(l2_tag), 1, "luks_write_keyfile stages no key under \\tmp");
-    if (is_err_result(l2_tag) == 0) { xunlink(l2); }   # a pre-3.13.8 build wrote one: remove it
+    if (is_err_result(l2_tag) == 0) { xunlink(l2); }   # a pre-3.13.9 build wrote one: remove it
     var l3_tag, l3 = luks_close("sigilrp");
     assert_eq(is_err_result(l3_tag), 1, "luks_close refuses");
 

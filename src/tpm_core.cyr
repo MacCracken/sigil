@@ -178,7 +178,7 @@ fn tpm_pcr_selection(bank, indices): i64 {
 
 # Check if a TPM 2.0 device is available.
 # Returns 1 if available, 0 if not. Always 0 on Windows, where "/dev/tpmrm0" is a drive-relative
-# path another local user can plant (agnosys_rooted_paths_untrusted). CHANGELOG [3.13.8].
+# path another local user can plant (agnosys_rooted_paths_untrusted). CHANGELOG [3.13.9].
 fn tpm_detect(): i64 {
     if (agnosys_rooted_paths_untrusted() == 1) { return 0; }
     if (sys_access("/dev/tpmrm0", 0) == 0) { return 1; }

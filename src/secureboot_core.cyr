@@ -107,7 +107,7 @@ fn secureboot_efi_var_size(data): i64 {
 
 # `dir` + `name` if that file exists and is executable, else 0. Always 0 on Windows, where
 # "/usr/bin/" is a drive-relative directory another local user can plant
-# (agnosys_rooted_paths_untrusted). CHANGELOG [3.13.8].
+# (agnosys_rooted_paths_untrusted). CHANGELOG [3.13.9].
 fn _sb_tool_in(dir, name): i64 {
     if (agnosys_rooted_paths_untrusted() == 1) { return 0; }
     var dl = strlen(dir);
@@ -178,8 +178,8 @@ fn _secureboot_state_from_mokutil(): i64 {
 # Detect the current Secure Boot state.
 # Returns Result: Ok(SecureBootState) or Err. Ok(SB_NOT_SUPPORTED) on Windows without reading
 # anything: "/sys/firmware/efi/..." is drive-relative there (agnosys_rooted_paths_untrusted).
-# Through 3.13.7 the only thing between a planted C:\sys\firmware\efi and this function's
-# answer was `file_exists` failing on a directory there. CHANGELOG [3.13.8].
+# Through 3.13.8 the only thing between a planted C:\sys\firmware\efi and this function's
+# answer was `file_exists` failing on a directory there. CHANGELOG [3.13.9].
 fn secureboot_detect_state(): i64 {
     if (agnosys_rooted_paths_untrusted() == 1) { return Ok(SB_NOT_SUPPORTED); }
     # Check if EFI is available. `file_exists` (io.cyr) rather than a raw

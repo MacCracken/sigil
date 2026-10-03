@@ -90,7 +90,7 @@ fn pid_str(): i64 {
 }
 
 # <scratch dir>/fdh_<tag>: inside this run's private directory (tests/scratch.cyr), so parallel
-# runs never collide and nobody can plant the name first. (Through 3.13.7: a fixed
+# runs never collide and nobody can plant the name first. (Through 3.13.8: a fixed
 # /tmp/sigil_fdh_<pid>_<tag>.)
 fn tmp_name(tag): i64 {
     return scratch_path(cat2("fdh_", tag));
@@ -178,7 +178,7 @@ fn main() {
     var base = lowest_free_fd();
     var i = 0;
     #ifdef CYRIUS_TARGET_WIN
-    # Refused on Windows since 3.13.8: the keyfile is staged under "/tmp", a drive-relative
+    # Refused on Windows since 3.13.9: the keyfile is staged under "/tmp", a drive-relative
     # directory there (tests/tcyr/rooted_paths.tcyr has the planted-drive rows).
     var wk_t, wk_v = luks_write_keyfile(key, 64);
     assert_eq(syserr_kind(wk_v), SIGIL_ERR_NOT_SUPPORTED, "Windows: luks_write_keyfile is not_supported");
@@ -319,7 +319,7 @@ fn main() {
     # ============================================================
     test_group("tpm_seal staging");
     #ifdef CYRIUS_TARGET_WIN
-    # Refused on Windows since 3.13.8, before any plaintext is staged (no tpm2-tools there).
+    # Refused on Windows since 3.13.9, before any plaintext is staged (no tpm2-tools there).
     var wv = vec_new();
     vec_push(wv, 7);
     var ws_t, ws_v = tpm_seal(TPM_SHA256, wv, "top-secret-plaintext", 20, scratch_dir());

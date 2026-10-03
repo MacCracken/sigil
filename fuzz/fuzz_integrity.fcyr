@@ -36,7 +36,7 @@ include "src/integrity.cyr"
 include "tests/scratch.cyr"
 
 # "<scratch dir>/sigil_fuzz_{i}.bin" as a fresh C string — inside this run's private directory
-# (tests/scratch.cyr; through 3.13.7 a fixed name in the shared /tmp).
+# (tests/scratch.cyr; through 3.13.8 a fixed name in the shared /tmp).
 fn _fuzz_path(i) {
     var name = alloc(40);
     memcpy(name, "sigil_fuzz_", 11);

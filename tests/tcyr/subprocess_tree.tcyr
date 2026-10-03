@@ -123,7 +123,7 @@ fn main(): i64 {
     #ifndef CYRIUS_TARGET_WIN
     var cbuf = alloc(4096);
     # The shell's pid file and marker live in this run's private directory (tests/scratch.cyr;
-    # until 3.13.8 the cwd), single-quoted for the shell, and go with it at the end.
+    # until 3.13.9 the cwd), single-quoted for the shell, and go with it at the end.
     assert(scratch_init("subprocess_tree") != 0, "a private per-run scratch directory under $TMPDIR");
     var pidf = scratch_path("pid");
     var mark = scratch_path("mark");

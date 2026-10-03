@@ -570,7 +570,7 @@ fn main() {
     test_group("mldsa zetas lazy init raced by staggered first callers");
     # Its workers wait on a spin barrier: where thread_create runs the body inline (x86 macOS,
     # agnos) the first worker would spin for ever, and the whole file hung there (killed at the
-    # 900 s limit on ach through 3.13.8's first draft). Group 1 has no barrier and runs anywhere.
+    # 900 s limit on ach through 3.13.8). Group 1 has no barrier and runs anywhere.
     if (test_threads_concurrent() == 0) {
         println("  SKIP: thread bodies run inline at thread_create on this target");
     } else {

@@ -99,7 +99,7 @@ fn main() {
     #endif
 
     # Ground truth: rmdir of a non-empty directory returns -ENOTEMPTY on this kernel. Inside this
-    # run's private directory (tests/scratch.cyr; until 3.13.8 a fixed name in the cwd), through
+    # run's private directory (tests/scratch.cyr; until 3.13.9 a fixed name in the cwd), through
     # lib/io.cyr's x* set, which on Linux and macOS returns the kernel's own -errno.
     assert(scratch_init("errno_peer") != 0, "a private per-run scratch directory under $TMPDIR");
     var dpath = scratch_path("d");

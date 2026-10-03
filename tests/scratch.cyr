@@ -1,4 +1,4 @@
-# tests/scratch.cyr — a private, per-run scratch directory for the tests and fuzz harnesses (3.13.8).
+# tests/scratch.cyr — a private, per-run scratch directory for the tests and fuzz harnesses (3.13.9).
 #
 # scratch_init(tag) creates <base>/sigil-<tag>-<16 random hex>, where <base> is $TMPDIR, else
 # $TEMP / $TMP (Windows), else /tmp, with ONE mkdir (mode 0700) that fails if the name already
@@ -6,18 +6,18 @@
 # symlink, a directory of theirs). Every file a test writes goes inside it (scratch_path), and
 # scratch_cleanup() removes the whole tree before the test exits.
 #
-# Through 3.13.7 eleven test files and fuzz/fuzz_integrity.fcyr wrote fixed names in the shared
+# Through 3.13.8 eleven test files and fuzz/fuzz_integrity.fcyr wrote fixed names in the shared
 # /tmp (`/tmp/sigil_verify_test.txt`, ...): predictable, so a pre-planted symlink redirected the
 # write; they ignored TMPDIR; they left their files behind; and they failed on Windows, where
-# /tmp does not exist. scripts/check.sh and batch_parallel moved off it earlier in 3.13.8.
+# /tmp does not exist. scripts/check.sh and batch_parallel moved off it in 3.13.8.
 #
 # File operations go through lib/io.cyr's x* set (xmkdir / xunlink / xrmdir), never the bare
 # sys_* wrappers: agnos's take (path, pathlen), so a bare `sys_unlink(p)` does not even compile
-# there, and every test that included this file stopped building for agnos (3.13.8 review).
+# there, and every test that included this file stopped building for agnos (3.13.9 review).
 # Removal is confirmed with is_dir, which asks the filesystem on every target (agnos's
 # sys_access is a stub that always answers -1, which would read as "gone").
 #
-# Include after the stdlib (str, vec, io, fs, random). CHANGELOG [3.13.8].
+# Include after the stdlib (str, vec, io, fs, random). CHANGELOG [3.13.9].
 
 include "lib/fs.cyr"
 include "lib/random.cyr"

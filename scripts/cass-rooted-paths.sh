@@ -1,6 +1,6 @@
 #!/bin/sh
 # cass-rooted-paths.sh — run tests/tcyr/rooted_paths.tcyr on a real Windows host, unplanted and
-# planted (3.13.8).
+# planted (3.13.9).
 #
 #   sh scripts/cass-rooted-paths.sh [host]          (default host: cass)
 #

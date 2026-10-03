@@ -70,7 +70,7 @@ fn is_bool(v) {
 
 # /usr/bin/<name> where it exists, else /bin/<name>. macOS has no /bin/true or /bin/false, so the
 # "a zero exit is Ok" row failed there, and the /bin/false rows "passed" because the binary was
-# missing, not because it exited 1 (3.13.8).
+# missing, not because it exited 1 (3.13.9).
 fn tool(name): i64 {
     var nl = strlen(name);
     var p = alloc(10 + nl);

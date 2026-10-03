@@ -65,7 +65,7 @@ fn agnosys_cstr_starts_with(str, prefix): i64 {
 # own. Every device-node, sysfs, tool-path or /tmp probe in the
 # trust cores asks this first and fails closed; the subprocess helpers below already refuse
 # on Windows, so no tool is ever spawned there either. The cyrius stdlib's CVE-54 / -57 / -65
-# are the same class. CHANGELOG [3.13.8].
+# are the same class. CHANGELOG [3.13.9].
 fn agnosys_rooted_paths_untrusted(): i64 {
     #ifdef CYRIUS_TARGET_WIN
     return 1;

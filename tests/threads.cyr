@@ -1,4 +1,4 @@
-# tests/threads.cyr — does thread_create start a SECOND thread on this target? (3.13.8)
+# tests/threads.cyr — does thread_create start a SECOND thread on this target? (3.13.9)
 #
 # A test that releases workers from a spin barrier deadlocks where thread_create runs the body
 # inline before it returns: the first worker spins on a release main can never give. cyrius's
@@ -9,7 +9,7 @@
 # thread_create has returned, which it can only see if it runs beside main. The probe touches no
 # sigil state, so a process that must stay cold for a first-use test stays cold.
 #
-# Include after lib/thread.cyr and lib/chrono.cyr. CHANGELOG [3.13.8].
+# Include after lib/thread.cyr and lib/chrono.cyr. CHANGELOG [3.13.9].
 
 var _tp_go = 0;
 var _tp_saw = 0;
