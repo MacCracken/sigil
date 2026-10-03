@@ -9,9 +9,11 @@
 #     worker was given bank 0, the main thread's lane;
 #   - the main thread never got a block, and its first crypto call read thread-local storage
 #     through a null thread pointer: SIGSEGV.
-# cyrius issue 2026-09-30-tls-first-use-thread-race (scenario C). On Linux each group runs in a
-# fresh process (fork), because the state under test is the cold one; elsewhere the first group
-# runs in this still-cold process and the other two, which test the Linux mechanism, skip.
+# cyrius issue 2026-09-30-tls-first-use-thread-race (scenario C). Each group runs in a fresh
+# process (fork), because the state under test is the cold one — on Linux and on macOS (arm64
+# macOS since cyrius 6.6.13 routes `sys_fork` through libSystem: before it, a thread created in a
+# fork child died of SIGSEGV there). Windows has no fork: the first group runs in this
+# still-cold process. The other two test the Linux mechanism and skip elsewhere.
 
 include "lib/assert.cyr"
 include "lib/alloc.cyr"
@@ -161,14 +163,13 @@ fn main() {
     _cl_sig = hex_decode("efd48b2aacb6a8fd1140dd9cd45e81d69d2c877b56aaf991c34d0ea84eaf3716f7cb1c942d657c41d436c7a1b6e29f65f3e900dbb9aff4064dc4ab2f843acda8", 128);
 
     test_group("a worker's crypto call comes first, then main's");
-    #ifdef CYRIUS_TARGET_LINUX
+    #ifndef CYRIUS_TARGET_WIN
     var r1 = _cl_fork(1);
     assert_eq(r1, 0, "both verify; the worker draws a lane of its own and main keeps bank 0, in a fresh process (1000+ = killed by that signal)");
     #endif
-    #ifndef CYRIUS_TARGET_LINUX
-    # Off Linux the scenario runs in this process, which is still cold (nothing above touched
-    # sigil): a forked child cannot create a thread on arm64 macOS (a cyrius limitation, measured
-    # on ecb), and Windows has no fork.
+    #ifdef CYRIUS_TARGET_WIN
+    # No fork on Windows: the scenario runs in this process, which is still cold (nothing above
+    # touched sigil).
     assert_eq(_cl_worker_first(), 0, "both verify, worker first (in this process)");
     #endif
 

@@ -11,7 +11,10 @@
 # ecdsa_p256_warm), which is exactly why none of them could see this. Here nothing is warm: each
 # trial is a FRESH PROCESS (fork) whose threads are released together from a barrier, so every one
 # of them makes a first call. A fork child starts cold only if its parent never touched sigil, so
-# this file's main thread does no crypto at all — it only decodes hex and forks.
+# this file's main thread does no crypto at all — it only decodes hex and forks. Linux and macOS
+# fork per trial (arm64 macOS since cyrius 6.6.13 routes `sys_fork` through libSystem: before it,
+# a thread created in a fork child died of SIGSEGV there); Windows has no fork and runs one cold
+# trial in this process; where thread bodies run inline the group skips. CHANGELOG [3.13.8].
 #
 # Per worker: SHA-256("abc") against FIPS 180-2; ECDSA P-256 and P-384 verify of the RFC 6979
 # A.2.5 / A.2.6 "sample" signatures (must accept) and of the same signatures with one bit flipped
@@ -119,6 +122,33 @@ fn _lr_trial(): i64 {
     return b;
 }
 
+# Does thread_create start a second thread here, or run the body inline before it returns?
+# cyrius's THREADS_CONCURRENT is 1 on Linux and arm64 macOS, and that is true. It is 0 on x86
+# macOS and agnos, which run the body inline, and ALSO on Windows, where thread_create is
+# CreateThread and the threads are real (measured on cass under cyrius 6.6.14). So a 0 is
+# measured, not trusted: the body waits up to 2 s for a store main makes only after
+# thread_create has returned, which it can only see if it is running beside main. The probe
+# touches no sigil state, so the process stays cold.
+var _lr_probe_go = 0;
+var _lr_probe_saw = 0;
+fn _lr_probe_body(arg): i64 {
+    var deadline = clock_now_ms() + 2000;
+    while (clock_now_ms() < deadline) {
+        if (atomic_load(&_lr_probe_go) == 1) {
+            atomic_store(&_lr_probe_saw, 1);
+            return 0;
+        }
+    }
+    return 0;
+}
+fn _lr_threads_concurrent(): i64 {
+    if (THREADS_CONCURRENT == 1) { return 1; }
+    var th = thread_create(&_lr_probe_body, 0);
+    atomic_store(&_lr_probe_go, 1);
+    thread_join(th);
+    return atomic_load(&_lr_probe_saw);
+}
+
 # Fork one trial and reap it within the deadline. Returns 0 = clean, 1 = wrong answers,
 # 2 = crashed (signal), 3 = hung (killed at the deadline), 4 = could not fork.
 fn _lr_run_trial(): i64 {
@@ -157,13 +187,13 @@ fn main() {
     _lr_pem_len = strlen(LR_PEM);
 
     test_group("concurrent first use of the lazy tables");
-    if (THREADS_CONCURRENT == 0) {
-        # x86 macOS, Windows and agnos run a thread body inline at thread_create under this
-        # toolchain, so no first use is ever concurrent (and the start barrier would never open).
-        println("  SKIP: threads run serially on this target");
+    if (_lr_threads_concurrent() == 0) {
+        # thread_create runs the body inline here (x86 macOS, measured on ach; agnos), so no
+        # first use is ever concurrent, and the start barrier would never open.
+        println("  SKIP: thread bodies run inline at thread_create on this target");
         return assert_summary();
     }
-    #ifdef CYRIUS_TARGET_LINUX
+    #ifndef CYRIUS_TARGET_WIN
     var clean = 0; var wrong = 0; var crashed = 0; var hung = 0; var nofork = 0;
     var t = 0;
     while (t < LR_TRIALS) {
@@ -181,10 +211,8 @@ fn main() {
     assert_eq(wrong, 0, "every worker's first call returned the right answer, in every trial");
     assert_eq(clean, LR_TRIALS, "every trial was clean");
     #endif
-    #ifndef CYRIUS_TARGET_LINUX
-    # arm64 macOS: a forked child cannot create a thread there (a cyrius limitation — measured on
-    # ecb, the child dies of SIGSEGV with no sigil code in the program), so this process is the
-    # one cold trial: nothing above has touched sigil.
+    #ifdef CYRIUS_TARGET_WIN
+    # No fork on Windows: this process is the one cold trial (nothing above has touched sigil).
     assert_eq(_lr_trial(), 0, "every worker's first call returned the right answer (one in-process trial)");
     #endif
     return assert_summary();
