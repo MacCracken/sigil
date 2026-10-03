@@ -339,12 +339,20 @@ modules, never the opt-in stdlib ones.
 
 ## Tests
 
-1661 assertions across 64 test files, 0 failures (3.12.2), plus a fuzz
-suite of 24 assertions across 3 `fuzz/*.fcyr` files. Crypto
-suites use published known-answer vectors (RFC / FIPS / NIST); the
-TEE attestation arc ships synthesised end-to-end fixtures.
-`tests/tcyr/batch_parallel.tcyr` doubles as the parallel-verify race
-detector — run mutex-off since 3.6.
+The current assertion and file counts (`.tcyr` suite and `fuzz/*.fcyr`)
+live in [`docs/development/state.md`](docs/development/state.md), rewritten
+from a measured run by `sh scripts/state-sync.sh --write --count` each
+release (CI's `state-sync.sh --check` fails while they name an older
+version). This README carried a 3.12.2 count for a whole minor, so it no
+longer repeats one. Crypto suites use published
+known-answer vectors (RFC / FIPS / NIST); the TEE attestation arc ships
+synthesised end-to-end fixtures. `tests/tcyr/batch_parallel.tcyr` doubles
+as the parallel-verify race detector — run mutex-off since 3.6. Tests and
+fuzz harnesses write only inside a private per-run directory under
+`$TMPDIR` (`tests/scratch.cyr`). Releases since 3.13.3 also run on aarch64
+Linux, arm64 and x86_64 macOS and Windows (state.md, "Bootstrap /
+verification hosts"); `sh scripts/cass-rooted-paths.sh` is the planted
+Windows run of `rooted_paths.tcyr`.
 
 ```sh
 cyrius build programs/smoke.cyr build/sigil   # full build
