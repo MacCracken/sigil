@@ -206,20 +206,36 @@ fn _tm_be(c, hexs): i64 {
     return hex_decode(hexs, strlen(hexs));
 }
 
+var _tm_core_fail = 0;   # timed signing cores that did not return 0
+
 # Nanoseconds for one _ecs_sign_core call with the chosen big-endian nonce k_be and key d_be
-# and message representative e (LE limbs) on curve c.
+# and message representative e (LE limbs) on curve c. A failed call is counted, so the timing
+# group cannot pass on the time of a failure; the key buffers are copied first, because under
+# the 6.6.9 pin on Intel macOS clock_now_ns writes through a stale rdx (cyrius CVE-51, fixed
+# in 6.6.10) and rdx holds d_be on entry here.
 fn _tm_core(c, k_be, d_be, e, sig): i64 {
+    var kk[48];
+    var dd[48];
+    var w = 32;
+    if (c == 384) { w = 48; }
+    memcpy(&kk, k_be, w);
+    memcpy(&dd, d_be, w);
+    var rc = 0;
     var t0 = 0;
+    var t1 = 0;
     if (c == 256) {
         _ect256_init();
         t0 = clock_now_ns();
-        _ecs_sign_core(d_be, k_be, e, sig, 4, _ect_fp256, _ect_fn256, _ect_b256, _ect_g256);
-        return clock_now_ns() - t0;
+        rc = _ecs_sign_core(&dd, &kk, e, sig, 4, _ect_fp256, _ect_fn256, _ect_b256, _ect_g256);
+        t1 = clock_now_ns();
+    } else {
+        _ect384_init();
+        t0 = clock_now_ns();
+        rc = _ecs_sign_core(&dd, &kk, e, sig, 6, _ect_fp384, _ect_fn384, _ect_b384, _ect_g384);
+        t1 = clock_now_ns();
     }
-    _ect384_init();
-    t0 = clock_now_ns();
-    _ecs_sign_core(d_be, k_be, e, sig, 6, _ect_fp384, _ect_fn384, _ect_b384, _ect_g384);
-    return clock_now_ns() - t0;
+    if (rc != 0) { _tm_core_fail = _tm_core_fail + 1; }
+    return t1 - t0;
 }
 
 fn main() {
@@ -418,6 +434,7 @@ fn main() {
     var mlo = _tm_median(t + 0 * 128, R);
     var mhi = _tm_median(t + 1 * 128, R);
     _tm_print2("p256 sign core", mlo, mhi);
+    assert_eq(_tm_core_fail, 0, "p256 every timed signing core succeeded");
     _tm_band(mlo, mhi, "p256 sign core (k,d)=(1,1) within [0.75, 1.33]x (n-1,n-1)");
 
     var e384 = u384_from(0x1234567);
@@ -439,6 +456,7 @@ fn main() {
     mlo = _tm_median(t + 0 * 128, R);
     mhi = _tm_median(t + 1 * 128, R);
     _tm_print2("p384 sign core", mlo, mhi);
+    assert_eq(_tm_core_fail, 0, "p384 every timed signing core succeeded");
     _tm_band(mlo, mhi, "p384 sign core (k,d)=(1,1) within [0.75, 1.33]x (n-1,n-1)");
 
     return assert_summary();
