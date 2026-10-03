@@ -24,6 +24,12 @@
 #
 # The u384_* helpers are used by ecdsa_sign.cyr and the tests as well
 # as by this module; they are not a stable public API.
+#
+# NOTHING in this file is constant-time (the field arithmetic branches on
+# its operands, the point formulas on infinity and P == ±Q), so nothing here
+# may be given a secret: verify consumes only public data. Every secret
+# scalar — the signing nonce, the private key's products, an ECDH key —
+# runs on the constant-time engine in src/ec_ct.cyr (3.13.8).
 
 # ================================================================
 # Curve constants — initialised on first call via `_p384_init`.
@@ -195,20 +201,20 @@ fn u384_shl1(r, a): i64 {
 # 3.12.2: the 32-bit-halves body (four 32x32 multiplies plus two
 # comparison-based carry fixups) is replaced by the native `_nmul64`
 # (src/mul64.cyr) — one x86-64 `MUL r64`, with a portable fallback on
-# aarch64. Beyond the speed-up this REMOVES two value-dependent branches
-# from a routine that multiplies secret operands on the P-384 sign path.
-# The banked out-slot contract is unchanged.
+# aarch64. Beyond the speed-up this removed two value-dependent branches
+# from a routine that then multiplied secret operands on the P-384 sign
+# path (since 3.13.8 the sign path runs on src/ec_ct.cyr instead). The
+# banked out-slot contract is unchanged.
 fn _p384_mul64(a, b, out): i64 {
     _nmul64(a, b, out, out + 8);
     return 0;
 }
 
 # Per-lane 16-byte slot for _p384_mul64's lo/hi product (quirk #9 / ADR
-# 0004). Module-global (banked) so the sign-path scrub in ecdsa_sign.cyr
-# can wipe it by name: it holds intermediate products of secret operands
-# on the sign path, so it is plain `alloc` + a per-lane scrub (NEVER
-# `secret var` — a whole-array wipe would clobber a sibling worker's
-# live lane). Lazily allocated on first u384_mul_full call.
+# 0004), lazily allocated on first u384_mul_full call. Through 3.13.7 it
+# held products of secret operands on the sign path and ecdsa_sign.cyr
+# scrubbed it by name; since 3.13.8 only public (verify) data passes
+# through it.
 var _p384_m64 = 0;
 
 # Schoolbook 384×384 → 768-bit multiply.
@@ -1044,9 +1050,9 @@ fn pt384_add(out, p, q): i64 {
 # ladder (see src/ecdsa_p256.cyr for the full rationale). pt384_add /
 # pt384_double exit early on an infinity operand and R0 is infinity for
 # every leading zero bit, so laddering over k itself (pt384_scalarmul)
-# leaks bitlen(k) — Minerva / CVE-2019-15809. A SECRET scalar goes through
-# pt384_scalarmul_secret: the ladder over the fixed-length k_hat = k + n or
-# k + 2n (bit 384 always set; n·P = O), 385 iterations for every k.
+# leaks bitlen(k) — Minerva / CVE-2019-15809 — and the field arithmetic
+# underneath is variable-time too. PUBLIC scalars only: every secret scalar
+# (pt384_scalarmul_secret included) runs on src/ec_ct.cyr since 3.13.8.
 var _ptm384_r0 = 0;
 var _ptm384_r1 = 0;
 var _ptm384_sum = 0;
@@ -1065,8 +1071,8 @@ fn _ptm384_init(): i64 {
 }
 
 # Ladder core: out = k * P over scalar bits top..0 (k is LE limbs covering bit `top`; P, out
-# 144-byte Jacobian), branch-free pt384_cswap. Shared by pt384_scalarmul (top 383) and
-# pt384_scalarmul_secret (top 384, fixed length).
+# 144-byte Jacobian), branch-free pt384_cswap. Public scalars only; used by pt384_scalarmul
+# with top 383.
 fn _pt384_ladder(out, k, top, P): i64 {
     _p384_init();
     _ptm384_init();
@@ -1101,124 +1107,18 @@ fn _pt384_ladder(out, k, top, P): i64 {
 
 # out = k * P via the ladder over all 384 bits of k (six LE limbs; P, out 144-byte Jacobian).
 # PUBLIC scalars only: pt384_add / pt384_double exit early on infinity, which R0 is for each
-# leading zero bit of k, so the time leaks bitlen(k) — use pt384_scalarmul_secret for a secret k.
+# leading zero bit of k, so the time leaks bitlen(k) — a secret k goes to pt384_scalarmul_secret
+# (src/ec_ct.cyr).
 fn pt384_scalarmul(out, k, P): i64 {
     return _pt384_ladder(out, k, 383, P);
-}
-
-# kh (7 LE limbs, 56 B) = the fixed-length ladder scalar for a 384-bit k: k + n when that sum
-# reaches 2^384, else k + 2n. For every k < 2^384 the result has limb 6 == 1 exactly (bit 384
-# set, n > 2^383), and kh == k mod n. Both candidates are always computed and one is picked by
-# an all-ones/zero mask: no branch, no early exit, no secret-indexed access. The carry is the
-# branch-free majority form MSB((a & b) | ((a | b) & ~s)).
-fn _p384_khat(kh, k): i64 {
-    _p384_init();
-    # k + 2n candidate — a stack local (per-call, per-thread), deliberately not cbank-banked:
-    # array locals are per-thread under the pinned toolchain (CLAUDE.md quirk #1); a
-    # CYRIUS_STACK_ARRAYS=0 build is unsupported. Wiped before return.
-    var t2[56];
-    var ones = 0 - 1;
-    var c = 0;
-    var i = 0;
-    while (i < 6) {                 # kh = k + n, carry into limb 6
-        var a = load64(k + i * 8);
-        var b = load64(_p384_n + i * 8);
-        var s = a + b + c;
-        c = (((a & b) | ((a | b) & (s ^ ones))) >> 63) & 1;
-        store64(kh + i * 8, s);
-        i = i + 1;
-    }
-    store64(kh + 48, c);
-    c = 0;
-    i = 0;
-    while (i < 6) {                 # t2 = kh + n = k + 2n
-        var a = load64(kh + i * 8);
-        var b = load64(_p384_n + i * 8);
-        var s = a + b + c;
-        c = (((a & b) | ((a | b) & (s ^ ones))) >> 63) & 1;
-        store64(&t2 + i * 8, s);
-        i = i + 1;
-    }
-    store64(&t2 + 48, load64(kh + 48) + c);
-    # mask = all ones iff k + n already reached bit 384 (keep it), else take k + 2n.
-    var mask = 0 - (load64(kh + 48) & 1);
-    i = 0;
-    while (i < 7) {
-        var x = load64(kh + i * 8);
-        var y = load64(&t2 + i * 8);
-        store64(kh + i * 8, y ^ (mask & (x ^ y)));
-        i = i + 1;
-    }
-    memset(&t2, 0, 56);
-    return 0;
-}
-
-# bp (144-byte Jacobian) = P with its coordinates rescaled by a secret per-call λ — (X·λ², Y·λ³,
-# Z·λ), the same point. λ = SHA-384("sigil-p384-ladder-blind" || kh) reduced mod p and never 0:
-# secret (derived from the secret k_hat) and different for every nonce, so no ladder iteration
-# runs on a fixed Z = 1 operand (the one-bit LadderLeak-class residual, fixed 3.13.1). Every
-# intermediate is wiped.
-fn _p384_blind_point(bp, P, kh): i64 {
-    _p384_init();
-    var hin[80];
-    var tag = "sigil-p384-ladder-blind";
-    var tl = strlen(tag);
-    memcpy(&hin, tag, tl);
-    memcpy(&hin + tl, kh, 56);
-    var dig[48];
-    sha384(&hin, tl + 56, &dig);
-    var one[48];
-    memset(&one, 0, 48);
-    store64(&one, 1);
-    var lam[48];
-    fp_p384_mul(&lam, &dig, &one);                 # reduce mod p
-    # λ == 0 (probability ~2^-384) would zero Z; map it to 1 without a branch.
-    var o = load64(&lam) | load64(&lam + 8) | load64(&lam + 16) | load64(&lam + 24)
-    | load64(&lam + 32) | load64(&lam + 40);
-    var isz = 1 ^ (((o | (0 - o)) >> 63) & 1);
-    store64(&lam, load64(&lam) | isz);
-    var l2[48];
-    var l3[48];
-    fp_p384_sq(&l2, &lam);
-    fp_p384_mul(&l3, &l2, &lam);
-    fp_p384_mul(_pt384_x(bp), _pt384_x(P), &l2);
-    fp_p384_mul(_pt384_y(bp), _pt384_y(P), &l3);
-    fp_p384_mul(_pt384_z(bp), _pt384_z(P), &lam);
-    memset(&hin, 0, 80);
-    memset(&dig, 0, 48);
-    memset(&lam, 0, 48);
-    memset(&l2, 0, 48);
-    memset(&l3, 0, 48);
-    return 0;
-}
-
-# out = k * P for a SECRET 384-bit scalar k (six LE limbs; P a point of order n, out 144-byte
-# Jacobian) — the ECDSA sign k·G entry. Ladders over the fixed-length k_hat from _p384_khat
-# (385 iterations for every k), so the point-op sequence no longer depends on bitlen(k): the
-# Minerva / CVE-2019-15809 fix. P enters with secret-randomised projective coordinates
-# (_p384_blind_point, 3.13.1). Result equals pt384_scalarmul(out, k, P) as a point (affine
-# coordinates identical) since n·P = O. The field arithmetic underneath still has
-# data-dependent reduction branches; k_hat and the blinded copy are wiped.
-fn pt384_scalarmul_secret(out, k, P): i64 {
-    # A stack local (per-call, per-thread), deliberately not cbank-banked: array locals are
-    # per-thread under the pinned toolchain (CLAUDE.md quirk #1); a CYRIUS_STACK_ARRAYS=0
-    # build is unsupported. Wiped before return.
-    var kh[56];
-    var bp[144];                    # P, blinded — same stack-local rule, wiped before return
-    _p384_khat(&kh, k);
-    _p384_blind_point(&bp, P, &kh);
-    _pt384_ladder(out, &kh, 384, &bp);
-    memset(&kh, 0, 56);
-    memset(&bp, 0, 144);
-    return 0;
 }
 
 # ================================================================
 # Fixed-base comb (G) + windowed variable mul (Q) — verify-only, NON-CT.
 # Direct mirror of the P-256 comb/window (see src/ecdsa_p256.cyr for the
 # full rationale). Both verify inputs are public, so the non-CT table
-# index is acceptable; the secret-nonce signing path stays on the
-# fixed-length ladder `pt384_scalarmul_secret`. P-384: 144 B points,
+# index is acceptable; the secret-nonce signing path runs on the
+# constant-time engine (src/ec_ct.cyr, 3.13.8). P-384: 144 B points,
 # 96 four-bit windows (384/4).
 # G table: 96 × 16 × 144 B = 221184 B, built once on the main thread
 # (P-384 verify is not on the parallel batch path).

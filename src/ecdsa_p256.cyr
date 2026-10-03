@@ -14,14 +14,17 @@
 #   • FIPS 186-4 D.1.2.3 / SP 800-186 — P-256 curve parameters
 #
 # Constant-time discipline:
-#   • Verify takes only public inputs (msg, pk, sig). No secret-data
-#     branches exist on this path; it uses the non-CT comb / window
-#     scalar muls below.
-#   • A SECRET scalar (the ECDSA sign nonce) goes through
-#     `pt_scalarmul_secret` — the Montgomery ladder over a fixed-length
-#     k_hat (k + n or k + 2n), so the point-op count does not depend on
-#     bitlen(k) (Minerva / CVE-2019-15809). Plain `pt_scalarmul` ladders
-#     over k itself and is for public scalars only.
+#   • NOTHING in this file is constant-time, and nothing here may be given a
+#     secret. The field arithmetic (fp_p256_*, fn_p256_*, and the u256_*
+#     helpers under it) branches on its operands: conditional subtracts,
+#     carry fix-ups, early-exit compares. The point formulas branch on the
+#     point at infinity and on P == ±Q.
+#   • Verify takes only public inputs (msg, pk, sig), so it runs here, on
+#     the fast comb / window scalar muls below.
+#   • Every SECRET scalar — the ECDSA signing nonce and its mod-n inverse,
+#     the private key's products, an ECDH private key — runs on the
+#     constant-time engine in src/ec_ct.cyr (3.13.8). Through 3.13.7 the
+#     signing ladder ran on this file's arithmetic (CHANGELOG [3.13.8]).
 #   • The final r comparison is a plain `u256_eq` — fine, since every
 #     verify input is public.
 #
@@ -483,11 +486,11 @@ fn _fp_p256_inv_generic(r, a): i64 {
 # Built from 2^k-1 blocks (à la `fp_inv` in bigint_ext.cyr) in
 # ~255 squarings + 12 multiplications, vs the generic loop's 256 sq +
 # ~128 mul. The exponent (p-2) is a public constant, so the square /
-# multiply schedule is fixed — but on the SIGN path the input is
-# secret-derived (the Z of k·G), and the field ops underneath have
-# data-dependent reduction branches: the recorded fine-grained timing
-# residual, not a constant-time guarantee. KAT-gated against
-# `_fp_p256_inv_generic` (ecdsa_p256.tcyr differential test).
+# multiply schedule is fixed, but the field ops underneath have
+# data-dependent reduction branches: public inputs only. (Through 3.13.7
+# the signer's k·G affine conversion ran through here; since 3.13.8 it
+# uses src/ec_ct.cyr.) KAT-gated against `_fp_p256_inv_generic`
+# (ecdsa_p256.tcyr differential test).
 # ----------------------------------------------------------------
 var _p256fi_t1 = 0;  var _p256fi_t2 = 0;  var _p256fi_t3 = 0;
 var _p256fi_t6 = 0;  var _p256fi_t12 = 0; var _p256fi_t15 = 0;
@@ -708,9 +711,10 @@ fn _fn_p256_inv_generic(r, a): i64 {
 # nibble). ~14 + 256 + ~55 = ~325 `fn_p256_mul` calls vs the generic
 # 256 + ~128 = ~384 — and every saved mul avoids a 256-iteration
 # long-division n_reduce, which is where this path's cost lives. The
-# exponent (n-2) is public, so the window schedule is fixed; on the
-# SIGN path the input is the secret nonce k (k^-1) and fn_p256_mul's
-# reduction is data-dependent — the recorded timing residual. `fn_p256_mul`
+# exponent (n-2) is public, so the window schedule is fixed, but
+# fn_p256_mul's reduction is data-dependent: public inputs only (verify's
+# s^-1). Through 3.13.7 the signer's k^-1 ran here; since 3.13.8 it runs on
+# src/ec_ct.cyr. `fn_p256_mul`
 # writes r only after consuming a,b into _p256_n_prod, so r==a==b
 # (in-place squaring) is alias-safe. KAT-gated vs the generic above.
 # ----------------------------------------------------------------
@@ -811,8 +815,8 @@ fn pt_copy(dst, src): i64 {
 #   if swap == 1: a <-> b
 #   if swap == 0: no change
 # No branches on point data or on `swap`: the mask arithmetic is
-# branch-free, which matters because on the sign path (pt_scalarmul_secret)
-# `swap` is derived from the SECRET nonce bits.
+# branch-free. (Only the public-scalar ladder below uses it since 3.13.8;
+# secret scalars run on src/ec_ct.cyr.)
 fn pt_cswap(swap, a, b): i64 {
     var mask = 0 - swap;     # 0 or 0xFF..FF
     var i = 0;
@@ -1227,19 +1231,15 @@ fn pt_add_mixed(out, p, qx, qy): i64 {
 #   cswap(R0, R1, prev)               # final unswap
 #   return R0
 #
-# The swap is a branch-free mask and the point ops run in a fixed
-# sequence, BUT pt_add / pt_double return early on an infinity operand,
-# and R0 is infinity for every leading zero bit of the scalar. Laddered
-# over k itself (pt_scalarmul) the run time therefore tracks bitlen(k):
-# the Minerva / TPM-Fail leak (CVE-2019-15809), which recovers an ECDSA
-# key from timed signatures by lattice reduction. A SECRET scalar must go
-# through pt_scalarmul_secret, which ladders over the fixed-length
-# k_hat = k + n or k + 2n (bit 256 always set; n·P = O, so k_hat·P ==
-# k·P): 257 iterations every call, R0/R1 at infinity only in the first.
-# It also enters the ladder with P's projective coordinates rescaled by a
-# secret per-call λ (_p256_blind_point): with Z = 1 (G as stored) ladder
-# iteration 2 ran measurably cheaper field operations when bit 255 of
-# k_hat was 1 — a one-bit nonce leak of the LadderLeak class (3.13.1).
+# PUBLIC SCALARS ONLY. The swap is a branch-free mask and the point ops run
+# in a fixed sequence, BUT pt_add / pt_double return early on an infinity
+# operand (R0 is infinity for every leading zero bit, so the run time
+# tracks bitlen(k) — the Minerva / TPM-Fail leak, CVE-2019-15809) and the
+# field arithmetic underneath branches on its operands. Through 3.13.7 the
+# ECDSA signer ran this ladder over a fixed-length k_hat (3.13.0) with a
+# blinded input point (3.13.1); 3.13.8 moved every secret scalar to the
+# constant-time engine in src/ec_ct.cyr (`pt_scalarmul_secret` lives there
+# now) and removed those two mitigations with the path they protected.
 # ----------------------------------------------------------------
 
 var _ptm_r0 = 0;
@@ -1260,7 +1260,7 @@ fn _ptm_init(): i64 {
 }
 
 # Ladder core: out = k * P over scalar bits top..0 (k is LE limbs covering bit `top`; P, out
-# Jacobian). Shared by pt_scalarmul (top 255) and pt_scalarmul_secret (top 256, fixed length).
+# Jacobian). Public scalars only (see above); used by pt_scalarmul with top 255.
 fn _pt_ladder(out, k, top, P): i64 {
     _p256_init();
     _ptm_init();
@@ -1297,115 +1297,10 @@ fn _pt_ladder(out, k, top, P): i64 {
 }
 
 # out = k * P, where k is a 256-bit scalar (LE limbs) and P is Jacobian. PUBLIC scalars only:
-# the ladder runs over k itself, so its time leaks bitlen(k) — use pt_scalarmul_secret for a
-# secret k (an ECDSA nonce, a DH key).
+# the ladder runs over k itself and the arithmetic is variable-time — a secret k (an ECDSA
+# nonce, a DH key) goes to pt_scalarmul_secret (src/ec_ct.cyr).
 fn pt_scalarmul(out, k, P): i64 {
     return _pt_ladder(out, k, 255, P);
-}
-
-# kh (5 LE limbs, 40 B) = the fixed-length ladder scalar for a 256-bit k: k + n when that sum
-# reaches 2^256, else k + 2n. For every k < 2^256 the result has limb 4 == 1 exactly (bit 256
-# set, n > 2^255), and kh == k mod n. Both candidates are always computed and one is picked by
-# an all-ones/zero mask: no branch, no early exit, no secret-indexed access. The carry is the
-# branch-free majority form MSB((a & b) | ((a | b) & ~s)).
-fn _p256_khat(kh, k): i64 {
-    _p256_init();
-    # k + 2n candidate — a stack local (per-call, per-thread), deliberately not cbank-banked:
-    # array locals are per-thread under the pinned toolchain (CLAUDE.md quirk #1); a
-    # CYRIUS_STACK_ARRAYS=0 build is unsupported. Wiped before return.
-    var t2[40];
-    var ones = 0 - 1;
-    var c = 0;
-    var i = 0;
-    while (i < 4) {                 # kh = k + n, carry into limb 4
-        var a = load64(k + i * 8);
-        var b = load64(_p256_n + i * 8);
-        var s = a + b + c;
-        c = (((a & b) | ((a | b) & (s ^ ones))) >> 63) & 1;
-        store64(kh + i * 8, s);
-        i = i + 1;
-    }
-    store64(kh + 32, c);
-    c = 0;
-    i = 0;
-    while (i < 4) {                 # t2 = kh + n = k + 2n
-        var a = load64(kh + i * 8);
-        var b = load64(_p256_n + i * 8);
-        var s = a + b + c;
-        c = (((a & b) | ((a | b) & (s ^ ones))) >> 63) & 1;
-        store64(&t2 + i * 8, s);
-        i = i + 1;
-    }
-    store64(&t2 + 32, load64(kh + 32) + c);
-    # mask = all ones iff k + n already reached bit 256 (keep it), else take k + 2n.
-    var mask = 0 - (load64(kh + 32) & 1);
-    i = 0;
-    while (i < 5) {
-        var x = load64(kh + i * 8);
-        var y = load64(&t2 + i * 8);
-        store64(kh + i * 8, y ^ (mask & (x ^ y)));
-        i = i + 1;
-    }
-    memset(&t2, 0, 40);
-    return 0;
-}
-
-# bp (96-byte Jacobian) = P with its coordinates rescaled by a secret per-call λ — (X·λ², Y·λ³,
-# Z·λ), the same point. λ = SHA-256("sigil-p256-ladder-blind" || kh) reduced mod p and never 0:
-# secret (it is derived from the secret k_hat) and different for every nonce, so no ladder
-# iteration runs on a fixed Z = 1 operand. Every intermediate is wiped. 3.13.1.
-fn _p256_blind_point(bp, P, kh): i64 {
-    _p256_init();
-    var hin[64];
-    var tag = "sigil-p256-ladder-blind";
-    var tl = strlen(tag);
-    memcpy(&hin, tag, tl);
-    memcpy(&hin + tl, kh, 40);
-    var dig[32];
-    sha256(&hin, tl + 40, &dig);
-    var one[32];
-    memset(&one, 0, 32);
-    store64(&one, 1);
-    var lam[32];
-    fp_p256_mul(&lam, &dig, &one);                 # reduce mod p
-    # λ == 0 (probability ~2^-256) would zero Z; map it to 1 without a branch.
-    var o = load64(&lam) | load64(&lam + 8) | load64(&lam + 16) | load64(&lam + 24);
-    var isz = 1 ^ (((o | (0 - o)) >> 63) & 1);
-    store64(&lam, load64(&lam) | isz);
-    var l2[32];
-    var l3[32];
-    fp_p256_sq(&l2, &lam);
-    fp_p256_mul(&l3, &l2, &lam);
-    fp_p256_mul(_pt_x(bp), _pt_x(P), &l2);
-    fp_p256_mul(_pt_y(bp), _pt_y(P), &l3);
-    fp_p256_mul(_pt_z(bp), _pt_z(P), &lam);
-    memset(&hin, 0, 64);
-    memset(&dig, 0, 32);
-    memset(&lam, 0, 32);
-    memset(&l2, 0, 32);
-    memset(&l3, 0, 32);
-    return 0;
-}
-
-# out = k * P for a SECRET 256-bit scalar k (LE limbs; P a point of order n, out Jacobian) — the
-# ECDSA sign k·G entry. Ladders over the fixed-length k_hat from _p256_khat (257 iterations for
-# every k), so the point-op sequence no longer depends on bitlen(k): the Minerva /
-# CVE-2019-15809 fix. P enters with secret-randomised projective coordinates
-# (_p256_blind_point, 3.13.1). Result equals pt_scalarmul(out, k, P) as a point (affine
-# coordinates identical) since n·P = O. The field arithmetic underneath still has
-# data-dependent reduction branches; k_hat and the blinded copy are wiped on return.
-fn pt_scalarmul_secret(out, k, P): i64 {
-    # A stack local (per-call, per-thread), deliberately not cbank-banked: array locals are
-    # per-thread under the pinned toolchain (CLAUDE.md quirk #1); a CYRIUS_STACK_ARRAYS=0
-    # build is unsupported. Wiped before return.
-    var kh[40];
-    var bp[96];                     # P, blinded — same stack-local rule, wiped before return
-    _p256_khat(&kh, k);
-    _p256_blind_point(&bp, P, &kh);
-    _pt_ladder(out, &kh, 256, &bp);
-    memset(&kh, 0, 40);
-    memset(&bp, 0, 96);
-    return 0;
 }
 
 # ================================================================
@@ -1416,9 +1311,8 @@ fn pt_scalarmul_secret(out, k, P): i64 {
 # fast table-indexed comb instead of the Montgomery ladder
 # (`pt_scalarmul`). **This must never be used on a secret scalar** — the
 # table index leaks the scalar nibble via cache timing. The signing path
-# (`ecdsa_sign.cyr`, secret nonce k·G) deliberately stays on the
-# fixed-length ladder `pt_scalarmul_secret`; only the verify `u1·G` site
-# calls this.
+# (`ecdsa_sign.cyr`, secret nonce k·G) runs on the constant-time engine
+# (src/ec_ct.cyr, 3.13.8); only the verify `u1·G` site calls this.
 #
 # 4-bit windowed comb (the same shape ed25519 uses for its base point):
 #   table[i][k] = k · 16^i · G   for window i ∈ [0,64), digit k ∈ [0,16)
@@ -1511,7 +1405,7 @@ fn p256_scalarmul_base(out, k): i64 {
 #   acc = O; for nibble i = 63..0: acc = 16·acc + Qtab[nibble_i]
 # Cost: 256 doubles + 64 adds + 15 precompute ≈ 1.5× fewer point ops
 # than the ladder. **Public data only** (table index leaks the nibble);
-# the secret-nonce signing path stays on `pt_scalarmul_secret`.
+# every secret scalar runs on src/ec_ct.cyr.
 # ================================================================
 
 var _ecq_tab    = 0;    # 16 Jacobian multiples k·Q (96 B each), build scratch
@@ -1538,7 +1432,7 @@ fn _ecq_init(): i64 {
 }
 
 # out = k · Q for a VARIABLE affine point Q = (qx, qy), verify-only / non-CT
-# (the secret-nonce signing path stays on the fixed-length ladder pt_scalarmul_secret).
+# (every secret scalar runs on the constant-time engine, src/ec_ct.cyr).
 #
 # 4-bit window: build Qtab[1..15] = k·Q (mixed adds, Q affine), batch-invert
 # their 15 Z-coordinates with Montgomery's trick (1 field inversion + ~3·14

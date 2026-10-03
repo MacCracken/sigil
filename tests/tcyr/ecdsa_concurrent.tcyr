@@ -47,6 +47,7 @@ include "src/hmac_sha384.cyr"
 include "src/bigint_ext.cyr"
 include "src/ecdsa_p256.cyr"
 include "src/ecdsa_p384.cyr"
+include "src/ec_ct.cyr"
 include "src/ecdsa_sign.cyr"
 
 # P-256 RFC 6979 A.2.5 key/pubkey (same vector as ecdsa_sign.tcyr).

@@ -18,49 +18,22 @@
 # SHA-384 for P-384), so signing is a pure function of key + message.
 #
 # Security floor (CLAUDE.md § Security Hardening):
+#   - Every operation on a secret — R = k·G, its affine conversion,
+#     k^(-1) mod n, r·d mod n and the sum with e — runs on the
+#     constant-time engine in src/ec_ct.cyr (3.13.8): no branch and no
+#     memory address depends on k, d or anything derived from them.
+#     Through 3.13.7 the k·G ladder, the affine conversion and the mod-n
+#     arithmetic ran on the variable-time verify arithmetic of
+#     ecdsa_p256.cyr / ecdsa_p384.cyr (data-dependent reductions and carry
+#     fix-ups), mitigated only by a fixed-length scalar (3.13.0) and a
+#     blinded ladder input (3.13.1). CHANGELOG [3.13.8], Security.
+#   - The RFC 6979 candidate test (1 <= k <= n-1) is computed without a
+#     branch; only the accept / reject verdict is branched on, and a
+#     rejected candidate is discarded, never used.
 #   - The nonce k, the HMAC_DRBG state (K, V), the private scalar, and
-#     every (e + r·d) / k^(-1) intermediate live in `secret var` stack
-#     buffers, zeroized on scope exit. r and s are public outputs.
-#   - R = k·G runs through pt_scalarmul_secret / pt384_scalarmul_secret:
-#     the Montgomery ladder over the fixed-length k_hat = k + n (or k + 2n,
-#     picked by a constant-time mask), so every signature performs the
-#     same 257 / 385 ladder steps whatever bitlen(k) is. Laddering over k
-#     itself leaked bitlen(k) through timing (Minerva / TPM-Fail,
-#     CVE-2019-15809), enough to recover d by lattice reduction from
-#     timed signatures. n·G = O, so signatures are byte-identical.
-#   - Scalar inversion / multiply reuse the curve's existing mod-n
-#     primitives (fn_p256_inv / fn_p256_mul, etc.).
-#   - add-mod-n is carry-correct (the lib `u256_addmod` drops the
-#     2^256 carry, which is wrong for the P-256/P-384 scalar field
-#     where n ≈ 2^256 and a+b can exceed 2^256 — see _ecs_addmod_*).
-
-# ================================================================
-# Carry-correct scalar add mod n
-# ================================================================
-# r = (a + b) mod n, for a, b < n (n < 2^256). a+b can be up to
-# 2n-2 > 2^256, so the 2^256 carry from u256_add MUST be honored.
-# When carry == 1 the true sum is 2^256 + low; since a,b < n the low
-# limbs are < n, so a single `u256_sub(r, r, n)` (which borrows and
-# wraps, adding 2^256-n) yields the correct residue in [0, n).
-fn _ecs_addmod_n_p256(r, a, b): i64 {
-    var carry = u256_add(r, a, b);
-    if (carry == 1) {
-        u256_sub(r, r, _p256_n);
-    } else {
-        if (u256_cmp(r, _p256_n) >= 0) { u256_sub(r, r, _p256_n); }
-    }
-    return 0;
-}
-
-fn _ecs_addmod_n_p384(r, a, b): i64 {
-    var carry = u384_add(r, a, b);
-    if (carry == 1) {
-        u384_sub(r, r, _p384_n);
-    } else {
-        if (u384_cmp(r, _p384_n) >= 0) { u384_sub(r, r, _p384_n); }
-    }
-    return 0;
-}
+#     every intermediate live in `secret var` stack blocks (per call, per
+#     thread, zeroised by the compiler on every return) or in the
+#     per-lane-wiped DRBG scratch below. r and s are public outputs.
 
 # ================================================================
 # RFC 6979 §3.2 — deterministic nonce (P-256 / HMAC-SHA256)
@@ -134,14 +107,13 @@ fn _rfc6979_k_p256(d_be, h1oct, k_out): i64 {
         # T = HMAC_K(V) (one block = qlen)
         hmac_sha256(Kb, 32, Vb, 32, Vtb);
         memcpy(Vb, Vtb, 32);
-        # k = bits2int(T); accept iff 1 <= k <= n-1.
+        # k = bits2int(T); accept iff 1 <= k <= n-1. The test is computed without a
+        # branch (src/ec_ct.cyr); only the verdict is branched on (3.13.8).
         u256_load_be(kintb, Vb);
-        if (u256_is_zero(kintb) == 0) {
-            if (u256_cmp(kintb, _p256_n) < 0) {
-                u256_store_be(k_out, kintb);
-                _rfc6979_scrub_p256_lanes(Vb, Kb, Ktb, Vtb, datab, d1b, kintb);
-                return 0;
-            }
+        if ((_ect_lt(kintb, _p256_n, 4) & (1 ^ _ect_is_zero(kintb, 4))) == 1) {
+            u256_store_be(k_out, kintb);
+            _rfc6979_scrub_p256_lanes(Vb, Kb, Ktb, Vtb, datab, d1b, kintb);
+            return 0;
         }
         # Reject: K = HMAC_K(V || 0x00); V = HMAC_K(V).
         memcpy(d1b, Vb, 32);
@@ -218,12 +190,10 @@ fn _rfc6979_k_p384(d_be, h1oct, k_out): i64 {
         hmac_sha384(Kb, 48, Vb, 48, Vtb);
         memcpy(Vb, Vtb, 48);
         u384_load_be(kintb, Vb);
-        if (u384_is_zero(kintb) == 0) {
-            if (u384_cmp(kintb, _p384_n) < 0) {
-                u384_store_be(k_out, kintb);
-                _rfc6979_scrub_p384_lanes(Vb, Kb, Ktb, Vtb, datab, d1b, kintb);
-                return 0;
-            }
+        if ((_ect_lt(kintb, _p384_n, 6) & (1 ^ _ect_is_zero(kintb, 6))) == 1) {   # 3.13.8
+            u384_store_be(k_out, kintb);
+            _rfc6979_scrub_p384_lanes(Vb, Kb, Ktb, Vtb, datab, d1b, kintb);
+            return 0;
         }
         memcpy(d1b, Vb, 48);
         store8(d1b + 48, 0x00);
@@ -238,196 +208,55 @@ fn _rfc6979_k_p384(d_be, h1oct, k_out): i64 {
 }
 
 # ================================================================
-# Point scratch (allocated once; G and R are public data)
+# Signing core — constant-time (src/ec_ct.cyr), shared by both curves
 # ================================================================
-var _ecs256_inited = 0;   # 0 / 1 building / 2 published (_sigil_once_*)
-var _ecs256_G = 0;
-var _ecs256_R = 0;
-
-fn _ecs256_init(): i64 {
-    if (atomic_load(&_ecs256_inited) == 2) { return _sigil_once_acquired(); }
-    if (_sigil_once_claim(&_ecs256_inited) == 0) { return 0; }
-    _p256_init();
-    _ecs256_G = pt_alloc();                      # generator, set once, read-only — unbanked
-    _ecs256_R = alloc(96 * SIGIL_CRYPTO_BANKS);  # per-sign k·G output point — lane-banked
-    pt_from_affine(_ecs256_G, _p256_gx, _p256_gy);
-    _sigil_once_publish(&_ecs256_inited);
-    return 0;
-}
-
-# Per-lane zeroization of every secret-tainted P-256 scratch buffer
-# (CLAUDE.md quirk #9 / ADR 0004). The banked field/scalar/point scratch
-# in ecdsa_p256.cyr is plain `var`/`alloc` (never `secret var`), so a
-# whole-array wipe would clobber a concurrent worker's live lane. This
-# scrubs ONLY the calling thread's lane (`cbank()`), preserving per-call
-# secret zeroization on the sign path. Called on every return of
-# ecdsa_p256_sign. Each buffer is guarded against the not-yet-allocated
-# (lazy `_init`) case. The field-inverse chain (_p256fi_*, which k·G's
-# affine conversion runs through), the generic inverse (_p256_inv_*) and
-# the reduction scratch (_p256_R, _p256_sol_t, which every field multiply
-# on the sign path runs through) are scrubbed too — 3.13.1: they were
-# listed as verify-only and left holding secret-derived residue. The
-# genuinely verify-only buffers (_ecv_*, _ecq_*, _onc_*, _p256_ninv_*)
-# hold public data and are left alone.
-fn _p256_scrub_secret_lanes(): i64 {
-    var bk = cbank();
-    # Montgomery-ladder point set (k·G with secret k) — 96 B each.
-    if (_ptm_r0  != 0) { memset(_ptm_r0  + bk * 96, 0, 96); }
-    if (_ptm_r1  != 0) { memset(_ptm_r1  + bk * 96, 0, 96); }
-    if (_ptm_sum != 0) { memset(_ptm_sum + bk * 96, 0, 96); }
-    if (_ptm_dbl != 0) { memset(_ptm_dbl + bk * 96, 0, 96); }
-    # pt_double temps — 9 × 32 B.
-    if (_ptd_delta != 0) { memset(_ptd_delta + bk * 32, 0, 32); }
-    if (_ptd_gamma != 0) { memset(_ptd_gamma + bk * 32, 0, 32); }
-    if (_ptd_beta  != 0) { memset(_ptd_beta  + bk * 32, 0, 32); }
-    if (_ptd_alpha != 0) { memset(_ptd_alpha + bk * 32, 0, 32); }
-    if (_ptd_t1    != 0) { memset(_ptd_t1    + bk * 32, 0, 32); }
-    if (_ptd_t2    != 0) { memset(_ptd_t2    + bk * 32, 0, 32); }
-    if (_ptd_x3    != 0) { memset(_ptd_x3    + bk * 32, 0, 32); }
-    if (_ptd_y3    != 0) { memset(_ptd_y3    + bk * 32, 0, 32); }
-    if (_ptd_z3    != 0) { memset(_ptd_z3    + bk * 32, 0, 32); }
-    # pt_add / pt_add_mixed temps — 16 × 32 B.
-    if (_pta_z1z1 != 0) { memset(_pta_z1z1 + bk * 32, 0, 32); }
-    if (_pta_z2z2 != 0) { memset(_pta_z2z2 + bk * 32, 0, 32); }
-    if (_pta_u1   != 0) { memset(_pta_u1   + bk * 32, 0, 32); }
-    if (_pta_u2   != 0) { memset(_pta_u2   + bk * 32, 0, 32); }
-    if (_pta_s1   != 0) { memset(_pta_s1   + bk * 32, 0, 32); }
-    if (_pta_s2   != 0) { memset(_pta_s2   + bk * 32, 0, 32); }
-    if (_pta_h    != 0) { memset(_pta_h    + bk * 32, 0, 32); }
-    if (_pta_i    != 0) { memset(_pta_i    + bk * 32, 0, 32); }
-    if (_pta_j    != 0) { memset(_pta_j    + bk * 32, 0, 32); }
-    if (_pta_r    != 0) { memset(_pta_r    + bk * 32, 0, 32); }
-    if (_pta_v    != 0) { memset(_pta_v    + bk * 32, 0, 32); }
-    if (_pta_t1   != 0) { memset(_pta_t1   + bk * 32, 0, 32); }
-    if (_pta_t2   != 0) { memset(_pta_t2   + bk * 32, 0, 32); }
-    if (_pta_x3   != 0) { memset(_pta_x3   + bk * 32, 0, 32); }
-    if (_pta_y3   != 0) { memset(_pta_y3   + bk * 32, 0, 32); }
-    if (_pta_z3   != 0) { memset(_pta_z3   + bk * 32, 0, 32); }
-    # pt_to_affine z-inverse temps — 3 × 32 B.
-    if (_pt_aff_zinv  != 0) { memset(_pt_aff_zinv  + bk * 32, 0, 32); }
-    if (_pt_aff_zinv2 != 0) { memset(_pt_aff_zinv2 + bk * 32, 0, 32); }
-    if (_pt_aff_zinv3 != 0) { memset(_pt_aff_zinv3 + bk * 32, 0, 32); }
-    # scalar-inverse window (k^-1 / s^-1) — 512 B table + 32 B acc.
-    if (_p256si_tbl != 0) { memset(_p256si_tbl + bk * 512, 0, 512); }
-    if (_p256si_acc != 0) { memset(_p256si_acc + bk * 32, 0, 32); }
-    # mod-n product / reduce scratch (carries r·d, k^-1·hpd) — 64 + 32 B.
-    if (_p256_n_prod != 0) { memset(_p256_n_prod + bk * 64, 0, 64); }
-    if (_p256_n_R    != 0) { memset(_p256_n_R    + bk * 32, 0, 32); }
-    # field product / temps — 64 + 32 + 32 B.
-    if (_p256_prod != 0) { memset(_p256_prod + bk * 64, 0, 64); }
-    if (_p256_tmp1 != 0) { memset(_p256_tmp1 + bk * 32, 0, 32); }
-    if (_p256_tmp2 != 0) { memset(_p256_tmp2 + bk * 32, 0, 32); }
-    # per-sign k·G output point (ecdsa_sign.cyr) — 96 B.
-    if (_ecs256_R != 0) { memset(_ecs256_R + bk * 96, 0, 96); }
-    # field inverse chain (k·G to affine) — 9 × 32 B.
-    if (_p256fi_t1  != 0) { memset(_p256fi_t1  + bk * 32, 0, 32); }
-    if (_p256fi_t2  != 0) { memset(_p256fi_t2  + bk * 32, 0, 32); }
-    if (_p256fi_t3  != 0) { memset(_p256fi_t3  + bk * 32, 0, 32); }
-    if (_p256fi_t6  != 0) { memset(_p256fi_t6  + bk * 32, 0, 32); }
-    if (_p256fi_t12 != 0) { memset(_p256fi_t12 + bk * 32, 0, 32); }
-    if (_p256fi_t15 != 0) { memset(_p256fi_t15 + bk * 32, 0, 32); }
-    if (_p256fi_t30 != 0) { memset(_p256fi_t30 + bk * 32, 0, 32); }
-    if (_p256fi_t32 != 0) { memset(_p256fi_t32 + bk * 32, 0, 32); }
-    if (_p256fi_acc != 0) { memset(_p256fi_acc + bk * 32, 0, 32); }
-    # generic field inverse — 3 × 32 B.
-    if (_p256_inv_tmp  != 0) { memset(_p256_inv_tmp  + bk * 32, 0, 32); }
-    if (_p256_inv_res  != 0) { memset(_p256_inv_res  + bk * 32, 0, 32); }
-    if (_p256_inv_base != 0) { memset(_p256_inv_base + bk * 32, 0, 32); }
-    # reduction scratch (every field multiply) — 2 × 32 B.
-    if (_p256_R     != 0) { memset(_p256_R     + bk * 32, 0, 32); }
-    if (_p256_sol_t != 0) { memset(_p256_sol_t + bk * 32, 0, 32); }
-    return 0;
-}
-
-var _ecs384_inited = 0;   # 0 / 1 building / 2 published (_sigil_once_*)
-var _ecs384_G = 0;
-var _ecs384_R = 0;
-
-fn _ecs384_init(): i64 {
-    if (atomic_load(&_ecs384_inited) == 2) { return _sigil_once_acquired(); }
-    if (_sigil_once_claim(&_ecs384_inited) == 0) { return 0; }
-    _p384_init();
-    _ecs384_G = alloc(144);                       # generator, set once, read-only — unbanked
-    _ecs384_R = alloc(144 * SIGIL_CRYPTO_BANKS);  # per-sign k·G output point — lane-banked
-    pt384_from_affine(_ecs384_G, _p384_gx, _p384_gy);
-    _sigil_once_publish(&_ecs384_inited);
-    return 0;
-}
-
-# Per-lane zeroization of every secret-tainted P-384 scratch buffer
-# (CLAUDE.md quirk #9 / ADR 0004) — the P-384 mirror of
-# _p256_scrub_secret_lanes. The banked field/scalar/point scratch in
-# ecdsa_p384.cyr is plain `var`/`alloc` (never `secret var`), so a
-# whole-array wipe would clobber a concurrent worker's live lane. This
-# scrubs ONLY the calling thread's lane (`cbank()`), preserving per-call
-# secret zeroization on the sign path. Called on every return of
-# ecdsa_p384_sign. Each buffer is guarded against the not-yet-allocated
-# (lazy `_init`) case. The field inverse (_p384_inv_*, which k·G's affine
-# conversion runs through) and the reduction scratch (_p384_R,
-# _p384_sol_t, which every field multiply on the sign path runs through)
-# are scrubbed too — 3.13.1: they were listed as verify-only and left
-# holding secret-derived residue. The genuinely verify-only buffers
-# (_ecv384_*, _ecq384_*, _onc384_*) hold public data and are left alone.
-fn _p384_scrub_secret_lanes(): i64 {
-    var bk = cbank();
-    # Montgomery-ladder point set (k·G with secret k) — 144 B each.
-    if (_ptm384_r0  != 0) { memset(_ptm384_r0  + bk * 144, 0, 144); }
-    if (_ptm384_r1  != 0) { memset(_ptm384_r1  + bk * 144, 0, 144); }
-    if (_ptm384_sum != 0) { memset(_ptm384_sum + bk * 144, 0, 144); }
-    if (_ptm384_dbl != 0) { memset(_ptm384_dbl + bk * 144, 0, 144); }
-    # pt384_double temps — 9 × 48 B.
-    if (_ptd384_delta != 0) { memset(_ptd384_delta + bk * 48, 0, 48); }
-    if (_ptd384_gamma != 0) { memset(_ptd384_gamma + bk * 48, 0, 48); }
-    if (_ptd384_beta  != 0) { memset(_ptd384_beta  + bk * 48, 0, 48); }
-    if (_ptd384_alpha != 0) { memset(_ptd384_alpha + bk * 48, 0, 48); }
-    if (_ptd384_t1    != 0) { memset(_ptd384_t1    + bk * 48, 0, 48); }
-    if (_ptd384_t2    != 0) { memset(_ptd384_t2    + bk * 48, 0, 48); }
-    if (_ptd384_x3    != 0) { memset(_ptd384_x3    + bk * 48, 0, 48); }
-    if (_ptd384_y3    != 0) { memset(_ptd384_y3    + bk * 48, 0, 48); }
-    if (_ptd384_z3    != 0) { memset(_ptd384_z3    + bk * 48, 0, 48); }
-    # pt384_add temps — 16 × 48 B.
-    if (_pta384_z1z1 != 0) { memset(_pta384_z1z1 + bk * 48, 0, 48); }
-    if (_pta384_z2z2 != 0) { memset(_pta384_z2z2 + bk * 48, 0, 48); }
-    if (_pta384_u1   != 0) { memset(_pta384_u1   + bk * 48, 0, 48); }
-    if (_pta384_u2   != 0) { memset(_pta384_u2   + bk * 48, 0, 48); }
-    if (_pta384_s1   != 0) { memset(_pta384_s1   + bk * 48, 0, 48); }
-    if (_pta384_s2   != 0) { memset(_pta384_s2   + bk * 48, 0, 48); }
-    if (_pta384_h    != 0) { memset(_pta384_h    + bk * 48, 0, 48); }
-    if (_pta384_i    != 0) { memset(_pta384_i    + bk * 48, 0, 48); }
-    if (_pta384_j    != 0) { memset(_pta384_j    + bk * 48, 0, 48); }
-    if (_pta384_r    != 0) { memset(_pta384_r    + bk * 48, 0, 48); }
-    if (_pta384_v    != 0) { memset(_pta384_v    + bk * 48, 0, 48); }
-    if (_pta384_t1   != 0) { memset(_pta384_t1   + bk * 48, 0, 48); }
-    if (_pta384_t2   != 0) { memset(_pta384_t2   + bk * 48, 0, 48); }
-    if (_pta384_x3   != 0) { memset(_pta384_x3   + bk * 48, 0, 48); }
-    if (_pta384_y3   != 0) { memset(_pta384_y3   + bk * 48, 0, 48); }
-    if (_pta384_z3   != 0) { memset(_pta384_z3   + bk * 48, 0, 48); }
-    # pt384_to_affine z-inverse temps — 3 × 48 B.
-    if (_pt384_aff_zinv  != 0) { memset(_pt384_aff_zinv  + bk * 48, 0, 48); }
-    if (_pt384_aff_zinv2 != 0) { memset(_pt384_aff_zinv2 + bk * 48, 0, 48); }
-    if (_pt384_aff_zinv3 != 0) { memset(_pt384_aff_zinv3 + bk * 48, 0, 48); }
-    # scalar-inverse working regs (k^-1 / s^-1) — 3 × 48 B.
-    if (_p384_ninv_tmp  != 0) { memset(_p384_ninv_tmp  + bk * 48, 0, 48); }
-    if (_p384_ninv_res  != 0) { memset(_p384_ninv_res  + bk * 48, 0, 48); }
-    if (_p384_ninv_base != 0) { memset(_p384_ninv_base + bk * 48, 0, 48); }
-    # mod-n product / reduce scratch (carries r·d, k^-1·hpd) — 96 + 48 B.
-    if (_p384_n_prod != 0) { memset(_p384_n_prod + bk * 96, 0, 96); }
-    if (_p384_n_R    != 0) { memset(_p384_n_R    + bk * 48, 0, 48); }
-    # field product / temps — 96 + 48 + 48 B.
-    if (_p384_prod != 0) { memset(_p384_prod + bk * 96, 0, 96); }
-    if (_p384_tmp1 != 0) { memset(_p384_tmp1 + bk * 48, 0, 48); }
-    if (_p384_tmp2 != 0) { memset(_p384_tmp2 + bk * 48, 0, 48); }
-    # _p384_mul64 lo/hi product slot (intermediate secret products) — 16 B.
-    if (_p384_m64 != 0) { memset(_p384_m64 + bk * 16, 0, 16); }
-    # per-sign k·G output point (ecdsa_sign.cyr) — 144 B.
-    if (_ecs384_R != 0) { memset(_ecs384_R + bk * 144, 0, 144); }
-    # field inverse (k·G to affine) — 3 × 48 B.
-    if (_p384_inv_tmp  != 0) { memset(_p384_inv_tmp  + bk * 48, 0, 48); }
-    if (_p384_inv_res  != 0) { memset(_p384_inv_res  + bk * 48, 0, 48); }
-    if (_p384_inv_base != 0) { memset(_p384_inv_base + bk * 48, 0, 48); }
-    # reduction scratch (every field multiply) — 2 × 48 B.
-    if (_p384_R     != 0) { memset(_p384_R     + bk * 48, 0, 48); }
-    if (_p384_sol_t != 0) { memset(_p384_sol_t + bk * 48, 0, 48); }
+# Given the reduced message representative e (nl LE limbs, e < n), the
+# private scalar d_be and the RFC 6979 nonce k_be (both nl·8 bytes,
+# big-endian), writes r || s (2·nl·8 bytes, big-endian) to sig_out:
+#   R = k·G,  r = R.x mod n,  s = k^(-1)·(e + r·d) mod n.
+# Every step that touches k or d is constant-time; r and s are public, so
+# the reduction of R.x and the degenerate-r / degenerate-s checks branch on
+# public values only. A private scalar d >= n acts as d mod n, as it always
+# has. Returns 0, or -1 when r or s is 0 (the caller reports failure; with
+# an RFC 6979 nonce this has probability ~2^-256).
+fn _ecs_sign_core(d_be, k_be, e, sig_out, nl, f, nc, bm, G): i64 {
+    var w = nl * 8;
+    secret var S[880];
+    var k   = &S;          # nonce, LE limbs
+    var d   = &S + 48;     # private scalar
+    var x   = &S + 96;     # R.x / R.y (ordinary form)
+    var y   = &S + 144;
+    var r   = &S + 192;
+    var km  = &S + 240;    # k·R mod n            (Montgomery form, scalar field)
+    var kim = &S + 288;    # k^(-1)·R mod n
+    var dm  = &S + 336;    # d·R mod n
+    var t   = &S + 384;
+    var u   = &S + 432;
+    var sv  = &S + 480;
+    var Rp  = &S + 528;    # k·G, projective (144 B)
+    _ect_load_be(k, k_be, nl);
+    _ect_smul(Rp, k, G, f, bm);
+    var ok = _ect_affine(x, y, Rp, f);
+    _ect_reduce_once(r, x, nc + 16, nl);          # r = R.x mod n (R.x < p < 2n)
+    ok = ok & (1 ^ _ect_is_zero(r, nl));
+    # s = k^(-1)·(e + r·d) mod n, in the scalar field's Montgomery domain.
+    _ect_to_mont(km, k, nc);
+    _ect_inv(kim, km, nc);
+    _ect_load_be(d, d_be, nl);
+    _ect_to_mont(dm, d, nc);                      # reduces d >= n
+    _ect_to_mont(t, r, nc);
+    _ect_mul(t, t, dm, nc);                       # (r·d)·R
+    _ect_to_mont(u, e, nc);
+    _ect_add(t, t, u, nc);                        # (e + r·d)·R
+    _ect_mul(t, kim, t, nc);                      # (k^(-1)·(e + r·d))·R
+    _ect_from_mont(sv, t, nc);
+    ok = ok & (1 ^ _ect_is_zero(sv, nl));
+    _ect_store_be(sig_out, r, nl);
+    _ect_store_be(sig_out + w, sv, nl);
+    if (ok == 0) {                                # r == 0 or s == 0: public outcome
+        memset(sig_out, 0, 2 * w);
+        return 0 - 1;
+    }
     return 0;
 }
 
@@ -437,67 +266,49 @@ fn _p384_scrub_secret_lanes(): i64 {
 # d_be: 32-byte big-endian private scalar in [1, n-1].
 # Hashes msg with SHA-256 internally (matches ecdsa_p256_verify).
 # Returns 0 on success, -1 on failure (degenerate r/s or no nonce).
+# Constant-time in d and k since 3.13.8 (src/ec_ct.cyr).
 fn ecdsa_p256_sign(d_be, msg, msg_len, sig_out): i64 {
-    _ecs256_init();
-    var bk = cbank();
-    var _ecs256_Rb = _ecs256_R + bk * 96;
-
-    # One secret scratch block; carve 13 × 32-byte slots by offset. This
-    # `var sc[N]` is a function-scope STATIC global (quirk #1), shared
-    # across concurrent signers, so it is banked across `cbank()` lanes
-    # (the concurrent-signers race in ecdsa_concurrent.tcyr). It carries
-    # key-derived / nonce material, so it is plain `var` + a per-lane wipe
-    # before every return (quirk #9 / ADR 0004 — NEVER `secret var`, whose
-    # whole-array wipe would clobber a sibling worker's live lane). Slots
-    # are offset from the calling worker's lane base `scb`.
-    var sc[26624];            # 416 * SIGIL_CRYPTO_BANKS
-    var scb    = &sc + bk * 416;
-    var digest = scb + 0;
-    var e      = scb + 32;
-    var h1oct  = scb + 64;
-    var k      = scb + 96;
-    var kint   = scb + 128;
-    var kinv   = scb + 160;
-    var dint   = scb + 192;
-    var rint   = scb + 224;
-    var sint   = scb + 256;
-    var rd     = scb + 288;
-    var hpd    = scb + 320;
-    var Rx     = scb + 352;
-    var Ry     = scb + 384;
-
-    # e = SHA-256(msg) as BE int, reduced mod n.
+    _ect256_init();
+    # Per-call stack block (array locals are per-thread; `secret var` wipes it on return).
+    secret var S[128];
+    var digest = &S;
+    var e      = &S + 32;
+    var h1oct  = &S + 64;
+    var k      = &S + 96;
+    # e = SHA-256(msg) as BE int, reduced mod n (public: the message digest).
     sha256(msg, msg_len, digest);
     u256_load_be(e, digest);
     if (u256_cmp(e, _p256_n) >= 0) { u256_sub(e, e, _p256_n); }
     # bits2octets(H(m)) = int2octets(e mod n)
     u256_store_be(h1oct, e);
-
     # k = RFC 6979 deterministic nonce.
-    if (_rfc6979_k_p256(d_be, h1oct, k) != 0) { memset(scb, 0, 416); _p256_scrub_secret_lanes(); return 0 - 1; }
-    u256_load_be(kint, k);
+    if (_rfc6979_k_p256(d_be, h1oct, k) != 0) { _ect_burn_stack(8192); return 0 - 1; }
+    var rc = _ecs_sign_core(d_be, k, e, sig_out, 4, _ect_fp256, _ect_fn256, _ect_b256, _ect_g256);
+    _ect_burn_stack(8192);    # dead frames below here: the core's, the engine's, the DRBG's
+    return rc;
+}
 
-    # R = k·G ; r = R.x mod n. Fixed-length ladder over k_hat = k + n / k + 2n, so the
-    # time does not track bitlen(k) (Minerva / CVE-2019-15809); R is unchanged.
-    pt_scalarmul_secret(_ecs256_Rb, kint, _ecs256_G);
-    if (pt_is_infinity(_ecs256_Rb) == 1) { memset(scb, 0, 416); _p256_scrub_secret_lanes(); return 0 - 1; }
-    pt_to_affine(Rx, Ry, _ecs256_Rb);
-    fn_p256_reduce256(rint, Rx);
-    if (u256_is_zero(rint) == 1) { memset(scb, 0, 416); _p256_scrub_secret_lanes(); return 0 - 1; }
-
-    # s = k^(-1) · (e + r·d) mod n.
-    u256_load_be(dint, d_be);
-    fn_p256_mul(rd, rint, dint);
-    _ecs_addmod_n_p256(hpd, e, rd);
-    fn_p256_inv(kinv, kint);
-    fn_p256_mul(sint, kinv, hpd);
-    if (u256_is_zero(sint) == 1) { memset(scb, 0, 416); _p256_scrub_secret_lanes(); return 0 - 1; }
-
-    u256_store_be(sig_out, rint);
-    u256_store_be(sig_out + 32, sint);
-    memset(scb, 0, 416);
-    _p256_scrub_secret_lanes();
-    return 0;
+# ================================================================
+# ecdsa_p384_sign — raw r||s (96 bytes, big-endian)
+# ================================================================
+# d_be: 48-byte big-endian private scalar in [1, n-1]; SHA-384 of msg.
+# Returns 0, or -1 (degenerate r/s or no nonce). Constant-time in d and k
+# since 3.13.8 (src/ec_ct.cyr).
+fn ecdsa_p384_sign(d_be, msg, msg_len, sig_out): i64 {
+    _ect384_init();
+    secret var S[192];
+    var digest = &S;
+    var e      = &S + 48;
+    var h1oct  = &S + 96;
+    var k      = &S + 144;
+    sha384(msg, msg_len, digest);
+    u384_load_be(e, digest);
+    if (u384_cmp(e, _p384_n) >= 0) { u384_sub(e, e, _p384_n); }
+    u384_store_be(h1oct, e);
+    if (_rfc6979_k_p384(d_be, h1oct, k) != 0) { _ect_burn_stack(8192); return 0 - 1; }
+    var rc = _ecs_sign_core(d_be, k, e, sig_out, 6, _ect_fp384, _ect_fn384, _ect_b384, _ect_g384);
+    _ect_burn_stack(8192);
+    return rc;
 }
 
 # ================================================================
@@ -520,67 +331,6 @@ fn ecdsa_p256_warm(): i64 {
     u256_store_be(&pk, _p256_gx);
     u256_store_be(&pk + 32, _p256_gy);                  # pk = G (a valid point)
     ecdsa_p256_verify(&pk, "warm", 4, &sig);            # verify-path inits (result ignored)
-    return 0;
-}
-
-# ================================================================
-# ecdsa_p384_sign — raw r||s (96 bytes, big-endian)
-# ================================================================
-fn ecdsa_p384_sign(d_be, msg, msg_len, sig_out): i64 {
-    _ecs384_init();
-    var bk = cbank();
-    var _ecs384_Rb = _ecs384_R + bk * 144;
-
-    # One secret scratch block; carve 13 × 48-byte slots by offset. This
-    # `var sc[N]` is a function-scope STATIC global (quirk #1), shared
-    # across concurrent signers, so it is banked across `cbank()` lanes
-    # (the concurrent-signers race in ecdsa_concurrent.tcyr). It carries
-    # key-derived / nonce material, so it is plain `var` + a per-lane wipe
-    # before every return (quirk #9 / ADR 0004 — NEVER `secret var`, whose
-    # whole-array wipe would clobber a sibling worker's live lane). Slots
-    # are offset from the calling worker's lane base `scb`.
-    var sc[39936];            # 624 * SIGIL_CRYPTO_BANKS
-    var scb    = &sc + bk * 624;
-    var digest = scb + 0;
-    var e      = scb + 48;
-    var h1oct  = scb + 96;
-    var k      = scb + 144;
-    var kint   = scb + 192;
-    var kinv   = scb + 240;
-    var dint   = scb + 288;
-    var rint   = scb + 336;
-    var sint   = scb + 384;
-    var rd     = scb + 432;
-    var hpd    = scb + 480;
-    var Rx     = scb + 528;
-    var Ry     = scb + 576;
-
-    sha384(msg, msg_len, digest);
-    u384_load_be(e, digest);
-    if (u384_cmp(e, _p384_n) >= 0) { u384_sub(e, e, _p384_n); }
-    u384_store_be(h1oct, e);
-
-    if (_rfc6979_k_p384(d_be, h1oct, k) != 0) { memset(scb, 0, 624); _p384_scrub_secret_lanes(); return 0 - 1; }
-    u384_load_be(kint, k);
-
-    # R = k·G via the fixed-length ladder (k_hat = k + n / k + 2n) — see ecdsa_p256_sign.
-    pt384_scalarmul_secret(_ecs384_Rb, kint, _ecs384_G);
-    if (pt384_is_infinity(_ecs384_Rb) == 1) { memset(scb, 0, 624); _p384_scrub_secret_lanes(); return 0 - 1; }
-    pt384_to_affine(Rx, Ry, _ecs384_Rb);
-    fn_p384_reduce384(rint, Rx);
-    if (u384_is_zero(rint) == 1) { memset(scb, 0, 624); _p384_scrub_secret_lanes(); return 0 - 1; }
-
-    u384_load_be(dint, d_be);
-    fn_p384_mul(rd, rint, dint);
-    _ecs_addmod_n_p384(hpd, e, rd);
-    fn_p384_inv(kinv, kint);
-    fn_p384_mul(sint, kinv, hpd);
-    if (u384_is_zero(sint) == 1) { memset(scb, 0, 624); _p384_scrub_secret_lanes(); return 0 - 1; }
-
-    u384_store_be(sig_out, rint);
-    u384_store_be(sig_out + 48, sint);
-    memset(scb, 0, 624);
-    _p384_scrub_secret_lanes();
     return 0;
 }
 

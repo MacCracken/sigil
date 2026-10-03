@@ -1,30 +1,28 @@
-# ecdsa_sign_timing.tcyr — H1 regression: the ECDSA SIGNING scalar multiply
-# must not leak the bit length of the secret nonce k through timing
-# (Minerva class — CVE-2019-15809 / TPM-Fail).
+# ecdsa_sign_timing.tcyr — the ECDSA SIGNING path must not leak the secret
+# nonce k or the private key d through timing.
 #
-# The signer computes R = k·G with a Montgomery ladder whose R0 starts at
-# the point at infinity, and pt_add / pt_double (and the P-384 twins) exit
-# early on an infinity operand. Run over k itself, every leading zero bit
-# of k skipped a full add + double, so signing time was a function of
-# bitlen(k) — enough timed signatures recover the private key by lattice
-# (HNP) reduction.
-#
-# The fix ladders over a FIXED-LENGTH scalar k_hat = k + n, or k + 2n when
-# k + n lacks bit 256 (P-384: bit 384), picked by a constant-time mask.
-# k_hat always has exactly that top bit set, so the ladder runs 257 / 385
-# iterations and R0/R1 meet infinity only in the identical first one.
-# n·G = O, so k_hat·G == k·G and every signature stays byte-identical.
+# History. 3.13.0 fixed the Minerva / TPM-Fail leak (CVE-2019-15809): the
+# signer's Montgomery ladder ran over k itself and exited early on the point
+# at infinity, so signing time tracked bitlen(k). It laddered over a
+# fixed-length k_hat = k + n or k + 2n instead, and 3.13.1 blinded the
+# ladder's input point. Both were mitigations on top of variable-time
+# arithmetic: the field and mod-n operations underneath branched on their
+# operands. 3.13.8 moved every secret-scalar operation onto the
+# constant-time engine in src/ec_ct.cyr (complete formulas, a fixed 4-bit
+# window over every window of k with a full-table masked lookup, branch-free
+# Montgomery arithmetic) and the two mitigations went with the old ladder.
 #
 # Groups:
-#   1. k_hat structure: top limb is exactly 1 and k_hat ∈ {k + n, k + 2n}
-#      (the one picked by the rule above), for edge and random k.
-#   2. k_hat·G == k·G: the signer's entry vs the 256/384-bit reference
-#      ladder, for edge k (0, 1, 2, 2^16, 2^255 / 2^383, n-2, n-1, n, and
-#      the values on either side of 2^bits - n) plus random k.
-#   3. RFC 6979 KATs through ecdsa_p{256,384}_sign (byte-identical output).
-#   4. Timing ratio on the exact scalar-multiply entry the signer uses:
-#      median over interleaved runs, small k (1, 2^16) vs full-length k
-#      (n-1). Pre-fix k=1 ran in well under 1% of the n-1 time.
+#   1. pt_scalarmul_secret / pt384_scalarmul_secret (now on the engine) equal
+#      the public-scalar reference ladder for edge k (0, 1, 2, 2^16, 2^255 /
+#      2^383, the values around 2^bits - n, n - 2, n - 1, n) and random k, and
+#      return the affine point (Z = 1) or the point at infinity.
+#   2. RFC 6979 KATs through ecdsa_p{256,384}_sign (byte-identical output).
+#   3. Timing of the scalar-multiply entry: median over interleaved runs, small
+#      k (1, 2^16) vs full-length k (n - 1), within [0.75, 1.33].
+#   4. Timing of the whole signing core with chosen (k, d): (1, 1) vs
+#      (n - 1, n - 1), within the same band — this covers k^-1 mod n and the
+#      r·d product, which ran on variable-time mod-n arithmetic through 3.13.7.
 
 include "lib/assert.cyr"
 include "lib/alloc.cyr"
@@ -58,6 +56,7 @@ include "src/bigint_ext.cyr"
 include "src/ed25519.cyr"
 include "src/ecdsa_p256.cyr"
 include "src/ecdsa_p384.cyr"
+include "src/ec_ct.cyr"
 include "src/ecdsa_sign.cyr"
 
 # ----------------------------------------------------------------
@@ -86,62 +85,6 @@ fn _tm_median(arr, n): i64 {
     return load64(arr + (n / 2) * 8);
 }
 
-# Limb-wise equality of two `limbs`-limb LE buffers (test-side; public data).
-fn _tm_limbs_eq(a, b, limbs): i64 {
-    var i = 0;
-    var d = 0;
-    while (i < limbs) {
-        d = d | (load64(a + i * 8) ^ load64(b + i * 8));
-        i = i + 1;
-    }
-    if (d == 0) { return 1; }
-    return 0;
-}
-
-# Reference k_hat, test-side and deliberately branchy/obvious:
-# out(limbs+1) = k + n if that sum carries into bit 256/384, else k + 2n.
-fn _tm_ref_khat(out, k, n, limbs): i64 {
-    var t = alloc((limbs + 1) * 8);
-    # t = k + n
-    var c = 0;
-    var i = 0;
-    while (i < limbs) {
-        var a = load64(k + i * 8);
-        var b = load64(n + i * 8);
-        var s = a + b;
-        var c1 = 0;
-        if ((s ^ (1 << 63)) < (a ^ (1 << 63))) { c1 = 1; }
-        var s2 = s + c;
-        var c2 = 0;
-        if ((s2 ^ (1 << 63)) < (s ^ (1 << 63))) { c2 = 1; }
-        store64(t + i * 8, s2);
-        c = c1 + c2;
-        i = i + 1;
-    }
-    store64(t + limbs * 8, c);
-    if (c == 0) {
-        # t = t + n  (= k + 2n)
-        var c3 = 0;
-        i = 0;
-        while (i < limbs) {
-            var a = load64(t + i * 8);
-            var b = load64(n + i * 8);
-            var s = a + b;
-            var c1 = 0;
-            if ((s ^ (1 << 63)) < (a ^ (1 << 63))) { c1 = 1; }
-            var s2 = s + c3;
-            var c2 = 0;
-            if ((s2 ^ (1 << 63)) < (s ^ (1 << 63))) { c2 = 1; }
-            store64(t + i * 8, s2);
-            c3 = c1 + c2;
-            i = i + 1;
-        }
-        store64(t + limbs * 8, load64(t + limbs * 8) + c3);
-    }
-    memcpy(out, t, (limbs + 1) * 8);
-    return 0;
-}
-
 # ---------------- P-256 ----------------
 
 var _tm256_G   = 0;
@@ -161,21 +104,15 @@ fn _tm256_setup(): i64 {
     return 0;
 }
 
-# k_hat structure + k_hat·G == k·G for one 256-bit scalar `k`.
+# pt_scalarmul_secret(k, G) == the public-scalar reference ladder for one 256-bit k, and
+# the result is affine (Z = 1) unless it is the point at infinity.
 fn _tm256_check(k, label): i64 {
-    var kh = alloc(40);
-    memset(kh, 0, 40);
-    _p256_khat(kh, k);
-    var want = alloc(40);
-    _tm_ref_khat(want, k, _p256_n, 4);
-    assert_eq(load64(kh + 32), 1, label);                 # bit 256 set, nothing above
-    assert_eq(_tm_limbs_eq(kh, want, 5), 1, label);       # == k+n or k+2n per the rule
-
     pt_scalarmul(_tm256_ref, k, _tm256_G);                # 256-bit reference ladder
-    pt_scalarmul_secret(_tm256_got, k, _tm256_G);         # the signer's entry
+    pt_scalarmul_secret(_tm256_got, k, _tm256_G);         # the constant-time engine
     var ri = pt_is_infinity(_tm256_ref);
     assert_eq(pt_is_infinity(_tm256_got), ri, label);
     if (ri == 0) {
+        assert_eq(u256_eq(_pt_z(_tm256_got), u256_from(1)), 1, label);
         pt_to_affine(_tm256_rx, _tm256_ry, _tm256_ref);
         pt_to_affine(_tm256_gx, _tm256_gy, _tm256_got);
         assert_eq(u256_eq(_tm256_gx, _tm256_rx), 1, label);
@@ -209,20 +146,14 @@ fn _tm384_setup(): i64 {
     return 0;
 }
 
+# The P-384 twin of _tm256_check.
 fn _tm384_check(k, label): i64 {
-    var kh = alloc(56);
-    memset(kh, 0, 56);
-    _p384_khat(kh, k);
-    var want = alloc(56);
-    _tm_ref_khat(want, k, _p384_n, 6);
-    assert_eq(load64(kh + 48), 1, label);                 # bit 384 set, nothing above
-    assert_eq(_tm_limbs_eq(kh, want, 7), 1, label);
-
     pt384_scalarmul(_tm384_ref, k, _tm384_G);
     pt384_scalarmul_secret(_tm384_got, k, _tm384_G);
     var ri = pt384_is_infinity(_tm384_ref);
     assert_eq(pt384_is_infinity(_tm384_got), ri, label);
     if (ri == 0) {
+        assert_eq(u384_eq(_pt384_z(_tm384_got), u384_from(1)), 1, label);
         pt384_to_affine(_tm384_rx, _tm384_ry, _tm384_ref);
         pt384_to_affine(_tm384_gx, _tm384_gy, _tm384_got);
         assert_eq(u384_eq(_tm384_gx, _tm384_rx), 1, label);
@@ -250,15 +181,56 @@ fn _tm_print3(label, a, b, c): i64 {
     return 0;
 }
 
+# Asserts a within [0.75, 1.33] of b (4a >= 3b and 3a <= 4b).
+fn _tm_band(a, b, label): i64 {
+    assert_gte(a * 4, b * 3, label);
+    assert_lte(a * 3, b * 4, label);
+    return 0;
+}
+
+# Prints two medians.
+fn _tm_print2(label, a, b): i64 {
+    sys_write(1, "    ", 4);
+    sys_write(1, label, strlen(label));
+    sys_write(1, " medians ns: low ", 17);
+    fmt_int(a);
+    sys_write(1, "  high ", 7);
+    fmt_int(b);
+    sys_write(1, "\n", 1);
+    return 0;
+}
+
+# A fresh big-endian byte buffer from a hex string (curve c only sizes nothing; kept for
+# readability at the call sites).
+fn _tm_be(c, hexs): i64 {
+    return hex_decode(hexs, strlen(hexs));
+}
+
+# Nanoseconds for one _ecs_sign_core call with the chosen big-endian nonce k_be and key d_be
+# and message representative e (LE limbs) on curve c.
+fn _tm_core(c, k_be, d_be, e, sig): i64 {
+    var t0 = 0;
+    if (c == 256) {
+        _ect256_init();
+        t0 = clock_now_ns();
+        _ecs_sign_core(d_be, k_be, e, sig, 4, _ect_fp256, _ect_fn256, _ect_b256, _ect_g256);
+        return clock_now_ns() - t0;
+    }
+    _ect384_init();
+    t0 = clock_now_ns();
+    _ecs_sign_core(d_be, k_be, e, sig, 6, _ect_fp384, _ect_fn384, _ect_b384, _ect_g384);
+    return clock_now_ns() - t0;
+}
+
 fn main() {
     alloc_init();
     _tm256_setup();
     _tm384_setup();
 
     # ============================================================
-    # Groups 1+2 — P-256 k_hat structure and k_hat·G == k·G
+    # Group 1 — P-256 secret scalar multiply vs the reference
     # ============================================================
-    test_group("P-256 fixed-length k_hat: structure + k_hat*G == k*G");
+    test_group("P-256 pt_scalarmul_secret (constant-time engine) == reference ladder");
 
     _tm256_check(u256_from(0), "p256 k=0");
     _tm256_check(u256_from(1), "p256 k=1");
@@ -267,11 +239,11 @@ fn main() {
     _tm256_check(u256_from_hex(
         "8000000000000000000000000000000000000000000000000000000000000000"),
         "p256 k=2^255");
-    # 2^256 - n - 1: k + n = 2^256 - 1 LACKS bit 256 -> k + 2n.
+    # The values around 2^256 - n were the k_hat (3.13.0) selection boundary; kept as
+    # edge scalars.
     _tm256_check(u256_from_hex(
         "00000000ffffffff00000000000000004319055258e8617b0c46353d039cdaae"),
         "p256 k=2^256-n-1 (k+n lacks bit 256)");
-    # 2^256 - n: k + n = 2^256 exactly HAS bit 256 -> k + n.
     _tm256_check(u256_from_hex(
         "00000000ffffffff00000000000000004319055258e8617b0c46353d039cdaaf"),
         "p256 k=2^256-n (k+n == 2^256)");
@@ -301,9 +273,9 @@ fn main() {
     }
 
     # ============================================================
-    # Groups 1+2 — P-384
+    # Group 1 — P-384
     # ============================================================
-    test_group("P-384 fixed-length k_hat: structure + k_hat*G == k*G");
+    test_group("P-384 pt384_scalarmul_secret (constant-time engine) == reference ladder");
 
     _tm384_check(u384_from(0), "p384 k=0");
     _tm384_check(u384_from(1), "p384 k=1");
@@ -342,9 +314,9 @@ fn main() {
     }
 
     # ============================================================
-    # Group 3 — the signer still emits the RFC 6979 vectors
+    # Group 2 — the signer still emits the RFC 6979 vectors
     # ============================================================
-    test_group("RFC 6979 KATs through the fixed-length signer");
+    test_group("RFC 6979 KATs through the constant-time signer");
 
     var x256 = hex_decode("c9afa9d845ba75166b5c215767b1d6934e50c3db36e89b127b8a622b120f6721", 64);
     var sig256[64];
@@ -360,13 +332,13 @@ fn main() {
         "p384 sample r||s == RFC 6979 A.2.6");
 
     # ============================================================
-    # Group 4 — timing ratio on the signer's scalar-multiply entry
+    # Group 3 — timing ratio on the scalar-multiply entry
     # ============================================================
-    # Rounds interleave the three scalars (rotating the order each
-    # round) so host noise lands on all of them alike; the median
-    # discards outliers. Tolerance is deliberately generous (small k
-    # >= 0.75x the n-1 time): pre-fix, k=1 took < 1% and k=2^16 ~7%.
-    test_group("scalar-mult timing independent of bitlen(k)");
+    # Rounds interleave the three scalars (rotating the order each round) so
+    # host noise lands on all of them alike; the median discards outliers.
+    # The band [0.75, 1.33] is generous on purpose: the 3.13.0 ladder ran
+    # k = 1 in < 1% of the n - 1 time, and the engine measures within ~1%.
+    test_group("scalar-mult timing independent of k");
 
     var t = alloc(3 * 8 * 16);            # 3 rows x up to 16 samples
     var k256_1   = u256_from(1);
@@ -391,8 +363,8 @@ fn main() {
     var m16  = _tm_median(t + 1 * 128, R);
     var mfull = _tm_median(t + 2 * 128, R);
     _tm_print3("p256", m1, m16, mfull);
-    assert_gte(m1 * 4, mfull * 3, "p256 k=1 median >= 0.75x k=n-1 median");
-    assert_gte(m16 * 4, mfull * 3, "p256 k=2^16 median >= 0.75x k=n-1 median");
+    _tm_band(m1, mfull, "p256 k=1 median within [0.75, 1.33]x k=n-1");
+    _tm_band(m16, mfull, "p256 k=2^16 median within [0.75, 1.33]x k=n-1");
 
     var k384_1   = u384_from(1);
     var k384_16  = u384_from(0x10000);
@@ -416,44 +388,58 @@ fn main() {
     m16   = _tm_median(t + 1 * 128, R);
     mfull = _tm_median(t + 2 * 128, R);
     _tm_print3("p384", m1, m16, mfull);
-    assert_gte(m1 * 4, mfull * 3, "p384 k=1 median >= 0.75x k=n-1 median");
-    assert_gte(m16 * 4, mfull * 3, "p384 k=2^16 median >= 0.75x k=n-1 median");
+    _tm_band(m1, mfull, "p384 k=1 median within [0.75, 1.33]x k=n-1");
+    _tm_band(m16, mfull, "p384 k=2^16 median within [0.75, 1.33]x k=n-1");
 
-    test_group("3.13.1 ladder input blinded: same point, secret non-unit Z");
-    var bk1[56];
-    var bk2[56];
-    memset(&bk1, 0, 56);
-    memset(&bk2, 0, 56);
-    store64(&bk1, 12345);
-    store64(&bk2, 67890);
-    var bp1 = alloc(96);
-    var bp2 = alloc(96);
-    _p256_blind_point(bp1, _tm256_G, &bk1);
-    _p256_blind_point(bp2, _tm256_G, &bk2);
-    var gx = alloc(32);
-    var gy = alloc(32);
-    var ax = alloc(32);
-    var ay = alloc(32);
-    pt_to_affine(gx, gy, _tm256_G);
-    pt_to_affine(ax, ay, bp1);
-    assert_eq(u256_eq(ax, gx), 1, "P-256 blinded G: same x");
-    assert_eq(u256_eq(ay, gy), 1, "P-256 blinded G: same y");
-    assert_eq(u256_eq(_pt_z(bp1), _pt_z(_tm256_G)), 0, "P-256 blinded G: Z is not 1");
-    assert_eq(u256_eq(_pt_z(bp1), _pt_z(bp2)), 0, "P-256: another k_hat gives another Z");
-    var cp1 = alloc(144);
-    var cp2 = alloc(144);
-    _p384_blind_point(cp1, _tm384_G, &bk1);
-    _p384_blind_point(cp2, _tm384_G, &bk2);
-    var hx = alloc(48);
-    var hy = alloc(48);
-    var bx = alloc(48);
-    var by = alloc(48);
-    pt384_to_affine(hx, hy, _tm384_G);
-    pt384_to_affine(bx, by, cp1);
-    assert_eq(memeq(bx, hx, 48), 1, "P-384 blinded G: same x");
-    assert_eq(memeq(by, hy, 48), 1, "P-384 blinded G: same y");
-    assert_eq(memeq(_pt384_z(cp1), _pt384_z(_tm384_G), 48), 0, "P-384 blinded G: Z is not 1");
-    assert_eq(memeq(_pt384_z(cp1), _pt384_z(cp2), 48), 0, "P-384: another k_hat gives another Z");
+    # ============================================================
+    # Group 4 — timing of the whole signing core with chosen (k, d)
+    # ============================================================
+    # _ecs_sign_core is everything after the RFC 6979 nonce: k·G, its affine
+    # conversion, k^-1 mod n and (e + r·d). Through 3.13.7 the last two ran on
+    # mod-n arithmetic with operand-dependent reductions.
+    test_group("signing-core timing independent of k and d");
+    var e256 = u256_from(0x1234567);
+    var lo256 = _tm_be(256, "0000000000000000000000000000000000000000000000000000000000000001");
+    var hi256 = _tm_be(256, "ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632550");
+    var sg = alloc(96);
+    _tm_core(256, lo256, lo256, e256, sg);   # warm
+    R = 11;
+    r = 0;
+    while (r < R) {
+        if ((r & 1) == 0) {
+            store64(t + (0 * 16 + r) * 8, _tm_core(256, lo256, lo256, e256, sg));
+            store64(t + (1 * 16 + r) * 8, _tm_core(256, hi256, hi256, e256, sg));
+        } else {
+            store64(t + (1 * 16 + r) * 8, _tm_core(256, hi256, hi256, e256, sg));
+            store64(t + (0 * 16 + r) * 8, _tm_core(256, lo256, lo256, e256, sg));
+        }
+        r = r + 1;
+    }
+    var mlo = _tm_median(t + 0 * 128, R);
+    var mhi = _tm_median(t + 1 * 128, R);
+    _tm_print2("p256 sign core", mlo, mhi);
+    _tm_band(mlo, mhi, "p256 sign core (k,d)=(1,1) within [0.75, 1.33]x (n-1,n-1)");
+
+    var e384 = u384_from(0x1234567);
+    var lo384 = _tm_be(384, "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001");
+    var hi384 = _tm_be(384, "ffffffffffffffffffffffffffffffffffffffffffffffffc7634d81f4372ddf581a0db248b0a77aecec196accc52972");
+    _tm_core(384, lo384, lo384, e384, sg);   # warm
+    R = 7;
+    r = 0;
+    while (r < R) {
+        if ((r & 1) == 0) {
+            store64(t + (0 * 16 + r) * 8, _tm_core(384, lo384, lo384, e384, sg));
+            store64(t + (1 * 16 + r) * 8, _tm_core(384, hi384, hi384, e384, sg));
+        } else {
+            store64(t + (1 * 16 + r) * 8, _tm_core(384, hi384, hi384, e384, sg));
+            store64(t + (0 * 16 + r) * 8, _tm_core(384, lo384, lo384, e384, sg));
+        }
+        r = r + 1;
+    }
+    mlo = _tm_median(t + 0 * 128, R);
+    mhi = _tm_median(t + 1 * 128, R);
+    _tm_print2("p384 sign core", mlo, mhi);
+    _tm_band(mlo, mhi, "p384 sign core (k,d)=(1,1) within [0.75, 1.33]x (n-1,n-1)");
 
     return assert_summary();
 }

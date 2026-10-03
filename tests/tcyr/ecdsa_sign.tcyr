@@ -44,6 +44,7 @@ include "src/bigint_ext.cyr"
 include "src/ed25519.cyr"
 include "src/ecdsa_p256.cyr"
 include "src/ecdsa_p384.cyr"
+include "src/ec_ct.cyr"
 include "src/ecdsa_sign.cyr"
 
 # Appends the DER INTEGER for the 32-byte big-endian value `v` to out+pos and returns the new
