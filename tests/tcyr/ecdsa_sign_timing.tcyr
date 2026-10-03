@@ -254,24 +254,24 @@ fn main() {
     _tm256_check(u256_from(0x10000), "p256 k=2^16");
     _tm256_check(u256_from_hex(
         "8000000000000000000000000000000000000000000000000000000000000000"),
-        "p256 k=2^255");
+      "p256 k=2^255");
     # The values around 2^256 - n were the k_hat (3.13.0) selection boundary; kept as
     # edge scalars.
     _tm256_check(u256_from_hex(
         "00000000ffffffff00000000000000004319055258e8617b0c46353d039cdaae"),
-        "p256 k=2^256-n-1 (k+n lacks bit 256)");
+      "p256 k=2^256-n-1 (k+n lacks bit 256)");
     _tm256_check(u256_from_hex(
         "00000000ffffffff00000000000000004319055258e8617b0c46353d039cdaaf"),
-        "p256 k=2^256-n (k+n == 2^256)");
+      "p256 k=2^256-n (k+n == 2^256)");
     _tm256_check(u256_from_hex(
         "00000000ffffffff00000000000000004319055258e8617b0c46353d039cdab0"),
-        "p256 k=2^256-n+1");
+      "p256 k=2^256-n+1");
     _tm256_check(u256_from_hex(
         "ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc63254f"),
-        "p256 k=n-2");
+      "p256 k=n-2");
     _tm256_check(u256_from_hex(
         "ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632550"),
-        "p256 k=n-1");
+      "p256 k=n-1");
     _tm256_check(_p256_n, "p256 k=n (n*G == O)");
 
     # Random k in [0, n): SHA-256 of a counter, reduced once (n > 2^255).
@@ -299,22 +299,22 @@ fn main() {
     _tm384_check(u384_from(0x10000), "p384 k=2^16");
     _tm384_check(u384_from_hex(
         "800000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"),
-        "p384 k=2^383");
+      "p384 k=2^383");
     _tm384_check(u384_from_hex(
         "000000000000000000000000000000000000000000000000389cb27e0bc8d220a7e5f24db74f58851313e695333ad68c"),
-        "p384 k=2^384-n-1 (k+n lacks bit 384)");
+      "p384 k=2^384-n-1 (k+n lacks bit 384)");
     _tm384_check(u384_from_hex(
         "000000000000000000000000000000000000000000000000389cb27e0bc8d220a7e5f24db74f58851313e695333ad68d"),
-        "p384 k=2^384-n (k+n == 2^384)");
+      "p384 k=2^384-n (k+n == 2^384)");
     _tm384_check(u384_from_hex(
         "000000000000000000000000000000000000000000000000389cb27e0bc8d220a7e5f24db74f58851313e695333ad68e"),
-        "p384 k=2^384-n+1");
+      "p384 k=2^384-n+1");
     _tm384_check(u384_from_hex(
         "ffffffffffffffffffffffffffffffffffffffffffffffffc7634d81f4372ddf581a0db248b0a77aecec196accc52971"),
-        "p384 k=n-2");
+      "p384 k=n-2");
     _tm384_check(u384_from_hex(
         "ffffffffffffffffffffffffffffffffffffffffffffffffc7634d81f4372ddf581a0db248b0a77aecec196accc52972"),
-        "p384 k=n-1");
+      "p384 k=n-1");
     _tm384_check(_p384_n, "p384 k=n (n*G == O)");
 
     var dg384[48];
@@ -338,14 +338,14 @@ fn main() {
     var sig256[64];
     assert_eq(ecdsa_p256_sign(x256, "sample", 6, &sig256), 0, "p256 sign rc=0");
     assert_streq(hex_encode(&sig256, 64),
-        "efd48b2aacb6a8fd1140dd9cd45e81d69d2c877b56aaf991c34d0ea84eaf3716f7cb1c942d657c41d436c7a1b6e29f65f3e900dbb9aff4064dc4ab2f843acda8",
-        "p256 sample r||s == RFC 6979 A.2.5");
+      "efd48b2aacb6a8fd1140dd9cd45e81d69d2c877b56aaf991c34d0ea84eaf3716f7cb1c942d657c41d436c7a1b6e29f65f3e900dbb9aff4064dc4ab2f843acda8",
+      "p256 sample r||s == RFC 6979 A.2.5");
     var x384 = hex_decode("6b9d3dad2e1b8c1c05b19875b6659f4de23c3b667bf297ba9aa47740787137d896d5724e4c70a825f872c9ea60d2edf5", 96);
     var sig384[96];
     assert_eq(ecdsa_p384_sign(x384, "sample", 6, &sig384), 0, "p384 sign rc=0");
     assert_streq(hex_encode(&sig384, 96),
-        "94edbb92a5ecb8aad4736e56c691916b3f88140666ce9fa73d64c4ea95ad133c81a648152e44acf96e36dd1e80fabe4699ef4aeb15f178cea1fe40db2603138f130e740a19624526203b6351d0a3a94fa329c145786e679e7b82c71a38628ac8",
-        "p384 sample r||s == RFC 6979 A.2.6");
+      "94edbb92a5ecb8aad4736e56c691916b3f88140666ce9fa73d64c4ea95ad133c81a648152e44acf96e36dd1e80fabe4699ef4aeb15f178cea1fe40db2603138f130e740a19624526203b6351d0a3a94fa329c145786e679e7b82c71a38628ac8",
+      "p384 sample r||s == RFC 6979 A.2.6");
 
     # ============================================================
     # Group 3 — timing ratio on the scalar-multiply entry
@@ -360,7 +360,7 @@ fn main() {
     var k256_1   = u256_from(1);
     var k256_16  = u256_from(0x10000);
     var k256_nm1 = u256_from_hex(
-        "ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632550");
+      "ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632550");
     _tm256_time(k256_nm1);                # warm
     var R = 11;
     var r = 0;
@@ -385,7 +385,7 @@ fn main() {
     var k384_1   = u384_from(1);
     var k384_16  = u384_from(0x10000);
     var k384_nm1 = u384_from_hex(
-        "ffffffffffffffffffffffffffffffffffffffffffffffffc7634d81f4372ddf581a0db248b0a77aecec196accc52972");
+      "ffffffffffffffffffffffffffffffffffffffffffffffffc7634d81f4372ddf581a0db248b0a77aecec196accc52972");
     _tm384_time(k384_nm1);                # warm
     R = 7;
     r = 0;

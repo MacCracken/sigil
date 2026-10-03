@@ -74,7 +74,7 @@ fn main() {
     var i = 0;
     while (i < n_big) {
         var e = revocation_entry_new(_ph_id("policy_hardening_key_", i), 0,
-            "key compromised in the field", "root_of_trust_admin");
+          "key compromised in the field", "root_of_trust_admin");
         rl_add(big, e);
         i = i + 1;
     }
@@ -88,15 +88,15 @@ fn main() {
         assert_eq(rl_len(big_loaded), n_big, "rl_load big: every entry loaded");
         assert_eq(rl_load_bad_count(), 0, "rl_load big: no line rejected");
         assert_eq(rl_is_key_revoked(big_loaded, "policy_hardening_key_0"), 1,
-            "first key revoked");
+          "first key revoked");
         assert_eq(rl_is_key_revoked(big_loaded, "policy_hardening_key_1499"), 1,
-            "LAST key revoked");
+          "LAST key revoked");
         assert_eq(rl_is_key_revoked(big_loaded, "policy_hardening_key_1000"), 1,
-            "key past 64 KiB revoked");
+          "key past 64 KiB revoked");
     }
     xunlink(rl_path);
     assert_eq(rl_load(scratch_path("sigil_policy_hardening_missing.jsonl")), 0,
-        "rl_load missing file -> 0");
+      "rl_load missing file -> 0");
 
     # CRL load past 64 KiB
     test_group("H6 crl_load > 64 KiB");
@@ -117,7 +117,7 @@ fn main() {
         var rl_from_crl = revocation_list_new();
         assert_eq(crl_apply_to(bigc_loaded, rl_from_crl), n_big, "crl apply: every entry");
         assert_eq(rl_is_key_revoked(rl_from_crl, "policy_hardening_crl_1499"), 1,
-            "crl LAST key revoked");
+          "crl LAST key revoked");
     }
     xunlink(crl_path);
 
@@ -182,39 +182,39 @@ fn main() {
     assert(h3 != 0, "i64 max accepted");
     if (h3 != 0) { assert_eq(crl_next_update(h3), 9223372036854775807, "i64 max exact"); }
     assert_eq(_ph_hdr_ok("{\"version\":1,\"issuer\":\"x\",\"next_update\":17x}"), 0,
-        "junk digit rejected");
+      "junk digit rejected");
     assert_eq(_ph_hdr_ok("{\"version\":1,\"issuer\":\"x\",\"next_update\":17 00}"), 0,
-        "space inside number rejected");
+      "space inside number rejected");
     assert_eq(_ph_hdr_ok("{\"version\":1,\"issuer\":\"x\",\"next_update\":9223372036854775808}"),
-        0, "i64 overflow rejected");
+      0, "i64 overflow rejected");
     assert_eq(_ph_hdr_ok("{\"version\":1,\"issuer\":\"x\",\"next_update\":99999999999999999999}"),
-        0, "20-digit overflow rejected");
+      0, "20-digit overflow rejected");
     assert_eq(_ph_hdr_ok("{\"version\":1,\"issuer\":\"x\",\"next_update\":1.5}"), 0,
-        "fraction rejected");
+      "fraction rejected");
     assert_eq(_ph_hdr_ok("{\"version\":1,\"issuer\":\"x\",\"next_update\":1e9}"), 0,
-        "exponent rejected");
+      "exponent rejected");
     assert_eq(_ph_hdr_ok("{\"version\":1,\"issuer\":\"x\",\"next_update\":-}"), 0,
-        "bare minus rejected");
+      "bare minus rejected");
     assert_eq(_ph_hdr_ok("{\"version\":1,\"issuer\":\"x\",\"next_update\":+5}"), 0,
-        "leading plus rejected");
+      "leading plus rejected");
     assert_eq(_ph_hdr_ok("{\"version\":1,\"issuer\":\"x\",\"next_update\":0123}"), 0,
-        "leading zero rejected");
+      "leading zero rejected");
     assert_eq(_ph_hdr_ok("{\"version\":1,\"issuer\":\"x\",\"next_update\":}"), 0,
-        "empty number rejected");
+      "empty number rejected");
     assert_eq(_ph_hdr_ok("{\"version\":1,\"issuer\":\"x\",\"next_update\":null}"), 0,
-        "null next_update rejected");
+      "null next_update rejected");
     assert_eq(_ph_hdr_ok("{\"version\":1,\"issuer\":\"x\",\"next_update\":\"1700000000\"}"), 0,
-        "string next_update rejected");
+      "string next_update rejected");
     assert_eq(_ph_hdr_ok("{\"version\":x1,\"issuer\":\"x\",\"next_update\":1}"), 0,
-        "junk version rejected");
+      "junk version rejected");
     assert_eq(_ph_hdr_ok("{\"version\":1,\"issuer\":\"x\",\"issued_at\":5z,\"next_update\":1}"),
-        0, "junk issued_at rejected");
+      0, "junk issued_at rejected");
     assert_eq(_ph_hdr_ok("{\"version\":1,\"issuer\":\"x\",\"next_update\":1"), 0,
-        "header without closing brace rejected");
+      "header without closing brace rejected");
     assert_eq(_ph_hdr_ok("{\"version\":1,\"issuer\":\"x"), 0,
-        "header with unterminated issuer rejected");
+      "header with unterminated issuer rejected");
     assert_eq(_ph_hdr_ok("{\"version\":1,\"issuer\":\"x\",\"next_update\":0}"), 1,
-        "zero next_update still accepted (= none)");
+      "zero next_update still accepted (= none)");
 
     # ============================================================
     # M6 — entry numbers
@@ -257,7 +257,7 @@ fn main() {
         var ents = load64(neg_loaded);
         assert_eq(rev_after(vec_get(ents, 0)), 0 - 5, "negative revoked_after round-trips");
         assert_eq(rev_after(vec_get(ents, 1)), 0 - 9223372036854775807 - 1,
-            "i64 min round-trips");
+          "i64 min round-trips");
         assert_eq(rev_after(vec_get(ents, 2)), 9223372036854775807, "i64 max round-trips");
     }
     var e6 = _ph_rl("{\"key_id\":\"k6\",\"revoked_at\":1,\"revoked_after\":-9223372036854775809}");

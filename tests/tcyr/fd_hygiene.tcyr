@@ -198,8 +198,8 @@ fn main() {
     xunlink(rec_body);
     xunlink(rec_tail);
     var script_ok = cat2(cat2(cat2(cat2(cat2(
-      "cat \"$1\" > '", rec_body), "' && printf %s \"$1\" > '"), rec_path),
-      "' && printf %s \"$2\" > '"), cat2(rec_tail, "'"));
+              "cat \"$1\" > '", rec_body), "' && printf %s \"$1\" > '"), rec_path),
+        "' && printf %s \"$2\" > '"), cat2(rec_tail, "'"));
     var pre = vec_new();
     vec_push(pre, "/bin/sh");
     vec_push(pre, "-c");

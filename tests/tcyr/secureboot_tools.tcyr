@@ -112,10 +112,10 @@ fn main() {
     assert_eq(xmkdir(_sbt_dir, 448), 0, "scratch dir created");   # 0700
     assert_eq(plant_fake("mokutil",
         "SecureBoot enabled\\n[key 1]\\nSHA1 Fingerprint: aa:bb\\nSubject: CN=evil\\n"),
-        0, "fake mokutil planted");
+      0, "fake mokutil planted");
     assert_eq(plant_fake("kmodsign", ""), 0, "fake kmodsign planted");
     assert_eq(plant_fake("modinfo", "sig_id: PKCS#7\\nsigner: Evil Corp\\nsig_hashalgo: sha256\\n"),
-        0, "fake modinfo planted");
+      0, "fake modinfo planted");
     assert_eq(plant_fake("ls", "SecureBoot-fake\\nPK-fake\\n"), 0, "fake ls planted");
     var kmod = cat2(_sbt_dir, "/fake.ko");
     var key = cat2(_sbt_dir, "/fake.key");
@@ -140,7 +140,7 @@ fn main() {
     assert_eq(fake_ran("mokutil"), 0, "the mokutil fallback never runs ./mokutil");
     if (_sb_tool_path("mokutil") == 0) {
         assert_eq(mstate, SB_NOT_SUPPORTED,
-            "no trusted mokutil: fails closed to not_supported, not 'enabled'");
+          "no trusted mokutil: fails closed to not_supported, not 'enabled'");
     }
 
     test_group("secureboot_list_enrolled_keys");
