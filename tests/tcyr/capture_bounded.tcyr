@@ -173,17 +173,19 @@ fn main() {
     var id_tag, id_v = _ima_read_log_fd(dfd);
     assert_eq(is_err_result(id_tag), 1, "read(2) -EISDIR is Err, not an empty log");
     assert_eq(file_close(dfd), 0, "the helper left the caller's fd open (caller owns it)");
-    #endif
-    #ifdef CYRIUS_TARGET_WIN
-    println("  SKIP: a directory cannot be opened as a file on Windows (the -EISDIR rows)");
-    #endif
 
-    # A write-only descriptor on a file of our own (it was /dev/null, which Windows lacks).
+    # A write-only descriptor on a file of our own (it was /dev/null).
     var wfd = file_open(scratch_path("write_only"), O_WRONLY | O_CREAT | O_TRUNC, 384);
     assert(wfd >= 0, "opened a write-only fd");
     var iw_tag, iw_v = _ima_read_log_fd(wfd);
-    assert_eq(is_err_result(iw_tag), 1, "read(2) on a write-only fd is Err, not an empty log");
+    assert_eq(is_err_result(iw_tag), 1, "read(2) -EBADF is Err, not an empty log");
     file_close(wfd);
+    #endif
+    #ifdef CYRIUS_TARGET_WIN
+    # Neither read error can be produced there: a directory does not open as a file, and a
+    # handle opened O_WRONLY reads an empty file without error (measured on cass).
+    println("  SKIP: the -EISDIR / -EBADF rows (POSIX read errors)");
+    #endif
 
     # The good path still reads to EOF and the result still parses.
     test_group("ima read ok");
