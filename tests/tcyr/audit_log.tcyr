@@ -40,6 +40,7 @@ include "src/trust.cyr"
 include "src/integrity.cyr"
 include "src/policy.cyr"
 include "src/audit.cyr"
+include "tests/scratch.cyr"
 
 # Returns 1 if C-strings `a` and `b` are byte-identical (length and content), else 0.
 fn _t_same(a, b): i64 {
@@ -80,6 +81,10 @@ fn _t_slurp(path, lo): i64 {
 
 fn main() {
     alloc_init();
+    if (scratch_init("audit_log") == 0) {
+        assert(0, "a private per-run scratch directory under $TMPDIR");
+        return assert_summary();
+    }
 
     # ============================================================
     # (0) Ordinary inputs: output stays byte-identical to the pre-fix writer.
@@ -276,7 +281,7 @@ fn main() {
 
     # Missing file stays -1.
     var rm = audit_log_new();
-    assert_eq(alog_load(rm, "/tmp/sigil_audit_log_does_not_exist_xyz.jsonl"), 0 - 1,
+    assert_eq(alog_load(rm, scratch_path("sigil_audit_log_does_not_exist_xyz.jsonl")), 0 - 1,
         "missing file returns -1");
 
     # ============================================================
@@ -331,6 +336,7 @@ fn main() {
     alog_record(lgf, audit_artifact_signed("/z", ARTIFACT_CONFIG, "k", "h"));
     assert_eq(alog_save(lgf, "/dev/full"), SIGIL_ERR_IO, "ENOSPC on /dev/full is SIGIL_ERR_IO");
 
+    assert_eq(scratch_cleanup(), 0, "the scratch directory and everything in it is removed");
     return assert_summary();
 }
 

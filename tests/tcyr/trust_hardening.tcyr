@@ -38,6 +38,7 @@ include "src/sha512.cyr"
 include "src/bigint_ext.cyr"
 include "src/ed25519.cyr"
 include "src/trust.cyr"
+include "tests/scratch.cyr"
 
 # Key material for four identities: root, intermediate, publisher, rogue (never in a keyring).
 var g_sk_r = 0;
@@ -94,6 +95,10 @@ fn build_chain(): i64 {
 
 fn main(): i64 {
     alloc_init();
+    if (scratch_init("trust_hardening") == 0) {
+        assert(0, "a private per-run scratch directory under $TMPDIR");
+        return assert_summary();
+    }
     ed25519_init();
 
     g_sk_r = alloc(64); g_kid_r = mk_identity(g_sk_r); g_hex_r = pk_hex_of(g_sk_r);
@@ -272,14 +277,14 @@ fn main(): i64 {
 
     # ------------------------------------------------------------
     test_group("hash_file read error is not EOF");
-    assert_eq(hash_file("/tmp"), 0, "hash_file(dir) -> 0");
-    assert_eq(hash_file_with("/tmp", HASH_ALG_SHA256), 0, "hash_file_with(dir, sha256) -> 0");
-    assert_eq(hash_file_with("/tmp", HASH_ALG_SHA512), 0, "hash_file_with(dir, sha512) -> 0");
+    assert_eq(hash_file(scratch_dir()), 0, "hash_file(dir) -> 0");
+    assert_eq(hash_file_with(scratch_dir(), HASH_ALG_SHA256), 0, "hash_file_with(dir, sha256) -> 0");
+    assert_eq(hash_file_with(scratch_dir(), HASH_ALG_SHA512), 0, "hash_file_with(dir, sha512) -> 0");
     var hex_out = alloc(80);
     var ctx_buf = alloc(160);
-    assert_eq(hash_file_into("/tmp", hex_out, ctx_buf), 0, "hash_file_into(dir) -> 0");
+    assert_eq(hash_file_into(scratch_dir(), hex_out, ctx_buf), 0, "hash_file_into(dir) -> 0");
     # Regular files still hash.
-    var fpath = "/tmp/sigil_trust_hardening.txt";
+    var fpath = scratch_path("sigil_trust_hardening.txt");
     var fd = file_open(fpath, O_WRONLY | O_CREAT | O_TRUNC, 420);
     file_write(fd, "hello world", 11);
     file_close(fd);
@@ -323,7 +328,7 @@ fn main(): i64 {
     assert_eq(kv_issuer_sig(rnew), 0, "new version must be re-issued");
 
     test_group("3.13.1 keyring_save writes each key file whole");
-    var kdir = "/tmp/sigil_th_keysave";
+    var kdir = scratch_path("sigil_th_keysave");
     xmkdir(kdir, 448);
     var skr = keyring_new(kdir);
     keyring_add_key(skr, mk_kv(g_kid_x, g_hex_x, KEY_ROLE_PUBLISHER, 0));
@@ -344,6 +349,7 @@ fn main(): i64 {
     xunlink(kf);
     xrmdir(kdir);
 
+    assert_eq(scratch_cleanup(), 0, "the scratch directory and everything in it is removed");
     return assert_summary();
 }
 

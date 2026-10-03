@@ -33,22 +33,28 @@ include "src/bigint_ext.cyr"
 include "src/ed25519.cyr"
 include "src/trust.cyr"
 include "src/integrity.cyr"
+include "tests/scratch.cyr"
 
-# Build "/tmp/sigil_fuzz_{i}.bin" into a fresh heap allocation.
+# "<scratch dir>/sigil_fuzz_{i}.bin" as a fresh C string — inside this run's private directory
+# (tests/scratch.cyr; through 3.13.7 a fixed name in the shared /tmp).
 fn _fuzz_path(i) {
-    var path = alloc(64);
-    memcpy(path, "/tmp/sigil_fuzz_", 16);
+    var name = alloc(40);
+    memcpy(name, "sigil_fuzz_", 11);
     var nbuf[24];
     memset(&nbuf, 0, 24);
     var nlen = fmt_int_buf(i, &nbuf);
-    memcpy(path + 16, &nbuf, nlen);
-    memcpy(path + 16 + nlen, ".bin", 4);
-    store8(path + 20 + nlen, 0);
-    return path;
+    memcpy(name + 11, &nbuf, nlen);
+    memcpy(name + 11 + nlen, ".bin", 4);
+    store8(name + 15 + nlen, 0);
+    return scratch_path(name);
 }
 
 fn main() {
     alloc_init();
+    if (scratch_init("fuzz_integrity") == 0) {
+        assert(0, "a private per-run scratch directory under $TMPDIR");
+        return assert_summary();
+    }
     ed25519_init();
 
     # Create temp files with known content
@@ -91,7 +97,7 @@ fn main() {
     assert_eq(ireport_is_clean(report2), 1, "clean after import");
 
     # Tamper with one file and re-verify
-    var tamper_fd = file_open("/tmp/sigil_fuzz_5.bin", O_WRONLY | O_CREAT | O_TRUNC, 420);
+    var tamper_fd = file_open(_fuzz_path(5), O_WRONLY | O_CREAT | O_TRUNC, 420);
     file_write(tamper_fd, "TAMPERED", 8);
     file_close(tamper_fd);
 
@@ -107,6 +113,7 @@ fn main() {
         i = i + 1;
     }
 
+    assert_eq(scratch_cleanup(), 0, "the scratch directory and everything in it is removed");
     return assert_summary();
 }
 

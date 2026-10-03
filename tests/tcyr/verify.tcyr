@@ -32,13 +32,18 @@ include "src/integrity.cyr"
 include "src/policy.cyr"
 include "src/audit.cyr"
 include "src/verify.cyr"
+include "tests/scratch.cyr"
 
 fn main() {
     alloc_init();
+    if (scratch_init("verify") == 0) {
+        assert(0, "a private per-run scratch directory under $TMPDIR");
+        return assert_summary();
+    }
     ed25519_init();
 
     # Setup: create a temp file to verify
-    var tmppath = "/tmp/sigil_verify_test.txt";
+    var tmppath = scratch_path("sigil_verify_test.txt");
     var tfd = file_open(tmppath, O_WRONLY | O_CREAT | O_TRUNC, 420);
     file_write(tfd, "test artifact content", 21);
     file_close(tfd);
@@ -50,7 +55,7 @@ fn main() {
     var pk_hex = hex_encode(&pk, 32);
 
     # Create keyring and add key
-    var kr = keyring_new("/tmp/sigil_test_keys");
+    var kr = keyring_new(scratch_path("sigil_test_keys"));
     var kv = key_version_new(kid, pk_hex);
     kv_set_secret_key(kv, &sk);
     keyring_add_key(kr, kv);
@@ -119,7 +124,7 @@ fn main() {
     # Key pinning
     # ============================================================
     test_group("key pinning");
-    var pin = key_pin_new(kid, "/tmp/");
+    var pin = key_pin_new(kid, scratch_path(""));
     sv_add_key_pin(sv, pin);
 
     # Should still pass (correct key for path)
@@ -166,7 +171,7 @@ fn main() {
     # Verify agent binary (unsigned check)
     # ============================================================
     test_group("verify agent unsigned");
-    var tmppath2 = "/tmp/sigil_verify_agent.txt";
+    var tmppath2 = scratch_path("sigil_verify_agent.txt");
     var tfd2 = file_open(tmppath2, O_WRONLY | O_CREAT | O_TRUNC, 420);
     file_write(tfd2, "unsigned agent", 14);
     file_close(tfd2);
@@ -221,7 +226,7 @@ fn main() {
     # ============================================================
     test_group("diff added");
     var snap0 = sv_snapshot_trust_store(sv);
-    var extra = trusted_artifact_new("/tmp/new_artifact", ARTIFACT_PACKAGE, "new_hash_123");
+    var extra = trusted_artifact_new(scratch_path("new_artifact"), ARTIFACT_PACKAGE, "new_hash_123");
     artifact_set_trust_level(extra, TRUST_VERIFIED);
     sv_register_trusted(sv, extra);
     var d_add = sv_diff_trust_store(sv, snap0);
@@ -270,11 +275,11 @@ fn main() {
     artifact_set_trust_level(art_b, TRUST_SYSTEM_CORE);
     sv_register_system_core(sv, art_b);
 
-    var ts_path = "/tmp/sigil_trust_store_test.json";
+    var ts_path = scratch_path("sigil_trust_store_test.json");
     xunlink(ts_path);
     assert_eq(sv_save_trust_store(sv, ts_path), SIGIL_ERR_NONE, "save ok");
 
-    var sv2 = sigil_verifier_new(keyring_new("/tmp/sigil_ts_keys2"), trust_policy_new());
+    var sv2 = sigil_verifier_new(keyring_new(scratch_path("sigil_ts_keys2")), trust_policy_new());
     var loaded_ct = sv_load_trust_store(sv2, ts_path);
     assert_gte(loaded_ct, 2, "loaded ≥ 2 artifacts");
     assert_eq(sv_trust_level_for(sv2, "hash_ls_ts"), TRUST_VERIFIED, "ls trust preserved");
@@ -285,14 +290,14 @@ fn main() {
     artifact_set_trust_level(art_esc, TRUST_VERIFIED);
     sv_register_trusted(sv, art_esc);
     sv_save_trust_store(sv, ts_path);
-    var sv3 = sigil_verifier_new(keyring_new("/tmp/sigil_ts_keys3"), trust_policy_new());
+    var sv3 = sigil_verifier_new(keyring_new(scratch_path("sigil_ts_keys3")), trust_policy_new());
     sv_load_trust_store(sv3, ts_path);
     assert_eq(sv_trust_level_for(sv3, "hash_escape"), TRUST_VERIFIED, "escape path roundtrip");
     xunlink(ts_path);
 
     # Missing file is not a crash: returns 0 loaded.
-    var sv_empty = sigil_verifier_new(keyring_new("/tmp/sigil_ts_keys_empty"), trust_policy_new());
-    var n_missing = sv_load_trust_store(sv_empty, "/tmp/sigil_does_not_exist_ts.json");
+    var sv_empty = sigil_verifier_new(keyring_new(scratch_path("sigil_ts_keys_empty")), trust_policy_new());
+    var n_missing = sv_load_trust_store(sv_empty, scratch_path("sigil_does_not_exist_ts.json"));
     assert_eq(n_missing, 0, "missing file returns 0");
 
     # ============================================================
@@ -302,7 +307,7 @@ fn main() {
     # TrustCheck that fails the whole result on mismatch.
     # ============================================================
     test_group("verify_package no hash");
-    var pkg_path = "/tmp/sigil_pkg_test.bin";
+    var pkg_path = scratch_path("sigil_pkg_test.bin");
     var pkg_fd = file_open(pkg_path, O_WRONLY | O_CREAT | O_TRUNC, 420);
     file_write(pkg_fd, "package payload", 15);
     file_close(pkg_fd);
@@ -355,6 +360,7 @@ fn main() {
     xunlink(tmppath);
     xunlink(tmppath2);
 
+    assert_eq(scratch_cleanup(), 0, "the scratch directory and everything in it is removed");
     return assert_summary();
 }
 

@@ -33,6 +33,7 @@ include "src/ed25519.cyr"
 include "src/trust.cyr"
 include "src/integrity.cyr"
 include "src/policy.cyr"
+include "tests/scratch.cyr"
 
 # "<prefix><i>" as a fresh NUL-terminated C-string.
 fn _ph_id(prefix, i): i64 {
@@ -59,6 +60,10 @@ fn _ph_hdr_ok(hdr): i64 {
 
 fn main() {
     alloc_init();
+    if (scratch_init("policy_hardening") == 0) {
+        assert(0, "a private per-run scratch directory under $TMPDIR");
+        return assert_summary();
+    }
 
     # ============================================================
     # H6 — a revocation list well past 64 KiB loads in full
@@ -75,7 +80,7 @@ fn main() {
     }
     var big_jsonl = rl_to_jsonl(big);
     assert(strlen(big_jsonl) > 65536 * 2, "fixture is well past 64 KiB");
-    var rl_path = "/tmp/sigil_policy_hardening_rl.jsonl";
+    var rl_path = scratch_path("sigil_policy_hardening_rl.jsonl");
     assert_eq(rl_save(big, rl_path), SIGIL_ERR_NONE, "rl_save big ok");
     var big_loaded = rl_load(rl_path);
     assert(big_loaded != 0, "rl_load big non-null");
@@ -90,7 +95,7 @@ fn main() {
             "key past 64 KiB revoked");
     }
     xunlink(rl_path);
-    assert_eq(rl_load("/tmp/sigil_policy_hardening_missing.jsonl"), 0,
+    assert_eq(rl_load(scratch_path("sigil_policy_hardening_missing.jsonl")), 0,
         "rl_load missing file -> 0");
 
     # CRL load past 64 KiB
@@ -103,7 +108,7 @@ fn main() {
             "superseded by rotation", "root_of_trust_admin"));
         i = i + 1;
     }
-    var crl_path = "/tmp/sigil_policy_hardening_crl.jsonl";
+    var crl_path = scratch_path("sigil_policy_hardening_crl.jsonl");
     assert_eq(crl_save(bigc, crl_path), SIGIL_ERR_NONE, "crl_save big ok");
     var bigc_loaded = crl_load(crl_path);
     assert(bigc_loaded != 0, "crl_load big non-null");
@@ -295,6 +300,7 @@ fn main() {
     assert(pe <= 5, "the scan stops at end");
     assert_streq(load64(&rjt), "abc", "no byte past end is copied");
 
+    assert_eq(scratch_cleanup(), 0, "the scratch directory and everything in it is removed");
     return assert_summary();
 }
 

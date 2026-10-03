@@ -292,5 +292,16 @@ jobs:
                | grep -v -E '^src/(aes_ni|sha_ni)\.cyr:' | grep -v -E '_p(256|384)_gt_(tmp|row)'; then
             echo "FAIL: unpublished lazy scratch allocation (use _sigil_lazy_scratch)"; fail=1
           fi
+          # 3.13.8: tests and fuzz harnesses write only inside their private per-run directory
+          # (tests/scratch.cyr: under $TMPDIR, an unpredictable name, removed on exit). A fixed
+          # "/tmp/..." name is predictable to every local user, so a planted symlink redirects
+          # the write; eleven tests and fuzz_integrity had them until 3.13.8. Exempt:
+          # batch_parallel's own $TMPDIR fallback, fd_hygiene (the library's LUKS staging dir is
+          # what it tests) and rooted_paths (its plants are relative to a scratch drive's root).
+          if grep -rnE '"/tmp[/"]' tests/tcyr tests/bcyr fuzz \
+               | grep -v -E '^tests/(tcyr|bcyr)/batch_parallel\.(tcyr|bcyr):[0-9]+: *if \(dir == 0\) \{ dir = "/tmp"; \}' \
+               | grep -v -E '^tests/tcyr/(fd_hygiene|rooted_paths)\.tcyr:'; then
+            echo "FAIL: fixed /tmp path in a test or fuzz harness (use tests/scratch.cyr)"; fail=1
+          fi
           echo "security scan complete"
           test $fail -eq 0

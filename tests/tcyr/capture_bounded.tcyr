@@ -59,6 +59,7 @@ include "src/ima_core.cyr"
 include "src/secureboot_core.cyr"
 include "src/luks.cyr"
 include "src/dmverity.cyr"
+include "tests/scratch.cyr"
 
 fn argv1(a0): i64 {
     var v = vec_new();
@@ -75,6 +76,10 @@ fn argv2(a0, a1): i64 {
 
 fn main() {
     alloc_init();
+    if (scratch_init("capture_bounded") == 0) {
+        assert(0, "a private per-run scratch directory under $TMPDIR");
+        return assert_summary();
+    }
     var cbuf = alloc(256);
 
     # ============================================================
@@ -134,7 +139,7 @@ fn main() {
     # _ima_read_log_fd — a read ERROR is Err, never a truncated log.
     # ============================================================
     test_group("ima read error");
-    var dfd = file_open("/tmp", O_RDONLY, 0);
+    var dfd = file_open(scratch_dir(), O_RDONLY, 0);
     assert(dfd >= 0, "opened a directory fd");
     var id_tag, id_v = _ima_read_log_fd(dfd);
     assert_eq(is_err_result(id_tag), 1, "read(2) -EISDIR is Err, not an empty log");
@@ -149,16 +154,7 @@ fn main() {
     # The good path still reads to EOF and the result still parses.
     test_group("ima read ok");
     var line = "10 0123456789abcdef0123456789abcdef01234567 ima-ng sha256:00ff /usr/bin/x\n";
-    # Per-process name so concurrent runs never collide.
-    var pidb = alloc(24);
-    memset(pidb, 0, 24);
-    fmt_int_buf(sys_getpid(), pidb);
-    var pfx = "/tmp/sigil_capture_bounded_ima_";
-    var lp = alloc(64);
-    memset(lp, 0, 64);
-    memcpy(lp, pfx, strlen(pfx));
-    memcpy(lp + strlen(pfx), pidb, strlen(pidb));
-    xunlink(lp);
+    var lp = scratch_path("sigil_capture_bounded_ima");
     assert(file_write_all(lp, line, strlen(line)) == strlen(line), "wrote a one-line log");
     var rfd = file_open(lp, O_RDONLY, 0);
     var ir_tag, ir_v = _ima_read_log_fd(rfd);
@@ -172,7 +168,7 @@ fn main() {
 
     # ima_get_status's count and agnosys_read_fd_to_str: a read error is not EOF (3.13.1).
     test_group("read errors are not EOF (ima_get_status, agnosys_read_fd_to_str)");
-    var cdf = file_open("/tmp", O_RDONLY, 0);
+    var cdf = file_open(scratch_dir(), O_RDONLY, 0);
     assert_eq(_ima_count_lines_fd(cdf), 0 - 1, "line count over -EISDIR is -1, not 0");
     assert_eq(agnosys_read_fd_to_str(cdf, 64), 0, "agnosys_read_fd_to_str over -EISDIR is 0");
     file_close(cdf);
@@ -219,6 +215,7 @@ fn main() {
     #endif
     #endif
 
+    assert_eq(scratch_cleanup(), 0, "the scratch directory and everything in it is removed");
     return assert_summary();
 }
 

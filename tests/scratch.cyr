@@ -1,0 +1,107 @@
+# tests/scratch.cyr — a private, per-run scratch directory for the tests and fuzz harnesses (3.13.8).
+#
+# scratch_init(tag) creates <base>/sigil-<tag>-<16 random hex>, where <base> is $TMPDIR, else
+# $TEMP / $TMP (Windows), else /tmp, with ONE mkdir (mode 0700) that fails if the name already
+# exists: another local user can neither predict the name nor plant something there first (a
+# symlink, a directory of theirs). Every file a test writes goes inside it (scratch_path), and
+# scratch_cleanup() removes the whole tree before the test exits.
+#
+# Through 3.13.7 eleven test files and fuzz/fuzz_integrity.fcyr wrote fixed names in the shared
+# /tmp (`/tmp/sigil_verify_test.txt`, ...): predictable, so a pre-planted symlink redirected the
+# write; they ignored TMPDIR; they left their files behind; and they failed on Windows, where
+# /tmp does not exist. scripts/check.sh and batch_parallel moved off it earlier in 3.13.8.
+#
+# Include after the stdlib (str, vec, io, fs, random). CHANGELOG [3.13.8].
+
+include "lib/fs.cyr"
+include "lib/random.cyr"
+
+var _scratch_dir = 0;
+
+# Create this run's directory, once (a second call returns the first one's path). Returns the
+# directory as a C string, or 0 if the entropy draw or the mkdir failed.
+fn scratch_init(tag): i64 {
+    if (_scratch_dir != 0) { return _scratch_dir; }
+    var rb[8];
+    if (random_bytes(&rb, 8) != 8) { return 0; }
+    var base = getenv("TMPDIR");
+    if (base == 0) { base = getenv("TEMP"); }
+    if (base == 0) { base = getenv("TMP"); }
+    if (base == 0) { base = "/tmp"; }
+    var bl = strlen(base);
+    var tl = strlen(tag);
+    var p = alloc(bl + 7 + tl + 1 + 16 + 1);
+    memcpy(p, base, bl);
+    memcpy(p + bl, "/sigil-", 7);
+    memcpy(p + bl + 7, tag, tl);
+    store8(p + bl + 7 + tl, 45);                         # '-'
+    var hx = "0123456789abcdef";
+    var o = bl + 8 + tl;
+    var i = 0;
+    while (i < 8) {
+        var b = load8(&rb + i);
+        store8(p + o + i * 2, load8(hx + ((b >> 4) & 15)));
+        store8(p + o + i * 2 + 1, load8(hx + (b & 15)));
+        i = i + 1;
+    }
+    store8(p + o + 16, 0);
+    if (sys_mkdir(p, 448) != 0) { return 0; }             # 0700; fails if it exists
+    _scratch_dir = p;
+    return p;
+}
+
+# This run's directory (a C string), or 0 before scratch_init.
+fn scratch_dir(): i64 { return _scratch_dir; }
+
+# `<scratch dir>/<name>` as a fresh C string (`name` may contain '/'), or 0 before scratch_init.
+fn scratch_path(name): i64 {
+    if (_scratch_dir == 0) { return 0; }
+    var dl = strlen(_scratch_dir);
+    var nl = strlen(name);
+    var p = alloc(dl + 1 + nl + 1);
+    memcpy(p, _scratch_dir, dl);
+    store8(p + dl, 47);                                  # '/'
+    memcpy(p + dl + 1, name, nl);
+    store8(p + dl + 1 + nl, 0);
+    return p;
+}
+
+# Remove `dir` and everything under it, depth-first; a symlink is unlinked, never followed.
+# Bounded at 16 levels (a test never nests deeper). Returns 0.
+fn _scratch_rm_tree(dir, depth): i64 {
+    if (depth > 16) { return 0; }
+    var names = dir_list(str_from(dir));
+    var dl = strlen(dir);
+    var i = 0;
+    while (i < vec_len(names)) {
+        var nm = vec_get(names, i);
+        var nl = str_len(nm);
+        var p = alloc(dl + 1 + nl + 1);
+        memcpy(p, dir, dl);
+        store8(p + dl, 47);
+        memcpy(p + dl + 1, str_data(nm), nl);
+        store8(p + dl + 1 + nl, 0);
+        var ps = str_from(p);
+        if (is_symlink(ps) == 1) {
+            if (sys_unlink(p) != 0) { sys_rmdir(p); }    # a Windows directory link
+        } elif (is_dir(ps) == 1) {
+            _scratch_rm_tree(p, depth + 1);
+            sys_rmdir(p);
+        } else {
+            sys_unlink(p);
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Remove this run's directory and everything in it. Returns 0 when the directory is gone (or was
+# never made), -1 when it could not be removed.
+fn scratch_cleanup(): i64 {
+    if (_scratch_dir == 0) { return 0; }
+    _scratch_rm_tree(_scratch_dir, 0);
+    sys_rmdir(_scratch_dir);
+    if (sys_access(_scratch_dir, 0) == 0) { return 0 - 1; }
+    _scratch_dir = 0;
+    return 0;
+}

@@ -44,6 +44,7 @@ include "src/integrity.cyr"
 include "src/policy.cyr"
 include "src/audit.cyr"
 include "src/verify.cyr"
+include "tests/scratch.cyr"
 
 fn write_str_file(path, s): i64 {
     var fd = file_open(path, O_WRONLY | O_CREAT | O_TRUNC, 420);
@@ -87,25 +88,29 @@ fn old_record(hash, path, trust): i64 {
 
 fn main() {
     alloc_init();
+    if (scratch_init("verify_hardening") == 0) {
+        assert(0, "a private per-run scratch directory under $TMPDIR");
+        return assert_summary();
+    }
     ed25519_init();
 
     var sk[64];
     var pk[32];
     var kid = generate_keypair(&sk, &pk);
     var pk_hex = hex_encode(&pk, 32);
-    var kr = keyring_new("/tmp/sigil_vh_keys");
+    var kr = keyring_new(scratch_path("sigil_vh_keys"));
     var kv = key_version_new(kid, pk_hex);
     kv_set_secret_key(kv, &sk);
     keyring_add_key(kr, kv);
 
-    var f_a = write_str_file("/tmp/sigil_vh_a.bin", "component a body");
-    var f_b = write_str_file("/tmp/sigil_vh_b.bin", "component b body");
-    var f_c = write_str_file("/tmp/sigil_vh_c.bin", "component c body");
-    var f_d = write_str_file("/tmp/sigil_vh_d.bin", "component d body v2");
-    var f_e = write_str_file("/tmp/sigil_vh_e.bin", "component e body");
-    var f_u = write_str_file("/tmp/sigil_vh_u.bin", "unsigned body");
-    var f_s = write_str_file("/tmp/sigil_vh_s.bin", "substitute target");
-    var ts_path = "/tmp/sigil_vh_store.json";
+    var f_a = write_str_file(scratch_path("sigil_vh_a.bin"), "component a body");
+    var f_b = write_str_file(scratch_path("sigil_vh_b.bin"), "component b body");
+    var f_c = write_str_file(scratch_path("sigil_vh_c.bin"), "component c body");
+    var f_d = write_str_file(scratch_path("sigil_vh_d.bin"), "component d body v2");
+    var f_e = write_str_file(scratch_path("sigil_vh_e.bin"), "component e body");
+    var f_u = write_str_file(scratch_path("sigil_vh_u.bin"), "unsigned body");
+    var f_s = write_str_file(scratch_path("sigil_vh_s.bin"), "substitute target");
+    var ts_path = scratch_path("sigil_vh_store.json");
 
     # ============================================================
     # H6 — trust-store load: no 64 KiB cap, no NULL-path records,
@@ -115,7 +120,8 @@ fn main() {
     var sv_big = sigil_verifier_new(kr, trust_policy_new());
     var long_path = alloc(160);
     memset(long_path, 0, 160);
-    cat_at(long_path, 0, "/tmp/sigil_vh/a/very/long/path/segment/that/pads/every/record/");
+    # A record label, never created on disk (the same length as the /tmp prefix it replaced).
+    cat_at(long_path, 0, "/opt/sigil_vh/a/very/long/path/segment/that/pads/every/record/");
     cat_at(long_path, strlen(long_path), "out/to/over/two/hundred/bytes/in/total/file.bin");
     var hb[32];
     var big_n = 600;
@@ -198,7 +204,7 @@ fn main() {
       "unsigned rejected even with min_trust = Unverified");
 
     test_group("M8 signature from unknown signer fails strict policy");
-    var sv_m8k = sigil_verifier_new(keyring_new("/tmp/sigil_vh_empty_keys"), trust_policy_new());
+    var sv_m8k = sigil_verifier_new(keyring_new(scratch_path("sigil_vh_empty_keys")), trust_policy_new());
     var k_art = trusted_artifact_new(f_u, ARTIFACT_PACKAGE, hash_file(f_u));
     artifact_set_trust_level(k_art, TRUST_VERIFIED);
     artifact_set_signature(k_art, alloc(64));
@@ -355,7 +361,7 @@ fn main() {
     test_group("M2 content trusted for another path is rejected");
     var sv_sub = sigil_verifier_new(kr, trust_policy_new());
     var sub_art = sv_sign_artifact(sv_sub, f_a, &sk, kid, ARTIFACT_BOOT_COMPONENT);
-    # Register /tmp/sigil_vh_s.bin's slot with a different hash, then put a's content there.
+    # Register sigil_vh_s.bin's slot with a different hash, then put a's content there.
     var sub_slot = trusted_artifact_new(f_s, ARTIFACT_BOOT_COMPONENT, sha256_hex("x", 1));
     artifact_set_trust_level(sub_slot, TRUST_VERIFIED);
     sv_register_trusted(sv_sub, sub_slot);
@@ -418,7 +424,7 @@ fn main() {
     var r_sk[64];
     var r_pk[32];
     var r_kid = generate_keypair(&r_sk, &r_pk);
-    var r_kr = keyring_new("/tmp/sigil_vh_rot_keys");
+    var r_kr = keyring_new(scratch_path("sigil_vh_rot_keys"));
     var r_kv = key_version_new(r_kid, hex_encode(&r_pk, 32));
     kv_set_valid_from(r_kv, clock_epoch_secs() - 100);
     kv_add_allowed_type(r_kv, ARTIFACT_SYSTEM_BINARY);
@@ -454,7 +460,7 @@ fn main() {
     assert_eq(sv_load_trust_store(sv_pm3, ts_path), 0, "group-writable store refused");
     sys_chmod(ts_path, 420);   # 0644
     assert_eq(sv_load_trust_store(sv_pm3, ts_path), 1, "0644 again loads");
-    assert_eq(sv_save_trust_store(sv_pm, "/tmp/sigil_vh_no_such_dir/store.json"), SIGIL_ERR_IO,
+    assert_eq(sv_save_trust_store(sv_pm, scratch_path("sigil_vh_no_such_dir/store.json")), SIGIL_ERR_IO,
       "a save that cannot be written is SIGIL_ERR_IO");
     xunlink(ts_path);
 
@@ -465,6 +471,7 @@ fn main() {
     xunlink(f_e);
     xunlink(f_u);
     xunlink(f_s);
+    assert_eq(scratch_cleanup(), 0, "the scratch directory and everything in it is removed");
     return assert_summary();
 }
 

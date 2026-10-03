@@ -36,9 +36,14 @@ include "src/integrity.cyr"
 include "src/policy.cyr"
 include "src/audit.cyr"
 include "src/verify.cyr"
+include "tests/scratch.cyr"
 
 fn main() {
     alloc_init();
+    if (scratch_init("security") == 0) {
+        assert(0, "a private per-run scratch directory under $TMPDIR");
+        return assert_summary();
+    }
     ed25519_init();
 
     # ============================================================
@@ -156,7 +161,7 @@ fn main() {
     # Write each problematic byte through json_write_escaped into a
     # temp file and check the serialized form is the expected escape.
     test_group("JSON escape dangerous bytes");
-    var tmp_path = "/tmp/sigil_json_escape_test";
+    var tmp_path = scratch_path("sigil_json_escape_test");
     var jfd = file_open(tmp_path, O_WRONLY | O_CREAT | O_TRUNC, 420);
     # Input: quote, backslash, newline, tab, control (0x01), plain
     var input[6];
@@ -194,7 +199,7 @@ fn main() {
     assert_eq(load8(&rbuf + 14) & 0xFF, 65, "byte 14: A passthrough");
 
     test_group("JSON escape no-op for safe content");
-    var spath = "/tmp/sigil_json_safe_test";
+    var spath = scratch_path("sigil_json_safe_test");
     var sfd = file_open(spath, O_WRONLY | O_CREAT | O_TRUNC, 420);
     json_write_escaped(sfd, "safe_key-01", 11);
     file_close(sfd);
@@ -210,6 +215,7 @@ fn main() {
     # ============================================================
     # Summary
     # ============================================================
+    assert_eq(scratch_cleanup(), 0, "the scratch directory and everything in it is removed");
     return assert_summary();
 }
 

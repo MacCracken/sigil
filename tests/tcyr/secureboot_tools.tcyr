@@ -41,6 +41,7 @@ include "src/sys_error.cyr"
 include "src/sys_util.cyr"
 include "src/sysinfo.cyr"
 include "src/secureboot_core.cyr"
+include "tests/scratch.cyr"
 
 var _sbt_pid = 0;
 var _sbt_dir = 0;
@@ -71,7 +72,7 @@ fn marker_path(tool): i64 {
 # its marker, then prints `out` (spoofed "trusted" output) and exits 0.
 fn plant_fake(tool, out): i64 {
     var path = cat2(cat2(_sbt_dir, "/"), tool);
-    var body = cat2(cat2(cat2("#!/bin/sh\n: > ", marker_path(tool)), "\nprintf '"), out);
+    var body = cat2(cat2(cat2("#!/bin/sh\n: > '", marker_path(tool)), "'\nprintf '"), out);
     body = cat2(body, "'\nexit 0\n");
     xunlink(path);
     var w = file_write_all(path, body, strlen(body));
@@ -85,13 +86,26 @@ fn fake_ran(tool): i64 {
 
 fn main() {
     alloc_init();
+    if (scratch_init("secureboot_tools") == 0) {
+        assert(0, "a private per-run scratch directory under $TMPDIR");
+        return assert_summary();
+    }
     _sbt_pid = sys_getpid();
-    _sbt_dir = cat2("/tmp/sigil_sbt_", pid_str());
+    _sbt_dir = scratch_path("sbt");   # inside this run's private directory (tests/scratch.cyr)
 
     # Save the cwd so it can be restored afterwards.
     var oldcwd = alloc(4096);
     memset(oldcwd, 0, 4096);
     var cl = sys_readlink("/proc/self/cwd", oldcwd, 4095);
+    if (cl <= 0) {
+        # No /proc (macOS): the cwd the shell started us in.
+        var pwd = getenv("PWD");
+        if (pwd != 0) {
+            cl = strlen(pwd);
+            if (cl > 4095) { cl = 4095; }
+            memcpy(oldcwd, pwd, cl);
+        }
+    }
     assert(cl > 0, "current cwd recorded");
 
     test_group("setup: fakes planted in the cwd");
@@ -201,6 +215,7 @@ fn main() {
     xunlink(crt);
     assert_eq(xrmdir(_sbt_dir), 0, "scratch dir removed");
 
+    assert_eq(scratch_cleanup(), 0, "the scratch directory and everything in it is removed");
     return assert_summary();
 }
 

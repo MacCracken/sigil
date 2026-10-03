@@ -33,6 +33,7 @@ include "src/trust.cyr"
 include "src/integrity.cyr"
 include "src/policy.cyr"
 include "src/audit.cyr"
+include "tests/scratch.cyr"
 
 
 var _iv_cb_n = 0;
@@ -40,6 +41,10 @@ fn _iv_cb_count(m): i64 { _iv_cb_n = _iv_cb_n + 1; return 0; }
 
 fn main() {
     alloc_init();
+    if (scratch_init("sigil") == 0) {
+        assert(0, "a private per-run scratch directory under $TMPDIR");
+        return assert_summary();
+    }
     ed25519_init();
 
     # ============================================================
@@ -71,7 +76,7 @@ fn main() {
     test_group("hash_file_with");
     # Write a known-content temp file; verify both algorithm paths
     # produce matching hashes (in-memory vs on-disk).
-    var hfw_path = "/tmp/sigil_hash_file_with.bin";
+    var hfw_path = scratch_path("sigil_hash_file_with.bin");
     var hfw_fd = file_open(hfw_path, O_WRONLY | O_CREAT | O_TRUNC, 420);
     file_write(hfw_fd, "hello world", 11);
     file_close(hfw_fd);
@@ -83,7 +88,7 @@ fn main() {
     var hfw_fb = hash_file_with(hfw_path, 99);
     assert_streq(hfw_fb, "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9", "unknown alg → sha256");
     # Missing file returns 0 (same contract as hash_file).
-    var hfw_missing = hash_file_with("/tmp/sigil_does_not_exist_hfw.bin", HASH_ALG_SHA256);
+    var hfw_missing = hash_file_with(scratch_path("sigil_does_not_exist_hfw.bin"), HASH_ALG_SHA256);
     assert_eq(hfw_missing, 0, "missing file returns 0");
     xunlink(hfw_path);
 
@@ -108,7 +113,7 @@ fn main() {
     # Trust: keyring
     # ============================================================
     test_group("keyring");
-    var kr = keyring_new("/tmp/sigil_test_keys");
+    var kr = keyring_new(scratch_path("sigil_test_keys"));
     var kv = key_version_new(kid, pk_hex);
     kv_set_pub_name(kv, "Test Publisher");
     keyring_add_key(kr, kv);
@@ -155,7 +160,7 @@ fn main() {
     # ============================================================
     test_group("file hashing");
     # Create a temp file
-    var tmppath = "/tmp/sigil_test_integrity.txt";
+    var tmppath = scratch_path("sigil_test_integrity.txt");
     var tfd = file_open(tmppath, O_WRONLY | O_CREAT | O_TRUNC, 420);  # 0644
     file_write(tfd, "hello world", 11);
     file_close(tfd);
@@ -165,7 +170,7 @@ fn main() {
     assert_streq(fh, "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9", "file hash matches");
 
     test_group("file hash nonexistent");
-    var fh2 = hash_file("/tmp/sigil_test_nonexistent_99999");
+    var fh2 = hash_file(scratch_path("sigil_test_nonexistent_99999"));
     assert_eq(fh2, 0, "nonexistent returns 0");
 
     # ============================================================
@@ -205,7 +210,7 @@ fn main() {
     # FileNotFound path via iv_verify_all on a missing file.
     test_group("mstatus file_not_found");
     var ipol3 = integrity_policy_new();
-    ipolicy_add(ipol3, "/tmp/nonexistent_sigil_test_xyz", "dead");
+    ipolicy_add(ipol3, scratch_path("nonexistent_sigil_test_xyz"), "dead");
     var iv3 = integrity_verifier_new(ipol3);
     var rep3 = iv_verify_all(iv3);
     assert_eq(vec_len(ireport_errors(rep3)), 1, "1 missing file");
@@ -215,7 +220,7 @@ fn main() {
     test_group("3.13.1 verify_all writes statuses back and calls the callback");
     var ipol4 = integrity_policy_new();
     ipolicy_add(ipol4, tmppath, "0000000000000000000000000000000000000000000000000000000000000000");
-    ipolicy_add(ipol4, "/tmp/nonexistent_sigil_test_xyz", "dead");
+    ipolicy_add(ipol4, scratch_path("nonexistent_sigil_test_xyz"), "dead");
     var iv4 = integrity_verifier_new(ipol4);
     iv_set_callback(iv4, &_iv_cb_count);
     _iv_cb_n = 0;
@@ -298,7 +303,7 @@ fn main() {
     assert_eq(rl_is_key_revoked(rl_loaded, "unknown_key"), 0, "unknown key not revoked");
 
     # File round-trip
-    var rl_path = "/tmp/sigil_rl_test.jsonl";
+    var rl_path = scratch_path("sigil_rl_test.jsonl");
     assert_eq(rl_save(rl_src, rl_path), SIGIL_ERR_NONE, "rl_save ok");
     var rl_via_file = rl_load(rl_path);
     assert_eq(rl_len(rl_via_file), 3, "file round-trip: 3 entries");
@@ -340,7 +345,7 @@ fn main() {
     assert_eq(crl_next_update(crl_loaded), 9999999999, "next_update preserved");
     assert_eq(vec_len(crl_entries(crl_loaded)), 2, "2 entries preserved");
 
-    var crl_path = "/tmp/sigil_crl_test.jsonl";
+    var crl_path = scratch_path("sigil_crl_test.jsonl");
     assert_eq(crl_save(crl_src, crl_path), SIGIL_ERR_NONE, "crl_save ok");
     var crl_via_file = crl_load(crl_path);
     assert_eq(crl_version(crl_via_file), 7, "crl version via file");
@@ -392,7 +397,7 @@ fn main() {
     test_group("audit file");
     var alog2 = audit_log_new();
     alog_record(alog2, audit_artifact_verified("/test", ARTIFACT_CONFIG, TRUST_VERIFIED, 1, "hash1"));
-    var apath = "/tmp/sigil_test_audit.jsonl";
+    var apath = scratch_path("sigil_test_audit.jsonl");
     var aresult = alog_save(alog2, apath);
     assert_eq(aresult, SIGIL_ERR_NONE, "append ok");
 
@@ -411,7 +416,7 @@ fn main() {
     alog_record(alog3, audit_artifact_verified("/bin/ls", ARTIFACT_SYSTEM_BINARY, TRUST_VERIFIED, 1, "hash_ls"));
     alog_record(alog3, audit_artifact_signed("/bin/cat", ARTIFACT_SYSTEM_BINARY, "key_root", "hash_cat"));
     alog_record(alog3, audit_revocation_added("key_bad", "hash_bad", "compromised"));
-    var lpath = "/tmp/sigil_audit_roundtrip.jsonl";
+    var lpath = scratch_path("sigil_audit_roundtrip.jsonl");
     xunlink(lpath);   # best-effort pre-cleanup
     alog_save(alog3, lpath);
 
@@ -434,7 +439,7 @@ fn main() {
 
     # Empty / missing file is not an error
     var alog_empty = audit_log_new();
-    var n_missing = alog_load(alog_empty, "/tmp/sigil_does_not_exist_xyz.jsonl");
+    var n_missing = alog_load(alog_empty, scratch_path("sigil_does_not_exist_xyz.jsonl"));
     assert_eq(n_missing, 0 - 1, "missing file returns -1");
     assert_eq(alog_len(alog_empty), 0, "missing file adds nothing");
 
@@ -442,6 +447,7 @@ fn main() {
     xunlink(tmppath);    # unlink
     xunlink(apath);      # unlink
 
+    assert_eq(scratch_cleanup(), 0, "the scratch directory and everything in it is removed");
     return assert_summary();
 }
 

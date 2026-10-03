@@ -62,6 +62,7 @@ include "src/tpm_core.cyr"
 include "src/ima_core.cyr"
 include "src/secureboot_core.cyr"
 include "src/luks.cyr"
+include "tests/scratch.cyr"
 
 var _fdh_pid = 0;
 
@@ -88,9 +89,11 @@ fn pid_str(): i64 {
     return buf;
 }
 
-# /tmp/sigil_fdh_<pid>_<tag> — per-process, so parallel runs never collide.
+# <scratch dir>/fdh_<tag>: inside this run's private directory (tests/scratch.cyr), so parallel
+# runs never collide and nobody can plant the name first. (Through 3.13.7: a fixed
+# /tmp/sigil_fdh_<pid>_<tag>.)
 fn tmp_name(tag): i64 {
-    return cat2(cat2(cat2("/tmp/sigil_fdh_", pid_str()), "_"), tag);
+    return scratch_path(cat2("fdh_", tag));
 }
 
 # Read a small file into a fresh NUL-terminated buffer; returns 0 if unreadable.
@@ -103,7 +106,9 @@ fn slurp(path, out_len): i64 {
     return buf;
 }
 
-# How many of THIS process's LUKS keyfiles (/tmp/.agnos-luks-<pid>-<hex>) exist.
+# How many of THIS process's LUKS keyfiles (/tmp/.agnos-luks-<pid>-<hex>) exist. That /tmp is
+# the library's own staging directory (src/luks.cyr), the thing under test — not a name this
+# test chose.
 fn count_own_keyfiles(): i64 {
     var pfx = cat2(cat2(".agnos-luks-", pid_str()), "-");
     var plen = strlen(pfx);
@@ -122,6 +127,10 @@ fn count_own_keyfiles(): i64 {
 
 fn main() {
     alloc_init();
+    if (scratch_init("fd_hygiene") == 0) {
+        assert(0, "a private per-run scratch directory under $TMPDIR");
+        return assert_summary();
+    }
     _fdh_pid = sys_getpid();
 
     var key = alloc(64);
@@ -189,8 +198,8 @@ fn main() {
     xunlink(rec_body);
     xunlink(rec_tail);
     var script_ok = cat2(cat2(cat2(cat2(cat2(
-      "cat \"$1\" > ", rec_body), " && printf %s \"$1\" > "), rec_path),
-      " && printf %s \"$2\" > "), rec_tail);
+      "cat \"$1\" > '", rec_body), "' && printf %s \"$1\" > '"), rec_path),
+      "' && printf %s \"$2\" > '"), cat2(rec_tail, "'"));
     var pre = vec_new();
     vec_push(pre, "/bin/sh");
     vec_push(pre, "-c");
@@ -221,7 +230,7 @@ fn main() {
 
     test_group("luks keyfile lifecycle (command fails)");
     xunlink(rec_path);
-    var script_fail = cat2(cat2("printf %s \"$1\" > ", rec_path), "; exit 3");
+    var script_fail = cat2(cat2("printf %s \"$1\" > '", rec_path), "'; exit 3");
     var pre_f = vec_new();
     vec_push(pre_f, "/bin/sh");
     vec_push(pre_f, "-c");
@@ -318,6 +327,7 @@ fn main() {
     xunlink(cat2(sdir, "/sealed.priv"));
     xrmdir(sdir);
 
+    assert_eq(scratch_cleanup(), 0, "the scratch directory and everything in it is removed");
     return assert_summary();
 }
 
