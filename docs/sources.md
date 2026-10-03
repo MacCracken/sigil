@@ -305,6 +305,52 @@ their specs inline; this file is the cross-module overview.
 - **FIPS 186-4** / **SEC 1 v2** — the ECDSA signing equations and
   curve parameters (as in the verify sections above).
 
+- Since 3.13.8 the signer's secret arithmetic (k·G, k^-1 mod n, r·d mod n)
+  runs on `src/ec_ct.cyr` — see the next section.
+
+### Constant-time P-256 / P-384 engine — `src/ec_ct.cyr` (3.13.8)
+
+- **Renes, Costello, Batina — "Complete addition formulas for prime
+  order elliptic curves"** (EUROCRYPT 2016). Algorithm 4 (complete
+  projective addition, a = -3) and Algorithm 6 (doubling, a = -3).
+  - https://eprint.iacr.org/2015/1060
+- **Koç, Acar, Kaliski — "Analyzing and Comparing Montgomery
+  Multiplication Algorithms"** (IEEE Micro, 1996). The CIOS method
+  `_ect_mul` implements.
+- **Montgomery — "Modular multiplication without trial division"**
+  (Math. Comp. 44, 1985).
+- **Warren, *Hacker's Delight*** (2nd ed., §2-16) — carry / borrow out of
+  a multi-word add / subtract computed from the operands' top bits, the
+  branch-free form used throughout.
+- Threat model: **Minerva** (Jancar et al., TCHES 2020/4), **TPM-Fail**
+  (Moghimi et al., USENIX Security 2020, CVE-2019-15809 / CVE-2019-11090),
+  **LadderLeak** (Aranha et al., CCS 2020) — nonce-bit timing leaks turned
+  into key recovery by lattice reduction.
+
+### ECDH P-256 / P-384 — `src/ecdh.cyr` (3.13.8)
+
+- **SEC 1 v2.0 §3.3.1** — the Elliptic Curve Diffie-Hellman primitive;
+  §2.3.3 / §2.3.4 — uncompressed point encoding / decoding.
+  - https://www.secg.org/sec1-v2.pdf
+- **NIST SP 800-56A rev. 3** — §5.7.1.2 (ECC CDH primitive, Z = x(d·Q)),
+  §5.6.2.3.3 (full public-key validation).
+  - https://csrc.nist.gov/publications/detail/sp/800-56a/rev-3/final
+- **FIPS 186-5 Appendix A.2.1** — key-pair generation using extra random
+  bits: d = (c mod (n - 1)) + 1 from len(n) + 64 random bits.
+  - https://csrc.nist.gov/publications/detail/fips/186/5/final
+- **RFC 8422 §5.10** — the ECDHE premaster secret for TLS 1.2 is the
+  x-coordinate, full field length. **RFC 8446 §7.4.2** — the same for
+  TLS 1.3 (secp256r1 / secp384r1 shared secrets).
+- **Test vectors.** **RFC 5903 §8.1 / §8.2** (IKE ECP groups 19 / 20);
+  **NIST CAVP "KAS ECC CDH primitive"** (`KAS_ECC_CDH_PrimitiveTest.txt`
+  from `ecccdhtestvectors.zip`, all 25 P-256 and 25 P-384 vectors);
+  OpenSSL `pkeyutl -derive` cross-checks.
+  - https://www.rfc-editor.org/rfc/rfc5903.txt
+  - https://csrc.nist.gov/projects/cryptographic-algorithm-validation-program/component-testing
+- Invalid-curve attacks: **Biehl, Meyer, Müller** (CRYPTO 2000);
+  **Jager, Schwenk, Somorovsky** (ESORICS 2015) — why the peer key is
+  checked on the curve even with cofactor 1.
+
 ### ML-DSA-65 — `src/mldsa*.cyr` (default-on since 3.7.6; `-D SIGIL_PQC` is a back-compat no-op)
 
 - **FIPS 204** — Module-Lattice-Based Digital Signature

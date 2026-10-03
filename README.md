@@ -26,7 +26,12 @@ All cryptography implemented in Cyrius — no external crypto libraries:
 
 - **Ed25519** (RFC 8032) — asymmetric signing/verification
 - **ECDSA P-256 / P-384** (FIPS 186-4) — secp256r1 / secp384r1
-  verify **and** RFC 6979 deterministic signing (raw + DER)
+  verify **and** RFC 6979 deterministic signing (raw + DER); signing is
+  constant-time in the nonce and the key (3.13.8)
+- **ECDH P-256 / P-384** (SEC 1 §3.3.1, NIST SP 800-56A) — key generation
+  from caller-supplied randomness (FIPS 186-5 A.2.1) and the shared secret,
+  with full peer-key validation, constant-time in the private key (3.13.8);
+  the TLS ECDHE premaster on secp256r1 / secp384r1 (RFC 8422 §5.10)
 - **X25519** (RFC 7748) — Curve25519 ECDH key agreement
 - **SHA-256 / SHA-384 / SHA-512** (FIPS 180-4) — hashing
 - **HMAC-SHA256 / HMAC-SHA384** (RFC 2104 / FIPS 198-1) — keyed hashing
@@ -96,7 +101,12 @@ All cryptography implemented in Cyrius — no external crypto libraries:
   backing Ed25519 / X25519 and ECDSA P-256
 - **`ed25519.cyr`** — Ed25519 signatures
 - **`x25519.cyr`** — X25519 ECDH key agreement
-- **`ecdsa_p256.cyr`**, **`ecdsa_p384.cyr`** — ECDSA verify
+- **`ecdsa_p256.cyr`**, **`ecdsa_p384.cyr`** — ECDSA verify (variable-time:
+  public inputs only)
+- **`ec_ct.cyr`** — the constant-time P-256 / P-384 engine every secret
+  scalar runs on (3.13.8)
+- **`ecdh.cyr`** — ECDH P-256 / P-384: `ecdh_p256_keygen` / `ecdh_p256_shared`,
+  `ecdh_p384_keygen` / `ecdh_p384_shared` (3.13.8)
 - **`ecdsa_sign.cyr`** — ECDSA P-256/P-384 RFC 6979 deterministic sign
 - **`privkey.cyr`** — EC + Ed25519 private-key parsers (PEM + DER)
 - **`aes_gcm.cyr`**, **`aes_ni.cyr`** — AES-256/128-GCM AEAD

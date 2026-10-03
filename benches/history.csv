@@ -394,3 +394,15 @@ timestamp,label,benchmark,estimate,unit
 2026-09-25T00:00:00Z,v3.13.1-baseline-3.13.0,rsa2048_modexp_fullwidth_3130_baseline,136.353,ms
 2026-09-25T00:00:00Z,v3.13.1-baseline-3.13.0,ecdsa_p256_verify_3130_baseline,10.350,ms
 2026-09-25T00:00:00Z,v3.13.1-baseline-3.13.0,ecdsa_p384_verify_3130_baseline,25.524,ms
+2026-10-02T00:00:00Z,v3.13.8-baseline-3.13.7,ecdsa_p256_sign_3137_baseline,13.275,ms
+2026-10-02T00:00:00Z,v3.13.8-baseline-3.13.7,ecdsa_p384_sign_3137_baseline,30.133,ms
+2026-10-02T00:00:00Z,v3.13.8-baseline-3.13.7,ecdsa_p256_verify_3137_baseline,9.803,ms
+2026-10-02T00:00:00Z,v3.13.8-baseline-3.13.7,ecdsa_p384_verify_3137_baseline,23.490,ms
+2026-10-02T00:00:00Z,v3.13.8-ct-ecdh,ecdsa_p256_sign,2.738,ms
+2026-10-02T00:00:00Z,v3.13.8-ct-ecdh,ecdsa_p384_sign,7.896,ms
+2026-10-02T00:00:00Z,v3.13.8-ct-ecdh,ecdsa_p256_verify,9.631,ms
+2026-10-02T00:00:00Z,v3.13.8-ct-ecdh,ecdsa_p384_verify,23.580,ms
+2026-10-02T00:00:00Z,v3.13.8-ct-ecdh,ecdh_p256_keygen,2.565,ms
+2026-10-02T00:00:00Z,v3.13.8-ct-ecdh,ecdh_p256_shared,2.554,ms
+2026-10-02T00:00:00Z,v3.13.8-ct-ecdh,ecdh_p384_keygen,7.181,ms
+2026-10-02T00:00:00Z,v3.13.8-ct-ecdh,ecdh_p384_shared,7.481,ms

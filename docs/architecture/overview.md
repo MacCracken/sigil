@@ -34,9 +34,14 @@ lib.cyr (entry point)
   ├── bignum.cyr        General variable-width big-int + modexp (RSA engine)
   ├── ed25519.cyr       Ed25519 sign/verify (RFC 8032)
   ├── x25519.cyr        X25519 ECDH key agreement (RFC 7748)
-  ├── ecdsa_p256.cyr    ECDSA verify on secp256r1 (FIPS 186-4)
-  ├── ecdsa_p384.cyr    ECDSA verify on secp384r1 (FIPS 186-4)
-  ├── ecdsa_sign.cyr    ECDSA P-256/P-384 RFC 6979 deterministic sign
+  ├── ecdsa_p256.cyr    ECDSA verify on secp256r1 (FIPS 186-4) — variable-time, public inputs only
+  ├── ecdsa_p384.cyr    ECDSA verify on secp384r1 (FIPS 186-4) — variable-time, public inputs only
+  ├── ec_ct.cyr         Constant-time P-256/P-384 engine for every SECRET scalar (3.13.8;
+  │                       Montgomery field ops, complete RCB formulas, fixed-window
+  │                       masked-lookup scalar mult; note 004 / ADR 0009)
+  ├── ecdh.cyr          ECDH P-256/P-384 keygen + shared secret (3.13.8; SEC 1, SP 800-56A,
+  │                       FIPS 186-5 A.2.1 keygen) on ec_ct
+  ├── ecdsa_sign.cyr    ECDSA P-256/P-384 RFC 6979 deterministic sign (on ec_ct since 3.13.8)
   │
   ├── x509.cyr          Minimal X.509 parser + chain walker
   │                       — P-256 and P-384 SPKIs

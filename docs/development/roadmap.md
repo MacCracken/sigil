@@ -13,6 +13,13 @@ shipped").
   `fork()`, so the fork-per-trial shape works on ecb; restore it (keep the `THREADS_CONCURRENT` gate for
   x86 macOS / Windows / agnos, where threads run inline) and re-verify on ecb.
 - At the pin bump, re-vendor `lib/math.cyr` with `cyrius deps` in the same commit — 6.6.13 made `f64_le` / `f64_ge` / `f64_trunc` compiler builtins (reserved names), and a pre-6.6.13 vendored copy still defines them (`reserved keyword`).
+- **Recorded at 3.13.8: the pin bump also fixes the timing tests on Intel macOS.** Under 6.6.9,
+  `clock_now_ns` on x86_64 macOS writes through a stale `rdx` (cyrius CVE-51, fixed in 6.6.10). On
+  ach it overwrote whatever buffer `rdx` pointed at — in `ecdh.tcyr`'s timing helper, the peer key —
+  so the timing groups measured refusals; since 3.13.8 they assert every timed call succeeded, which
+  makes them fail there instead of passing vacuously. Built with 6.6.14 the same tests pass on ach
+  with flat medians. Any sigil test or consumer reading the clock on Intel macOS under the pin is
+  exposed the same way.
 
 **One scheduled cycle — [3.14.0, retire `cbank()`](#planned--3140--retire-cbank)
 — plus parked / gated / verification-only items.** The 3.6 TLS arc,
@@ -139,6 +146,26 @@ these were left out of it, and each is the maintainer's decision:
       all of them). Exposure: a multi-threaded process that forks during its very first
       crypto calls and runs sigil in the child without exec.
 
+**Named at 3.13.8 — awaiting the maintainer's call** (performance only; nothing
+is broken without them). 3.13.8 added ECDH on P-256 / P-384 and moved ECDSA
+signing onto the constant-time engine `src/ec_ct.cyr`; these two levers were
+measured but not taken:
+
+- [ ] **A constant-time fixed-base comb for k·G / d·G.** Keygen and signing run the
+      engine's variable-base window with P = G, rebuilding the 15-entry table and
+      doubling 252 / 380 times per call. A precomputed comb over G with the same
+      full-table masked lookup would need no doublings: roughly 4x faster keygen
+      and signing (P-256 keygen ~2.6 → ~0.6 ms on the x86_64 dev host), for
+      ~98 KB (P-256) + ~221 KB (P-384) of tables built on first use. A TLS ECDHE
+      handshake pays one keygen and one shared secret, so the handshake gain is
+      ~40% of its EC cost.
+- [ ] **An aarch64 `UMULH` for `_nmul64_hi`.** On aarch64 the high half of every
+      64×64 product is the branch-free 32-bit-halves software form (four
+      multiplies plus adds). The engine runs ~1.8x slower on ecb (Apple M5 Pro)
+      than on the x86_64 dev host; the pi pays more. A one-instruction `asm{}`
+      leaf (the `src/mul64.cyr` pattern) would remove most of that, if cyrius's
+      aarch64 `asm{}` supports the needed parameter loads.
+
 **Backlog — gated / parked** (open, but not actionable until the gate lifts)
 
 - [ ] **EC scalar-mult ≤ 10 ms — DECISION NEEDED: the target is now met.**
@@ -181,11 +208,14 @@ these were left out of it, and each is the maintainer's decision:
       currently MOOT.** Would distribute the comb's affine entries (64 B since
       3.7.16, not the old 128) across cache lines so a same-host attacker can't
       recover the selected nibble. But `p256_scalarmul_base` only ever processes
-      the **public** scalar `u1 = e·s⁻¹` (verify data); the secret signing nonce
-      stays on the CT ladder `pt_scalarmul` and never touches the comb — so this
-      protects an already-public value. Becomes relevant only if a secret scalar
-      ever reaches the comb AND the deployment goes multi-tenant (neither holds
-      for AGNOS). Kept parked, not dropped.
+      the **public** scalar `u1 = e·s⁻¹` (verify data); every secret scalar runs
+      on the constant-time engine `src/ec_ct.cyr` since 3.13.8 and never
+      touches the comb — so this protects an already-public value. (This line
+      said until 3.13.8 that the signing nonce "stays on the CT ladder
+      `pt_scalarmul`": that ladder was the public-scalar one, and the signer's
+      own ladder ran on variable-time field arithmetic — CHANGELOG [3.13.8].)
+      Becomes relevant only if a secret scalar ever reaches the comb AND the
+      deployment goes multi-tenant. Kept parked, not dropped.
 
 - [ ] **CLMUL-assisted GHASH** — **the gate is weaker than recorded; re-scope.**
       This was parked as "gated on the cyrius `asm`-block global-symbol pseudo"
