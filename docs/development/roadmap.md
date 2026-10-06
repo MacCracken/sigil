@@ -497,3 +497,13 @@ is this repo's to adopt when it pins ≥ 6.6.17. Nothing here gates a cyrius rel
   `-D SIGIL_SMOKE` from the manifest. The `-D SIGIL_SMOKE` on the CI lines becomes redundant (an explicit
   `-D` REPLACES the manifest list, so keeping it is harmless). A `CYRIUS_DCE=1 cyrius build …` CI prefix can
   become `[build] dce = true`.
+
+## Recorded by cyrius 6.6.19 (2026-10-06) — for the next cyrius pin move
+
+⛔ **Needs cyrius >= 6.6.19 — do not bump the pin until 6.6.19 is tagged and out.** Docs-only note from the cyrius
+6.6.19 lanes; each item is this repo's to adopt when it pins ≥ 6.6.19. Nothing here gates a cyrius release.
+
+- **The `_crypto_needs_block` comment is stale** (`lib/sigil.cyr` ~5283, "macOS keep it process-global"): since
+  cyrius 6.6.19 (T1) BOTH macOS arches run real threads with per-thread TLS — x86 macOS through the gs base,
+  arm64 through TPIDR_EL0 — and `THREADS_CONCURRENT` = `CHAN_BLOCKING` = 1 on both. Re-check whether the
+  process-global fallback is still needed on macOS, and correct the comment either way.
