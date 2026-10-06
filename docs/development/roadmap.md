@@ -486,3 +486,14 @@ Windows builds carry these bodies too.
       13 per-profile bundles pass. The fix is upstream (raise the cap or stream);
       do not reformat sigil to chase it. Nothing in sigil's CI runs cyrfmt on the
       monolith.
+
+## Recorded by cyrius 6.6.17 (2026-10-05) — for the next cyrius pin move
+
+⛔ **Nothing to do until cyrius 6.6.17 is tagged and out.** Docs-only note from the cyrius 6.6.17 lanes; each item
+is this repo's to adopt when it pins ≥ 6.6.17. Nothing here gates a cyrius release.
+
+- **`[build] defines` is read from 6.6.17** (cyrius m4) for every `cyrius build` in the project — a bare one
+  and `cyrius build <other source> <out>` alike, so the fuzz loop now builds each harness with
+  `-D SIGIL_SMOKE` from the manifest. The `-D SIGIL_SMOKE` on the CI lines becomes redundant (an explicit
+  `-D` REPLACES the manifest list, so keeping it is harmless). A `CYRIUS_DCE=1 cyrius build …` CI prefix can
+  become `[build] dce = true`.
