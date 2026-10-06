@@ -213,8 +213,10 @@ snapshot:
   *stdlib module*, not a pinned `[deps.*]` entry, so its only machine-visible
   trace is the `lib/bayan.cyr` hash in `cyrius.lock`. `sys` (for `sys_uname`)
   joined the set at 3.12.18.)
-- **Opt-in — the consumer MUST `include` these** (they are *not* in the
-  cyrius auto-prepend union, and `dist/sigil.cyr` does not carry them):
+- **Opt-in** (*not* in the cyrius auto-prepend union). Since **3.13.10**
+  `dist/sigil.cyr` includes them itself, in the compile-verified `# Requires`
+  block the cyrius 6.6.18 `distlib` writes at its top (the leaves of
+  `dist/sigil.deps`); through 3.13.9 the consumer had to `include` them:
   - `lib/ct.cyr` — constant-time compares (`ct_eq_bytes_lens` / `ct_select`),
     every verify path
   - `lib/keccak.cyr` — `shake256` for ML-DSA-65 (default-on since 3.7.6)
@@ -243,24 +245,30 @@ does not.
 > kernel-layer helpers it provided (the `agnosys_*` / `SYSE_*` surface) were
 > internalized into sigil's own `src/sys_error.cyr` / `src/sys_util.cyr`.
 
-**`dist/sigil.cyr` is self-contained** beyond the five opt-in stdlib modules
-above: it references no *external* crate symbols (the `agnosys_*` helpers it
+**`dist/sigil.cyr` is self-contained** — since 3.13.10 including the five
+opt-in stdlib modules above: it references no *external* crate symbols (the `agnosys_*` helpers it
 uses are now defined internally). Since 3.9.0 the bundle is no longer crypto-only
 — it carries the full trust + kernel-integration surface too (TPM seal/unseal,
 IMA, Secure Boot, cert-pin, dm-verity, LUKS — internalized `*_core.cyr`), so a
-consumer gets the crypto **and** trust engine from the one bundle plus the five
-opt-in stdlib modules.
+consumer gets the crypto **and** trust engine from the one bundle.
 
 ## Usage — stdlib include order (3.6+)
 
 Sigil is consumed as a vendored distlib: `cyrius deps` resolves it into your
 `lib/sigil.cyr`, which you then `include`.
 
-**Five stdlib modules must be `include`d _before_ `lib/sigil.cyr`.** They are
-*not* part of the cyrius auto-prepend union — cyrius stdlib is **opt-in**, not
+> **Since 3.13.10 the five includes below are optional.** The bundle opens with a
+> compile-verified `# Requires` block (written by the cyrius 6.6.18 `distlib`) that
+> includes them and every other stdlib leaf in `dist/sigil.deps`, so
+> `include "lib/sigil.cyr"` alone compiles (`tests/tcyr/sigil_raw_include.tcyr`);
+> repeating an include is harmless. What follows is what a 3.13.9-or-older bundle
+> needs.
+
+**Through 3.13.9, five stdlib modules had to be `include`d _before_ `lib/sigil.cyr`.**
+They are *not* part of the cyrius auto-prepend union — cyrius stdlib is **opt-in**, not
 auto-associated. The base stdlib (`string`/`alloc`/`str`/`vec`/`io`/…) *is* in
 the auto union, so those stay automatic; these five are not, and sigil's bundle
-deliberately does **not** carry them (it bundles only sigil's own crypto/trust
+did **not** carry them before 3.13.10 (it bundled only sigil's own crypto/trust
 modules, leaving lib selection to you). This is the same opt-in pattern as
 [mabda](https://github.com/MacCracken/mabda)'s manual deps:
 

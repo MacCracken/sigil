@@ -1,0 +1,20 @@
+# sigil_raw_include.tcyr — dist/sigil.cyr compiles when it is the ONLY sigil include (3.13.10).
+#
+# The 6.6.18 distlib writes a compile-verified "# Requires" block at the top of every bundle
+# (the leaves of dist/sigil.deps), so `include "dist/sigil.cyr"` alone is enough; before it, a
+# consumer that raw-included the bundle had to spell those stdlib leaves itself, and this file
+# did not compile against the 3.13.9 bundle (`thread_local` / `keccak` / `random` / ... missing).
+# Only the test framework is added here: the bundle no longer pulls lib/assert.cyr in.
+
+include "dist/sigil.cyr"
+include "lib/assert.cyr"
+
+fn main() {
+    test_group("raw include: sha256_hex through dist/sigil.cyr alone");
+    assert_streq(sha256_hex("abc", 3),
+      "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", "sha256 abc");
+    return assert_summary();
+}
+
+var exit_code = main();
+sys_exit(exit_code);
