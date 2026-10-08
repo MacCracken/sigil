@@ -178,9 +178,15 @@ fn _sigil_tp_base(): i64 {
 
 # 1 if the calling thread has no thread-local block and needs one installed before `cbank()` may
 # read its slot; 0 if it has one. On Linux only the main thread can lack one: thread_create gives
-# every worker a block through CLONE_SETTLS. Elsewhere cyrius does not reach thread-local storage
-# through the thread pointer (macOS, agnos and cx keep it process-global or in a registry, Windows
-# uses TlsGetValue), nothing can fault, and the first caller initialises as before 3.13.6.
+# every worker a block through CLONE_SETTLS. Elsewhere no thread can lack one, so nothing can
+# fault and the first caller initialises as before 3.13.6: on macOS (both arches, real threads
+# since cyrius 6.6.19 on x86) a worker's slots are its own block, found through a TPIDRRO_EL0-keyed
+# registry (arm64) or the gs base (x86), and the main thread's are a process-global array that
+# lookup falls back to; Windows gives each thread a block on its first TlsGetValue; agnos and cx
+# run one thread over a process-global array. (Until 3.13.11 this said macOS keeps every slot
+# process-global, which stopped being true for its workers at cyrius 6.5.44 / 6.6.19.) What
+# still differs off Linux is which thread takes bank 0: the first to call, not necessarily main,
+# which then draws a lane from the counter like a worker. 3.14.0 retires the banks altogether.
 fn _crypto_needs_block(): i64 {
     #ifdef CYRIUS_TARGET_LINUX
     var tp = _sigil_tp_base();

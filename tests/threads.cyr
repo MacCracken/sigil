@@ -2,14 +2,16 @@
 #
 # A test that releases workers from a spin barrier deadlocks where thread_create runs the body
 # inline before it returns: the first worker spins on a release main can never give. cyrius's
-# THREADS_CONCURRENT answers 1 on Linux and arm64 macOS, and that is true. It answers 0 on x86
-# macOS and agnos, which do run bodies inline — and ALSO on Windows, where thread_create is
-# CreateThread and the threads are real (measured on cass under cyrius 6.6.14). So a 0 is
+# THREADS_CONCURRENT answers 1 on Linux, Windows (since cyrius 6.6.16) and both macOS arches (x86
+# since 6.6.19), and that is true. It answers 0 on agnos, which does run bodies inline. It also
+# answered 0 on Windows before 6.6.16, where thread_create was CreateThread and the threads were
+# always real (measured on cass under cyrius 6.6.14), and on x86 macOS before 6.6.19. So a 0 is
 # measured here, not trusted: the body waits up to 2 s for a store main makes only after
 # thread_create has returned, which it can only see if it runs beside main. The probe touches no
-# sigil state, so a process that must stay cold for a first-use test stays cold.
+# sigil state, so a process that must stay cold for a first-use test stays cold. The measurement
+# stays while a supported pin can answer 0 for real threads.
 #
-# Include after lib/thread.cyr and lib/chrono.cyr. CHANGELOG [3.13.9].
+# Include after lib/thread.cyr and lib/chrono.cyr. CHANGELOG [3.13.9], [3.13.11].
 
 var _tp_go = 0;
 var _tp_saw = 0;
