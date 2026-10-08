@@ -9,7 +9,7 @@
 #   - Linux / AGNOS : getrandom(2)
 #   - macOS         : getentropy (normalized to the Linux byte-count contract)
 #   - Windows (PE)  : bcryptprimitives.dll!ProcessPrng via the 0xF01A reroute
-#                     (cyrius 6.2.12 — CVE-19 follow-on)
+#                     (cyrius 6.2.12 — a follow-on to cyrius's entropy-fallback hardening item)
 #
 # This replaces the prior direct `/dev/urandom` open/read path used at
 # every keygen/nonce/blinding site, which was NON-FUNCTIONAL on Windows
@@ -17,7 +17,7 @@
 # `file_open` failed and those paths fell closed). See
 # docs/development/issues/2026-06-15-sigil-windows-entropy-not-via-getrandom.md.
 #
-# FAIL-CLOSED (the CVE-19 invariant): on any short read or error the caller
+# FAIL-CLOSED (the invariant of cyrius's entropy-fallback hardening item): on any short read or error the caller
 # buffer is NOT usable and we return -1. There is NO weak/partial fallback
 # anywhere — a predictable key/nonce/blind is strictly worse than a failed
 # operation. `random_bytes` loops internally until the full request is

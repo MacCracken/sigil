@@ -211,7 +211,7 @@ var _tm_core_fail = 0;   # timed signing cores that did not return 0
 # Nanoseconds for one _ecs_sign_core call with the chosen big-endian nonce k_be and key d_be
 # and message representative e (LE limbs) on curve c. A failed call is counted, so the timing
 # group cannot pass on the time of a failure; the key buffers are copied first, because under
-# the 6.6.9 pin on Intel macOS clock_now_ns writes through a stale rdx (cyrius CVE-51, fixed
+# the 6.6.9 pin on Intel macOS clock_now_ns writes through a stale rdx (cyrius's Intel-Mac clock stale-register bug, fixed
 # in 6.6.10) and rdx holds d_be on entry here.
 fn _tm_core(c, k_be, d_be, e, sig): i64 {
     var kk[48];

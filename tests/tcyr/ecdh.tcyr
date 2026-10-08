@@ -641,7 +641,7 @@ var _time_fail = 0;   # timed derives that did not return 0
 
 # Nanoseconds for one shared-secret derivation on curve c; a derive that fails is counted in
 # _time_fail, so the timing group cannot pass on the time of a refusal. (Under the 6.6.9
-# pin on Intel macOS, clock_now_ns writes through a stale rdx — cyrius CVE-51, fixed in
+# pin on Intel macOS, clock_now_ns writes through a stale rdx — cyrius's Intel-Mac clock stale-register bug, fixed in
 # 6.6.10 — and rdx holds `peer` here: the clock read corrupted the key, every timed derive
 # failed in ~15 us, and the medians compared four refusals.)
 fn _time_shared(c, priv, peer, out): i64 {

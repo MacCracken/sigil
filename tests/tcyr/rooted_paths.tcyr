@@ -16,7 +16,7 @@
 # A planted C:\sys\firmware\efi\efivars\SecureBoot-... did NOT reach secureboot_detect_state():
 # its `file_exists("/sys/firmware/efi")` gate opens the path as a file, which fails on a
 # directory on Windows. It is refused up front now too, so it no longer rests on that.
-# The cyrius stdlib's CVE-54 / -57 / -65 are the same class. Each helper now asks
+# The cyrius stdlib's CYRIUS-2026-0012 / CYRIUS-2026-0014 / CYRIUS-2026-0020 are the same class. Each helper now asks
 # agnosys_rooted_paths_untrusted() first and fails closed.
 #
 # Every target: agnosys_rooted_paths_untrusted() is 1 on Windows and 0 elsewhere (the POSIX paths

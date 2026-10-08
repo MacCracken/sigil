@@ -54,7 +54,7 @@ the bundles' headers and sidecars differ.
 ⛔ **Tag this release before cyrius 6.6.15 is tagged** — cyrius 6.6.15 folds it as
 `lib/sigil.cyr`: 3.13.8's constant-time ECDH and ECDSA signing, with this release's toolchain pin
 and Windows fix. The toolchain pin moves **6.6.9 → 6.6.14** (the maintainer's call, 2026-10-02:
-under 6.6.9, cyrius CVE-51 made 3.13.8's `ecdh.tcyr` timing group fail on Intel macOS), and with
+under 6.6.9, cyrius's Intel-Mac clock stale-register bug made 3.13.8's `ecdh.tcyr` timing group fail on Intel macOS), and with
 it **one security fix** — on Windows the trust cores probed rooted POSIX paths, which are
 drive-relative there — plus tests and fuzz harnesses moved off fixed names in the shared `/tmp`,
 the arm64-macOS fork-per-trial threading tests restored, and the test fixes that make every
@@ -68,7 +68,7 @@ engine compiles to the same instructions under 6.6.14. All of this landed after 
 - **MEDIUM — on Windows, the TPM / Secure Boot / IMA / dm-verity / LUKS helpers probed rooted
   POSIX paths, which are drive-relative there.** "/dev/tpmrm0" opens `C:\dev\tpmrm0` on Windows,
   and any authenticated user may create folders at the root of the system drive — the class of
-  cyrius CVE-54 / -57 / -65. Measured on cass with each probed path planted at the root of a
+  cyrius CYRIUS-2026-0012 / CYRIUS-2026-0014 / CYRIUS-2026-0020. Measured on cass with each probed path planted at the root of a
   scratch drive: `tpm_detect` / `tpm_available` reported a TPM; `_sb_tool_path` resolved a planted
   `C:\usr\bin\mokutil`; `ima_get_status` reported IMA active with the planted measurement count,
   `ima_read_measurements` returned the planted log as the measurement list and `ima_write_policy`
@@ -104,7 +104,7 @@ engine compiles to the same instructions under 6.6.14. All of this landed after 
   whose store slot equals its tag). `cyrius deps` re-vendored `lib/` from that snapshot (40 files,
   each byte-identical to `~/.cyrius/versions/6.6.14/lib`) and re-locked `cyrius.lock`
   (`deps --verify`: 40 verified). sakshi 2.5.5 → 2.5.6 and bayan 1.5.7 → 1.5.11 arrive with it.
-  6.6.10 fixed cyrius CVE-51 (Intel macOS `clock_now_ns` wrote through a stale `rdx`), which made
+  6.6.10 fixed cyrius's Intel-Mac clock stale-register bug (Intel macOS `clock_now_ns` wrote through a stale `rdx`), which made
   `ecdh.tcyr`'s timing group fail on ach, and 6.6.13 (I6) made a thread created in a `fork()`
   child work on arm64 macOS. Nothing the newer toolchain checks fires: every test, bench, fuzz
   harness and program emits the same diagnostics as under 6.6.9 (only the large-static-data byte
@@ -197,7 +197,7 @@ host ran ~8% above the `v3.13.8-ct-ecdh` rows the day before, for both builds al
   and state.md make it mandatory whenever `tpm_core`, `ima_core`, `secureboot_core`, `dmverity`
   or `luks` changes.
 - **`ecdh.tcyr`'s timing group passes on Intel macOS.** 3.13.8 made both timing tests assert
-  that every timed call succeeded, which under the 6.6.9 pin's CVE-51 failed two `ecdh.tcyr`
+  that every timed call succeeded, which under the 6.6.9 pin's Intel-Mac clock stale-register bug (cyrius) failed two `ecdh.tcyr`
   assertions on ach; with the pin at 6.6.14 `ecdh` is 460/0 there, with flat medians.
 - **`lazy_init_race.tcyr` and `cbank_main_lane.tcyr` fork per trial on macOS again.** 3.13.6 ran
   their cold trial in-process off Linux because a thread created in a `fork()` child died of
@@ -317,7 +317,7 @@ ran its secret nonce and private key through variable-time arithmetic (it now ru
 constant-time engine), and — found by the review of this release's first draft — every signature
 left its nonce k in dead stack and in a vector register. Signatures are byte-identical (RFC 6979
 KATs). The toolchain pin stays **6.6.9** pending the maintainer's call (roadmap: under it,
-`ecdh.tcyr`'s two timing-success assertions fail on Intel macOS because of cyrius CVE-51). Audit: [`docs/audit/2026-10-02-3.13.8-ct-ecdh-ecdsa-sign-audit.md`](docs/audit/2026-10-02-3.13.8-ct-ecdh-ecdsa-sign-audit.md).
+`ecdh.tcyr`'s two timing-success assertions fail on Intel macOS because of cyrius's Intel-Mac clock stale-register bug). Audit: [`docs/audit/2026-10-02-3.13.8-ct-ecdh-ecdsa-sign-audit.md`](docs/audit/2026-10-02-3.13.8-ct-ecdh-ecdsa-sign-audit.md).
 Decision record: [ADR 0009](docs/adr/0009-constant-time-ec-engine-for-secret-scalars.md);
 invariant: [architecture note 004](docs/architecture/004-secret-ec-scalars-run-on-ec-ct.md).
 
@@ -503,7 +503,7 @@ did; `hkdf_extract` 1.917 → **1.727 µs** (−10%: the HMAC exit wipes moved t
   smoke check (medians for d = 1, 2^k, 0x55…, n - 1 within [0.75, 1.33], every timed derive
   checked to have succeeded).
 - **The timing groups fail when a timed call fails.** On ach (x86_64 macOS) under the 6.6.9 pin,
-  `clock_now_ns` writes through a stale `rdx` (cyrius CVE-51, fixed in 6.6.10); in the ECDH timing
+  `clock_now_ns` writes through a stale `rdx` (cyrius's Intel-Mac clock stale-register bug, fixed in 6.6.10); in the ECDH timing
   helper `rdx` held the peer key, so the clock read overwrote it, every timed derive was a
   refusal (~15 µs) and the band check passed on four refusals. Both timing tests now assert that
   every timed call returned 0 (`ecdh.tcyr` +2, `ecdsa_sign_timing.tcyr` +2). The library is not
@@ -540,7 +540,7 @@ did; `hkdf_extract` 1.917 → **1.727 µs** (−10%: the HMAC exit wipes moved t
   |---|---|---|
   | pi (Raspberry Pi 4, aarch64 Linux) | 83 / 83 | — |
   | ecb (Apple M5 Pro, arm64 macOS) | 80 / 83 | agnosys, random, secureboot_tools |
-  | ach (Intel, x86_64 macOS) | 74 / 83 | agnosys, audit_log, fd_hygiene, mldsa_kat (900 s limit), random, secureboot_tools, verify, verify_hardening; and `ecdh` 458/2 — its two "every timed derive succeeded" assertions, cyrius CVE-51 under the 6.6.9 pin (460/0 built with cycc 6.6.14, flat medians) |
+  | ach (Intel, x86_64 macOS) | 74 / 83 | agnosys, audit_log, fd_hygiene, mldsa_kat (900 s limit), random, secureboot_tools, verify, verify_hardening; and `ecdh` 458/2 — its two "every timed derive succeeded" assertions, cyrius's Intel-Mac clock stale-register bug under the 6.6.9 pin (460/0 built with cycc 6.6.14, flat medians) |
   | cass (Windows, PE) | 72 / 81 | agnosys, capture_bounded, fd_hygiene, policy_hardening, security, sigil, trust_hardening, verify, verify_hardening |
 
   `batch_parallel` now passes on cass (it was non-zero there on the first draft and on 3.13.7:
@@ -3273,8 +3273,8 @@ stdlib kernel CSPRNG instead of opening `/dev/urandom` directly + cyrius pin
   `ed25519_generate_keypair`, `mldsa65_keypair`, `_rsa_gen_blind`,
   `_rsa_pss_rand`) called `file_open("/dev/urandom")` — on Windows (PE) there
   is no `/dev/urandom` and no path translation for it, so the open failed and
-  these paths fell **closed** (fail-CLOSED, **not** fail-weak: the CVE-19
-  invariant held — no weak / partial entropy was ever emitted). But sigil
+  these paths fell **closed** (fail-CLOSED, **not** fail-weak: the fail-closed invariant of cyrius's
+  entropy-fallback hardening item held — no weak / partial entropy was ever emitted). But sigil
   RSA / Ed25519 / ML-DSA keygen + RSA-PSS salt/blinding and (transitively)
   `tls_native` nonces were **unusable** on Windows. **Severity: Medium**
   (fail-closed, Windows-only; Linux / macOS / aarch64 / AGNOS were
@@ -3396,7 +3396,7 @@ stdlib kernel CSPRNG instead of opening `/dev/urandom` directly + cyrius pin
 
 ### Added
 - **x509 keyUsage + extendedKeyUsage are now parsed and stored** (for cyrius
-  CVE-17 TLS chain-verification hardening). `X509Cert` grew 256 → 272 bytes:
+  CYRIUS-2026-0002 TLS chain-verification hardening). `X509Cert` grew 256 → 272 bytes:
   `x509_cert_key_usage(c)` (`+256`) holds `0x100 | bits` where the low byte is
   the first keyUsage BIT STRING octet (digitalSignature=0x80, keyEncipherment=
   0x20, keyAgreement=0x08, keyCertSign=0x04, cRLSign=0x02); `x509_cert_eku(c)`
@@ -3438,7 +3438,7 @@ stdlib kernel CSPRNG instead of opening `/dev/urandom` directly + cyrius pin
   their internal `#ifdef CYRIUS_ARCH_X86` platform guards (an orthogonal
   concern — those modules are x86-only HW crypto with a software fallback).
   This is the systemic fix for the un-inlined-`src/`-include bug class that a
-  strict-include consumer (cyrius ≥ 6.1.35, CVE-31) surfaces.
+  strict-include consumer (cyrius ≥ 6.1.35, the fix for its silent broken-input bug) surfaces.
 
 ## [3.7.10] — 2026-06-11
 
@@ -3451,7 +3451,7 @@ stdlib kernel CSPRNG instead of opening `/dev/urandom` directly + cyrius pin
   `src/sha256.cyr`) link cleanly. In the bundle those re-includes pointed at
   `src/sha_ni.cyr` / `src/aes_ni.cyr` — files absent from the fold — and only
   "worked" because older cyrius silently skipped an unopenable include. Cyrius
-  v6.1.35 hard-errors on a missing include (CVE-31), so the bundle failed to
+  v6.1.35 hard-errors on a missing include (the fix for cyrius's silent broken-input bug), so the bundle failed to
   compile downstream (cyrius tls tests, any sigil consumer). Fix: guard each
   re-include with `#ifndef _SIGIL_{SHA,AES}_NI_INCLUDED` and have
   `sha_ni.cyr` / `aes_ni.cyr` `#define` the marker. The guarded include
