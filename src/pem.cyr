@@ -299,6 +299,10 @@ fn pem_decode_certs_into(pem, pem_len, out_chain, max_certs,
     if (pem_len < 0) { return 0 - 1; }
     if (max_certs <= 0) { return 0 - 1; }
     if (der_pool_size < 0) { return 0 - 1; }
+    # A null pool is refused before anything is decoded into it (3.13.11). pem_decode_certs
+    # hands its allocation straight through, and a refused alloc used to arrive here as 0, so
+    # the base64 decode wrote the certificate through address 0.
+    if (der_pool == 0) { return 0 - 1; }
 
     var count = 0;
     var pool_used = 0;
@@ -353,10 +357,12 @@ fn pem_decode_certs_into(pem, pem_len, out_chain, max_certs,
 # drift-free path shipped in 3.7.3 — long-running consumers (kavach
 # attestation loop) should call `pem_decode_certs_into` with their own
 # arena (`arena_reset` between calls). This wrapper remains for one-shot
-# use.
+# use. A refused allocation returns -1 (3.13.11; it used to decode
+# through address 0).
 fn pem_decode_certs(pem, pem_len, out_chain, max_certs): i64 {
     if (pem_len <= 0) { return 0 - 1; }
     var pool = alloc(pem_len);
+    if (pool == 0) { return 0 - 1; }
     return pem_decode_certs_into(pem, pem_len, out_chain, max_certs,
       pool, pem_len);
 }

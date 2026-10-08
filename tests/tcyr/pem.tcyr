@@ -590,6 +590,32 @@ fn main() {
     assert_eq(n, 0 - 1, "_into rejects when pool can't hold decoded DER");
 
     # ============================================================
+    # Group 6b — a refused pool allocation, and a null pool (3.13.11)
+    # ============================================================
+    # pem_decode_certs never checked alloc(pem_len), and _into never checked
+    # der_pool: a refused allocation decoded the certificate through address 0
+    # (SIGSEGV here before 3.13.11). ALLOC_MAX caps the allocator just below
+    # pem_len, so that one allocation is refused and nothing else is.
+    test_group("pem_decode_certs — a refused pool allocation and a null pool");
+
+    var cap_saved = ALLOC_MAX;
+    ALLOC_MAX = ROOT_PEM_LEN - 1;
+    memset(&chain, 0, 64);
+    n = pem_decode_certs(root_pem, ROOT_PEM_LEN, &chain, 4);
+    ALLOC_MAX = cap_saved;
+    assert_eq(n, 0 - 1, "a refused alloc(pem_len) returns -1");
+    assert_eq(load64(&chain), 0, "and writes no chain entry");
+
+    memset(&chain, 0, 64);
+    n = pem_decode_certs_into(root_pem, ROOT_PEM_LEN, &chain, 4, 0, 4096);
+    assert_eq(n, 0 - 1, "_into refuses a null der_pool");
+    assert_eq(load64(&chain), 0, "and writes no chain entry");
+
+    memset(&chain, 0, 64);
+    n = pem_decode_certs(root_pem, ROOT_PEM_LEN, &chain, 4);
+    assert_eq(n, 1, "the allocator uncapped again, the same input decodes");
+
+    # ============================================================
     # Group 7 — max_certs enforcement
     # ============================================================
     test_group("pem_decode_certs — max_certs enforcement");
