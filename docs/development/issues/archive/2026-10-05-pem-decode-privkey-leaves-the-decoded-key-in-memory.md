@@ -2,7 +2,7 @@
 
 **Filed:** 2026-10-05 (recorded by cyrius 6.6.16, from the thr-2 lane's review of the native TLS server's
 key load) · **Severity:** MEDIUM (a secret left in memory; plus a NULL write on allocation failure) ·
-**Status:** open
+**Status:** resolved (3.13.11)
 
 ⛔ Nothing in cyrius 6.6.16 depends on this; fix it in sigil, release, and cyrius refolds `lib/sigil.cyr`.
 
@@ -56,3 +56,17 @@ A test that decodes a PEM key of each kind (SEC1 P-256, PKCS#8 Ed25519, PKCS#1 R
 RSAK_SIZE` and with it ≥) and asserts the scratch region holds no non-zero byte afterwards (capture `alloc`'s
 next pointer before the call, scan `pem_len` bytes after); and a row that forces the allocation to refuse
 (an arena/limit-capped allocator) and expects `-1`, not a fault.
+
+## Resolution (3.13.11)
+
+- `pem_decode_privkey` zeroes the DER scratch for `pem_len` bytes on every return after the decode — success,
+  the PKCS#8 RSA sentinel, and every failure, a failed or partial base64 decode included — and the header
+  comment now says what the scratch holds.
+- A PKCS#1 RSA key with `key_max < RSAK_SIZE` answers the sentinel before anything is allocated or decoded.
+- `alloc(pem_len)` is checked in both `pem_decode_privkey` and `pem_decode_certs`, and `pem_decode_certs_into`
+  refuses a null `der_pool`.
+- Tests: `tests/tcyr/privkey.tcyr` "the DER scratch is wiped on every return" (SEC1 P-256, PKCS#8 P-384,
+  PKCS#8 Ed25519, PKCS#1 RSA at both buffer sizes, a body that fails late) and "a refused scratch
+  allocation"; `tests/tcyr/pem.tcyr` "a refused pool allocation and a null pool". Red against 3.13.10's
+  source: 119 / 180 / 47 / 1177 / 44 bytes left, an allocation on the PKCS#1 sentinel path, and SIGSEGV on
+  the capped allocator.

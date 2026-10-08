@@ -48,6 +48,42 @@ include "src/rsa.cyr"
 include "src/pem.cyr"
 include "src/privkey.cyr"
 
+# ------------------------------------------------------------------
+# DER-scratch residue (3.13.11). pem_decode_privkey base64-decodes the
+# key into an alloc(pem_len) block; through 3.13.10 nothing wiped it, so
+# every call left a plaintext copy of the private key in the heap for the
+# life of the process. alloc() bumps by its size rounded up to 8, so after
+# `a = alloc(8)` the next block starts at a + 8 while the chunk has room.
+# ------------------------------------------------------------------
+var _pk_rc = 0;
+var _pk_algo = 0;
+
+# Decodes pem with key_max, then counts the non-zero bytes left in the
+# strlen(pem) bytes where its DER scratch was allocated. `scratch` = 1 when
+# the call must allocate one, 0 when it must not allocate at all. Returns
+# the count, or -1 when the allocation did not happen as `scratch` says
+# (so a scan of the wrong region can never read as clean).
+fn _pk_residue(pem, key_out, key_max, scratch): i64 {
+    var plen = strlen(pem);
+    var at = alloc(8) + 8;
+    _pk_algo = 0;
+    _pk_rc = pem_decode_privkey(pem, plen, key_out, key_max, &_pk_algo);
+    var after = alloc(8);
+    if (scratch == 0) {
+        if (after != at) { return 0 - 1; }
+        return 0;
+    }
+    if (after < at + plen) { return 0 - 1; }
+    if (after - at > 1048576) { return 0 - 1; }
+    var n = 0;
+    var i = 0;
+    while (i < plen) {
+        if (load8(at + i) != 0) { n = n + 1; }
+        i = i + 1;
+    }
+    return n;
+}
+
 fn main() {
     alloc_init();
 
@@ -189,6 +225,49 @@ fn main() {
     assert_streq(hex_encode(&rsak + 0, 256),
         "bd61200b4b717e9153324c43ba3079b49275d4e3b3c1b88833a25d20c9e664d39c9185df74a506e5ab7c8f77cfad648a5a3c4652a483b79a28c02bb8108e8c2bc331baf18cdf9e8957cf79d031d42368439ccd2711cedf640f68d5a9aa77cc2c580973857ef867652c22f89400f0f5ed6f25bfca78c5728ef64eed549f321dddfe5bded13a0a0ed6d683361cacbfd1b1fe6647fb439d61ca1357b524d316b5c6a76c1666ea6aa6c0728d9469782af0aba3b3023106545b44dee0abbc9bafe37e0626af5277f78d21304a8fd60dc09b2e9ce0e68439db90ba430496e0f4987927e645e8004af2aa5fa93731eb3317f041023e92857f3d0801e9c7eeebd19e5649",
         "PEM RSA RSAK modulus matches");
+
+    # ============================================================
+    # pem_decode_privkey leaves no decoded key behind (3.13.11)
+    # ============================================================
+    test_group("pem_decode_privkey — the DER scratch is wiped on every return");
+
+    var big[2384];
+    assert_eq(_pk_residue(p256_sec1_pem, &kout, 48, 1), 0, "P-256 SEC1: no byte of the DER left");
+    assert_eq(_pk_rc, 32, "P-256 SEC1: still rc=32");
+    assert_streq(hex_encode(&kout, 32), p256_d, "P-256 SEC1: still the right scalar");
+    assert_eq(_pk_residue(p384_pk8_pem, &kout, 48, 1), 0, "P-384 PKCS#8: no byte of the DER left");
+    assert_eq(_pk_rc, 48, "P-384 PKCS#8: still rc=48");
+    assert_eq(_pk_residue(ed_pem, &kout, 48, 1), 0, "Ed25519 PKCS#8: no byte of the DER left");
+    assert_eq(_pk_rc, 32, "Ed25519 PKCS#8: still rc=32");
+    assert_streq(hex_encode(&kout, 32), "399843cd6b8ea5ba0309fe5b38fe4dd271ee65f20f39a48efc7d7503c0775f12",
+        "Ed25519 PKCS#8: still the right seed");
+    assert_eq(_pk_residue(rsa_real_pem, &big, 2384, 1), 0, "PKCS#1 RSA, RSAK-sized buffer: no byte of the DER left");
+    assert_eq(_pk_rc, 2384, "PKCS#1 RSA, RSAK-sized buffer: still rc=RSAK_SIZE");
+    assert_eq(load64(&big + 2320), 256, "PKCS#1 RSA, RSAK-sized buffer: still the 256-byte modulus");
+
+    # PKCS#1 is RSA by its label: a scalar-sized buffer gets the sentinel
+    # without the body being decoded at all (through 3.13.10 the whole RSA
+    # key was decoded, left behind, and decoded again by the caller's retry).
+    assert_eq(_pk_residue(rsa_real_pem, &kout, 48, 0), 0, "PKCS#1 RSA, scalar-sized buffer: nothing allocated");
+    assert_eq(_pk_rc, 0 - SIG_PRIVKEY_RSA, "PKCS#1 RSA, scalar-sized buffer: the sentinel");
+    assert_eq(_pk_algo, SIG_PRIVKEY_RSA, "PKCS#1 RSA, scalar-sized buffer: algo RSA");
+
+    # A body that goes bad near its end: the decode writes most of the key
+    # before it fails, and that partial key is wiped too.
+    var ed_bad = "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIDmYQ81rjqW6Awn+Wzj+TdJx7mXyDzmkjvx9dQPAd1!S\n-----END PRIVATE KEY-----\n";
+    assert_eq(_pk_residue(ed_bad, &kout, 48, 1), 0, "a failed decode: no partial key left");
+    assert_eq(_pk_rc, 0 - 1, "a failed decode: rc=-1");
+
+    # A refused scratch allocation returns -1 (through 3.13.10 the decode
+    # wrote the key through address 0). ALLOC_MAX caps the allocator just
+    # below pem_len, so that one allocation is refused and nothing else is.
+    test_group("pem_decode_privkey — a refused scratch allocation");
+    var cap_saved = ALLOC_MAX;
+    ALLOC_MAX = strlen(p256_sec1_pem) - 1;
+    var rc_cap = pem_decode_privkey(p256_sec1_pem, strlen(p256_sec1_pem), &kout, 48, &algo);
+    ALLOC_MAX = cap_saved;
+    assert_eq(rc_cap, 0 - 1, "a refused alloc(pem_len) returns -1");
+    assert_eq(algo, SIG_PRIVKEY_UNKNOWN, "and reports no algorithm");
 
     return assert_summary();
 }
