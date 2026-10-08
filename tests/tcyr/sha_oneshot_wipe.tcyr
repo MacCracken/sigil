@@ -1,0 +1,193 @@
+# sha_oneshot_wipe.tcyr — the one-shot sha256() / sha384() leave no context behind (3.13.11).
+#
+# sha512() has zeroed its banked context since 3.13.1; sha256() and sha384() did not. Their
+# context is a stack local, and after the call it sits in dead stack below the caller holding
+# the final state (which IS the digest) and the block buffer (the message tail). HMAC hashes a
+# key longer than its block through these one-shots, so such a key's hash stayed behind
+# (roadmap, "Dead-stack and register residue", item (c)).
+#
+# How: _sw_run fills 64 KB of stack below its frame with 0x5a, makes one call, and scans that
+# region for (a) the final state — eight consecutive i64 slots equal to the SHA-256 digest
+# words, six equal to the SHA-384 digest words, eight to SHA-512's — and (b) the first 16 bytes
+# of the 40-byte message, contiguous. Each primitive runs on the SHA-NI path where the CPU has
+# one and again with the software path forced.
+# Controls keep the scan honest: _sw_old256 / _sw_old384 are the 3.13.10 one-shots verbatim
+# (no wipe), so the scan MUST find both the state and the message in them, or it is not looking
+# where the context was. Red on 3.13.10's sha256() / sha384(); sha512() is the green control.
+#
+# Not covered here (roadmap item (b)): the SHA compression frames' own locals — the software
+# message schedule and working variables — which no one-shot wipes.
+
+include "lib/assert.cyr"
+include "lib/alloc.cyr"
+include "lib/freelist.cyr"
+include "lib/str.cyr"
+include "lib/string.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
+include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fmt.cyr"
+include "lib/bayan.cyr"
+include "lib/sakshi.cyr"
+include "lib/chrono.cyr"
+include "lib/ct.cyr"
+include "lib/thread_local.cyr"
+include "src/crypto_scratch.cyr"
+include "src/types.cyr"
+include "src/error.cyr"
+include "src/sha256.cyr"
+include "src/hex.cyr"
+include "src/sha512.cyr"
+include "src/sha384.cyr"
+
+var SW_SCAN = 65536;   # bytes of dead stack scanned and filled (four 16 KB frames)
+var SW_MLEN = 40;      # one block: the whole message stays in the block buffer
+var _sw_msg = 0;       # the message (heap — never a copy on the scanned stack)
+var _sw_dig = 0;       # the digest the call wrote (heap)
+var _sw_words = 0;     # the state words the scan looks for (heap)
+var _sw_state = 0;     # state-run hits of the last _sw_run
+var _sw_block = 0;     # message hits of the last _sw_run
+
+# Fills lv x 16 KB of stack below the caller with 0x5a (non-tail recursion, so the frames stack
+# up), leaving the region holding nothing from earlier calls. Returns 0.
+fn _sw_fill(lv): i64 {
+    var pad[16384];
+    memset(&pad, 0x5a, 16384);
+    if (lv > 1) { _sw_fill(lv - 1); }
+    return 0;
+}
+
+# The 3.13.10 sha256() one-shot, without the wipe 3.13.11 added. Returns 0.
+fn _sw_old256(data, len, out): i64 {
+    var bk = cbank();
+    var ctx[9216];   var ctxb = &ctx + bk * 144;
+    sha256_init_into(ctxb);
+    sha256_update(ctxb, data, len);
+    sha256_finalize(ctxb, out);
+    return 0;
+}
+
+# The 3.13.10 sha384() one-shot, without the wipe 3.13.11 added. Returns 0.
+fn _sw_old384(data, len, out): i64 {
+    var bk = cbank();
+    var ctx[13312];   var ctxb = &ctx + bk * 208;
+    sha384_init_into(ctxb);
+    sha384_update(ctxb, data, len);
+    sha384_finalize(ctxb, out);
+    return 0;
+}
+
+# The digest at _sw_dig as n state words of wb bytes (big-endian) at _sw_words. Returns 0.
+fn _sw_load_words(n, wb): i64 {
+    var i = 0;
+    while (i < n) {
+        var v = 0;
+        var j = 0;
+        while (j < wb) {
+            v = (v << 8) | (load8(_sw_dig + i * wb + j) & 0xFF);
+            j = j + 1;
+        }
+        store64(_sw_words + i * 8, v);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Counts, in the SW_SCAN bytes below ref, the 8-aligned runs of n consecutive i64 slots equal to
+# _sw_words, and the byte offsets where the message's first 16 bytes appear. Stores both.
+fn _sw_scan(ref, n): i64 {
+    var st = 0;
+    var bl = 0;
+    var p = ref - SW_SCAN;
+    while (p + n * 8 <= ref) {
+        var ok = 1;
+        var j = 0;
+        while (j < n) {
+            if (load64(p + j * 8) != load64(_sw_words + j * 8)) {
+                ok = 0;
+                j = n;
+            }
+            j = j + 1;
+        }
+        st = st + ok;
+        p = p + 8;
+    }
+    p = ref - SW_SCAN;
+    while (p + 16 <= ref) {
+        if (memeq(p, _sw_msg, 16) == 1) { bl = bl + 1; }
+        p = p + 1;
+    }
+    _sw_state = st;
+    _sw_block = bl;
+    return 0;
+}
+
+# One call on a freshly filled region, then the scan. which: 1 sha256(), 2 sha384(), 3 sha512(),
+# 4 the old sha256(), 5 the old sha384(). Returns 0.
+fn _sw_run(which): i64 {
+    var ref[8];
+    _sw_fill(4);
+    if (which == 1) { sha256(_sw_msg, SW_MLEN, _sw_dig); }
+    if (which == 2) { sha384(_sw_msg, SW_MLEN, _sw_dig); }
+    if (which == 3) { sha512(_sw_msg, SW_MLEN, _sw_dig); }
+    if (which == 4) { _sw_old256(_sw_msg, SW_MLEN, _sw_dig); }
+    if (which == 5) { _sw_old384(_sw_msg, SW_MLEN, _sw_dig); }
+    var n = 8;
+    var wb = 4;
+    if (which == 2) { n = 6; wb = 8; }
+    if (which == 3) { wb = 8; }
+    if (which == 5) { n = 6; wb = 8; }
+    _sw_load_words(n, wb);
+    _sw_scan(&ref, n);
+    return 0;
+}
+
+# The five rows on the current SHA-256 path (the test group names it). Returns 0.
+fn _sw_rows(): i64 {
+    _sw_run(4);
+    assert_eq(_sw_state >= 1, 1, "old sha256() shape leaves its state (anti-vacuous)");
+    assert_eq(_sw_block >= 1, 1, "old sha256() shape leaves the message (anti-vacuous)");
+    _sw_run(1);
+    assert_eq(_sw_state, 0, "sha256() leaves no state run");
+    assert_eq(_sw_block, 0, "sha256() leaves no copy of the message");
+    _sw_run(5);
+    assert_eq(_sw_state >= 1, 1, "old sha384() shape leaves its state (anti-vacuous)");
+    assert_eq(_sw_block >= 1, 1, "old sha384() shape leaves the message (anti-vacuous)");
+    _sw_run(2);
+    assert_eq(_sw_state, 0, "sha384() leaves no state run");
+    assert_eq(_sw_block, 0, "sha384() leaves no copy of the message");
+    _sw_run(3);
+    assert_eq(_sw_state, 0, "sha512() leaves no state run (control, wiped since 3.13.1)");
+    assert_eq(_sw_block, 0, "sha512() leaves no copy of the message (control)");
+    return 0;
+}
+
+fn main(): i64 {
+    alloc_init();
+    _sw_msg = alloc(SW_MLEN);
+    _sw_dig = alloc(64);
+    _sw_words = alloc(64);
+    var i = 0;
+    while (i < SW_MLEN) {
+        store8(_sw_msg + i, (i * 37 + 0xC3) & 0xFF);
+        i = i + 1;
+    }
+
+    if (sha_ni_available() == 1) {
+        test_group("one-shot SHA contexts are wiped — SHA-NI path");
+    } else {
+        test_group("one-shot SHA contexts are wiped — software path (no SHA-NI here)");
+    }
+    _sw_rows();
+
+    test_group("one-shot SHA contexts are wiped — software path forced");
+    _sha_ni_cache = 0;
+    _sw_rows();
+    _sha_ni_cache = 2;
+
+    return assert_summary();
+}
+
+var exit_code = main();
+sys_exit(exit_code);

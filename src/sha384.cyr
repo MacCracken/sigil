@@ -70,16 +70,21 @@ fn sha384_finalize(ctx, out): i64 {
     return 0;
 }
 
-# Convenience — hash `data` (len bytes) into `out` (48 bytes).
+# Convenience — hash `data` (len bytes) into `out` (48 bytes). The banked
+# context is zeroed before returning (3.13.11), as sha512()'s is.
 fn sha384(data, len, out): i64 {
     # Banked one-shot (3.9.6): `fl_alloc` is not thread-safe (quirk #7),
     # so concurrent SHA-384 one-shots (the TLS_AES_256_GCM_SHA384
     # transcript / HKDF-SHA384 key schedule) raced the freelist. Use a
     # per-worker banked static ctx + the `_into` variant.
+    # The ctx is wiped (3.13.11): its final state holds the digest and its
+    # block buffer the message tail — an HMAC-SHA384 key longer than 128
+    # bytes, hashed down here, stayed in this dead frame.
     var bk = cbank();
     var ctx[13312];   var ctxb = &ctx + bk * 208;   # 208 * SIGIL_CRYPTO_BANKS
     sha384_init_into(ctxb);
     sha384_update(ctxb, data, len);
     sha384_finalize(ctxb, out);
+    _sigil_wipe64(ctxb, 208);
     return 0;
 }

@@ -402,18 +402,23 @@ fn sha256_finalize(ctx, out): i64 {
 # ================================================================
 
 # One-shot SHA-256: hashes `len` bytes at `data` and writes the 32-byte
-# digest to `out`. Runs on a banked per-cbank()-lane context — no allocator call.
-# Returns 0.
+# digest to `out`. Runs on a banked per-cbank()-lane context — no allocator
+# call — and zeroes it before returning (3.13.11), as sha512() has since
+# 3.13.1. Returns 0.
 fn sha256(data, len, out): i64 {
     # Banked one-shot (3.9.6): the ctx was `fl_alloc`'d, but `fl_alloc`
     # is NOT thread-safe (quirk #7), so concurrent one-shot hashes (TLS
     # transcript / HKDF / HMAC long-key) raced the freelist — a
     # concurrent-TLS-handshake crash site. Use a per-worker banked
     # static ctx + the `_into` variant; no allocator touched.
+    # The ctx is wiped (3.13.11): its final state IS the digest and its block
+    # buffer the message tail, so a secret input — an HMAC key longer than the
+    # block, hashed down here — stayed in this dead frame.
     var bk = cbank();
     var ctx[9216];   var ctxb = &ctx + bk * 144;   # 144 * SIGIL_CRYPTO_BANKS
     sha256_init_into(ctxb);
     sha256_update(ctxb, data, len);
     sha256_finalize(ctxb, out);
+    _sigil_wipe64(ctxb, 144);
     return 0;
 }
