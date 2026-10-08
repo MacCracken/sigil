@@ -19,7 +19,7 @@ below gates the 6.7.6 refold). Each item is the maintainer's to place:
       ecb, ach and cass with the three cass checks of "After the 6.6.6 pin" below.
 - [ ] **IMA `policy_loaded`** — the open LOW below; needs a host with IMA enabled.
 - [ ] **Cyrius-side, tracked here:** `cyrfmt` refuses `dist/sigil.cyr` for size (cyrius
-      `programs/cyrfmt.cyr` `_MAX_FILE`; a stretch item of cyrius 6.7.6), and `#derive(Serialize)`
+      `programs/cyrfmt.cyr` `_MAX_FILE`; proposed as a cyrius 6.7.6 stretch item), and `#derive(Serialize)`
       cstring fields (the hand-rolled serializer item below).
 - [ ] **Public names that collide with other repos' public names.** `is_syscall_err`,
       `result_print_err` and `wrap_syscall` (`src/sys_error.cyr`) are also defined by agnodrm's
@@ -60,7 +60,7 @@ pass):** two tests still do not compile for agnos — `lazy_init_race` / `cbank_
 fork-per-trial reaper calls a three-argument `sys_waitpid` with `WNOHANG`, which agnos lacks;
 since 3.13.6). `errno_peer`, the third through 3.13.10, compiles since 3.13.11 moved it off the
 raw `SYS_FCNTL` pair onto the stdlib's `fd_set_nonblocking` (checked with `cyrius build --agnos`
-over every `.tcyr` under the 6.7.5 pin: these two fail, 83 compile). No CI step compiles the
+over every `.tcyr` under the 6.7.5 pin: these two fail, the other 85 compile). No CI step compiles the
 tests for agnos — the 3.13.9 scan greps the file-syscall class only — so an agnos ABI slip
 outside that class stays invisible until someone builds for agnos. Options: guard the two
 reapers with a named agnos SKIP (agnos runs thread bodies inline, so `lazy_init_race` already

@@ -6,7 +6,16 @@ type: state
 
 # Documentation Health — sigil
 
-> **Last refresh**: 2026-08-14 (**3.12.9 — RSA sign de-banking**: the sign /
+> **Last refresh**: 2026-10-08 (**3.13.11 — the cyrius W2 pin to 6.7.5**: the
+> decoded private-key DER wiped in `pem_decode_privkey`, the PEM scratch
+> allocations checked, quirk #10 lifted with a proving test, the cyrius
+> `CVE-NN` citations rewritten to the cyrius ledger's 2026-10-08 ids. Rows
+> refreshed: `CHANGELOG.md`, `CLAUDE.md`, `VERSION`, the architecture README
+> and note 005, `roadmap.md`, `state.md`, and the new audit. Both 2026-10-05
+> issues archived. The rest of the per-file Tier tables were **not**
+> re-inventoried.)
+>
+> **Prior refresh**: 2026-08-14 (**3.12.9 — RSA sign de-banking**: the sign /
 > blind / CRT workspace (23 globals) and the whole bignum engine (17 more) are
 > now function-scope stack locals, closing the last two wider-scope items of the
 > 2026-08-08 forged-signature issue, which is **CLOSED**. The Bellcore
@@ -225,13 +234,13 @@ citation index for every crypto primitive.
 | File | Last touched | Status | Notes |
 |---|---|---|---|
 | `README.md` | 2026-10-06 | ✅ Fresh | **Usage section (3.13.10):** the five opt-in stdlib includes are optional — every bundle carries a compile-verified `# Requires` block from the 6.6.18 `distlib`; the pre-3.13.10 requirement is kept, marked as such. **Tests section (3.13.9):** no longer repeats a count — it said "1661 assertions across 64 test files, 0 failures (3.12.2)" through 3.13.8, a whole minor stale; it now points at `state.md`, whose counts `scripts/state-sync.sh --write --count` rewrites from a measured run, and names the per-run scratch directory, the cross-host runs and `scripts/cass-rooted-paths.sh`. The toolchain pin is not repeated (`cyrius.cyml` is named as its source). Only the Tests section was re-checked at 3.13.9; the module list and roadmap narrative were last inventoried 2026-07-30 (3.12.2). (Deliberately no line numbers here — they rot on every insertion into README.) |
-| `CHANGELOG.md` | 2026-10-03 | ✅ Fresh | Source of truth per CLAUDE.md. **Through 3.13.9** (untagged at this refresh; 3.13.8 is tagged at `bbaecc4` and its section is the tag's text). Refreshed every release. |
-| `CLAUDE.md` | 2026-07-14 | ✅ Fresh | agnosticos `example_claude.md` template; durable rules only. 3.6.8 fixed the stale `benches/sigil.bcyr` → `tests/bcyr/sigil.bcyr` Quick-Start path. |
+| `CHANGELOG.md` | 2026-10-08 | ✅ Fresh | Source of truth per CLAUDE.md. **Through 3.13.11.** At 3.13.11 the cyrius `CVE-NN` citations in earlier entries were rewritten to the cyrius ledger's 2026-10-08 ids and labels (the only edit to released text). Refreshed every release. |
+| `CLAUDE.md` | 2026-10-08 | ✅ Fresh | agnosticos `example_claude.md` template; durable rules only. 3.13.11: quirk #10 marked LIFTED (with what stays and what changed), and the "No raw syscalls" rule's one tracked exception retired. |
 | `CONTRIBUTING.md` | 2026-06-29 | ✅ Fresh | Cyrius work loop + commit/hook rules; no Rust/cargo references. |
 | `SECURITY.md` | 2026-07-30 | ✅ Fresh | Supported-versions table tops at **3.12.x** (current minor) / 3.11.x (prior), `< 3.11.0` unsupported. |
 | `CODE_OF_CONDUCT.md` | (per upstream) | 🔵 Evergreen | Standard contributor covenant. |
 | `LICENSE` | (per upstream) | 🔵 Evergreen | GPL-3.0-only. |
-| `VERSION` | 2026-10-06 | ✅ Fresh | **`3.13.10`**. Bumped every release. |
+| `VERSION` | 2026-10-08 | ✅ Fresh | **`3.13.11`**. Bumped every release. |
 | `cyrius.cyml` | 2026-07-30 | ✅ Fresh | `[lib].modules` now lists **65** modules — every file in `src/` except the `src/lib.cyr` umbrella, so the module-list drift gate below is currently clean; `mul64.cyr` added this cycle to `[lib]` and to the `ed25519` / `ecdsa` / `mldsa` / `x509` / `authenticode` profiles. Toolchain pin **`6.5.3`** (6.0.87 @3.7.8 → 6.2.x → 6.3.5 @3.9.6 → 6.4.65 @3.12.1 → **6.5.3** @3.12.2). Deps: **sakshi 2.4.7 ONLY — agnosys DROPPED @3.8.1**; `bayan` is in the `[deps].stdlib` list (1.3.0 with the toolchain), not a pinned `[deps.*]` entry; `json` / `bigint` were dropped at the 6.2.1 pin (bigint → bayan). |
 | `dist/sigil.deps` + `cyrius distlib` | 2026-07-30 | ✅ Fresh | **@3.9.5+**: the bash `scripts/regen-dist.sh` retired — the sovereign `cyrius distlib` (≥6.2.48) folds `dist/sigil.cyr` AND emits the `dist/sigil.deps` sidecar (stdlib leaves, captured from the modules + the `src/lib.cyr` umbrella). `dist/` now holds **14 `.cyr` bundles + 14 `.deps` sidecars**: the full `sigil.cyr` plus the 13 `[lib.*]` profile cuts (`argon2`, `sha`, `hmac`, `hkdf`, `aes`, `chacha`, `ed25519`, `ecdsa`, `mldsa`, `x509`, `authenticode`, `secureboot`, `tpm`). Re-run `cyrius distlib` after a `[lib].modules` or VERSION change. |
 | `dist/sigil.cyr` | 2026-07-30 | ✅ Fresh | Regenerated every release (last, after the VERSION bump — CI has a stale-dist gate). Header reads **`# Version: 3.12.2`**; carries the 3.7.8 NI `param_load` migration, the 3.7.15 `src/random.cyr` entropy boundary, the agnosys-drop internalized trust modules, the 3.9.x full concurrent-crypto banking, and the 3.10–3.12 `authenticode` / `efi_sigdb` / `blake2b` / `argon2` / `mul64` surfaces incl. the `authenticode_pe_sign` pad-in-hash security fix. |
@@ -243,12 +252,12 @@ citation index for every crypto primitive.
 
 | File | Last touched | Status | Notes |
 |---|---|---|---|
-| `README.md` | 2026-06-29 | ✅ Fresh | Index + conventions. The numbered series is **no longer empty** — `001` is promoted and indexed; the README's "candidates" list still names `002-preprocessor-output-cap.md` (quirk #8) as the next candidate, but **`002` was taken** by the native-asm-multiply note at 3.12.2, so that candidate needs renumbering to `003` when it is written (**never renumber the existing series**). |
+| `README.md` | 2026-10-08 | ✅ Fresh | Index + conventions. The numbered series is **no longer empty** — `001` is promoted and indexed; the README's "candidates" list still names `002-preprocessor-output-cap.md` (quirk #8) as the next candidate, but **`002` was taken** by the native-asm-multiply note at 3.12.2, so that candidate needs renumbering to `003` when it is written (**never renumber the existing series**). 3.13.11: the 005 entry marked LIFTED. |
 | `001-var-array-static-semantics.md` | 2026-06-29 | ✅ Fresh | Quirk #1 promoted from CLAUDE.md — `var X[N]` arrays are function-scope statics, the invariant every `cbank()` bank follows from, incl. the 3.9.7 `secret var`-arrays-race corollary. |
 | `002-native-asm-multiply.md` | 2026-07-30 | ✅ Fresh | New this cycle (written by the operator). The `src/mul64.cyr` `asm{}` contract and the four big-integer engines that consume it; the third `asm{}` site in `src/` after `sha_ni.cyr` / `aes_ni.cyr` and the first with no runtime feature detection. |
 | `003-global-arrays-are-eight-bytes-per-element.md` | 2026-08-14 | ✅ Fresh | A banked global `var X[N]` costs 8N bytes. (Row added 3.13.8; the note existed but this ledger and the README index did not list it.) |
 | `004-secret-ec-scalars-run-on-ec-ct.md` | 2026-10-02 | ✅ Fresh | New at 3.13.8. The verify modules are variable-time; every secret EC scalar runs on `src/ec_ct.cyr`; how the constant-time property is checked in the compiled code (`CYRIUS_SYMS` + disassembly), and the stack-wipe traps (orientation; burn from a plain wrapper; size to the whole call tree — 128 / 160 KB for the signers). Cross-links ADR 0009. |
-| `005-secret-var-epilogue-spills-registers.md` | 2026-10-02 | ✅ Fresh | New at 3.13.8 (review of the first draft). A `secret var` function's epilogue saves the return registers below its frame after its wipe and never clears them (cyrius EDEFER_SAVE); burn from a plain wrapper, clear vector registers at the end of secret `asm` blocks, test with a spill. CLAUDE.md quirk #10. |
+| `005-secret-var-epilogue-spills-registers.md` | 2026-10-08 | ✅ Fresh | New at 3.13.8; **LIFTED at 3.13.11** (cyrius 6.6.15 clears the defer walker's save area; `tests/tcyr/secret_epilogue.tcyr` proves it under the 6.7.5 pin). The defect's record is kept; an "After the lift" section says what happened to its three rules — the plain-wrapper burns and vector-register clears stay, and the zeroisation tests now spill registers explicitly (`tests/regdump.cyr`). CLAUDE.md quirk #10. |
 | `overview.md` | 2026-06-29 | 🟡 Stale | Module map + TEE data-flow + parallel-batch framing. Current through the 3.9.x banking arc (auto-lane `cbank()`, banks 8→64, `secret var`-array gotcha, agnosys drop, PQC-gate removal, bayan/stdlib list are all correct). **Stale**: the module map predates five modules — `authenticode.cyr` (3.10.0), `efi_sigdb.cyr` (3.11.1), `blake2b.cyr` + `argon2.cyr` (3.12.0) and `mul64.cyr` (3.12.2) are absent, as is any mention of the `[lib.*]` per-profile dist cuts. Add `mul64.cyr` with a pointer to architecture note `002`. |
 
 ---
@@ -319,6 +328,7 @@ finding closes).
 | `2026-07-30-3.12.2-asm-multiply-authenticode-verify-audit.md` | 2026-07-30 | 🔵 Dated artifact (3.12.2 — `mul64.cyr` asm multiply, `bn_mont_modexp_pub` reachability proof, Authenticode verify + P-256 signer, plus the 6.4.65→6.5.3 / sakshi 2.4.3→2.4.7 / bayan 1.1.0→1.3.0 bumps. **1 HIGH fixed** — `authenticode_pe_sign` signed a byte range no verifier checks — **4 hardenings applied, 1 LOW fixed, 2 INFO, no CRITICAL**) |
 | `2026-10-02-3.13.8-ct-ecdh-ecdsa-sign-audit.md` | 2026-10-02 | 🔵 Dated artifact (3.13.8 — constant-time ECDH; **HIGH** ECDSA-signing timing side channel found by the premise check and fixed; **MEDIUM** signing-nonce residue in dead stack and xmm1 found by the review of the first draft and fixed — §F4 was rewritten from "no finding"; branch counts of the compiled engine on x86_64 and aarch64) |
 | `2026-10-03-3.13.9-pin-bump-windows-rooted-paths-audit.md` | 2026-10-03 | 🔵 Dated artifact (3.13.9 — everything after the 3.13.8 tag: **MEDIUM** §F8, the trust cores' rooted POSIX paths on Windows, found at the pin bump to cyrius 6.6.14 and fixed; the 3.13.8 branch counts of the compiled engine re-checked on cycc 6.6.14 (§R1, unchanged) and the suite and timing smoke checks re-run on every host. F8 was first written into the 3.13.8 audit after its tag, and moved here) |
+| `2026-10-08-3.13.11-w2-pin-privkey-residue-audit.md` | 2026-10-08 | 🔵 Dated artifact (3.13.11 — the cyrius W2 pin to 6.7.5: F1 MEDIUM the decoded private key left in the heap, F2–F4 LOW, R1 the zeroisation tests' register spill; all fixed. Not a full pass.) |
 
 > **Table complete through 3.12.2** — all **38** dated audit artifacts under
 > `docs/audit/` are itemised above. **Gap, tracked not buried: there is no
@@ -355,8 +365,8 @@ reserved for the first cycle of a day.
 
 | File | Last touched | Status | Notes |
 |---|---|---|---|
-| `roadmap.md` | 2026-07-30 | ✅ Fresh | **Through 3.12.2**: "Closed cycles" now carries the **3.12** entry (3.12.0 BLAKE2b + Argon2, 3.12.1 bank-slot move, 3.12.2 native asm multiply + public-exponent modexp + Authenticode verify) alongside 3.6–3.11. Open items are named, not buried — the headline one is **"EC scalar-mult ≤ 10 ms — DECISION NEEDED: the target is now met"**: ADR 0006 parked it as unreachable, 3.12.2's `src/mul64.cyr` measured `ecdsa_p256_verify` at 9.732 ms, and the ADR was **deliberately left open** because a ~7 % single-host crossing is the maintainer's call, not a perf side-effect. **Opened by 3.12.2**: the UEFI firmware-interop gate (last item of the now-archived authenticode issue, moved here so it survives archival), the **missing 3.10 / 3.11 rows in `benches/history.csv`** (left honest — fill forward only), and a full `asm{}` CIOS inner loop (unscoped by choice). Carried backlog: TDX/SGX in-quote PCK chain walk, retire-bank-indexing, scatter-store, CLMUL-GHASH, ML-KEM-768, `#derive(Serialize)` completeness, Windows-entropy `cass` ProcessPrng confirmation, retire-`sysinfo.cyr`. **Open audit findings — NONE.** |
-| `state.md` | 2026-07-30 | ✅ Fresh | Live state snapshot — bumped every release. **Through 3.12.2**: version / pin `6.5.3` / sakshi `2.4.7` + bayan `1.3.0`-as-stdlib-module, last release audit = the 2026-07-30 3.12.2 audit, test surface **1661 / 0 across 64 files**. Its **Counting note (revised @3.12.0)** is the authoritative one — the `*_verify_full` summaries no longer drop under a pipe, so the grep-sum already includes those 44 and they must **not** be added back; this file (doc-health) carried the opposite claim from 3.12.0 until the 2026-07-30 refresh and was the wrong one. Standing open item, escalated this cycle: the ⚠️ **state-drift note** now records the **third** occurrence of the release post-hook failing to bump the volatile fields (3.9.0–3.9.5, 3.9.6–3.11.0, 3.12.0–3.12.1 — at one point three different versions asserted in one section). Per CLAUDE.md ("if the hook doesn't, fix the hook — don't hand-maintain state") the hook fix stays flagged for the maintainer. |
+| `roadmap.md` | 2026-10-08 | ✅ Fresh | **Through 3.13.11**: a W2 block at the top of "Outstanding work" places every item the cyrius W2 survey found and 3.13.11 did not fix; the residue item's (a) and (c) closed; the mabda / yukti re-vendor row closed; the cyrius 6.6.17 / 6.6.19 notes marked adopted. "Closed cycles" still ends at 3.12. |
+| `state.md` | 2026-10-08 | ✅ Fresh | Live state snapshot — bumped every release; `scripts/state-sync.sh` (`--check` in CI) owns the derivable fields. **Through 3.13.11**: pin 6.7.5, 87 `.tcyr` files, 3303 / 0 assertions, fuzz 25 / 0. |
 | `3.0-handoff-2026-04-22.md` | 2026-04-22 | 📦 Archive | Frozen by design — closed-cycle handoff doc. |
 | `3.0-scope.md` | (closed) | 📦 Archive | Frozen by design — closed-cycle scope doc. |
 | `3.2-scope.md` | (closed) | 📦 Archive | Frozen by design — closed-cycle scope doc. |

@@ -7,6 +7,102 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.13.11] - 2026-10-08
+
+Toolchain pin **6.6.18 → 6.7.5** for the cyrius W2 stdlib wave (cyrius 6.7.6 refolds this release
+as `lib/sigil.cyr`), with the two issues filed since 3.13.9 fixed — `pem_decode_privkey` left the
+decoded private key in the heap, and the PEM scratch allocations were never checked — and the
+follow-ups the 6.7.5 pin allows. **Public API unchanged:** no signature changed, and the functions
+cyrius's own `lib/` calls from the fold keep their names and contracts. Audit:
+[`docs/audit/2026-10-08-3.13.11-w2-pin-privkey-residue-audit.md`](docs/audit/2026-10-08-3.13.11-w2-pin-privkey-residue-audit.md).
+
+### Changed
+
+- **Toolchain pin 6.6.18 → 6.7.5** (`cyrius.cyml [package].cyrius`); `cyrius.lock` re-locked by
+  `cyrius deps` (41 rows). The move surfaced no new error or warning.
+- **`dist/` regenerated — all fourteen bundles** (the `# Version:` header, the ledger rewrite and
+  this release's source). Five profile sidecars shrink, because the bayan fold in cyrius 6.6.19+
+  carries its own requires block: `authenticode` drops `str` `io` `result` `fmt`; `ecdsa`,
+  `ed25519` and `x509` drop `vec` `str` `io` `result` `fmt`; `mldsa` drops `str` `io` `result`
+  `fmt` (and the bundles' `# Requires` blocks the same includes). `dist/sigil.deps` is unchanged
+  (19 leaves).
+- **CI.** The smoke build takes `SIGIL_SMOKE` from `[build] defines` (no `-D`; the binary is
+  byte-identical either way); the `src/aes_gcm.cyr` line-length exemption is gone (cyrlint has no
+  warning for it under 6.7.5), leaving `src/mldsa_ntt.cyr:43` the only one; the security scan
+  fails on any raw `syscall(` in `src/`, `tests/`, `fuzz/`, `programs/` or `benches/`.
+
+### Fixed
+
+- **`pem_decode_privkey` wipes the decoded private key (MEDIUM on sigil's scale — key
+  zeroization).** Its `alloc(pem_len)` scratch IS the key in DER form (EC scalar, Ed25519 seed,
+  every RSA component), and no return path wiped it; the bump allocator never frees, so each call
+  left a plaintext copy in the heap for the life of the process (cyrius's native TLS server: one
+  per distinct key). One exit now zeroes `pem_len` bytes after every decode — success, the PKCS#8
+  RSA sentinel, each failure, a failed or partial base64 decode included (the dispatch moved into
+  the private `_privkey_from_der_kind`). **Behaviour note:** a PKCS#1 key (`BEGIN RSA PRIVATE
+  KEY`) with `key_max < RSAK_SIZE` now gets the `0 - SIG_PRIVKEY_RSA` sentinel before anything is
+  allocated or decoded — so also when its body is not valid base64 (that used to be -1); the retry
+  with an RSAK-sized buffer reports the malformed body.
+- **The PEM scratch allocations are checked (LOW).** `pem_decode_privkey` and `pem_decode_certs`
+  return -1 on a refused `alloc(pem_len)`, and `pem_decode_certs_into` refuses a null `der_pool`;
+  all three used to decode through address 0 (SIGSEGV).
+- **The capture drain checks its `O_NONBLOCK` (LOW).** `agnosys_run_capture_timeout` set its pipe
+  non-blocking with a raw `syscall(SYS_FCNTL, …)` pair and ignored both results, so a refused
+  `F_SETFL` left the "bounded" drain able to block in `read(2)` past its deadline. It uses the
+  stdlib's `fd_set_nonblocking` now; a refusal kills and reaps the child's tree and returns Err.
+  CLAUDE.md's one tracked exception to "no raw syscalls" is retired.
+- **`sha256()` / `sha384()` zero their context (LOW),** as `sha512()` has since 3.13.1: its final
+  state is the digest and its block buffer the message tail, and HMAC hashes an over-long key
+  through these one-shots. Cost, interleaved A/B on the dev host (best of 15, 64-byte input):
+  `sha256` SHA-NI **545 → 569 ns**, `sha384` **6966 → 7001 ns** (a byte-wise `memset` there cost
+  +210 ns, so the wipe is `_sigil_wipe64`). Full suite, same session, 3.13.10 at pin 6.6.18 vs
+  this release at 6.7.5: `sha256_64b_ni` **548 → 568 ns (+3.6%)**; every other row within ±1.5%
+  except `ct_eq_32b` 61 → 65 ns (a stdlib `lib/ct.cyr` routine sigil does not change; 4 ns at the
+  timer floor). Rows in `benches/history.csv` (`v3.13.11-pin-6.7.5`,
+  `v3.13.11-baseline-3.13.10-pin-6.6.18`).
+
+### Tests
+
+Suite **3303 / 0 across 87 files** (3248 across 85 at 3.13.10; `scripts/state-sync.sh --write
+--count`); fuzz 25 / 0. Every changed or new test also passes on aarch64 under qemu.
+
+- `privkey.tcyr` +2 groups: the DER scratch scanned after SEC1 P-256, PKCS#8 P-384 / Ed25519,
+  PKCS#1 RSA at both buffer sizes and a late-failing body; and a refused scratch allocation. Red
+  against 3.13.10's source (119 / 180 / 47 / 1177 / 44 bytes of DER left, an allocation on the
+  sentinel path, SIGSEGV on the capped allocator).
+- `pem.tcyr` +1 group: a refused pool allocation and a null pool (SIGSEGV before).
+- New `sha_oneshot_wipe.tcyr`: a 64 KB dead-stack scan for the state run and the message after each
+  one-shot, SHA-NI and forced-software paths, with the 3.13.10 one-shots as anti-vacuous controls
+  and `sha512()` as the green control (8 of 20 red before).
+- New `secret_epilogue.tcyr` — the proof CLAUDE.md quirk #10 asked for before it could be lifted:
+  a `secret var` function's epilogue leaves no return register in dead stack. Red under cyrius
+  6.6.14 (7 markers in the secret row, 7 in the plain-`defer` row), green under 6.7.5 on x86_64 and
+  aarch64 (qemu), with an anti-vacuous one-frame-down control and a no-walker control.
+- New `tests/regdump.cyr`: the zeroisation groups of `ecdsa_sign.tcyr` / `ecdh.tcyr` used a
+  `secret var` call as their register spill, which cyrius ≥ 6.6.15 no longer performs — so they had
+  stopped seeing registers (with the SHA-NI register clear deleted, `ecdsa_sign.tcyr` still passed
+  90 / 0). They now store xmm0–xmm15 and the scratch GPRs (aarch64 q0–q7, x1–x16) into the dead
+  stack they scan explicitly; with the same mutant the signing group finds 12 words of k.
+- `errno_peer.tcyr` uses `fd_set_nonblocking`, and so compiles for agnos: 85 of the 87 `.tcyr`
+  files do now (`cyrius build --agnos`); `lazy_init_race` / `cbank_main_lane` remain.
+
+### Docs
+
+- **CLAUDE.md quirk #10 lifted** (cyrius 6.6.15 clears the defer walker's save area); architecture
+  note 005 records the lift and what changed for its three rules.
+- `tests/threads.cyr`'s header and `_crypto_needs_block`'s reasoning describe the threads cyrius
+  6.6.16 / 6.6.19 run (Windows and both macOS arches answer `THREADS_CONCURRENT` 1; macOS workers
+  have their own thread-local blocks). Code unchanged. Both 2026-10-05 issues archived.
+- **cyrius's `CVE-NN` citations rewritten** to the cyrius ledger's 2026-10-08 renumbering
+  (`docs/audit/2026-10-08-security-ledger.md` there): CVE-17 → CYRIUS-2026-0002, CVE-54 / 57 / 65
+  → CYRIUS-2026-0012 / 0014 / 0020; the withdrawn CVE-19, CVE-20/21, CVE-31 and CVE-51 take their
+  bug labels. Real-world `CVE-YYYY-NNNN` citations are unchanged.
+- Roadmap: the W2 items left for later (SHA frame residue, the agnos test-compile gate, hardware
+  rows for this release's tests, public names that collide with agnodrm / agnostik, `_pem_init`'s
+  allocations, `sha512()`'s byte wipe, and 3.14.0's `const` / `bool` / constant-time review); the
+  mabda / yukti re-vendor row closed (neither vendors sigil now); the cyrius 6.6.17 / 6.6.19 notes
+  marked adopted. `state.md` and `doc-health.md` refreshed.
+
 ## [3.13.10] - 2026-10-06
 
 Toolchain pin **6.6.14 → 6.6.18** and `dist/` regenerated by the cyrius 6.6.18 `distlib`, for the
