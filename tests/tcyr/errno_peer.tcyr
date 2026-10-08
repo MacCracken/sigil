@@ -59,8 +59,7 @@ fn main() {
     assert_eq(sys_pipe(&pipefd), 0, "pipe");
     var rfd = load32(&pipefd);
     var wfd = load32(&pipefd + 4);
-    var fl = syscall(SYS_FCNTL, rfd, 3, 0);
-    syscall(SYS_FCNTL, rfd, 4, fl | O_NONBLOCK);
+    assert_eq(fd_set_nonblocking(rfd) >= 0, 1, "fd_set_nonblocking succeeds on a pipe");
     var probe[16];
     var n = sys_read(rfd, &probe, 8);
     assert_eq(n, 0 - EAGAIN, "an empty non-blocking read returns -EAGAIN");

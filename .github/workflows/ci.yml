@@ -323,5 +323,13 @@ jobs:
                | grep -v -E '^src/crypto_scratch\.cyr:[0-9]+: *var fd = sys_open\("/proc/self/auxv", O_RDONLY, 0\);$'; then
             echo "FAIL: bare sys_* file call (use lib/io.cyr's xopen / xunlink / xmkdir / xrmdir / xstat / xreadlink)"; fail=1
           fi
+          # 3.13.11: no raw `syscall(...)` anywhere (CLAUDE.md "No raw syscalls"). Its one tracked
+          # exception, the SYS_FCNTL pair in src/sys_util.cyr's capture drain (and its twin in
+          # tests/tcyr/errno_peer.tcyr), moved to the stdlib's fd_set_nonblocking at 3.13.11, so the
+          # rule has no exemption left. Comment lines are skipped.
+          if grep -rnE '^[^#]*\bsyscall\(' \
+                 src tests fuzz programs benches --include='*.cyr' --include='*.tcyr' --include='*.bcyr' --include='*.fcyr'; then
+            echo "FAIL: raw syscall(...) (use the stdlib's sys_* / fd_* / x* wrappers)"; fail=1
+          fi
           echo "security scan complete"
           test $fail -eq 0

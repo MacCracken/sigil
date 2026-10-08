@@ -20,15 +20,16 @@ fixed-`/tmp` scan's exemptions pinned to single lines, and the planted Windows r
 `rooted_paths` checked in as `scripts/cass-rooted-paths.sh`.
 
 **Open — the maintainer's call, named here so it is not buried (found by the 3.13.9 review
-pass):** three tests still do not compile for agnos, as at 3.13.8 — `errno_peer` (the
-tracked `SYS_FCNTL` exception, until cyrius ships `sys_fcntl`) and `lazy_init_race` /
-`cbank_main_lane` (their fork-per-trial reaper calls a three-argument `sys_waitpid` with
-`WNOHANG`, which agnos lacks; since 3.13.6). No CI step compiles the tests for agnos — the 3.13.9
-scan greps the file-syscall class only — so an agnos ABI slip outside that class stays invisible
-until someone builds for agnos. Options: guard the two reapers with a named agnos SKIP (agnos
-runs thread bodies inline, so `lazy_init_race` already skips there at run time) and add an
-"every test compiles for agnos" CI step with `errno_peer` exempted; or leave agnos test builds
-ungated.
+pass):** two tests still do not compile for agnos — `lazy_init_race` / `cbank_main_lane` (their
+fork-per-trial reaper calls a three-argument `sys_waitpid` with `WNOHANG`, which agnos lacks;
+since 3.13.6). `errno_peer`, the third through 3.13.10, compiles since 3.13.11 moved it off the
+raw `SYS_FCNTL` pair onto the stdlib's `fd_set_nonblocking` (checked with `cyrius build --agnos`
+over every `.tcyr` under the 6.7.5 pin: these two fail, 83 compile). No CI step compiles the
+tests for agnos — the 3.13.9 scan greps the file-syscall class only — so an agnos ABI slip
+outside that class stays invisible until someone builds for agnos. Options: guard the two
+reapers with a named agnos SKIP (agnos runs thread bodies inline, so `lazy_init_race` already
+skips there at run time) and add an "every test compiles for agnos" CI step; or leave agnos
+test builds ungated.
 
 **One scheduled cycle — [3.14.0, retire `cbank()`](#planned--3140--retire-cbank)
 — plus parked / gated / verification-only items.** The 3.6 TLS arc,
