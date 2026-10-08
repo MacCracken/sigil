@@ -51,6 +51,7 @@ include "src/ecdsa_p256.cyr"
 include "src/ecdsa_p384.cyr"
 include "src/ec_ct.cyr"
 include "src/ecdh.cyr"
+include "tests/regdump.cyr"
 
 # Decodes a hex C-string into a fresh buffer.
 fn _h(s): i64 { return hex_decode(s, strlen(s)); }
@@ -520,13 +521,12 @@ fn _dz_dirty(ref, lo, hi): i64 {
 # Both are given the address of one local of the helper's frame, so they agree on every offset.
 var _dz_last_dirty = 0;
 
-# A function holding a `secret var`: its compiled epilogue saves rax, rdx, r8, xmm0 and xmm1
-# below its frame (cyrius EDEFER_SAVE), so calling it right after an ECDH call writes whatever
-# those registers still hold into the scanned region. Returns 0.
+# Writes the vector registers and the scratch GPRs into the scanned region (tests/regdump.cyr),
+# so a register still holding a key limb after an ECDH call is found. Until 3.13.11 this was a
+# `secret var` fn whose epilogue did the spill (cyrius EDEFER_SAVE); cyrius 6.6.15 clears that
+# area, so the spill is explicit now. Returns 0.
 fn _dz_spill(): i64 {
-    secret var x[16];
-    store64(&x, 1);
-    return 0;
+    return regdump_spill();
 }
 
 # Derives with the private key d_be on curve c, then counts how many of d's limbs survive in

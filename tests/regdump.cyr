@@ -1,0 +1,80 @@
+# tests/regdump.cyr — write the registers a secret can outlive a call in into dead stack (3.13.11)
+#
+# The zeroisation groups (ecdsa_sign.tcyr, ecdh.tcyr) scan the dead stack below the caller for
+# key and nonce material. A secret can also survive the call in a REGISTER, and reaches memory
+# only when something later spills it; the groups call regdump_spill() right after the entry
+# point returns so that spill happens inside the region they scan.
+#
+# Through 3.13.10 that spill was a `secret var` function: cyrius's defer walker saved rax / rdx /
+# r8 / xmm0 / xmm1 (aarch64 x0-x3 / q0 / q1) below its frame and never cleared them (sigil quirk
+# #10, architecture note 005). cyrius 6.6.15 clears that area, so under sigil's pin such a call
+# spills nothing and the groups had stopped seeing registers at all. The spill is explicit now
+# and wider: x86_64 xmm0-xmm15 and rdx rcx r8-r11 rsi rdi; aarch64 q0-q7 and x1-x16 — every
+# register an `asm {}` block or a compiled callee could leave holding a secret.
+#
+# The dump lands at the BOTTOM of regdump_spill's 512-byte array, a few hundred bytes below the
+# caller's frame: below the locals of the small scan functions the caller runs next (which
+# would overwrite a dump near the top), and above every burn band a group checks for leftover
+# writes. No includes. CHANGELOG [3.13.11].
+
+# Stores the registers listed above at p (320 bytes on x86_64, 256 on aarch64). Returns 0.
+fn regdump_into(p): i64 {
+    #ifdef CYRIUS_ARCH_X86
+    asm {
+        param_load(rax, 0);                          # p
+        0xF3; 0x0F; 0x7F; 0x00;                      # movdqu [rax], xmm0
+        0xF3; 0x0F; 0x7F; 0x48; 0x10;                # movdqu [rax+0x10], xmm1
+        0xF3; 0x0F; 0x7F; 0x50; 0x20;                # movdqu [rax+0x20], xmm2
+        0xF3; 0x0F; 0x7F; 0x58; 0x30;                # movdqu [rax+0x30], xmm3
+        0xF3; 0x0F; 0x7F; 0x60; 0x40;                # movdqu [rax+0x40], xmm4
+        0xF3; 0x0F; 0x7F; 0x68; 0x50;                # movdqu [rax+0x50], xmm5
+        0xF3; 0x0F; 0x7F; 0x70; 0x60;                # movdqu [rax+0x60], xmm6
+        0xF3; 0x0F; 0x7F; 0x78; 0x70;                # movdqu [rax+0x70], xmm7
+        0x48; 0x8D; 0x80; 0x80; 0x00; 0x00; 0x00;    # lea rax, [rax+0x80]
+        0xF3; 0x44; 0x0F; 0x7F; 0x00;                # movdqu [rax], xmm8
+        0xF3; 0x44; 0x0F; 0x7F; 0x48; 0x10;          # movdqu [rax+0x10], xmm9
+        0xF3; 0x44; 0x0F; 0x7F; 0x50; 0x20;          # movdqu [rax+0x20], xmm10
+        0xF3; 0x44; 0x0F; 0x7F; 0x58; 0x30;          # movdqu [rax+0x30], xmm11
+        0xF3; 0x44; 0x0F; 0x7F; 0x60; 0x40;          # movdqu [rax+0x40], xmm12
+        0xF3; 0x44; 0x0F; 0x7F; 0x68; 0x50;          # movdqu [rax+0x50], xmm13
+        0xF3; 0x44; 0x0F; 0x7F; 0x70; 0x60;          # movdqu [rax+0x60], xmm14
+        0xF3; 0x44; 0x0F; 0x7F; 0x78; 0x70;          # movdqu [rax+0x70], xmm15
+        0x48; 0x8D; 0x80; 0x80; 0x00; 0x00; 0x00;    # lea rax, [rax+0x80]
+        0x48; 0x89; 0x10;                            # mov [rax], rdx
+        0x48; 0x89; 0x48; 0x08;                      # mov [rax+0x08], rcx
+        0x4C; 0x89; 0x40; 0x10;                      # mov [rax+0x10], r8
+        0x4C; 0x89; 0x48; 0x18;                      # mov [rax+0x18], r9
+        0x4C; 0x89; 0x50; 0x20;                      # mov [rax+0x20], r10
+        0x4C; 0x89; 0x58; 0x28;                      # mov [rax+0x28], r11
+        0x48; 0x89; 0x70; 0x30;                      # mov [rax+0x30], rsi
+        0x48; 0x89; 0x78; 0x38;                      # mov [rax+0x38], rdi
+    }
+    #endif
+    #ifdef CYRIUS_ARCH_AARCH64
+    asm {
+        param_load(x0, 0);                           # p
+        0x00; 0x04; 0x00; 0xAD;                      # stp q0, q1, [x0]
+        0x02; 0x0C; 0x01; 0xAD;                      # stp q2, q3, [x0, #32]
+        0x04; 0x14; 0x02; 0xAD;                      # stp q4, q5, [x0, #64]
+        0x06; 0x1C; 0x03; 0xAD;                      # stp q6, q7, [x0, #96]
+        0x01; 0x08; 0x08; 0xA9;                      # stp x1, x2, [x0, #128]
+        0x03; 0x10; 0x09; 0xA9;                      # stp x3, x4, [x0, #144]
+        0x05; 0x18; 0x0A; 0xA9;                      # stp x5, x6, [x0, #160]
+        0x07; 0x20; 0x0B; 0xA9;                      # stp x7, x8, [x0, #176]
+        0x09; 0x28; 0x0C; 0xA9;                      # stp x9, x10, [x0, #192]
+        0x0B; 0x30; 0x0D; 0xA9;                      # stp x11, x12, [x0, #208]
+        0x0D; 0x38; 0x0E; 0xA9;                      # stp x13, x14, [x0, #224]
+        0x0F; 0x40; 0x0F; 0xA9;                      # stp x15, x16, [x0, #240]
+    }
+    #endif
+    return 0;
+}
+
+# Spills the registers into this frame's array, which is dead stack once it returns. Call it
+# right after the API call under test, from the function whose dead stack the scan reads.
+# Returns 0.
+fn regdump_spill(): i64 {
+    var dump: i64[64];
+    regdump_into(&dump);
+    return 0;
+}

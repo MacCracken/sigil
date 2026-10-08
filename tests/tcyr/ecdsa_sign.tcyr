@@ -55,6 +55,7 @@ include "src/ecdsa_p256.cyr"
 include "src/ecdsa_p384.cyr"
 include "src/ec_ct.cyr"
 include "src/ecdsa_sign.cyr"
+include "tests/regdump.cyr"
 
 # Appends the DER INTEGER for the 32-byte big-endian value `v` to out+pos and returns the new
 # pos. mode 0 = canonical; 1 = one redundant leading 0x00 (only when v's top bit is clear);
@@ -184,14 +185,14 @@ fn _rz_scan(): i64 {
     return c;
 }
 
-# A function holding a `secret var`: its compiled epilogue saves rax, rdx, r8, xmm0 and xmm1
-# into the 64 bytes below its frame (cyrius EDEFER_SAVE), so calling it right after the signer
-# writes whatever those registers still hold into the region _rz_scan reads. Through the first
-# 3.13.8 draft xmm1 still held the SHA-NI state of the DRBG's last HMAC — half of k. Returns 0.
+# Writes the vector registers and the scratch GPRs into the dead stack _rz_scan reads
+# (tests/regdump.cyr), so a register still holding k or d after the signer returns is found.
+# Through the first 3.13.8 draft xmm1 still held the SHA-NI state of the DRBG's last HMAC —
+# half of k. Until 3.13.11 this was a `secret var` fn whose epilogue did the spill (cyrius
+# EDEFER_SAVE); cyrius 6.6.15 clears that area, which left this group blind to registers
+# (measured: with the SHA-NI block's register clear deleted it still passed). Returns 0.
 fn _rz_spill(): i64 {
-    secret var x[16];
-    store64(&x, 1);
-    return 0;
+    return regdump_spill();
 }
 
 # Signs msg with d on curve c (256 / 384) and returns how many words of k and d the call left

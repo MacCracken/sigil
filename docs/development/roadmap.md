@@ -185,18 +185,20 @@ measured but not taken:
 **Named at 3.13.8 by the review of the first draft — awaiting the maintainer's call:**
 
 - [ ] **Dead-stack and register residue outside the secret-scalar entry points.** 3.13.8 makes
-      `ecdsa_p*_sign` and `ecdh_*` leave nothing behind; elsewhere: (a) every other `secret var`
-      function (Ed25519, X25519, HKDF, key parsers) has its return registers spilled below its
-      frame by the cyrius defer walker (architecture note 005) — closed for all of them by the
-      cyrius `EDEFER_RESTORE` fix drafted for the 6.6.15 integrator, after which quirk #10 can
-      be lifted with a test; (b) HMAC / HKDF called outside the signers wipe their context and
-      inner hash, but the SHA compression frames below them (software message schedule, working
-      variables, a finalize temporary) are not wiped per call; (c) `hmac_sha256` with a key
-      longer than 64 bytes (`hmac_sha384`: 128) leaves the hashed key's SHA state in the
-      one-shot `sha256()` / `sha384()` dead frame (`sha512()` has wiped its context since 3.13.1;
-      `sha256()` / `sha384()` do not). The
-      choice for (b)/(c) is a per-call wipe (cost on every hash) or burns at the HKDF / TLS PRF
-      entry points.
+      `ecdsa_p*_sign` and `ecdh_*` leave nothing behind; elsewhere:
+      (a) ~~every other `secret var` function (Ed25519, X25519, HKDF, key parsers) has its return
+      registers spilled below its frame by the cyrius defer walker~~ — **closed at 3.13.11**:
+      cyrius 6.6.15 clears the save area, `tests/tcyr/secret_epilogue.tcyr` proves it under the
+      6.7.5 pin, and quirk #10 is lifted (architecture note 005);
+      (b) **open — the one item left here:** HMAC / HKDF called outside the signers wipe their
+      context and inner hash, but the SHA compression frames below them (the software message
+      schedule `W`, the working variables, a finalize temporary such as its last state word) are
+      not wiped per call. The choice is a per-call wipe in the compression functions (a cost on
+      every hash) or burns at the HKDF / TLS PRF entry points — the maintainer's call;
+      (c) ~~`hmac_sha256` with a key longer than 64 bytes (`hmac_sha384`: 128) leaves the hashed
+      key's SHA state in the one-shot `sha256()` / `sha384()` dead frame~~ — **closed at
+      3.13.11**: both one-shots wipe their context as `sha512()` does
+      (`tests/tcyr/sha_oneshot_wipe.tcyr`).
 
 **Backlog — gated / parked** (open, but not actionable until the gate lifts)
 

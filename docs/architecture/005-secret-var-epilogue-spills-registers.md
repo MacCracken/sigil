@@ -1,5 +1,13 @@
 # 005 — a `secret var` function's epilogue writes live registers into dead stack after its wipe
 
+> **LIFTED at 3.13.11 (pin cyrius 6.7.5).** cyrius 6.6.15 fixed this — `EDEFER_RESTORE` now
+> zeroes the save area before releasing it (cyrius CHANGELOG [6.6.15], "the secret-var epilogue
+> spill gap") — and `tests/tcyr/secret_epilogue.tcyr` proves it under sigil's pin: markers in
+> every saved register, a `secret var` function returning with them, and a window over the
+> released frames finds none (7 of 8 under cyrius 6.6.14, 0 under 6.7.5; x86_64 and aarch64),
+> with an anti-vacuous control that leaves all eight one frame down. The text below is the
+> record of the defect. What changed for the rules is in "After the lift" at the end.
+
 **What it affects:** every function that holds a `secret var` and returns while a register still
 holds a secret or secret-derived value, and every public entry point that relies on
 `_ect_burn_stack` to clear what its callees left (`src/ecdsa_sign.cyr`, `src/ecdh.cyr`,
@@ -53,3 +61,18 @@ restructured: if one returns with a secret in rax / rdx / r8 / xmm0 / xmm1 (x86_
 q0 / q1 (aarch64), the epilogue writes it below its frame. The cyrius fix (zero the area in
 `EDEFER_RESTORE`) closes that for all of them; until then the two rules above are how a sigil
 entry point makes its own guarantee.
+
+## After the lift (3.13.11)
+
+- **Burn from a plain wrapper** — kept. The signers and ECDH entry points still hold their
+  `secret var` block in a callee and burn from a plain wrapper; that remains correct and costs
+  nothing, and the burn still clears what the callees left in their frames.
+- **Clear vector registers at the end of a secret `asm {}` block** — kept, and independent of
+  this defect: a register outlives the block and the function, and anything that later spills it
+  writes it to memory.
+- **Test with a spill** — the mechanism changed. Under cyrius ≥ 6.6.15 a `secret var` call no
+  longer spills anything, so the zeroisation groups had silently stopped seeing registers
+  (measured at 3.13.11: with the SHA-NI register clear deleted, `ecdsa_sign.tcyr` still passed).
+  They now call `regdump_spill()` (`tests/regdump.cyr`), which stores xmm0–xmm15 and the scratch
+  GPRs (aarch64 q0–q7, x1–x16) into the dead stack they scan; with the same mutant the signing
+  group finds 12 words of k again.

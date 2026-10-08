@@ -52,11 +52,13 @@ deep-dives on individual invariants.
   how that is checked in the compiled code. Cross-links ADR 0009.
 
 - [`005-secret-var-epilogue-spills-registers.md`](005-secret-var-epilogue-spills-registers.md) —
-  **written (3.13.8).** A `secret var` function's compiled epilogue saves the
-  return registers (x86_64 rax / rdx / r8 / xmm0 / xmm1; aarch64 x0–x3 / q0 / q1)
-  below its frame after its wipe and never clears them (cyrius EDEFER_SAVE). So
-  burn from a plain wrapper, and clear vector registers at the end of an `asm`
-  block that held secrets.
+  **written (3.13.8); LIFTED at 3.13.11.** A `secret var` function's compiled
+  epilogue saved the return registers (x86_64 rax / rdx / r8 / xmm0 / xmm1;
+  aarch64 x0–x3 / q0 / q1) below its frame after its wipe and never cleared them
+  (cyrius EDEFER_SAVE) — fixed in cyrius 6.6.15 and proven under sigil's pin by
+  `tests/tcyr/secret_epilogue.tcyr`. The plain-wrapper burns and the vector
+  register clears stay; the zeroisation tests now spill registers explicitly
+  (`tests/regdump.cyr`).
 
 *The remaining cross-cutting constraints from CLAUDE.md "Known Cyrius Compiler
 Quirks" become numbered notes the first time a reader hits one from grep
