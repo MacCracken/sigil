@@ -5,8 +5,3 @@ thread_local
 string
 freelist
 bayan
-vec
-str
-io
-result
-fmt
