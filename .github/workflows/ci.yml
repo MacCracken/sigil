@@ -55,9 +55,11 @@ jobs:
         # also proves the vendored lib/ matches the lock byte for byte.
         run: cyrius deps --verify
       - name: Build smoke
+        # SIGIL_SMOKE comes from cyrius.cyml `[build] defines` (read by every `cyrius build`
+        # since cyrius 6.6.17); an explicit -D would REPLACE that list, not add to it.
         run: |
           mkdir -p build
-          cyrius build -D SIGIL_SMOKE programs/smoke.cyr build/sigil-smoke
+          cyrius build programs/smoke.cyr build/sigil-smoke
           ls -la build/sigil-smoke
       - name: Run smoke
         run: ./build/sigil-smoke
@@ -106,35 +108,38 @@ jobs:
         run: cyrius deps
       - name: Lint src/*.cyr
         # Treat any `warn` line as a failure, matching the agnosys
-        # / yukti pattern. Two files are exempted because they
-        # carry indivisible hex-literal lookup tables (>120 chars
-        # by intent — they encode constant data, not control
-        # flow). Splitting these into smaller chunks would require
-        # ~30 lines of init scaffolding per table for a cosmetic
-        # win; the data is unchanged across releases and bears
-        # no readability cost as a single literal.
+        # / yukti pattern. One file is exempted because it carries
+        # an indivisible hex-literal lookup table (>120 chars by
+        # intent — it encodes constant data, not control flow).
+        # Splitting it into smaller chunks would require ~30 lines
+        # of init scaffolding for a cosmetic win; the data is
+        # unchanged across releases and bears no readability cost
+        # as a single literal.
         #
         # Exempted:
-        #   src/aes_gcm.cyr  — `_aes_sbox_hex` (FIPS 197 §5.1.1 S-box, 512 hex chars)
         #   src/mldsa_ntt.cyr — `_mldsa_zetas_hex` (256 NTT twiddle factors, 2048 hex chars)
+        #
+        # src/aes_gcm.cyr's `_aes_sbox_hex` (FIPS 197 §5.1.1 S-box, 512 hex chars) was
+        # exempted too until 3.13.11; cyrlint has not warned on it since at least the
+        # 6.7.5 pin, so the arm was dropped and the file is linted like any other.
         #
         # If a future cyrius cyrlint adds a per-line `# cyrlint:
         # allow line-length` annotation, drop the exemption here
-        # and add the inline allow next to each literal.
+        # and add the inline allow next to the literal.
         run: |
           # `cyrius lint` exits with code 1 when a file has any
           # warnings. Under GitHub Actions' default `bash -e`,
           # the command-substitution assignment would terminate
-          # the step the moment we hit aes_gcm.cyr / mldsa_ntt.cyr
-          # (both carry the exempted line-length warnings), before
+          # the step the moment we hit mldsa_ntt.cyr (which
+          # carries the exempted line-length warning), before
           # the case-branch logic has a chance to classify the
           # output. The trailing `|| true` neutralises the exit
           # code so we can inspect the stdout/stderr ourselves.
           fail=0
           for f in src/*.cyr programs/*.cyr; do
             case "$f" in
-              src/aes_gcm.cyr|src/mldsa_ntt.cyr)
-                # Allow only line-length warnings from these files;
+              src/mldsa_ntt.cyr)
+                # Allow only line-length warnings from this file;
                 # any other warning class still fails the gate.
                 out=$(cyrius lint "$f" 2>&1 || true)
                 echo "$out"

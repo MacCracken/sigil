@@ -279,10 +279,11 @@ measured but not taken:
       recorded, and fabricating them would corrupt the history, so the gap is left
       honest. 3.12.2 rows are present. Fill forward only.
 - [ ] **One standing `cyrlint` line-length warning, deliberately exempted.**
-      `src/mldsa_ntt.cyr:41` exceeds 120 characters — it is the 2048-char
+      `src/mldsa_ntt.cyr:43` exceeds 120 characters — it is the 2048-char
       `_mldsa_zetas_hex` NTT twiddle-factor constant, and
-      `.github/workflows/ci.yml` carves it out by name alongside
-      `src/aes_gcm.cyr`'s FIPS 197 S-box. The CI comment states the exit
+      `.github/workflows/ci.yml` carves it out by name (the `src/aes_gcm.cyr`
+      FIPS 197 S-box arm beside it was dropped at 3.13.11: cyrlint no longer
+      warns on that file). The CI comment states the exit
       condition: drop the carve-out and add an inline allow **when cyrius
       cyrlint gains a per-line `# cyrlint: allow line-length` annotation**.
       Until then, splitting the literal would be strictly worse. Not a defect.
@@ -481,7 +482,10 @@ Windows builds carry these bodies too.
 - [ ] **On `cass`:** read a signed manifest off a read-only volume via
       `file_read_all` / `file_read_whole`; 6.6.6 stops PE requesting write access
       for a read, so this should now succeed.
-- [ ] **Re-vendor into mabda and yukti** so their Windows builds pick up the fixed
+- [x] ~~**Re-vendor into mabda and yukti** so their Windows builds pick up the fixed
+      bodies.~~ **Closed at 3.13.11:** neither repo vendors sigil any more (no
+      `lib/sigil*.cyr` and no lock row, checked at mabda `59b8534` / yukti `33b901e`),
+      and both pin cyrius ≥ 6.6.18, whose own `lib/sigil.cyr` fold carries the fixed
       bodies.
 - [ ] **`dist/sigil.cyr` fails `cyrfmt --check` for a size reason, not a
       formatting one.** At ~1.1 MB it is over cyrfmt's `_MAX_FILE`
@@ -491,6 +495,10 @@ Windows builds carry these bodies too.
       monolith.
 
 ## Recorded by cyrius 6.6.17 (2026-10-05) — for the next cyrius pin move
+
+**Adopted at 3.13.11 (pin 6.7.5):** CI's smoke build dropped its `-D SIGIL_SMOKE` (the manifest's
+`[build] defines` gives it; the binary is byte-identical with and without the flag). The bench job's
+`CYRIUS_DCE=1` prefix is left as it is. The original note follows.
 
 ⛔ **Nothing to do until cyrius 6.6.17 is tagged and out.** Docs-only note from the cyrius 6.6.17 lanes; each item
 is this repo's to adopt when it pins ≥ 6.6.17. Nothing here gates a cyrius release.
@@ -502,6 +510,10 @@ is this repo's to adopt when it pins ≥ 6.6.17. Nothing here gates a cyrius rel
   become `[build] dce = true`.
 
 ## Recorded by cyrius 6.6.19 (2026-10-06) — for the next cyrius pin move
+
+**Adopted at 3.13.11 (pin 6.7.5):** the `_crypto_needs_block` comment now describes the per-thread
+blocks macOS workers have (registry on arm64, gs base on x86); the process-global fallback is the
+main thread's slots, nothing can fault there, and the code is unchanged. The original note follows.
 
 ⛔ **Needs cyrius >= 6.6.19 — do not bump the pin until 6.6.19 is tagged and out.** Docs-only note from the cyrius
 6.6.19 lanes; each item is this repo's to adopt when it pins ≥ 6.6.19. Nothing here gates a cyrius release.

@@ -2,7 +2,8 @@
 # Built in CI to prove the library compiles, DCE prunes unused surface,
 # and the public crypto API is consumable from a downstream project.
 #
-# Build:  cyrius build -D SIGIL_SMOKE programs/smoke.cyr build/sigil-smoke
+# Build:  cyrius build programs/smoke.cyr build/sigil-smoke
+#         (SIGIL_SMOKE comes from cyrius.cyml [build] defines, cyrius >= 6.6.17)
 # Run:    ./build/sigil-smoke   (exit 0 on success)
 
 include "src/lib.cyr"
