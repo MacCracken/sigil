@@ -6,6 +6,42 @@ shipped").
 
 ## Outstanding work
 
+**3.13.11 — the cyrius W2 stdlib wave (pin 6.7.5) — shipped the planned scope; the rest of what
+that survey found is placed here for later** (the cyrius roadmap's *W2* table, 2026-10-08; nothing
+below gates the 6.7.6 refold). Each item is the maintainer's to place:
+
+- [ ] **SHA compression-frame residue under HMAC / HKDF** — item (b) of "Dead-stack and register
+      residue" below; (a) and (c) closed at 3.13.11.
+- [ ] **An "every test compiles for agnos" CI gate** — see "Open — the maintainer's call" just
+      below; since 3.13.11 only `lazy_init_race` / `cbank_main_lane` stand in its way.
+- [ ] **Real-hardware rows for 3.13.11's new tests.** `secret_epilogue`, `sha_oneshot_wipe` and the
+      new `privkey` / `pem` groups ran on x86_64 and under qemu-aarch64 only; run them on the pi,
+      ecb, ach and cass with the three cass checks of "After the 6.6.6 pin" below.
+- [ ] **IMA `policy_loaded`** — the open LOW below; needs a host with IMA enabled.
+- [ ] **Cyrius-side, tracked here:** `cyrfmt` refuses `dist/sigil.cyr` for size (cyrius
+      `programs/cyrfmt.cyr` `_MAX_FILE`; a stretch item of cyrius 6.7.6), and `#derive(Serialize)`
+      cstring fields (the hand-rolled serializer item below).
+- [ ] **Public names that collide with other repos' public names.** `is_syscall_err`,
+      `result_print_err` and `wrap_syscall` (`src/sys_error.cyr`) are also defined by agnodrm's
+      `src/error.cyr`, and `_hex_nibble` (`src/hex.cyr`) by agnostik's `src/types.cyr`; a program
+      linking both gets two bodies for one name. Renaming sigil's is a public API change (a minor,
+      with consumer notes); found by the W2 survey, not yet triaged.
+- [ ] **`_pem_init` does not check its three init-once allocations** (`src/pem.cyr`, the base64
+      table and the two marker buffers; 256 + 27 + 25 bytes). A refusal there stores through
+      address 0 on the first PEM call — the same fail-closed crash class 3.13.11 removed from the
+      per-call scratch. Found in passing at 3.13.11.
+- [ ] **`sha512()` wipes its context with a byte-wise `memset`** (208 bytes, ~300 ns per call on
+      the dev host); `sha256()` / `sha384()` use `_sigil_wipe64` since 3.13.11 (+24 / +35 ns).
+      A one-line performance change, to be measured before it is claimed.
+- [ ] **3.14.0** (below) also takes, by the W2 plan: `const` tables, `bool` predicates (both
+      raise the toolchain floor to cyrius 6.7.x, so they wait for the minor), and a constant-time
+      review that checks whether RSA *signing* (`rsa_pkcs1v15_sign_*` / `rsa_pss_sign_*`,
+      `src/rsa.cyr`) reaches the data-dependent carry branches in `src/bignum.cyr` with secret
+      operands — `bn_add_assign`'s `c1` / `c2` and `_bn_mont_mul`'s `c1` / `c2` / `c3`, `d0`,
+      `e1` / `e2`, `f`. Unverified.
+- [ ] **The maintainer's-call lists** below ("Named at 3.13.6", "Named at 3.13.8", the
+      gated / parked backlog) are unchanged by 3.13.11.
+
 **The cyrius 6.6.13 follow-ups and the pin and `/tmp` items the 3.13.8 review named shipped in
 3.13.9** (pin 6.6.14; the fork-per-trial threading tests restored on macOS; tests and fuzz harnesses
 in a private per-run directory) — see CHANGELOG `[3.13.9]`. The `lib/math.cyr` re-vendor that the 6.6.13
